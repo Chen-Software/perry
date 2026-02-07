@@ -28,14 +28,14 @@ const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
 
 /// Pointer tag: 0x7FFD_XXXX_XXXX_XXXX (48 bits for pointer) - objects/arrays
 const POINTER_TAG: u64 = 0x7FFD_0000_0000_0000;
-const POINTER_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
+pub(crate) const POINTER_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
 
 /// Int32 tag: 0x7FFE_0000_XXXX_XXXX (32 bits for i32)
 const INT32_TAG: u64 = 0x7FFE_0000_0000_0000;
 const INT32_MASK: u64 = 0x0000_0000_FFFF_FFFF;
 
 /// String pointer tag: 0x7FFF_XXXX_XXXX_XXXX (48 bits for string pointer)
-const STRING_TAG: u64 = 0x7FFF_0000_0000_0000;
+pub(crate) const STRING_TAG: u64 = 0x7FFF_0000_0000_0000;
 
 /// BigInt pointer tag: 0x7FFA_XXXX_XXXX_XXXX (48 bits for bigint pointer)
 const BIGINT_TAG: u64 = 0x7FFA_0000_0000_0000;

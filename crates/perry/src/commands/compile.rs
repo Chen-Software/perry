@@ -1152,9 +1152,16 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         let mut defined_syms: HashSet<String> = HashSet::new();
         let runtime_lib_path = find_runtime_library(target.as_deref()).ok();
         let stdlib_lib_path = find_stdlib_library(target.as_deref());
+        // Also scan jsruntime if it will be used - it defines js_call_function, js_load_module, etc.
+        let jsruntime_lib_path = if ctx.needs_js_runtime || args.enable_js_runtime {
+            find_jsruntime_library(target.as_deref())
+        } else {
+            None
+        };
         let mut all_scan_paths: Vec<PathBuf> = obj_paths.clone();
         if let Some(ref p) = runtime_lib_path { all_scan_paths.push(p.clone()); }
         if let Some(ref p) = stdlib_lib_path { all_scan_paths.push(p.clone()); }
+        if let Some(ref p) = jsruntime_lib_path { all_scan_paths.push(p.clone()); }
         for scan_path in &all_scan_paths {
             if let Ok(output) = std::process::Command::new("nm").arg("-g").arg(scan_path).output() {
                 for line in String::from_utf8_lossy(&output.stdout).lines() {

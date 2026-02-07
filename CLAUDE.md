@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.140
+**Current Version:** 0.2.142
 
 ## Workflow Requirements
 
@@ -423,6 +423,25 @@ These are recurring issues encountered during development. Check these first whe
 - `CGPoint`/`CGSize`/`CGRect` are in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.142
+- Shape-cached object literal allocation eliminates per-object key array construction
+  - New `js_object_alloc_with_shape(shape_id, field_count, packed_keys, len)` runtime function
+  - Thread-local `SHAPE_CACHE` maps FNV-1a hash of key names → cached keys array pointer
+  - First object with a given shape creates the keys array; all subsequent objects reuse it
+  - Codegen packs key names into null-separated data section, computes shape hash at compile time
+  - Replaced per-key `js_string_from_bytes` + `js_nanbox_string` + `js_array_push_f64` (17+ FFI calls per object) with single FFI call
+  - Also inlined string NaN-boxing for field values and pointer NaN-boxing for final result (new `inline_nanbox_pointer` helper)
+  - **object_create benchmark: 11-13ms → 2ms (5-6x faster, now 3x faster than Node's 5-7ms)**
+
+### v0.2.141
+- Fix stub generator including runtime functions that are already defined in libperry_jsruntime.a
+  - Root cause: When scanning for undefined symbols to generate stubs, jsruntime library wasn't being scanned
+  - `js_load_module`, `js_call_function`, `js_new_from_handle` were being added to stubs because they appeared
+    as undefined ("U") in object files, but weren't found in `defined_syms` since jsruntime wasn't scanned
+  - This caused duplicate symbol linker errors when linking with jsruntime
+  - Fix: Added jsruntime_lib to `all_scan_paths` when `ctx.needs_js_runtime || args.enable_js_runtime`
+  - Now these symbols are correctly found as defined in jsruntime and excluded from stub generation
 
 ### v0.2.140
 - Inline NaN-box string operations to eliminate FFI overhead in string hot paths

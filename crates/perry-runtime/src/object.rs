@@ -10,9 +10,14 @@ use crate::JSValue;
 use crate::ArrayHeader;
 use crate::arena::arena_alloc;
 use std::alloc::{alloc, dealloc, Layout};
+use std::cell::RefCell;
 use std::ptr;
 use std::collections::HashMap;
 use std::sync::RwLock;
+
+thread_local! {
+    static SHAPE_CACHE: RefCell<HashMap<u32, *mut ArrayHeader>> = RefCell::new(HashMap::new());
+}
 
 /// Global class registry mapping class_id -> parent_class_id for inheritance chain lookups
 static CLASS_REGISTRY: RwLock<Option<HashMap<u32, u32>>> = RwLock::new(None);
@@ -178,6 +183,56 @@ pub extern "C" fn js_object_alloc_fast_with_parent(class_id: u32, parent_class_i
     }
 
     ptr
+}
+
+/// Allocate an object with a shape-cached keys array.
+/// First call per shape_id creates the keys array from packed_keys (null-separated key names);
+/// subsequent calls reuse the cached pointer. This eliminates per-object key string allocation
+/// and array construction for repeated object literals with the same shape.
+#[no_mangle]
+pub extern "C" fn js_object_alloc_with_shape(
+    shape_id: u32,
+    field_count: u32,
+    packed_keys: *const u8,
+    packed_keys_len: u32,
+) -> *mut ObjectHeader {
+    let header_size = std::mem::size_of::<ObjectHeader>();
+    let fields_size = (field_count as usize) * 8;
+    let total_size = header_size + fields_size;
+    let obj_ptr = arena_alloc(total_size, 8) as *mut ObjectHeader;
+
+    unsafe {
+        (*obj_ptr).object_type = crate::error::OBJECT_TYPE_REGULAR;
+        (*obj_ptr).class_id = 0;
+        (*obj_ptr).parent_class_id = 0;
+        (*obj_ptr).field_count = field_count;
+    }
+
+    let keys_arr = SHAPE_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(&arr) = cache.get(&shape_id) {
+            return arr;
+        }
+        let keys_bytes = unsafe { std::slice::from_raw_parts(packed_keys, packed_keys_len as usize) };
+        let keys: Vec<&[u8]> = keys_bytes.split(|&b| b == 0).filter(|s| !s.is_empty()).collect();
+        let num_keys = keys.len();
+        let arr = crate::array::js_array_alloc_with_length(num_keys as u32);
+        let elements_ptr = unsafe { (arr as *mut u8).add(8) as *mut f64 };
+        for (i, key_bytes) in keys.iter().enumerate() {
+            let str_ptr = crate::string::js_string_from_bytes(
+                key_bytes.as_ptr(), key_bytes.len() as u32,
+            );
+            let nanboxed = f64::from_bits(
+                crate::value::STRING_TAG | (str_ptr as u64 & crate::value::POINTER_MASK)
+            );
+            unsafe { *elements_ptr.add(i) = nanboxed; }
+        }
+        cache.insert(shape_id, arr);
+        arr
+    });
+
+    unsafe { (*obj_ptr).keys_array = keys_arr; }
+    obj_ptr
 }
 
 /// Get a field from an object by index

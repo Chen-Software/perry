@@ -245,6 +245,16 @@ fn inline_get_string_pointer(builder: &mut FunctionBuilder, val: Value) -> Value
     builder.ins().band(val_i64, mask)
 }
 
+/// Inline NaN-box a pointer with POINTER_TAG (0x7FFD).
+/// ptr must be I64, returns F64.
+fn inline_nanbox_pointer(builder: &mut FunctionBuilder, ptr: Value) -> Value {
+    let mask = builder.ins().iconst(types::I64, 0x0000_FFFF_FFFF_FFFFu64 as i64);
+    let masked = builder.ins().band(ptr, mask);
+    let tag = builder.ins().iconst(types::I64, 0x7FFD_0000_0000_0000u64 as i64);
+    let tagged = builder.ins().bor(masked, tag);
+    builder.ins().bitcast(types::F64, MemFlags::new(), tagged)
+}
+
 /// Compile a condition expression to an I8 bool without FFI calls.
 /// Handles Compare (fcmp), Logical And/Or (band/bor), Unary Not, and falls back
 /// to inline_truthiness_check for general expressions.
@@ -2990,6 +3000,23 @@ impl Compiler {
                 &sig,
             )?;
             self.extern_funcs.insert("js_object_alloc_fast_with_parent".to_string(), func_id);
+        }
+
+        // Declare js_object_alloc_with_shape(shape_id: I32, field_count: I32, packed_keys: I64, packed_keys_len: I32) -> I64
+        // Shape-cached allocation: first call per shape_id creates keys array, subsequent calls reuse cache
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I32)); // shape_id
+            sig.params.push(AbiParam::new(types::I32)); // field_count
+            sig.params.push(AbiParam::new(types::I64)); // packed_keys ptr
+            sig.params.push(AbiParam::new(types::I32)); // packed_keys_len
+            sig.returns.push(AbiParam::new(types::I64)); // object pointer
+            let func_id = self.module.declare_function(
+                "js_object_alloc_with_shape",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_object_alloc_with_shape".to_string(), func_id);
         }
 
         // Declare js_create_native_module_namespace(module_name_ptr: i64, module_name_len: i64) -> f64
@@ -26729,32 +26756,52 @@ fn compile_expr(
             Ok(builder.ins().bitcast(types::F64, MemFlags::new(), final_arr_ptr))
         }
         Expr::Object(props) => {
-            // Create an object literal
-            // 1. Allocate an object with js_object_alloc (class_id=0 for anonymous, field_count=props.len())
-            // 2. Set each field value with js_object_set_field
-            // 3. Create a keys array and set it on the object (for Object.keys() support)
-            // 4. Return the object pointer as f64-bitcasted value
+            // Shape-cached object allocation: compute a shape hash from key names,
+            // pack keys into a null-separated byte string in a data section, and call
+            // js_object_alloc_with_shape which caches the keys array per shape_id.
+            // This eliminates per-object key string allocation + array construction.
 
             let field_count = props.len();
 
-            // Allocate the object (class_id = 0 for anonymous objects)
-            // Use fast allocation (bump allocator, no field initialization)
-            let alloc_func = extern_funcs.get("js_object_alloc_fast")
-                .ok_or_else(|| anyhow!("js_object_alloc_fast not declared"))?;
+            // Compute shape_id (FNV-1a hash of key names)
+            let mut shape_hash: u32 = 0x811c9dc5;
+            let mut packed_keys = Vec::new();
+            for (key, _) in props.iter() {
+                for b in key.as_bytes() {
+                    shape_hash ^= *b as u32;
+                    shape_hash = shape_hash.wrapping_mul(0x01000193);
+                }
+                packed_keys.extend_from_slice(key.as_bytes());
+                packed_keys.push(0); // null separator
+            }
+
+            // Create data section for packed key names
+            let packed_keys_len = packed_keys.len();
+            let data_id = {
+                let mut data_desc = DataDescription::new();
+                data_desc.define(packed_keys.into_boxed_slice());
+                let name = format!("__shape_keys_{}", next_temp_var_id());
+                let id = module.declare_data(&name, Linkage::Local, false, false)?;
+                module.define_data(id, &data_desc)?;
+                id
+            };
+            let data_ptr = module.declare_data_in_func(data_id, builder.func);
+            let data_addr = builder.ins().global_value(types::I64, data_ptr);
+
+            // Single FFI call: allocate object + attach cached keys array
+            let alloc_func = extern_funcs.get("js_object_alloc_with_shape")
+                .ok_or_else(|| anyhow!("js_object_alloc_with_shape not declared"))?;
             let alloc_ref = module.declare_func_in_func(*alloc_func, builder.func);
-            let class_id_val = builder.ins().iconst(types::I32, 0);
+            let shape_id_val = builder.ins().iconst(types::I32, shape_hash as i64);
             let field_count_val = builder.ins().iconst(types::I32, field_count as i64);
-            let call = builder.ins().call(alloc_ref, &[class_id_val, field_count_val]);
+            let packed_len_val = builder.ins().iconst(types::I32, packed_keys_len as i64);
+            let call = builder.ins().call(alloc_ref, &[shape_id_val, field_count_val, data_addr, packed_len_val]);
             let obj_ptr = builder.inst_results(call)[0];
 
-            // Set each field using direct memory stores
-            // ObjectHeader is 24 bytes (4x u32 + 1 pointer), fields start at offset 24
-            // Each field is f64 (8 bytes)
+            // Direct field stores (ObjectHeader is 24 bytes, fields start at offset 24)
             for (i, (_key, value_expr)) in props.iter().enumerate() {
-                // Compile the value expression
                 let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value_expr, this_ctx)?;
 
-                // Check if this is a string value that needs NaN-boxing for dynamic storage
                 let is_string = match value_expr {
                     Expr::String(_) => true,
                     Expr::LocalGet(id) => locals.get(id).map(|info| info.is_string).unwrap_or(false),
@@ -26762,102 +26809,18 @@ fn compile_expr(
                 };
 
                 let final_val = if is_string {
-                    // NaN-box the string pointer
                     let str_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), val);
-                    let nanbox_func = extern_funcs.get("js_nanbox_string")
-                        .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
-                    let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
-                    let nanbox_call = builder.ins().call(nanbox_ref, &[str_ptr]);
-                    builder.inst_results(nanbox_call)[0]
+                    inline_nanbox_string(builder, str_ptr)
                 } else {
                     ensure_f64(builder, val)
                 };
 
-                // Direct store: obj_ptr + 24 + i*8
                 let offset = (24 + i * 8) as i32;
                 builder.ins().store(MemFlags::new(), final_val, obj_ptr, offset);
             }
 
-            // Create a keys array containing the property names as strings
-            // This enables Object.keys() to work at runtime
-            if !props.is_empty() {
-                // Allocate array for keys
-                let arr_alloc_func = extern_funcs.get("js_array_alloc")
-                    .ok_or_else(|| anyhow!("js_array_alloc not declared"))?;
-                let arr_alloc_ref = module.declare_func_in_func(*arr_alloc_func, builder.func);
-                let keys_capacity = builder.ins().iconst(types::I32, field_count as i64);
-                let keys_call = builder.ins().call(arr_alloc_ref, &[keys_capacity]);
-                let keys_arr_ptr = builder.inst_results(keys_call)[0];
-
-                // Push each key string to the array
-                let string_from_bytes = extern_funcs.get("js_string_from_bytes")
-                    .ok_or_else(|| anyhow!("js_string_from_bytes not declared"))?;
-                let string_from_bytes_ref = module.declare_func_in_func(*string_from_bytes, builder.func);
-
-                let arr_push_func = extern_funcs.get("js_array_push_f64")
-                    .ok_or_else(|| anyhow!("js_array_push_f64 not declared"))?;
-                let arr_push_ref = module.declare_func_in_func(*arr_push_func, builder.func);
-
-                // We need to track the current keys array pointer as push may reallocate
-                let keys_arr_var = Variable::new(next_temp_var_id());
-                builder.declare_var(keys_arr_var, types::I64);
-                builder.def_var(keys_arr_var, keys_arr_ptr);
-
-                for (key, _value_expr) in props.iter() {
-                    // Create string from key bytes
-                    let key_bytes = key.as_bytes();
-                    let key_len = key_bytes.len();
-
-                    // For each key, we need to create a string at runtime
-                    // Store the key bytes in a data section and pass to js_string_from_bytes
-                    let data_id = {
-                        let mut data_desc = DataDescription::new();
-                        data_desc.define(key_bytes.to_vec().into_boxed_slice());
-                        let name = format!("__key_str_{}_{}", key, next_temp_var_id());
-                        let id = module.declare_data(&name, Linkage::Local, false, false)?;
-                        module.define_data(id, &data_desc)?;
-                        id
-                    };
-
-                    let data_ptr = module.declare_data_in_func(data_id, builder.func);
-                    let data_addr = builder.ins().global_value(types::I64, data_ptr);
-                    let len_val = builder.ins().iconst(types::I32, key_len as i64);
-
-                    let string_call = builder.ins().call(string_from_bytes_ref, &[data_addr, len_val]);
-                    let key_string_ptr = builder.inst_results(string_call)[0];
-
-                    // NaN-box the string pointer for proper array storage
-                    let nanbox_string_func = extern_funcs.get("js_nanbox_string")
-                        .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
-                    let nanbox_string_ref = module.declare_func_in_func(*nanbox_string_func, builder.func);
-                    let nanbox_call = builder.ins().call(nanbox_string_ref, &[key_string_ptr]);
-                    let key_string_f64 = builder.inst_results(nanbox_call)[0];
-
-                    // Push to keys array
-                    let current_keys_arr = builder.use_var(keys_arr_var);
-                    let push_call = builder.ins().call(arr_push_ref, &[current_keys_arr, key_string_f64]);
-                    let new_keys_arr = builder.inst_results(push_call)[0];
-                    builder.def_var(keys_arr_var, new_keys_arr);
-                }
-
-                // Set the keys array on the object
-                let set_keys_func = extern_funcs.get("js_object_set_keys")
-                    .ok_or_else(|| anyhow!("js_object_set_keys not declared"))?;
-                let set_keys_ref = module.declare_func_in_func(*set_keys_func, builder.func);
-                let final_keys_arr = builder.use_var(keys_arr_var);
-                // Ensure both arguments are i64 (they should be, but make it explicit)
-                let obj_ptr_i64 = ensure_i64(builder, obj_ptr);
-                let keys_arr_i64 = ensure_i64(builder, final_keys_arr);
-                builder.ins().call(set_keys_ref, &[obj_ptr_i64, keys_arr_i64]);
-            }
-
-            // NaN-box the object pointer with POINTER_TAG for proper runtime identification
-            let nanbox_ptr_func = extern_funcs.get("js_nanbox_pointer")
-                .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
-            let nanbox_ptr_ref = module.declare_func_in_func(*nanbox_ptr_func, builder.func);
-            let obj_ptr_i64 = ensure_i64(builder, obj_ptr);
-            let nanbox_call = builder.ins().call(nanbox_ptr_ref, &[obj_ptr_i64]);
-            Ok(builder.inst_results(nanbox_call)[0])
+            // Inline NaN-box with POINTER_TAG (no FFI)
+            Ok(inline_nanbox_pointer(builder, obj_ptr))
         }
         Expr::IndexGet { object, index } => {
             // LICM: Check for hoisted element loads first (arr[outer_idx] hoisted out of inner loop)
