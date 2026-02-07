@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.123
+**Current Version:** 0.2.124
 
 ## Workflow Requirements
 
@@ -378,6 +378,17 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
     })
     ```
   - Build UI crate: `cargo build --release -p perry-ui-macos`
+
+### v0.2.124
+- Implement reactive text binding for perry/ui State
+  - Text widgets bound to State values now auto-update when State.set() is called
+  - Added `perry_ui_state_bind_text_numeric(state_handle, text_handle, prefix_ptr)` FFI
+  - Detects `Text("prefix" + State.value)` pattern at compile time in VStack/HStack children
+  - When state changes, formats `"{prefix}{value}"` and updates NSTextField's stringValue
+  - Integer values formatted without decimal point (matches JavaScript behavior)
+  - Counter demo now works: clicking "Increment" updates "Count: 0" → "Count: 1" → "Count: 2" etc.
+  - Added `set_text_str(handle, text)` to `widgets/text.rs` for runtime text updates
+  - Added text binding registry to `state.rs` with per-state-handle binding lists
 
 ### v0.2.115
 - Performance optimizations: array pointer caching in loops and integer function specialization

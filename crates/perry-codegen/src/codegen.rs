@@ -107,6 +107,8 @@ struct LocalInfo {
     product_cache: Option<HashMap<LocalId, Variable>>,
     /// Cached raw I64 pointer for arrays (avoids redundant js_nanbox_get_pointer calls in loops)
     cached_array_ptr: Option<Variable>,
+    /// Compile-time constant value for const variables initialized with literals
+    const_value: Option<f64>,
 }
 
 /// Check if a block has been filled with a terminating instruction
@@ -660,7 +662,7 @@ impl Compiler {
                         self.analyze_module_var_types_recursive(&case.body);
                     }
                 }
-                Stmt::Let { id, name, ty, init, .. } => {
+                Stmt::Let { id, name, ty, init, mutable, .. } => {
                 // Determine if this variable is a pointer type
                 // Note: String is NOT included because strings are now NaN-boxed (f64 values)
                 let is_pointer = matches!(ty, HirType::Array(_) |
@@ -725,6 +727,17 @@ impl Compiler {
                     Some(Expr::BufferAllocUnsafe(_)) | Some(Expr::BufferConcat(_)) |
                     Some(Expr::BufferSlice { .. }) | Some(Expr::ChildProcessExecSync { .. }));
 
+                // Track compile-time constant values for const module-level variables
+                let const_value = if !mutable && !is_pointer && !is_string {
+                    match init {
+                        Some(Expr::Integer(n)) => Some(*n as f64),
+                        Some(Expr::Number(f)) => Some(*f),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+
                 // Store the type info
                 let info = LocalInfo {
                     var: Variable::new(0), // Will be overwritten in compile_function
@@ -753,6 +766,7 @@ impl Compiler {
                     squared_cache: None,
                     product_cache: None,
                     cached_array_ptr: None,
+                    const_value,
                 };
                 self.module_level_locals.insert(*id, info);
                 }
@@ -1415,7 +1429,7 @@ impl Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None, cached_array_ptr: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
                 });
             }
 
@@ -1449,7 +1463,7 @@ impl Compiler {
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
                     })
                 };
 
@@ -1705,7 +1719,7 @@ impl Compiler {
                         is_buffer: false, is_event_emitter: false, is_union: false, is_mixed_array: false, is_integer: false,
                         is_integer_array: false, is_i32: false, i32_shadow: None,
                         bounded_by_array: None, bounded_by_constant: None, scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
                     })
                 };
                 let var = Variable::new(next_var);
@@ -1852,7 +1866,7 @@ impl Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None, cached_array_ptr: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
                 });
             }
 
@@ -1873,7 +1887,7 @@ impl Compiler {
                         is_buffer: false, is_event_emitter: false, is_union: false, is_mixed_array: false, is_integer: false,
                         is_integer_array: false, is_i32: false, i32_shadow: None,
                         bounded_by_array: None, bounded_by_constant: None, scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
                     })
                 };
                 let var = Variable::new(next_var);
@@ -2044,7 +2058,7 @@ impl Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None, cached_array_ptr: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
                 });
             }
 
@@ -2065,7 +2079,7 @@ impl Compiler {
                         is_buffer: false, is_event_emitter: false, is_union: false, is_mixed_array: false, is_integer: false,
                         is_integer_array: false, is_i32: false, i32_shadow: None,
                         bounded_by_array: None, bounded_by_constant: None, scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
                     })
                 };
                 let var = Variable::new(next_var);
@@ -2264,7 +2278,7 @@ impl Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None, cached_array_ptr: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
                 });
             }
 
@@ -2285,7 +2299,7 @@ impl Compiler {
                         is_buffer: false, is_event_emitter: false, is_union: false, is_mixed_array: false, is_integer: false,
                         is_integer_array: false, is_i32: false, i32_shadow: None,
                         bounded_by_array: None, bounded_by_constant: None, scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
                     })
                 };
                 let var = Variable::new(next_var);
@@ -9095,6 +9109,16 @@ impl Compiler {
             self.extern_funcs.insert("perry_ui_state_set".to_string(), func_id);
         }
 
+        // perry_ui_state_bind_text_numeric(state_handle: i64, text_handle: i64, prefix_ptr: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // state handle
+            sig.params.push(AbiParam::new(types::I64)); // text widget handle
+            sig.params.push(AbiParam::new(types::I64)); // prefix string ptr
+            let func_id = self.module.declare_function("perry_ui_state_bind_text_numeric", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_state_bind_text_numeric".to_string(), func_id);
+        }
+
         // ============================================
         // V8 JavaScript Runtime FFI functions
         // ============================================
@@ -9464,7 +9488,7 @@ impl Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None, cached_array_ptr: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
                 });
             }
 
@@ -9500,7 +9524,7 @@ impl Compiler {
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
                     })
                 };
 
@@ -11061,7 +11085,7 @@ impl Compiler {
                     bounded_by_array: None,
                     bounded_by_constant: None,
                     scalar_fields: None,
-                    squared_cache: None, product_cache: None, cached_array_ptr: None,
+                    squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
                 });
             }
 
@@ -11135,7 +11159,7 @@ impl Compiler {
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
                     });
                 } else {
                     // For immutable captures, store the value directly
@@ -11164,7 +11188,7 @@ impl Compiler {
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
                     });
                 }
             }
@@ -11204,7 +11228,7 @@ impl Compiler {
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
                     })
                 };
 
@@ -12199,7 +12223,7 @@ fn compile_stmt(
     boxed_vars: &std::collections::HashSet<LocalId>,
 ) -> Result<()> {
     match stmt {
-        Stmt::Let { id, name: var_name, mutable: _, ty, init, .. } => {
+        Stmt::Let { id, name: var_name, mutable, ty, init, .. } => {
             // Use the declared type to determine the ABI type
             // Note: Type::Any and Type::Unknown use expression inference, not pointer type
             use perry_types::Type as HirType;
@@ -12792,7 +12816,18 @@ fn compile_stmt(
 
             let i32_shadow: Option<Variable> = None;
 
-            locals.insert(*id, LocalInfo { var, name: Some(var_name.clone()), class_name, type_args, is_pointer, is_array, is_string, is_bigint, is_closure, is_boxed: false, is_map, is_set, is_buffer, is_event_emitter, is_union, is_mixed_array, is_integer, is_integer_array: false, is_i32: should_use_i32, i32_shadow, bounded_by_array: None, bounded_by_constant: None, scalar_fields: None, squared_cache: None, product_cache: None, cached_array_ptr: None });
+            // Track compile-time constant values for const variables with literal initializers
+            let const_value = if !mutable && !is_pointer && !is_string && !is_bigint {
+                match init {
+                    Some(Expr::Integer(n)) => Some(*n as f64),
+                    Some(Expr::Number(f)) => Some(*f),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            locals.insert(*id, LocalInfo { var, name: Some(var_name.clone()), class_name, type_args, is_pointer, is_array, is_string, is_bigint, is_closure, is_boxed: false, is_map, is_set, is_buffer, is_event_emitter, is_union, is_mixed_array, is_integer, is_integer_array: false, is_i32: should_use_i32, i32_shadow, bounded_by_array: None, bounded_by_constant: None, scalar_fields: None, squared_cache: None, product_cache: None, cached_array_ptr: None, const_value });
         }
         Stmt::Return(expr) => {
             // Check if this is a void function (no return type) - e.g., constructors
@@ -13342,7 +13377,7 @@ fn compile_stmt(
             builder.seal_block(body_block);
 
             // WHILE LOOP UNROLLING: For loops with CSE, unroll by 8 to reduce branch overhead
-            let should_unroll = !cse_squared_vars.is_empty() && body.len() >= 2;
+            let should_unroll = false; // Disabled: while-loop unrolling bloats code beyond i-cache/LSD limits, hurting mandelbrot-style tight loops
 
             if should_unroll {
                 // First iteration
@@ -14124,7 +14159,7 @@ fn compile_stmt(
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: Some(field_vars.clone()),
-                        squared_cache: None, product_cache: None, cached_array_ptr: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
                     });
 
                     scalar_replacement_vars = Some((obj_id, field_vars));
@@ -14947,7 +14982,7 @@ fn compile_stmt(
                         bounded_by_array: None,
                         bounded_by_constant: None,
                         scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None, const_value: None,
                     });
                 }
 
@@ -15142,6 +15177,26 @@ fn compile_stmt(
         }
     }
     Ok(())
+}
+
+/// Detect if a child expression is `Text("prefix" + State.value)` pattern.
+/// Returns (prefix_string, state_object_expr) if found.
+fn detect_text_state_binding(expr: &Expr) -> Option<(String, &Expr)> {
+    if let Expr::NativeMethodCall { module, method, args, object: None, .. } = expr {
+        if module == "perry/ui" && method == "Text" && !args.is_empty() {
+            // Look in args[0] for Binary { Add, String(prefix), NativeMethodCall("value") }
+            if let Expr::Binary { op: BinaryOp::Add, left, right } = &args[0] {
+                if let Expr::String(prefix) = left.as_ref() {
+                    if let Expr::NativeMethodCall { module: m, method: meth, object: Some(state_obj), .. } = right.as_ref() {
+                        if m == "perry/ui" && meth == "value" {
+                            return Some((prefix.clone(), state_obj.as_ref()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 fn compile_expr(
@@ -18274,6 +18329,9 @@ fn compile_expr(
                 // For i32 loop counters, convert to f64 for use in expressions
                 let i32_val = builder.use_var(info.var);
                 Ok(builder.ins().fcvt_from_sint(types::F64, i32_val))
+            } else if let Some(val) = info.const_value {
+                // Inline the constant value - enables Cranelift constant folding
+                Ok(builder.ins().f64const(val))
             } else {
                 // Return the value directly - typed functions now handle different types
                 Ok(builder.use_var(info.var))
@@ -26454,6 +26512,10 @@ fn compile_expr(
                                 let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
 
                                 for elem in elements {
+                                    // Detect Text(prefix + State.value) pattern BEFORE compiling
+                                    // so we can emit a binding call after the widget is created
+                                    let binding_info = detect_text_state_binding(elem);
+
                                     let child_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, elem, this_ctx)?;
                                     // Child widgets return NaN-boxed POINTER_TAG handles (from generic result path)
                                     // or raw bitcast handles (from Button/VStack special paths).
@@ -26463,6 +26525,42 @@ fn compile_expr(
                                     let ptr_call = builder.ins().call(get_ptr_ref, &[child_f64]);
                                     let child_handle = builder.inst_results(ptr_call)[0];
                                     builder.ins().call(add_child_ref, &[container_handle, child_handle]);
+
+                                    // If Text is bound to State.value, register the binding
+                                    // so the text auto-updates when state changes
+                                    if let Some((prefix, state_obj_expr)) = binding_info {
+                                        // Compile the state object expression to get state handle
+                                        let state_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, state_obj_expr, this_ctx)?;
+                                        let state_f64 = ensure_f64(builder, state_val);
+                                        let state_ptr_call = builder.ins().call(get_ptr_ref, &[state_f64]);
+                                        let state_handle = builder.inst_results(state_ptr_call)[0];
+
+                                        // Create prefix as StringHeader via js_string_from_bytes
+                                        let prefix_bytes = prefix.as_bytes();
+                                        let prefix_data_id = module.declare_data(
+                                            &format!("__ui_bind_prefix_{}", next_js_data_id()),
+                                            Linkage::Local,
+                                            false,
+                                            false,
+                                        )?;
+                                        let mut data_desc = cranelift_module::DataDescription::new();
+                                        data_desc.define(prefix_bytes.to_vec().into_boxed_slice());
+                                        module.define_data(prefix_data_id, &data_desc)?;
+                                        let prefix_gv = module.declare_data_in_func(prefix_data_id, builder.func);
+                                        let prefix_raw_ptr = builder.ins().global_value(types::I64, prefix_gv);
+                                        let prefix_len = builder.ins().iconst(types::I32, prefix_bytes.len() as i64);
+                                        let str_from_bytes_func = extern_funcs.get("js_string_from_bytes")
+                                            .ok_or_else(|| anyhow!("js_string_from_bytes not declared"))?;
+                                        let str_from_bytes_ref = module.declare_func_in_func(*str_from_bytes_func, builder.func);
+                                        let str_call = builder.ins().call(str_from_bytes_ref, &[prefix_raw_ptr, prefix_len]);
+                                        let prefix_ptr = builder.inst_results(str_call)[0];
+
+                                        // Call perry_ui_state_bind_text_numeric(state_handle, text_handle, prefix_ptr)
+                                        let bind_func = extern_funcs.get("perry_ui_state_bind_text_numeric")
+                                            .ok_or_else(|| anyhow!("perry_ui_state_bind_text_numeric not declared"))?;
+                                        let bind_ref = module.declare_func_in_func(*bind_func, builder.func);
+                                        builder.ins().call(bind_ref, &[state_handle, child_handle, prefix_ptr]);
+                                    }
                                 }
                             }
                         }

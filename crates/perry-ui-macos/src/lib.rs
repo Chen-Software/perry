@@ -73,3 +73,10 @@ pub extern "C" fn perry_ui_state_get(state_handle: i64) -> f64 {
 pub extern "C" fn perry_ui_state_set(state_handle: i64, value: f64) {
     state::state_set(state_handle, value);
 }
+
+/// Bind a text widget to a state cell with a prefix string.
+/// When the state changes, text updates to "{prefix}{value}".
+#[no_mangle]
+pub extern "C" fn perry_ui_state_bind_text_numeric(state_handle: i64, text_handle: i64, prefix_ptr: i64) {
+    state::bind_text_numeric(state_handle, text_handle, prefix_ptr as *const u8);
+}

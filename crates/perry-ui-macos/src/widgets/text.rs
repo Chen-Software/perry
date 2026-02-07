@@ -30,3 +30,14 @@ pub fn create(text_ptr: *const u8) -> i64 {
     let view: Retained<NSView> = unsafe { Retained::cast_unchecked(label) };
     register_widget(view)
 }
+
+/// Update the text of an existing Text widget (NSTextField).
+pub fn set_text_str(handle: i64, text: &str) {
+    if let Some(view) = super::get_widget(handle) {
+        let ns_string = NSString::from_str(text);
+        unsafe {
+            let tf: &NSTextField = &*(Retained::as_ptr(&view) as *const NSTextField);
+            tf.setStringValue(&ns_string);
+        }
+    }
+}
