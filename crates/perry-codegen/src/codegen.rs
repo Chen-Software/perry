@@ -178,6 +178,48 @@ fn ensure_f64(builder: &mut FunctionBuilder, val: Value) -> Value {
     }
 }
 
+/// Try to compile an index expression entirely in i32 arithmetic.
+/// Returns Some(i32_value) if the expression can be computed in i32, None otherwise.
+/// This avoids f64 round-trips for array index computations like `i * size + k`.
+/// The i32 result is immediately consumed as an array index in IndexGet/IndexSet.
+fn try_compile_index_as_i32(
+    builder: &mut FunctionBuilder,
+    expr: &Expr,
+    locals: &HashMap<LocalId, LocalInfo>,
+) -> Option<Value> {
+    match expr {
+        Expr::Integer(n) if *n >= 0 && *n <= i32::MAX as i64 => {
+            Some(builder.ins().iconst(types::I32, *n))
+        }
+        Expr::LocalGet(id) => {
+            let info = locals.get(id)?;
+            if info.is_i32 {
+                Some(builder.use_var(info.var))
+            } else if let Some(shadow) = info.i32_shadow {
+                Some(builder.use_var(shadow))
+            } else if info.is_integer {
+                let f64_val = builder.use_var(info.var);
+                Some(builder.ins().fcvt_to_sint(types::I32, f64_val))
+            } else {
+                None
+            }
+        }
+        Expr::Binary { op, left, right }
+            if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul) =>
+        {
+            let l = try_compile_index_as_i32(builder, left, locals)?;
+            let r = try_compile_index_as_i32(builder, right, locals)?;
+            Some(match op {
+                BinaryOp::Add => builder.ins().iadd(l, r),
+                BinaryOp::Sub => builder.ins().isub(l, r),
+                BinaryOp::Mul => builder.ins().imul(l, r),
+                _ => unreachable!(),
+            })
+        }
+        _ => None,
+    }
+}
+
 /// Metadata about a compiled class
 #[derive(Debug, Clone)]
 struct ClassMeta {
@@ -1323,8 +1365,10 @@ impl Compiler {
         let decorator_data = self.prepare_decorators(&method.decorators, &method.name)?;
         let print_func_id = self.extern_funcs.get("js_string_print").copied();
 
+        // Use fresh FunctionBuilderContext to avoid variable ID conflicts across functions
+        let mut method_func_ctx = FunctionBuilderContext::new();
         {
-            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.func_ctx);
+            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut method_func_ctx);
 
             let entry_block = builder.create_block();
             builder.append_block_params_for_function_params(entry_block);
@@ -1624,8 +1668,10 @@ impl Compiler {
         // Collect mutable captures before FunctionBuilder block
         let boxed_vars = self.collect_mutable_captures_from_stmts(&getter.body);
 
+        // Use fresh FunctionBuilderContext to avoid variable ID conflicts
+        let mut getter_func_ctx = FunctionBuilderContext::new();
         {
-            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.func_ctx);
+            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut getter_func_ctx);
 
             let entry_block = builder.create_block();
             builder.append_block_params_for_function_params(entry_block);
@@ -1756,8 +1802,10 @@ impl Compiler {
         // Collect mutable captures before FunctionBuilder block
         let boxed_vars = self.collect_mutable_captures_from_stmts(&setter.body);
 
+        // Use fresh FunctionBuilderContext to avoid variable ID conflicts
+        let mut setter_func_ctx = FunctionBuilderContext::new();
         {
-            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.func_ctx);
+            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut setter_func_ctx);
 
             let entry_block = builder.create_block();
             builder.append_block_params_for_function_params(entry_block);
@@ -1952,8 +2000,10 @@ impl Compiler {
         // Collect mutable captures before FunctionBuilder block
         let boxed_vars = self.collect_mutable_captures_from_stmts(&method.body);
 
+        // Use fresh FunctionBuilderContext to avoid variable ID conflicts
+        let mut static_method_func_ctx = FunctionBuilderContext::new();
         {
-            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.func_ctx);
+            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut static_method_func_ctx);
 
             let entry_block = builder.create_block();
             builder.append_block_params_for_function_params(entry_block);
@@ -2156,8 +2206,10 @@ impl Compiler {
         // Collect mutable captures before FunctionBuilder block
         let boxed_vars = self.collect_mutable_captures_from_stmts(&ctor.body);
 
+        // Use fresh FunctionBuilderContext to avoid variable ID conflicts
+        let mut ctor_func_ctx = FunctionBuilderContext::new();
         {
-            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.func_ctx);
+            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut ctor_func_ctx);
 
             let entry_block = builder.create_block();
             builder.append_block_params_for_function_params(entry_block);
@@ -9354,9 +9406,11 @@ impl Compiler {
         // Collect all variables that will be mutably captured by closures (before borrowing self.ctx)
         let boxed_vars = self.collect_mutable_captures_from_stmts(&func.body);
 
+        // Use fresh FunctionBuilderContext to avoid variable ID conflicts
+        let mut func_build_ctx = FunctionBuilderContext::new();
         {
             // Build the function
-            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.func_ctx);
+            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut func_build_ctx);
 
             let entry_block = builder.create_block();
             builder.append_block_params_for_function_params(entry_block);
@@ -9570,8 +9624,10 @@ impl Compiler {
 
         // Step 2: Compile the i64 specialized function body
         self.ctx.func.signature = i64_sig.clone();
+        // Use fresh FunctionBuilderContext to avoid variable ID conflicts
+        let mut i64_func_ctx = FunctionBuilderContext::new();
         {
-            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.func_ctx);
+            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut i64_func_ctx);
             let entry_block = builder.create_block();
             builder.append_block_params_for_function_params(entry_block);
             builder.switch_to_block(entry_block);
@@ -9618,8 +9674,10 @@ impl Compiler {
         }
         self.ctx.func.signature.returns.push(AbiParam::new(types::F64));
 
+        // Use fresh FunctionBuilderContext to avoid variable ID conflicts
+        let mut wrapper_i64_ctx = FunctionBuilderContext::new();
         {
-            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.func_ctx);
+            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut wrapper_i64_ctx);
             let entry_block = builder.create_block();
             builder.append_block_params_for_function_params(entry_block);
             builder.switch_to_block(entry_block);
@@ -10934,8 +10992,10 @@ impl Compiler {
             None
         };
 
+        // Use fresh FunctionBuilderContext to avoid variable ID conflicts
+        let mut closure_func_ctx = FunctionBuilderContext::new();
         {
-            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.func_ctx);
+            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut closure_func_ctx);
 
             let entry_block = builder.create_block();
             builder.append_block_params_for_function_params(entry_block);
@@ -25547,6 +25607,8 @@ fn compile_expr(
                                 if idx_vt == types::I32 { idx_val }
                                 else { let idx_f64 = ensure_f64(builder, idx_val); builder.ins().fcvt_to_sint(types::I32, idx_f64) }
                             }
+                        } else if let Some(i32_val) = try_compile_index_as_i32(builder, index, locals) {
+                            i32_val
                         } else {
                             let idx_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
                             let idx_vt = builder.func.dfg.value_type(idx_val);
@@ -25780,6 +25842,8 @@ fn compile_expr(
                                 if idx_vt == types::I32 { idx_val }
                                 else { let idx_f64 = ensure_f64(builder, idx_val); builder.ins().fcvt_to_sint(types::I32, idx_f64) }
                             }
+                        } else if let Some(i32_val) = try_compile_index_as_i32(builder, index, locals) {
+                            i32_val
                         } else {
                             let idx_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
                             let idx_vt = builder.func.dfg.value_type(idx_val);

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.119
+**Current Version:** 0.2.120
 
 ## Workflow Requirements
 
@@ -269,6 +269,18 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 ## Recent Fixes (v0.2.37-0.2.117)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.120
+- Contained i32 index arithmetic optimization for array access in loops
+  - Added `try_compile_index_as_i32` helper that compiles index expressions entirely in i32 arithmetic
+  - Handles: integer literals, i32 loop counters, i32 shadows, `is_integer` params, and Binary Add/Sub/Mul
+  - Applied in IndexGet and IndexSet else branches (complex index expressions like `i * size + k`)
+  - Unlike v0.2.117's broad i32 fast path (disabled in v0.2.118), i32 values are **contained** —
+    they never escape into the wider `compile_expr` return path, only used as immediate array indices
+  - Before: `i * size + k` required 3 f64↔i32 conversions + 2 float ops per array access
+  - After: 2 integer ops per array access (Cranelift CSEs the `size` f64→i32 conversion)
+  - Matrix multiply benchmark: ~50ms → ~41ms (Perry) vs ~39ms (Node) — 1.28x → 1.05x gap
+  - No regressions: fibonacci, object_create, string methods, array operations all unchanged
 
 ### v0.2.119
 - Fix UI counter app SIGILL crash and module init variable ID conflicts
