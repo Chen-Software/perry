@@ -51,6 +51,8 @@ pub const NATIVE_MODULES: &[&str] = &[
     "async_hooks",
     // Perry native UI
     "perry/ui",
+    // Node.js worker threads
+    "worker_threads",
 ];
 
 /// Check if a module path refers to a native stdlib module
@@ -677,6 +679,9 @@ pub enum Expr {
     PathBasename(Box<Expr>),             // path.basename(path) -> string
     PathExtname(Box<Expr>),              // path.extname(path) -> string
     PathResolve(Box<Expr>),              // path.resolve(path) -> string
+
+    // URL operations
+    FileURLToPath(Box<Expr>),            // url.fileURLToPath(url) -> string
 
     // JSON operations
     JsonParse(Box<Expr>),                // JSON.parse(string) -> value

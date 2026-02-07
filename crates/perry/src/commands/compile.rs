@@ -861,6 +861,85 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         sorted
     };
 
+    // Build a map of all exported enums from all modules (owned data, no borrows)
+    // Key: (resolved_path, enum_name) -> Vec<(member_name, EnumValue)>
+    let mut exported_enums: HashMap<(String, String), Vec<(String, perry_hir::EnumValue)>> = HashMap::new();
+    for (path, hir_module) in &ctx.native_modules {
+        let path_str = path.to_string_lossy().to_string();
+        for en in &hir_module.enums {
+            if en.is_exported {
+                let members: Vec<(String, perry_hir::EnumValue)> = en.members.iter()
+                    .map(|m| (m.name.clone(), m.value.clone()))
+                    .collect();
+                exported_enums.insert((path_str.clone(), en.name.clone()), members);
+            }
+        }
+    }
+
+    // Propagate enum re-exports: when module A has `export * from "./B"`,
+    // all enums exported from B should also be accessible via A's path.
+    loop {
+        let mut new_enum_entries: Vec<((String, String), Vec<(String, perry_hir::EnumValue)>)> = Vec::new();
+        for (path, hir_module) in &ctx.native_modules {
+            let path_str = path.to_string_lossy().to_string();
+            for export in &hir_module.exports {
+                if let perry_hir::Export::ExportAll { source } = export {
+                    if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root) {
+                        let source_path_str = resolved_source.to_string_lossy().to_string();
+                        for ((src_path, enum_name), members) in &exported_enums {
+                            if src_path == &source_path_str {
+                                let key = (path_str.clone(), enum_name.clone());
+                                if !exported_enums.contains_key(&key) {
+                                    new_enum_entries.push((key, members.clone()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if new_enum_entries.is_empty() { break; }
+        for (key, members) in new_enum_entries {
+            exported_enums.insert(key, members);
+        }
+    }
+
+    // Fix imported enum references in all modules BEFORE building exported_classes
+    // (exported_classes holds references into ctx.native_modules, so we need to do
+    // the mutable fixup pass first)
+    {
+        let mut module_enums: HashMap<PathBuf, HashMap<String, Vec<(String, perry_hir::EnumValue)>>> = HashMap::new();
+        for (path, hir_module) in &ctx.native_modules {
+            let mut imported_enums_for_module: HashMap<String, Vec<(String, perry_hir::EnumValue)>> = HashMap::new();
+            for import in &hir_module.imports {
+                if import.module_kind != perry_hir::ModuleKind::NativeCompiled { continue; }
+                let resolved_path = match &import.resolved_path {
+                    Some(p) => p.clone(),
+                    None => continue,
+                };
+                for spec in &import.specifiers {
+                    let (local_name, exported_name) = match spec {
+                        perry_hir::ImportSpecifier::Named { imported, local } => (local.clone(), imported.clone()),
+                        perry_hir::ImportSpecifier::Default { local } => (local.clone(), local.clone()),
+                        perry_hir::ImportSpecifier::Namespace { .. } => continue,
+                    };
+                    let key = (resolved_path.clone(), exported_name.clone());
+                    if let Some(members) = exported_enums.get(&key) {
+                        imported_enums_for_module.insert(local_name, members.clone());
+                    }
+                }
+            }
+            if !imported_enums_for_module.is_empty() {
+                module_enums.insert(path.clone(), imported_enums_for_module);
+            }
+        }
+        for (path, imported_enums_for_module) in &module_enums {
+            if let Some(hir_module) = ctx.native_modules.get_mut(path) {
+                perry_hir::fix_imported_enums(hir_module, imported_enums_for_module);
+            }
+        }
+    }
+
     // Build a map of all exported classes from all modules
     // Key: (resolved_path, class_name) -> Class reference
     let mut exported_classes: HashMap<(String, String), &perry_hir::Class> = HashMap::new();
@@ -874,8 +953,6 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     }
 
     // Build a map of all exported functions with their param counts from all modules
-    // Key: (resolved_path, func_name) -> param_count
-    // This is needed to ensure consistent wrapper signatures for functions with optional params
     let mut exported_func_param_counts: HashMap<(String, String), usize> = HashMap::new();
     for (path, hir_module) in &ctx.native_modules {
         let path_str = path.to_string_lossy().to_string();
@@ -886,25 +963,15 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         }
     }
 
-    // Propagate re-exports: when module A has `export * from "./B"`, all classes
-    // exported from B should also be accessible via A's path.
-    // We need to iterate until no new entries are added (for chained re-exports).
-    // NOTE: We only propagate classes, not function param counts, to avoid type mismatches
-    // when functions have different signatures in different modules.
+    // Propagate class re-exports
     loop {
         let mut new_entries: Vec<((String, String), &perry_hir::Class)> = Vec::new();
-
         for (path, hir_module) in &ctx.native_modules {
             let path_str = path.to_string_lossy().to_string();
-
             for export in &hir_module.exports {
                 if let perry_hir::Export::ExportAll { source } = export {
-                    // Resolve the source path relative to this module
                     if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root) {
                         let source_path_str = resolved_source.to_string_lossy().to_string();
-
-                        // Find all classes exported from the source module and add them
-                        // as also being exported from this module
                         for ((src_path, class_name), class) in &exported_classes {
                             if src_path == &source_path_str {
                                 let key = (path_str.clone(), class_name.clone());
@@ -917,11 +984,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 }
             }
         }
-
-        if new_entries.is_empty() {
-            break;
-        }
-
+        if new_entries.is_empty() { break; }
         for (key, class) in new_entries {
             exported_classes.insert(key, class);
         }
@@ -982,6 +1045,11 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 // Register its param count so wrapper signatures are consistent
                 if let Some(&param_count) = exported_func_param_counts.get(&key) {
                     compiler.register_imported_func_param_count(exported_name, param_count);
+                }
+
+                // Check if this import is an enum from another module
+                if let Some(members) = exported_enums.get(&key) {
+                    compiler.register_imported_enum(&local_name, members);
                 }
             }
         }

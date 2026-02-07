@@ -906,6 +906,15 @@ fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_l
         Expr::JsonStringify(inner) | Expr::JsonParse(inner) => {
             substitute_locals(inner, param_map, next_local_id);
         }
+        // Path/URL operations
+        Expr::PathJoin(a, b) => {
+            substitute_locals(a, param_map, next_local_id);
+            substitute_locals(b, param_map, next_local_id);
+        }
+        Expr::PathDirname(p) | Expr::PathBasename(p) | Expr::PathExtname(p) |
+        Expr::PathResolve(p) | Expr::FileURLToPath(p) => {
+            substitute_locals(p, param_map, next_local_id);
+        }
         // Math operations
         Expr::MathFloor(inner) | Expr::MathCeil(inner) | Expr::MathRound(inner) |
         Expr::MathAbs(inner) | Expr::MathSqrt(inner) => {

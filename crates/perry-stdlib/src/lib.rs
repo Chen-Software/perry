@@ -25,6 +25,7 @@ pub mod commander;
 pub mod decimal;
 pub mod exponential_backoff;
 pub mod async_local_storage;
+pub mod worker_threads;
 
 // Re-export core
 pub use common::*;
@@ -39,6 +40,7 @@ pub use commander::*;
 pub use decimal::*;
 pub use exponential_backoff::*;
 pub use async_local_storage::*;
+pub use worker_threads::*;
 
 // === HTTP Server ===
 #[cfg(feature = "http-server")]

@@ -1322,6 +1322,18 @@ impl Compiler {
         Ok(())
     }
 
+    /// Register an imported enum from another module.
+    /// This allows EnumMember expressions to be resolved at codegen time.
+    pub fn register_imported_enum(&mut self, enum_name: &str, members: &[(String, perry_hir::EnumValue)]) {
+        for (member_name, value) in members {
+            let v = match value {
+                perry_hir::EnumValue::Number(n) => EnumMemberValue::Number(*n),
+                perry_hir::EnumValue::String(s) => EnumMemberValue::String(s.clone()),
+            };
+            self.enums.insert((enum_name.to_string(), member_name.clone()), v);
+        }
+    }
+
     fn declare_class_methods(&mut self, class: &Class) -> Result<()> {
         // Export methods for exported classes so other modules can call them
         let linkage = if class.is_exported { Linkage::Export } else { Linkage::Local };
@@ -4903,6 +4915,19 @@ impl Compiler {
             self.extern_funcs.insert("clearInterval".to_string(), func_id);
         }
 
+        // clearTimeout(timer_id: i64)
+        // Stops a callback timer by its ID
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // timer_id
+            let func_id = self.module.declare_function(
+                "clearTimeout",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("clearTimeout".to_string(), func_id);
+        }
+
         // js_interval_timer_tick() -> i32
         // Process expired interval timers
         {
@@ -8284,6 +8309,15 @@ impl Compiler {
             self.extern_funcs.insert("js_url_new".to_string(), func_id);
         }
 
+        // js_url_file_url_to_path(url_f64: f64) -> f64 (NaN-boxed string)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // url (NaN-boxed string)
+            sig.returns.push(AbiParam::new(types::F64)); // result (NaN-boxed string)
+            let func_id = self.module.declare_function("js_url_file_url_to_path", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_url_file_url_to_path".to_string(), func_id);
+        }
+
         // js_url_new_with_base(url: *mut StringHeader, base: *mut StringHeader) -> *mut UrlHeader
         {
             let mut sig = self.module.make_signature();
@@ -10434,7 +10468,7 @@ impl Compiler {
                 self.collect_closures_from_expr(a, closures, enclosing_class);
                 self.collect_closures_from_expr(b, closures, enclosing_class);
             }
-            Expr::PathDirname(path) | Expr::PathBasename(path) | Expr::PathExtname(path) | Expr::PathResolve(path) => {
+            Expr::PathDirname(path) | Expr::PathBasename(path) | Expr::PathExtname(path) | Expr::PathResolve(path) | Expr::FileURLToPath(path) => {
                 self.collect_closures_from_expr(path, closures, enclosing_class);
             }
             // JSON operations
@@ -12031,6 +12065,8 @@ fn compile_async_stmt(
                     Expr::StringFromCharCode(_) => true,  // String.fromCharCode() returns a string
                     Expr::ArrayJoin { .. } => true,  // array.join() returns a string
                     Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) => true,
+                    Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
+                    Expr::PathExtname(_) | Expr::PathResolve(_) | Expr::FileURLToPath(_) => true,
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
                     Expr::NativeMethodCall { module, method, .. } => {
                         (module == "path" && matches!(method.as_str(), "dirname" | "basename" | "extname" | "join" | "resolve"))
@@ -12243,7 +12279,7 @@ fn compile_stmt(
                     Expr::FsReadFileSync(_) => true, // fs.readFileSync returns a string
                     // All path operations return strings
                     Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
-                    Expr::PathExtname(_) | Expr::PathResolve(_) | Expr::JsonStringify(_) => true,
+                    Expr::PathExtname(_) | Expr::PathResolve(_) | Expr::FileURLToPath(_) | Expr::JsonStringify(_) => true,
                     // All crypto operations return strings (hex or UUID format)
                     Expr::CryptoRandomBytes(_) | Expr::CryptoRandomUUID |
                     Expr::CryptoSha256(_) | Expr::CryptoMd5(_) => true,
@@ -13256,33 +13292,27 @@ fn compile_stmt(
                 // Compile condition with optimized i32 comparison for the counter
                 let cond_bool = match condition {
                     // Direct: iter < limit - use icmp
-                    Expr::Compare { op: CompareOp::Lt, left, .. } => {
+                    Expr::Compare { op: CompareOp::Lt, left, right: cmp_right } => {
                         if let Expr::LocalGet(id) = left.as_ref() {
                             if *id == counter_id {
                                 let counter_i32 = builder.use_var(i32_var);
                                 let limit_i32 = builder.use_var(limit_var);
                                 builder.ins().icmp(IntCC::SignedLessThan, counter_i32, limit_i32)
                             } else {
-                                let cond_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, condition, this_ctx)?;
-                                let cond_val = ensure_f64(builder, cond_val_raw);
-                                let truthy_func = extern_funcs.get("js_is_truthy")
-                                    .ok_or_else(|| anyhow!("js_is_truthy not declared"))?;
-                                let truthy_ref = module.declare_func_in_func(*truthy_func, builder.func);
-                                let truthy_call = builder.ins().call(truthy_ref, &[cond_val]);
-                                let truthy_result = builder.inst_results(truthy_call)[0];
-                                let zero_i32 = builder.ins().iconst(types::I32, 0);
-                                builder.ins().icmp(IntCC::NotEqual, truthy_result, zero_i32)
+                                // Direct Compare::Lt - compile as fcmp (no js_is_truthy needed)
+                                let lhs = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, left, this_ctx)?;
+                                let rhs = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, cmp_right, this_ctx)?;
+                                let lhs_f64 = ensure_f64(builder, lhs);
+                                let rhs_f64 = ensure_f64(builder, rhs);
+                                builder.ins().fcmp(FloatCC::LessThan, lhs_f64, rhs_f64)
                             }
                         } else {
-                            let cond_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, condition, this_ctx)?;
-                            let cond_val = ensure_f64(builder, cond_val_raw);
-                            let truthy_func = extern_funcs.get("js_is_truthy")
-                                .ok_or_else(|| anyhow!("js_is_truthy not declared"))?;
-                            let truthy_ref = module.declare_func_in_func(*truthy_func, builder.func);
-                            let truthy_call = builder.ins().call(truthy_ref, &[cond_val]);
-                            let truthy_result = builder.inst_results(truthy_call)[0];
-                            let zero_i32 = builder.ins().iconst(types::I32, 0);
-                            builder.ins().icmp(IntCC::NotEqual, truthy_result, zero_i32)
+                            // Direct Compare::Lt - compile as fcmp (no js_is_truthy needed)
+                            let lhs = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, left, this_ctx)?;
+                            let rhs = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, cmp_right, this_ctx)?;
+                            let lhs_f64 = ensure_f64(builder, lhs);
+                            let rhs_f64 = ensure_f64(builder, rhs);
+                            builder.ins().fcmp(FloatCC::LessThan, lhs_f64, rhs_f64)
                         }
                     }
                     // AND condition: ... && iter < limit
@@ -13290,16 +13320,32 @@ fn compile_stmt(
                         if let Expr::Compare { op: CompareOp::Lt, left: cmp_left, .. } = right.as_ref() {
                             if let Expr::LocalGet(id) = cmp_left.as_ref() {
                                 if *id == counter_id {
-                                    // Compile left side normally - use js_is_truthy
-                                    let left_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, left, this_ctx)?;
-                                    let left_val = ensure_f64(builder, left_val_raw);
-                                    let truthy_func = extern_funcs.get("js_is_truthy")
-                                        .ok_or_else(|| anyhow!("js_is_truthy not declared"))?;
-                                    let truthy_ref = module.declare_func_in_func(*truthy_func, builder.func);
-                                    let truthy_call = builder.ins().call(truthy_ref, &[left_val]);
-                                    let truthy_result = builder.inst_results(truthy_call)[0];
-                                    let zero_i32 = builder.ins().iconst(types::I32, 0);
-                                    let left_bool = builder.ins().icmp(IntCC::NotEqual, truthy_result, zero_i32);
+                                    // Compile left side - use fcmp directly for Compare, js_is_truthy for others
+                                    let left_bool = if let Expr::Compare { op: cmp_op, left: cmp_left, right: cmp_right } = left.as_ref() {
+                                        let lhs = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, cmp_left, this_ctx)?;
+                                        let rhs = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, cmp_right, this_ctx)?;
+                                        let lhs_f64 = ensure_f64(builder, lhs);
+                                        let rhs_f64 = ensure_f64(builder, rhs);
+                                        let cc = match cmp_op {
+                                            CompareOp::Eq => FloatCC::Equal,
+                                            CompareOp::Ne => FloatCC::NotEqual,
+                                            CompareOp::Lt => FloatCC::LessThan,
+                                            CompareOp::Le => FloatCC::LessThanOrEqual,
+                                            CompareOp::Gt => FloatCC::GreaterThan,
+                                            CompareOp::Ge => FloatCC::GreaterThanOrEqual,
+                                        };
+                                        builder.ins().fcmp(cc, lhs_f64, rhs_f64)
+                                    } else {
+                                        let left_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, left, this_ctx)?;
+                                        let left_val = ensure_f64(builder, left_val_raw);
+                                        let truthy_func = extern_funcs.get("js_is_truthy")
+                                            .ok_or_else(|| anyhow!("js_is_truthy not declared"))?;
+                                        let truthy_ref = module.declare_func_in_func(*truthy_func, builder.func);
+                                        let truthy_call = builder.ins().call(truthy_ref, &[left_val]);
+                                        let truthy_result = builder.inst_results(truthy_call)[0];
+                                        let zero_i32 = builder.ins().iconst(types::I32, 0);
+                                        builder.ins().icmp(IntCC::NotEqual, truthy_result, zero_i32)
+                                    };
 
                                     // Use icmp for counter comparison
                                     let counter_i32 = builder.use_var(i32_var);
@@ -13342,6 +13388,22 @@ fn compile_stmt(
                             builder.ins().icmp(IntCC::NotEqual, truthy_result, zero_i32)
                         }
                     }
+                    // Other Compare ops (Le, Ge, Gt, Ne, Eq) - compile as fcmp directly
+                    Expr::Compare { op: cmp_op, left: cmp_left, right: cmp_right } => {
+                        let lhs = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, cmp_left, this_ctx)?;
+                        let rhs = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, cmp_right, this_ctx)?;
+                        let lhs_f64 = ensure_f64(builder, lhs);
+                        let rhs_f64 = ensure_f64(builder, rhs);
+                        let cc = match cmp_op {
+                            CompareOp::Eq => FloatCC::Equal,
+                            CompareOp::Ne => FloatCC::NotEqual,
+                            CompareOp::Lt => FloatCC::LessThan,
+                            CompareOp::Le => FloatCC::LessThanOrEqual,
+                            CompareOp::Gt => FloatCC::GreaterThan,
+                            CompareOp::Ge => FloatCC::GreaterThanOrEqual,
+                        };
+                        builder.ins().fcmp(cc, lhs_f64, rhs_f64)
+                    }
                     _ => {
                         let cond_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, condition, this_ctx)?;
                         let cond_val = ensure_f64(builder, cond_val_raw);
@@ -13356,16 +13418,89 @@ fn compile_stmt(
                 };
                 builder.ins().brif(cond_bool, body_block, &[], exit_block, &[]);
             } else {
-                // Non-optimized path
-                let cond_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, condition, this_ctx)?;
-                let cond_val = ensure_f64(builder, cond_val_raw);
-                let truthy_func = extern_funcs.get("js_is_truthy")
-                    .ok_or_else(|| anyhow!("js_is_truthy not declared"))?;
-                let truthy_ref = module.declare_func_in_func(*truthy_func, builder.func);
-                let truthy_call = builder.ins().call(truthy_ref, &[cond_val]);
-                let truthy_result = builder.inst_results(truthy_call)[0];
-                let zero_i32 = builder.ins().iconst(types::I32, 0);
-                let cond_bool = builder.ins().icmp(IntCC::NotEqual, truthy_result, zero_i32);
+                // Non-optimized path - still optimize Compare and And(Compare, Compare)
+                let cond_bool = match condition {
+                    Expr::Compare { op: cmp_op, left: cmp_left, right: cmp_right } => {
+                        let lhs = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, cmp_left, this_ctx)?;
+                        let rhs = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, cmp_right, this_ctx)?;
+                        let lhs_f64 = ensure_f64(builder, lhs);
+                        let rhs_f64 = ensure_f64(builder, rhs);
+                        let cc = match cmp_op {
+                            CompareOp::Eq => FloatCC::Equal,
+                            CompareOp::Ne => FloatCC::NotEqual,
+                            CompareOp::Lt => FloatCC::LessThan,
+                            CompareOp::Le => FloatCC::LessThanOrEqual,
+                            CompareOp::Gt => FloatCC::GreaterThan,
+                            CompareOp::Ge => FloatCC::GreaterThanOrEqual,
+                        };
+                        builder.ins().fcmp(cc, lhs_f64, rhs_f64)
+                    }
+                    Expr::Logical { op: LogicalOp::And, left, right } => {
+                        // Optimize both sides if they are Compare expressions
+                        let left_bool = if let Expr::Compare { op: cmp_op, left: cmp_left, right: cmp_right } = left.as_ref() {
+                            let lhs = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, cmp_left, this_ctx)?;
+                            let rhs = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, cmp_right, this_ctx)?;
+                            let lhs_f64 = ensure_f64(builder, lhs);
+                            let rhs_f64 = ensure_f64(builder, rhs);
+                            let cc = match cmp_op {
+                                CompareOp::Eq => FloatCC::Equal,
+                                CompareOp::Ne => FloatCC::NotEqual,
+                                CompareOp::Lt => FloatCC::LessThan,
+                                CompareOp::Le => FloatCC::LessThanOrEqual,
+                                CompareOp::Gt => FloatCC::GreaterThan,
+                                CompareOp::Ge => FloatCC::GreaterThanOrEqual,
+                            };
+                            builder.ins().fcmp(cc, lhs_f64, rhs_f64)
+                        } else {
+                            let left_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, left, this_ctx)?;
+                            let left_val = ensure_f64(builder, left_val_raw);
+                            let truthy_func = extern_funcs.get("js_is_truthy")
+                                .ok_or_else(|| anyhow!("js_is_truthy not declared"))?;
+                            let truthy_ref = module.declare_func_in_func(*truthy_func, builder.func);
+                            let truthy_call = builder.ins().call(truthy_ref, &[left_val]);
+                            let truthy_result = builder.inst_results(truthy_call)[0];
+                            let zero_i32 = builder.ins().iconst(types::I32, 0);
+                            builder.ins().icmp(IntCC::NotEqual, truthy_result, zero_i32)
+                        };
+                        let right_bool = if let Expr::Compare { op: cmp_op, left: cmp_left, right: cmp_right } = right.as_ref() {
+                            let lhs = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, cmp_left, this_ctx)?;
+                            let rhs = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, cmp_right, this_ctx)?;
+                            let lhs_f64 = ensure_f64(builder, lhs);
+                            let rhs_f64 = ensure_f64(builder, rhs);
+                            let cc = match cmp_op {
+                                CompareOp::Eq => FloatCC::Equal,
+                                CompareOp::Ne => FloatCC::NotEqual,
+                                CompareOp::Lt => FloatCC::LessThan,
+                                CompareOp::Le => FloatCC::LessThanOrEqual,
+                                CompareOp::Gt => FloatCC::GreaterThan,
+                                CompareOp::Ge => FloatCC::GreaterThanOrEqual,
+                            };
+                            builder.ins().fcmp(cc, lhs_f64, rhs_f64)
+                        } else {
+                            let right_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, right, this_ctx)?;
+                            let right_val = ensure_f64(builder, right_val_raw);
+                            let truthy_func = extern_funcs.get("js_is_truthy")
+                                .ok_or_else(|| anyhow!("js_is_truthy not declared"))?;
+                            let truthy_ref = module.declare_func_in_func(*truthy_func, builder.func);
+                            let truthy_call = builder.ins().call(truthy_ref, &[right_val]);
+                            let truthy_result = builder.inst_results(truthy_call)[0];
+                            let zero_i32 = builder.ins().iconst(types::I32, 0);
+                            builder.ins().icmp(IntCC::NotEqual, truthy_result, zero_i32)
+                        };
+                        builder.ins().band(left_bool, right_bool)
+                    }
+                    _ => {
+                        let cond_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, condition, this_ctx)?;
+                        let cond_val = ensure_f64(builder, cond_val_raw);
+                        let truthy_func = extern_funcs.get("js_is_truthy")
+                            .ok_or_else(|| anyhow!("js_is_truthy not declared"))?;
+                        let truthy_ref = module.declare_func_in_func(*truthy_func, builder.func);
+                        let truthy_call = builder.ins().call(truthy_ref, &[cond_val]);
+                        let truthy_result = builder.inst_results(truthy_call)[0];
+                        let zero_i32 = builder.ins().iconst(types::I32, 0);
+                        builder.ins().icmp(IntCC::NotEqual, truthy_result, zero_i32)
+                    }
+                };
                 builder.ins().brif(cond_bool, body_block, &[], exit_block, &[]);
             }
 
@@ -15359,7 +15494,12 @@ fn compile_expr(
                         let zero_len = builder.ins().iconst(types::I32, 0);
                         let call = builder.ins().call(alloc_ref, &[null_ptr, zero_len]);
                         let str_ptr = builder.inst_results(call)[0];
-                        return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), str_ptr));
+                        // NaN-box the string pointer for proper type identification
+                        let nanbox_func = extern_funcs.get("js_nanbox_string")
+                            .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                        let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                        let nanbox_call = builder.ins().call(nanbox_ref, &[str_ptr]);
+                        return Ok(builder.inst_results(nanbox_call)[0]);
                     }
 
                     let slot = builder.create_sized_stack_slot(StackSlotData::new(
@@ -15389,7 +15529,12 @@ fn compile_expr(
                     let len_val = builder.ins().iconst(types::I32, len as i64);
                     let call = builder.ins().call(alloc_ref, &[slot_addr, len_val]);
                     let str_ptr = builder.inst_results(call)[0];
-                    Ok(builder.ins().bitcast(types::F64, MemFlags::new(), str_ptr))
+                    // NaN-box the string pointer for proper type identification
+                    let nanbox_func = extern_funcs.get("js_nanbox_string")
+                        .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                    let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                    let nanbox_call = builder.ins().call(nanbox_ref, &[str_ptr]);
+                    Ok(builder.inst_results(nanbox_call)[0])
                 }
                 None => Err(anyhow!("Unknown enum member: {}.{}", enum_name, member_name)),
             }
@@ -15762,6 +15907,17 @@ fn compile_expr(
 
             Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr))
         }
+        Expr::FileURLToPath(url_expr) => {
+            // fileURLToPath takes a NaN-boxed string (f64) and returns a NaN-boxed string (f64)
+            let url_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, url_expr, this_ctx)?;
+            let url_f64 = ensure_f64(builder, url_val);
+
+            let func = extern_funcs.get("js_url_file_url_to_path")
+                .ok_or_else(|| anyhow!("js_url_file_url_to_path not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[url_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
         Expr::JsonParse(json_str_expr) => {
             // Compile the JSON string expression
             let str_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, json_str_expr, this_ctx)?;
@@ -15784,7 +15940,7 @@ fn compile_expr(
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
                     Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) |
                     Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
-                    Expr::PathExtname(_) | Expr::PathResolve(_) => true,
+                    Expr::PathExtname(_) | Expr::PathResolve(_) | Expr::FileURLToPath(_) => true,
                     Expr::Binary { op: BinaryOp::Add, left, right } => {
                         is_string_value_expr(left, locals) || is_string_value_expr(right, locals)
                     }
@@ -18356,7 +18512,7 @@ fn compile_expr(
                     Expr::EnvGet(_) | Expr::EnvGetDynamic(_) => true,
                     Expr::FsReadFileSync(_) => true,
                     Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
-                    Expr::PathExtname(_) | Expr::PathResolve(_) | Expr::JsonStringify(_) => true,
+                    Expr::PathExtname(_) | Expr::PathResolve(_) | Expr::FileURLToPath(_) | Expr::JsonStringify(_) => true,
                     // OS operations that return strings
                     Expr::OsPlatform | Expr::OsArch | Expr::OsHostname | Expr::OsHomedir |
                     Expr::OsTmpdir | Expr::OsType | Expr::OsRelease | Expr::OsEOL => true,
@@ -18640,14 +18796,15 @@ fn compile_expr(
         }
         Expr::Binary { op, left, right } => {
             // CONSTANT FOLDING: Evaluate constant expressions at compile time
-            fn get_constant_value(expr: &Expr) -> Option<f64> {
+            fn get_constant_value(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> Option<f64> {
                 match expr {
                     Expr::Integer(n) => Some(*n as f64),
                     Expr::Number(f) => Some(*f),
+                    Expr::LocalGet(id) => locals.get(id).and_then(|info| info.const_value),
                     _ => None,
                 }
             }
-            if let (Some(lhs_const), Some(rhs_const)) = (get_constant_value(left), get_constant_value(right)) {
+            if let (Some(lhs_const), Some(rhs_const)) = (get_constant_value(left, locals), get_constant_value(right, locals)) {
                 let result = match op {
                     BinaryOp::Add => Some(lhs_const + rhs_const),
                     BinaryOp::Sub => Some(lhs_const - rhs_const),
@@ -18676,7 +18833,7 @@ fn compile_expr(
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string && !i.is_union).unwrap_or(false),
                     Expr::FsReadFileSync(_) |
                     Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
-                    Expr::PathExtname(_) | Expr::PathResolve(_) | Expr::JsonStringify(_) => true,
+                    Expr::PathExtname(_) | Expr::PathResolve(_) | Expr::FileURLToPath(_) | Expr::JsonStringify(_) => true,
                     Expr::Binary { op: BinaryOp::Add, left, right } => {
                         is_string_operand(left, locals) || is_string_operand(right, locals)
                     }
@@ -25219,7 +25376,7 @@ fn compile_expr(
                     Expr::String(_) => true,
                     Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) => true,
                     Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
-                    Expr::PathExtname(_) | Expr::PathResolve(_) | Expr::JsonStringify(_) => true,
+                    Expr::PathExtname(_) | Expr::PathResolve(_) | Expr::FileURLToPath(_) | Expr::JsonStringify(_) => true,
                     Expr::CryptoRandomBytes(_) | Expr::CryptoRandomUUID |
                     Expr::CryptoSha256(_) | Expr::CryptoMd5(_) => true,
                     Expr::DateToISOString(_) => true,

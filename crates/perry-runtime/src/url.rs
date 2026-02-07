@@ -840,6 +840,32 @@ pub extern "C" fn js_abort_controller_abort(controller: *mut ObjectHeader) {
     }
 }
 
+/// Convert a file:// URL to a filesystem path
+/// Strips the "file://" prefix and percent-decodes the result
+/// js_url_file_url_to_path(url_f64: f64) -> f64 (NaN-boxed string)
+#[no_mangle]
+pub extern "C" fn js_url_file_url_to_path(url_f64: f64) -> f64 {
+    let url_string = get_string_content(url_f64);
+
+    // Strip file:// prefix
+    let path = if url_string.starts_with("file:///") {
+        // file:///path → /path (Unix)
+        &url_string[7..]
+    } else if url_string.starts_with("file://") {
+        // file://host/path or file:///path
+        &url_string[7..]
+    } else if url_string.starts_with("file:") {
+        &url_string[5..]
+    } else {
+        // Not a file URL, return as-is
+        &url_string
+    };
+
+    // Percent-decode the path
+    let decoded = url_decode(path);
+    create_string_f64(&decoded)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

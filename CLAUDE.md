@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.125
+**Current Version:** 0.2.126
 
 ## Workflow Requirements
 
@@ -546,6 +546,21 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
     })
     ```
   - Build UI crate: `cargo build --release -p perry-ui-macos`
+
+### v0.2.126
+- Eliminate js_is_truthy FFI calls in while-loop conditions for Compare expressions
+  - While-loop conditions like `x*x + y*y <= 4.0 && iter < MAX_ITER` previously compiled Compare
+    expressions to f64 (via `select(fcmp, 1.0, 0.0)`), then called `js_is_truthy` FFI to convert
+    back to bool — a wasteful round-trip on every iteration (~50M iterations for mandelbrot)
+  - Now detects Compare expressions in while-loop conditions and compiles them directly as `fcmp`,
+    producing an I8 bool without any FFI call
+  - Optimized all while-loop condition paths: direct Compare, And(Compare, Compare), and the
+    non-optimized fallback path (no counter detected)
+  - **Mandelbrot benchmark: 48ms → 27ms (44% faster, now matches Node.js ~26ms)**
+- Extend constant folding to handle LocalGet with const_value
+  - `get_constant_value()` now checks `locals` for variables with `const_value` set
+  - Expressions like `WIDTH / 2.0` (where `const WIDTH = 800`) now fold to `f64const(400.0)`
+  - Enables Cranelift to strength-reduce subsequent divisions by known constants
 
 ### v0.2.124
 - Implement reactive text binding for perry/ui State
