@@ -3477,6 +3477,7 @@ dependencies = [
  "perry-hir",
  "perry-runtime",
  "perry-types",
+ "target-lexicon",
  "thiserror 1.0.69",
 ]
 

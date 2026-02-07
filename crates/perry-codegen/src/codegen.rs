@@ -12,6 +12,7 @@ use cranelift_module::{DataDescription, Init, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Thread-local tracking of the current function being compiled (for self-recursive call optimization)
@@ -467,18 +468,33 @@ pub struct Compiler {
 
 impl Compiler {
     /// Create a new compiler for the host target
-    pub fn new() -> Result<Self> {
+    pub fn new(target: Option<&str>) -> Result<Self> {
         let mut flag_builder = settings::builder();
         flag_builder.set("use_colocated_libcalls", "false").unwrap();
-        // Enable PIC for macOS compatibility
+        // Enable PIC for macOS/iOS compatibility
         flag_builder.set("is_pic", "true").unwrap();
         // Enable maximum optimization
         flag_builder.set("opt_level", "speed").unwrap();
 
-        let isa_builder = cranelift_native::builder().map_err(|e| anyhow!("{}", e))?;
-        let isa = isa_builder
-            .finish(settings::Flags::new(flag_builder))
-            .map_err(|e| anyhow!("{}", e))?;
+        let isa = match target {
+            Some("ios-simulator") | Some("ios") => {
+                // Cross-compile for aarch64-apple-ios (Mach-O)
+                let triple = target_lexicon::Triple::from_str("aarch64-apple-ios")
+                    .map_err(|e| anyhow!("Bad triple: {}", e))?;
+                let isa_builder = cranelift::codegen::isa::lookup(triple)
+                    .map_err(|e| anyhow!("Failed to create iOS ISA: {}", e))?;
+                isa_builder
+                    .finish(settings::Flags::new(flag_builder))
+                    .map_err(|e| anyhow!("{}", e))?
+            }
+            _ => {
+                // Native host target
+                let isa_builder = cranelift_native::builder().map_err(|e| anyhow!("{}", e))?;
+                isa_builder
+                    .finish(settings::Flags::new(flag_builder))
+                    .map_err(|e| anyhow!("{}", e))?
+            }
+        };
 
         let builder = ObjectBuilder::new(
             isa,
@@ -31351,12 +31367,23 @@ fn compile_stmt_with_this(
 }
 
 /// Generate a stub object file for missing symbols from unresolved imports.
-pub fn generate_stub_object(missing_data_symbols: &[String], missing_func_symbols: &[String]) -> Result<Vec<u8>> {
+pub fn generate_stub_object(missing_data_symbols: &[String], missing_func_symbols: &[String], target: Option<&str>) -> Result<Vec<u8>> {
     let mut flag_builder = settings::builder();
     flag_builder.set("use_colocated_libcalls", "false").unwrap();
     flag_builder.set("is_pic", "true").unwrap();
-    let isa_builder = cranelift_native::builder().map_err(|e| anyhow!("{}", e))?;
-    let isa = isa_builder.finish(settings::Flags::new(flag_builder)).map_err(|e| anyhow!("{}", e))?;
+    let isa = match target {
+        Some("ios-simulator") | Some("ios") => {
+            let triple = target_lexicon::Triple::from_str("aarch64-apple-ios")
+                .map_err(|e| anyhow!("Bad triple: {}", e))?;
+            let isa_builder = cranelift::codegen::isa::lookup(triple)
+                .map_err(|e| anyhow!("Failed to create iOS ISA: {}", e))?;
+            isa_builder.finish(settings::Flags::new(flag_builder)).map_err(|e| anyhow!("{}", e))?
+        }
+        _ => {
+            let isa_builder = cranelift_native::builder().map_err(|e| anyhow!("{}", e))?;
+            isa_builder.finish(settings::Flags::new(flag_builder)).map_err(|e| anyhow!("{}", e))?
+        }
+    };
     let builder = ObjectBuilder::new(isa, "perry_stubs", cranelift_module::default_libcall_names())?;
     let mut module = ObjectModule::new(builder);
     const TAG_UNDEF: u64 = 0x7FFC_0000_0000_0001;

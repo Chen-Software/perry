@@ -34,6 +34,7 @@ pub mod os;
 pub mod buffer;
 pub mod child_process;
 pub mod net;
+#[cfg(feature = "full")]
 pub mod redis_client;
 
 pub use value::JSValue;

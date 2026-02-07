@@ -58,6 +58,30 @@ cargo run --release -- test_factorial.ts --print-hir
 
 # Produce object file only (no linking)
 cargo run --release -- test_factorial.ts --no-link
+
+# Compile a UI app for iOS Simulator
+cargo run --release -- test_ui_counter.ts --target ios-simulator -o CounterApp
+# Then: xcrun simctl install booted CounterApp.app && xcrun simctl launch booted com.perry.CounterApp
+```
+
+### iOS Cross-Compilation
+
+```bash
+# Install iOS target
+rustup target add aarch64-apple-ios-sim
+
+# Build iOS libraries
+cargo build --release -p perry-runtime --no-default-features --target aarch64-apple-ios-sim
+cargo build --release -p perry-stdlib --no-default-features --target aarch64-apple-ios-sim
+cargo build --release -p perry-ui-ios --target aarch64-apple-ios-sim
+
+# Build the compiler (runs on macOS host)
+cargo build --release
+
+# Compile and deploy
+cargo run --release -- app.ts --target ios-simulator -o MyApp
+xcrun simctl install booted MyApp.app
+xcrun simctl launch booted com.perry.MyApp
 ```
 
 ## Architecture
@@ -80,6 +104,7 @@ TypeScript (.ts) → Parse (SWC) → AST → Lower → HIR → Transform → Cod
 | **perry-stdlib** | Standard library — Node.js API support (mysql2, redis, fetch, fastify, ws, etc.) |
 | **perry-ui** | Platform-agnostic UI types (WidgetHandle, WidgetKind, StateId) |
 | **perry-ui-macos** | macOS AppKit UI backend (NSWindow, NSButton, NSTextField, NSStackView) |
+| **perry-ui-ios** | iOS UIKit UI backend (UIWindow, UIButton, UILabel, UIStackView) |
 | **perry-jsruntime** | JavaScript interop via QuickJS |
 
 ### Key Data Flow
@@ -182,9 +207,29 @@ App({
 TypeScript: import { Text, Button } from "perry/ui"
   → HIR: "perry/ui" in NATIVE_MODULES → NativeMethodCall { module: "perry/ui", method: "Text" }
   → Codegen: Special dispatch → calls perry_ui_* FFI functions
-  → Linker: Detects perry/ui import → links libperry_ui_macos.a + AppKit framework
-  → Runtime: perry-ui-macos uses objc2 for NSWindow, NSStackView, NSTextField, NSButton
+  → Linker: Detects perry/ui import → links libperry_ui_macos.a + AppKit (or libperry_ui_ios.a + UIKit)
+  → Runtime: perry-ui-macos uses objc2/AppKit, perry-ui-ios uses objc2/UIKit
 ```
+
+### iOS Support (`--target ios-simulator` / `--target ios`)
+
+The same TypeScript UI source compiles to either macOS or iOS depending on the `--target` flag. The 47 `perry_ui_*` FFI functions are the abstraction boundary — codegen is platform-agnostic.
+
+| Component | macOS | iOS |
+|-----------|-------|-----|
+| UI library | `libperry_ui_macos.a` | `libperry_ui_ios.a` |
+| Text | NSTextField (label mode) | UILabel |
+| Button | NSButton + target-action | UIButton + TouchUpInside |
+| Stacks | NSStackView | UIStackView |
+| Toggle | NSSwitch | UISwitch |
+| Slider | NSSlider (f64) | UISlider (f32, cast at boundary) |
+| TextField | NSNotificationCenter observer | addTarget:EditingChanged |
+| App lifecycle | NSApplication.run() | UIApplicationMain + deferred creation |
+| Root widget | NSWindow contentView | UIViewController.view safeAreaLayoutGuide |
+
+**Stubbed on iOS** (no-op): Keyboard shortcuts, context menus, file dialog, appSetMinSize/appSetMaxSize, textSetSelectable.
+
+**Cross-compilation**: perry-runtime uses Cargo feature gates (`default = ["full"]`). iOS builds use `--no-default-features` to exclude postgres, redis, sysinfo, hostname, dirs, whoami. Cranelift codegen uses `target_lexicon::Triple` for `aarch64-apple-ios` ISA.
 
 ### Handle-Based Widget System
 
@@ -380,21 +425,21 @@ These are recurring issues encountered during development. Check these first whe
 ## Recent Changes
 
 ### v0.2.138
-- Eliminate js_is_truthy FFI calls from Stmt::If, for-loop, and while-loop condition paths
-  - New `compile_condition_to_bool` helper: compiles condition expressions directly to I8 bool
-    - `Compare` → `fcmp` (no FFI)
-    - `Logical And/Or` → recursive `band`/`bor` of sub-conditions
-    - `Unary Not` → recursive compile + `bxor` inversion
-    - General expressions → `inline_truthiness_check` (pure Cranelift IR, no FFI)
-  - `inline_truthiness_check`: 7-instruction inline sequence checking NaN-box tags + ±0.0
-    - `(val - TAG_UNDEFINED) <=u 2` covers undefined/null/false
-    - `(val << 1) == 0` covers ±0.0
-  - Replaced all `js_is_truthy` FFI calls in:
-    - `Stmt::If` handler (both regular and async paths)
-    - For-loop condition fallbacks (both BCE and non-BCE paths)
-    - While-loop non-optimized path and counter-optimized fallbacks
-  - Significant code deduplication: removed ~150 lines of repeated Compare→fcmp match arms
-  - All 16 benchmarks pass with correct results
+- **iOS support**: New `perry-ui-ios` crate + `--target ios-simulator`/`--target ios` CLI flag
+  - **perry-ui-ios**: Complete UIKit implementation of all 47 `perry_ui_*` FFI functions
+    - Widgets: UILabel (Text), UIButton, UIStackView (VStack/HStack), UISwitch (Toggle),
+      UISlider, UITextField, UIScrollView, Spacer (UIView), Divider (UIView)
+    - App lifecycle: UIApplicationMain with deferred UIWindow creation via PerryAppDelegate
+    - Reactive state: Verbatim copy of platform-agnostic state.rs (all 5 binding types)
+    - Clipboard: UIPasteboard read/write
+    - Stubbed: Keyboard shortcuts, context menus, file dialog, window sizing (no-op on iOS)
+  - **perry-runtime feature gates**: postgres, redis, sysinfo, hostname, dirs, whoami now optional
+    - `default = ["full"]` enables all; `--no-default-features` for iOS builds
+    - `#[cfg(feature = "full")]` guards on os.rs functions with safe fallbacks
+  - **Cross-compilation**: Cranelift uses `target_lexicon::Triple` for `aarch64-apple-ios(-sim)` ISA
+  - **iOS linker pipeline**: xcrun SDK discovery, proper `-target`/`-isysroot`, UIKit/Foundation/CoreGraphics frameworks
+  - **App bundle**: Generates `.app` directory with Info.plist for simulator deployment
+  - Target-aware library discovery: searches `target/{triple}/release/` for cross-compiled `.a` files
 
 ### v0.2.137
 - Fix arena allocator crash on large allocations (>8MB)

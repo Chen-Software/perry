@@ -19,13 +19,15 @@ fn get_process_start() -> &'static Instant {
 pub extern "C" fn js_os_platform() -> *mut StringHeader {
     #[cfg(target_os = "macos")]
     let platform = "darwin";
+    #[cfg(target_os = "ios")]
+    let platform = "darwin";
     #[cfg(target_os = "linux")]
     let platform = "linux";
     #[cfg(target_os = "windows")]
     let platform = "win32";
     #[cfg(target_os = "freebsd")]
     let platform = "freebsd";
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows", target_os = "freebsd")))]
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "windows", target_os = "freebsd")))]
     let platform = "unknown";
 
     let bytes = platform.as_bytes();
@@ -54,38 +56,54 @@ pub extern "C" fn js_os_arch() -> *mut StringHeader {
 /// Get the hostname of the operating system
 #[no_mangle]
 pub extern "C" fn js_os_hostname() -> *mut StringHeader {
-    match hostname::get() {
-        Ok(hostname) => {
-            let hostname_str = hostname.to_string_lossy();
-            let bytes = hostname_str.as_bytes();
-            js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
+    #[cfg(feature = "full")]
+    {
+        match hostname::get() {
+            Ok(hostname) => {
+                let hostname_str = hostname.to_string_lossy();
+                let bytes = hostname_str.as_bytes();
+                js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
+            }
+            Err(_) => {
+                let default = "localhost";
+                js_string_from_bytes(default.as_ptr(), default.len() as u32)
+            }
         }
-        Err(_) => {
-            let default = "localhost";
-            js_string_from_bytes(default.as_ptr(), default.len() as u32)
-        }
+    }
+    #[cfg(not(feature = "full"))]
+    {
+        let default = "localhost";
+        js_string_from_bytes(default.as_ptr(), default.len() as u32)
     }
 }
 
 /// Get the home directory for the current user
 #[no_mangle]
 pub extern "C" fn js_os_homedir() -> *mut StringHeader {
-    match dirs::home_dir() {
-        Some(path) => {
-            let path_str = path.to_string_lossy();
-            let bytes = path_str.as_bytes();
-            js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
+    #[cfg(feature = "full")]
+    {
+        match dirs::home_dir() {
+            Some(path) => {
+                let path_str = path.to_string_lossy();
+                let bytes = path_str.as_bytes();
+                js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
+            }
+            None => {
+                // Fallback
+                #[cfg(unix)]
+                let fallback = "/home";
+                #[cfg(windows)]
+                let fallback = "C:\\Users";
+                #[cfg(not(any(unix, windows)))]
+                let fallback = "/";
+                js_string_from_bytes(fallback.as_ptr(), fallback.len() as u32)
+            }
         }
-        None => {
-            // Fallback
-            #[cfg(unix)]
-            let fallback = "/home";
-            #[cfg(windows)]
-            let fallback = "C:\\Users";
-            #[cfg(not(any(unix, windows)))]
-            let fallback = "/";
-            js_string_from_bytes(fallback.as_ptr(), fallback.len() as u32)
-        }
+    }
+    #[cfg(not(feature = "full"))]
+    {
+        let fallback = "/";
+        js_string_from_bytes(fallback.as_ptr(), fallback.len() as u32)
     }
 }
 
@@ -101,24 +119,39 @@ pub extern "C" fn js_os_tmpdir() -> *mut StringHeader {
 /// Get the total amount of system memory in bytes
 #[no_mangle]
 pub extern "C" fn js_os_totalmem() -> f64 {
-    use sysinfo::System;
-    let sys = System::new_all();
-    sys.total_memory() as f64
+    #[cfg(feature = "full")]
+    {
+        use sysinfo::System;
+        let sys = System::new_all();
+        sys.total_memory() as f64
+    }
+    #[cfg(not(feature = "full"))]
+    { 0.0 }
 }
 
 /// Get the amount of free system memory in bytes
 #[no_mangle]
 pub extern "C" fn js_os_freemem() -> f64 {
-    use sysinfo::System;
-    let sys = System::new_all();
-    sys.free_memory() as f64
+    #[cfg(feature = "full")]
+    {
+        use sysinfo::System;
+        let sys = System::new_all();
+        sys.free_memory() as f64
+    }
+    #[cfg(not(feature = "full"))]
+    { 0.0 }
 }
 
 /// Get the system uptime in seconds
 #[no_mangle]
 pub extern "C" fn js_os_uptime() -> f64 {
-    use sysinfo::System;
-    System::uptime() as f64
+    #[cfg(feature = "full")]
+    {
+        use sysinfo::System;
+        System::uptime() as f64
+    }
+    #[cfg(not(feature = "full"))]
+    { 0.0 }
 }
 
 /// Get the process uptime in seconds (time since process started)
@@ -165,13 +198,15 @@ pub extern "C" fn js_process_argv() -> *mut ArrayHeader {
 pub extern "C" fn js_os_type() -> *mut StringHeader {
     #[cfg(target_os = "macos")]
     let os_type = "Darwin";
+    #[cfg(target_os = "ios")]
+    let os_type = "Darwin";
     #[cfg(target_os = "linux")]
     let os_type = "Linux";
     #[cfg(target_os = "windows")]
     let os_type = "Windows_NT";
     #[cfg(target_os = "freebsd")]
     let os_type = "FreeBSD";
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows", target_os = "freebsd")))]
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "windows", target_os = "freebsd")))]
     let os_type = "Unknown";
 
     let bytes = os_type.as_bytes();
@@ -181,10 +216,18 @@ pub extern "C" fn js_os_type() -> *mut StringHeader {
 /// Get the operating system release
 #[no_mangle]
 pub extern "C" fn js_os_release() -> *mut StringHeader {
-    use sysinfo::System;
-    let release = System::os_version().unwrap_or_else(|| "unknown".to_string());
-    let bytes = release.as_bytes();
-    js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
+    #[cfg(feature = "full")]
+    {
+        use sysinfo::System;
+        let release = System::os_version().unwrap_or_else(|| "unknown".to_string());
+        let bytes = release.as_bytes();
+        js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
+    }
+    #[cfg(not(feature = "full"))]
+    {
+        let release = "unknown";
+        js_string_from_bytes(release.as_ptr(), release.len() as u32)
+    }
 }
 
 /// Get the end-of-line marker for the current operating system
@@ -260,12 +303,14 @@ mod tests {
         assert!(!tmpdir.is_null());
     }
 
+    #[cfg(feature = "full")]
     #[test]
     fn test_os_totalmem() {
         let mem = js_os_totalmem();
         assert!(mem > 0.0);
     }
 
+    #[cfg(feature = "full")]
     #[test]
     fn test_os_freemem() {
         let mem = js_os_freemem();

@@ -1,0 +1,132 @@
+use objc2::rc::Retained;
+use objc2::runtime::{AnyObject, Sel};
+use objc2::{define_class, msg_send, AnyThread, DefinedClass};
+use objc2_ui_kit::{UIButton, UIView};
+use objc2_foundation::{NSObject, NSString};
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+thread_local! {
+    static BUTTON_CALLBACKS: RefCell<HashMap<usize, f64>> = RefCell::new(HashMap::new());
+}
+
+extern "C" {
+    fn js_closure_call0(closure: *const u8) -> f64;
+    fn js_nanbox_get_pointer(value: f64) -> i64;
+}
+
+pub struct PerryButtonTargetIvars {
+    callback_key: std::cell::Cell<usize>,
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "PerryButtonTarget"]
+    #[ivars = PerryButtonTargetIvars]
+    pub struct PerryButtonTarget;
+
+    impl PerryButtonTarget {
+        #[unsafe(method(buttonPressed:))]
+        fn button_pressed(&self, _sender: &AnyObject) {
+            let key = self.ivars().callback_key.get();
+            BUTTON_CALLBACKS.with(|cbs| {
+                if let Some(&closure_f64) = cbs.borrow().get(&key) {
+                    let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
+                    unsafe {
+                        js_closure_call0(closure_ptr as *const u8);
+                    }
+                }
+            });
+        }
+    }
+);
+
+impl PerryButtonTarget {
+    fn new() -> Retained<Self> {
+        let this = Self::alloc().set_ivars(PerryButtonTargetIvars {
+            callback_key: std::cell::Cell::new(0),
+        });
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+fn str_from_header(ptr: *const u8) -> &'static str {
+    if ptr.is_null() {
+        return "";
+    }
+    unsafe {
+        let header = ptr as *const perry_runtime::string::StringHeader;
+        let len = (*header).length as usize;
+        let data = ptr.add(std::mem::size_of::<perry_runtime::string::StringHeader>());
+        std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
+    }
+}
+
+/// Create a UIButton with a label and closure callback.
+pub fn create(label_ptr: *const u8, on_press: f64) -> i64 {
+    let label = str_from_header(label_ptr);
+
+    unsafe {
+        // UIButton.buttonWithType: 0 = UIButtonTypeCustom, 1 = UIButtonTypeSystem
+        let button: Retained<UIButton> = msg_send![
+            objc2::runtime::AnyClass::get(c"UIButton").unwrap(),
+            buttonWithType: 1i64  // UIButtonTypeSystem
+        ];
+
+        let ns_string = NSString::from_str(label);
+        let _: () = msg_send![&*button, setTitle: &*ns_string, forState: 0u64]; // UIControlStateNormal = 0
+
+        let _: () = msg_send![&*button, setTranslatesAutoresizingMaskIntoConstraints: false];
+
+        let target = PerryButtonTarget::new();
+        let target_addr = Retained::as_ptr(&target) as usize;
+        target.ivars().callback_key.set(target_addr);
+
+        BUTTON_CALLBACKS.with(|cbs| {
+            cbs.borrow_mut().insert(target_addr, on_press);
+        });
+
+        let sel = Sel::register(c"buttonPressed:");
+        // addTarget:action:forControlEvents: UIControlEventTouchUpInside = 1 << 6 = 64
+        let _: () = msg_send![&*button, addTarget: &*target, action: sel, forControlEvents: 64u64];
+
+        std::mem::forget(target);
+
+        let view: Retained<UIView> = Retained::cast_unchecked(button);
+        super::register_widget(view)
+    }
+}
+
+/// Set whether a button has a border (approximated via layer).
+pub fn set_bordered(handle: i64, bordered: bool) {
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            let layer: *const AnyObject = msg_send![&*view, layer];
+            if !layer.is_null() {
+                if bordered {
+                    let _: () = msg_send![layer, setBorderWidth: 1.0f64];
+                    let color: *const AnyObject = msg_send![
+                        objc2::runtime::AnyClass::get(c"UIColor").unwrap(),
+                        systemBlueColor
+                    ];
+                    let cg_color: *const AnyObject = msg_send![color, CGColor];
+                    let _: () = msg_send![layer, setBorderColor: cg_color];
+                    let _: () = msg_send![layer, setCornerRadius: 5.0f64];
+                } else {
+                    let _: () = msg_send![layer, setBorderWidth: 0.0f64];
+                }
+            }
+        }
+    }
+}
+
+/// Set the title text of a button.
+pub fn set_title(handle: i64, title_ptr: *const u8) {
+    let title = str_from_header(title_ptr);
+    if let Some(view) = super::get_widget(handle) {
+        let ns_title = NSString::from_str(title);
+        unsafe {
+            let _: () = msg_send![&*view, setTitle: &*ns_title, forState: 0u64];
+        }
+    }
+}

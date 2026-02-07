@@ -37,6 +37,10 @@ pub struct CompileArgs {
     /// WARNING: This significantly increases binary size (~10-15MB).
     #[arg(long)]
     pub enable_js_runtime: bool,
+
+    /// Target platform: ios-simulator, ios (default: native host)
+    #[arg(long)]
+    pub target: Option<String>,
 }
 
 /// Information about a JavaScript module that will be interpreted at runtime
@@ -80,90 +84,76 @@ impl CompilationContext {
     }
 }
 
-/// Find the runtime library for linking
-fn find_runtime_library() -> Result<PathBuf> {
-    let candidates = [
-        PathBuf::from("target/release/libperry_runtime.a"),
-        PathBuf::from("target/debug/libperry_runtime.a"),
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.join("libperry_runtime.a")))
-            .unwrap_or_default(),
-        PathBuf::from("/usr/local/lib/libperry_runtime.a"),
-    ];
+/// Get the Rust target triple for a given perry target string
+fn rust_target_triple(target: Option<&str>) -> Option<&'static str> {
+    match target {
+        Some("ios-simulator") => Some("aarch64-apple-ios-sim"),
+        Some("ios") => Some("aarch64-apple-ios"),
+        _ => None,
+    }
+}
+
+/// Find a library by name, optionally searching cross-compilation target directories
+fn find_library(name: &str, target: Option<&str>) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+
+    // For cross-compilation targets, search target-specific directories first
+    if let Some(triple) = rust_target_triple(target) {
+        candidates.push(PathBuf::from(format!("target/{}/release/{}", triple, name)));
+        candidates.push(PathBuf::from(format!("target/{}/debug/{}", triple, name)));
+    }
+
+    // Always search host directories
+    candidates.push(PathBuf::from(format!("target/release/{}", name)));
+    candidates.push(PathBuf::from(format!("target/debug/{}", name)));
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join(name));
+        }
+    }
+    candidates.push(PathBuf::from(format!("/usr/local/lib/{}", name)));
 
     for path in &candidates {
         if path.exists() {
-            return Ok(path.clone());
+            return Some(path.clone());
         }
     }
+    None
+}
 
-    Err(anyhow!(
-        "Could not find libperry_runtime.a. Build it with: cargo build --release -p perry-runtime"
-    ))
+/// Find the runtime library for linking
+fn find_runtime_library(target: Option<&str>) -> Result<PathBuf> {
+    find_library("libperry_runtime.a", target).ok_or_else(|| {
+        let extra = if target.is_some() {
+            format!(" (for target {:?})", target.unwrap())
+        } else {
+            String::new()
+        };
+        anyhow!(
+            "Could not find libperry_runtime.a{}. Build it with: cargo build --release -p perry-runtime{}",
+            extra,
+            rust_target_triple(target).map(|t| format!(" --target {}", t)).unwrap_or_default()
+        )
+    })
 }
 
 /// Find the stdlib library for linking (optional - only needed for native modules)
-fn find_stdlib_library() -> Option<PathBuf> {
-    let candidates = [
-        PathBuf::from("target/release/libperry_stdlib.a"),
-        PathBuf::from("target/debug/libperry_stdlib.a"),
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.join("libperry_stdlib.a")))
-            .unwrap_or_default(),
-        PathBuf::from("/usr/local/lib/libperry_stdlib.a"),
-    ];
-
-    for path in &candidates {
-        if path.exists() {
-            return Some(path.clone());
-        }
-    }
-
-    None
+fn find_stdlib_library(target: Option<&str>) -> Option<PathBuf> {
+    find_library("libperry_stdlib.a", target)
 }
 
 /// Find the V8 jsruntime library for linking (optional - only needed for JS module support)
-fn find_jsruntime_library() -> Option<PathBuf> {
-    let candidates = [
-        PathBuf::from("target/release/libperry_jsruntime.a"),
-        PathBuf::from("target/debug/libperry_jsruntime.a"),
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.join("libperry_jsruntime.a")))
-            .unwrap_or_default(),
-        PathBuf::from("/usr/local/lib/libperry_jsruntime.a"),
-    ];
-
-    for path in &candidates {
-        if path.exists() {
-            return Some(path.clone());
-        }
-    }
-
-    None
+fn find_jsruntime_library(target: Option<&str>) -> Option<PathBuf> {
+    find_library("libperry_jsruntime.a", target)
 }
 
 /// Find the UI library for linking (optional - only needed when perry/ui is imported)
-fn find_ui_library() -> Option<PathBuf> {
-    let candidates = [
-        PathBuf::from("target/release/libperry_ui_macos.a"),
-        PathBuf::from("target/debug/libperry_ui_macos.a"),
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.join("libperry_ui_macos.a")))
-            .unwrap_or_default(),
-        PathBuf::from("/usr/local/lib/libperry_ui_macos.a"),
-    ];
-
-    for path in &candidates {
-        if path.exists() {
-            return Some(path.clone());
-        }
-    }
-
-    None
+fn find_ui_library(target: Option<&str>) -> Option<PathBuf> {
+    let lib_name = match target {
+        Some("ios-simulator") | Some("ios") => "libperry_ui_ios.a",
+        _ => "libperry_ui_macos.a",
+    };
+    find_library(lib_name, target)
 }
 
 /// Find node_modules directory starting from a given path
@@ -1036,9 +1026,11 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         }
     }
 
+    let target = args.target.clone();
+
     // Compile native modules
     for (path, hir_module) in &ctx.native_modules {
-        let mut compiler = perry_codegen::Compiler::new()?;
+        let mut compiler = perry_codegen::Compiler::new(target.as_deref())?;
 
         // Check if this is the entry module
         let is_entry = path == &entry_path;
@@ -1158,8 +1150,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         use std::collections::HashSet;
         let mut undefined_syms: HashSet<String> = HashSet::new();
         let mut defined_syms: HashSet<String> = HashSet::new();
-        let runtime_lib_path = find_runtime_library().ok();
-        let stdlib_lib_path = find_stdlib_library();
+        let runtime_lib_path = find_runtime_library(target.as_deref()).ok();
+        let stdlib_lib_path = find_stdlib_library(target.as_deref());
         let mut all_scan_paths: Vec<PathBuf> = obj_paths.clone();
         if let Some(ref p) = runtime_lib_path { all_scan_paths.push(p.clone()); }
         if let Some(ref p) = stdlib_lib_path { all_scan_paths.push(p.clone()); }
@@ -1184,7 +1176,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             let (mut md, mut mf) = (Vec::new(), Vec::new());
             for s in &missing { if s.starts_with("__export_") { md.push(s.clone()); } else { mf.push(s.clone()); } }
             if let OutputFormat::Text = format { eprintln!("  Generating stubs for {} missing symbols ({} data, {} functions)", missing.len(), md.len(), mf.len()); }
-            let stub_bytes = perry_codegen::generate_stub_object(&md, &mf)?;
+            let stub_bytes = perry_codegen::generate_stub_object(&md, &mf, target.as_deref())?;
             let stub_path = PathBuf::from("_perry_stubs.o");
             fs::write(&stub_path, &stub_bytes)?;
             obj_paths.push(stub_path);
@@ -1219,10 +1211,12 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         OutputFormat::Json => {}
     }
 
-    let runtime_lib = find_runtime_library()?;
-    let stdlib_lib = find_stdlib_library();
-    let jsruntime_lib = if ctx.needs_js_runtime || args.enable_js_runtime {
-        match find_jsruntime_library() {
+    let is_ios = matches!(target.as_deref(), Some("ios-simulator") | Some("ios"));
+
+    let runtime_lib = find_runtime_library(target.as_deref())?;
+    let stdlib_lib = find_stdlib_library(target.as_deref());
+    let jsruntime_lib = if !is_ios && (ctx.needs_js_runtime || args.enable_js_runtime) {
+        match find_jsruntime_library(target.as_deref()) {
             Some(lib) => {
                 match format {
                     OutputFormat::Text => println!("Using V8 JavaScript runtime for JS module support"),
@@ -1243,35 +1237,41 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         None
     };
 
-    let mut cmd = Command::new("cc");
+    // For iOS targets, use xcrun to find the right SDK and clang
+    let mut cmd = if is_ios {
+        let sdk = if target.as_deref() == Some("ios-simulator") { "iphonesimulator" } else { "iphoneos" };
+        let clang = String::from_utf8(
+            Command::new("xcrun").args(["--sdk", sdk, "--find", "clang"]).output()?.stdout
+        )?.trim().to_string();
+        let sysroot = String::from_utf8(
+            Command::new("xcrun").args(["--sdk", sdk, "--show-sdk-path"]).output()?.stdout
+        )?.trim().to_string();
+        let triple = if target.as_deref() == Some("ios-simulator") {
+            "arm64-apple-ios17.0-simulator"
+        } else {
+            "arm64-apple-ios17.0"
+        };
+
+        let mut c = Command::new(clang);
+        c.arg("-target").arg(triple)
+         .arg("-isysroot").arg(sysroot);
+        c
+    } else {
+        Command::new("cc")
+    };
+
     for obj_path in &obj_paths {
         cmd.arg(obj_path);
     }
-
-    // Link libraries carefully to avoid duplicate symbols.
-    // All three libraries (runtime, stdlib, jsruntime) contain perry-runtime symbols
-    // because Rust staticlib embeds all dependencies.
-    //
-    // To avoid duplicates:
-    // - If jsruntime is used: link only jsruntime + stdlib (jsruntime has runtime)
-    // - If only stdlib: link only stdlib (it has runtime)
-    // - If neither: link only runtime
-    //
-    // Note: When both jsruntime and stdlib are needed, they both contain runtime,
-    // so we use -Wl,-allow_sub_type_mismatches to ignore the duplicates.
-
 
     // Link libraries - avoid duplicates by linking only one library with runtime symbols.
     // jsruntime now includes stdlib, which includes runtime.
     // So we only need to link ONE of: jsruntime, stdlib, or runtime.
     if let Some(ref jsruntime) = jsruntime_lib {
-        // jsruntime includes stdlib and runtime - link only jsruntime
         cmd.arg(jsruntime);
     } else if let Some(ref stdlib) = stdlib_lib {
-        // stdlib includes runtime - link only stdlib
         cmd.arg(stdlib);
     } else {
-        // No stdlib or jsruntime - link runtime directly
         cmd.arg(&runtime_lib);
     }
 
@@ -1279,41 +1279,50 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         .arg(&exe_path)
         .arg("-lc");
 
-    // On macOS, we need additional frameworks for the runtime (sysinfo, etc.) and V8
-    #[cfg(target_os = "macos")]
-    {
-        // Always link CoreFoundation and related frameworks since perry-runtime uses sysinfo
-        cmd.arg("-framework").arg("Security")
-           .arg("-framework").arg("CoreFoundation")
-           .arg("-framework").arg("SystemConfiguration")
-           .arg("-framework").arg("IOKit")
-           .arg("-liconv")
-           .arg("-lresolv");
+    if is_ios {
+        // iOS frameworks
+        cmd.arg("-framework").arg("UIKit")
+           .arg("-framework").arg("Foundation")
+           .arg("-framework").arg("CoreGraphics");
+    } else {
+        // On macOS, we need additional frameworks for the runtime (sysinfo, etc.) and V8
+        #[cfg(target_os = "macos")]
+        {
+            cmd.arg("-framework").arg("Security")
+               .arg("-framework").arg("CoreFoundation")
+               .arg("-framework").arg("SystemConfiguration")
+               .arg("-framework").arg("IOKit")
+               .arg("-liconv")
+               .arg("-lresolv");
 
-        // V8 requires additional C++ runtime
-        if jsruntime_lib.is_some() {
-            cmd.arg("-lc++");
+            if jsruntime_lib.is_some() {
+                cmd.arg("-lc++");
+            }
         }
-    }
 
-    // On Linux, link against pthread and dl for V8
-    #[cfg(target_os = "linux")]
-    {
-        if jsruntime_lib.is_some() {
-            cmd.arg("-lpthread")
-               .arg("-ldl")
-               .arg("-lstdc++");
+        // On Linux, link against pthread and dl for V8
+        #[cfg(target_os = "linux")]
+        {
+            if jsruntime_lib.is_some() {
+                cmd.arg("-lpthread")
+                   .arg("-ldl")
+                   .arg("-lstdc++");
+            }
         }
     }
 
     // Link perry/ui library and platform frameworks if needed
     if ctx.needs_ui {
-        if let Some(ui_lib) = find_ui_library() {
+        if let Some(ui_lib) = find_ui_library(target.as_deref()) {
             cmd.arg(&ui_lib);
 
-            #[cfg(target_os = "macos")]
-            {
-                cmd.arg("-framework").arg("AppKit");
+            if is_ios {
+                // UIKit already linked above
+            } else {
+                #[cfg(target_os = "macos")]
+                {
+                    cmd.arg("-framework").arg("AppKit");
+                }
             }
 
             match format {
@@ -1321,8 +1330,14 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 OutputFormat::Json => {}
             }
         } else {
+            let lib_name = if is_ios { "libperry_ui_ios.a" } else { "libperry_ui_macos.a" };
+            let build_cmd = if is_ios {
+                "cargo build --release -p perry-ui-ios --target aarch64-apple-ios-sim"
+            } else {
+                "cargo build --release -p perry-ui-macos"
+            };
             return Err(anyhow!(
-                "perry/ui imported but libperry_ui_macos.a not found. Build with: cargo build --release -p perry-ui-macos"
+                "perry/ui imported but {} not found. Build with: {}", lib_name, build_cmd
             ));
         }
     }
@@ -1333,16 +1348,71 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         return Err(anyhow!("Linking failed"));
     }
 
-    match format {
-        OutputFormat::Text => println!("Wrote executable: {}", exe_path.display()),
-        OutputFormat::Json => {
-            let result = serde_json::json!({
-                "success": true,
-                "output": exe_path.to_string_lossy(),
-                "native_modules": ctx.native_modules.len(),
-                "js_modules": ctx.js_modules.len(),
-            });
-            println!("{}", serde_json::to_string(&result)?);
+    // For iOS targets, create a .app bundle
+    if is_ios {
+        let app_dir = exe_path.with_extension("app");
+        let _ = fs::create_dir_all(&app_dir);
+        let bundle_exe = app_dir.join(exe_path.file_name().unwrap_or_default());
+        fs::copy(&exe_path, &bundle_exe)?;
+        let _ = fs::remove_file(&exe_path);
+
+        let bundle_id = format!("com.perry.{}", stem);
+        let info_plist = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>{}</string>
+    <key>CFBundleIdentifier</key>
+    <string>{}</string>
+    <key>CFBundleName</key>
+    <string>{}</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>MinimumOSVersion</key>
+    <string>17.0</string>
+    <key>UILaunchStoryboardName</key>
+    <string></string>
+</dict>
+</plist>"#,
+            stem, bundle_id, stem
+        );
+        fs::write(app_dir.join("Info.plist"), info_plist)?;
+
+        match format {
+            OutputFormat::Text => {
+                println!("Wrote iOS app bundle: {}", app_dir.display());
+                println!();
+                println!("To run on iOS Simulator:");
+                println!("  xcrun simctl install booted {}", app_dir.display());
+                println!("  xcrun simctl launch booted {}", bundle_id);
+            }
+            OutputFormat::Json => {
+                let result = serde_json::json!({
+                    "success": true,
+                    "output": app_dir.to_string_lossy(),
+                    "bundle_id": bundle_id,
+                    "native_modules": ctx.native_modules.len(),
+                    "js_modules": ctx.js_modules.len(),
+                });
+                println!("{}", serde_json::to_string(&result)?);
+            }
+        }
+    } else {
+        match format {
+            OutputFormat::Text => println!("Wrote executable: {}", exe_path.display()),
+            OutputFormat::Json => {
+                let result = serde_json::json!({
+                    "success": true,
+                    "output": exe_path.to_string_lossy(),
+                    "native_modules": ctx.native_modules.len(),
+                    "js_modules": ctx.js_modules.len(),
+                });
+                println!("{}", serde_json::to_string(&result)?);
+            }
         }
     }
 
