@@ -259,3 +259,92 @@ pub extern "C" fn js_map_clear(map: *mut MapHeader) {
         (*map).size = 0;
     }
 }
+
+/// Get the entries of a map as an array of [key, value] pairs
+/// Returns an array where each element is a 2-element array [key, value]
+#[no_mangle]
+pub extern "C" fn js_map_entries(map: *const MapHeader) -> *mut crate::array::ArrayHeader {
+    if map.is_null() {
+        return crate::array::js_array_alloc(0);
+    }
+    unsafe {
+        let size = (*map).size as usize;
+        let entries = entries_ptr(map);
+        let result = crate::array::js_array_alloc(size as u32);
+
+        for i in 0..size {
+            // Create a pair array [key, value]
+            let pair = crate::array::js_array_alloc(2);
+            let key = ptr::read(entries.add(i * 2));
+            let value = ptr::read(entries.add(i * 2 + 1));
+            crate::array::js_array_push_f64(pair, key);
+            crate::array::js_array_push_f64(pair, value);
+
+            // Push the pair as a pointer-NaN-boxed value
+            let pair_boxed = crate::value::js_nanbox_pointer(pair as i64);
+            crate::array::js_array_push_f64(result, pair_boxed);
+        }
+
+        result
+    }
+}
+
+/// Get the keys of a map as an array
+#[no_mangle]
+pub extern "C" fn js_map_keys(map: *const MapHeader) -> *mut crate::array::ArrayHeader {
+    if map.is_null() {
+        return crate::array::js_array_alloc(0);
+    }
+    unsafe {
+        let size = (*map).size as usize;
+        let entries = entries_ptr(map);
+        let result = crate::array::js_array_alloc(size as u32);
+
+        for i in 0..size {
+            let key = ptr::read(entries.add(i * 2));
+            crate::array::js_array_push_f64(result, key);
+        }
+
+        result
+    }
+}
+
+/// Get the values of a map as an array
+#[no_mangle]
+pub extern "C" fn js_map_values(map: *const MapHeader) -> *mut crate::array::ArrayHeader {
+    if map.is_null() {
+        return crate::array::js_array_alloc(0);
+    }
+    unsafe {
+        let size = (*map).size as usize;
+        let entries = entries_ptr(map);
+        let result = crate::array::js_array_alloc(size as u32);
+
+        for i in 0..size {
+            let value = ptr::read(entries.add(i * 2 + 1));
+            crate::array::js_array_push_f64(result, value);
+        }
+
+        result
+    }
+}
+
+/// Iterate over map entries, calling a callback with (value, key, map) for each
+#[no_mangle]
+pub extern "C" fn js_map_foreach(map: *const MapHeader, callback: f64) {
+    if map.is_null() {
+        return;
+    }
+    unsafe {
+        let size = (*map).size as usize;
+        let entries = entries_ptr(map);
+
+        for i in 0..size {
+            let key = ptr::read(entries.add(i * 2));
+            let value = ptr::read(entries.add(i * 2 + 1));
+            // Call closure with (value, key) - Map.forEach callback signature
+            let closure_ptr = callback.to_bits() as *const crate::closure::ClosureHeader;
+            crate::closure::js_closure_call2(closure_ptr, value, key);
+        }
+    }
+}

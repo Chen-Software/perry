@@ -95,32 +95,11 @@ pub fn app_set_body(app_handle: i64, root_handle: i64) {
             apps[idx]._root_widget = Some(root_handle);
 
             if let Some(view) = widgets::get_widget(root_handle) {
-                unsafe {
-                    // Disable autoresizing mask translation for Auto Layout
-                    view.setTranslatesAutoresizingMaskIntoConstraints(false);
-                }
-
+                // Use autoresizing mask (the default) so the window
+                // automatically sizes the content view to fill its bounds.
+                // NOTE: we intentionally do NOT disable autoresizing here —
+                // setContentView already manages the frame for us.
                 apps[idx].window.setContentView(Some(&view));
-
-                // Pin the root widget to fill the window's content view
-                if let Some(content_view) = apps[idx].window.contentView() {
-                    unsafe {
-                        let leading = view.leadingAnchor();
-                        let trailing = view.trailingAnchor();
-                        let top = view.topAnchor();
-                        let bottom = view.bottomAnchor();
-                        let cv_leading = content_view.leadingAnchor();
-                        let cv_trailing = content_view.trailingAnchor();
-                        let cv_top = content_view.topAnchor();
-                        let cv_bottom = content_view.bottomAnchor();
-                        NSLayoutConstraint::activateConstraints(&objc2_foundation::NSArray::from_retained_slice(&[
-                            leading.constraintEqualToAnchor(&cv_leading),
-                            trailing.constraintEqualToAnchor(&cv_trailing),
-                            top.constraintEqualToAnchor(&cv_top),
-                            bottom.constraintEqualToAnchor(&cv_bottom),
-                        ]));
-                    }
-                }
             }
         }
     });
@@ -232,14 +211,17 @@ define_class!(
         #[unsafe(method(shortcutFired:))]
         fn shortcut_fired(&self, _sender: &AnyObject) {
             let key = self.ivars().callback_key.get();
-            SHORTCUT_CALLBACKS.with(|cbs| {
-                if let Some(&closure_f64) = cbs.borrow().get(&key) {
-                    let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
-                    unsafe {
-                        js_closure_call0(closure_ptr as *const u8);
-                    }
-                }
+            // Extract closure pointer and drop the borrow BEFORE calling it,
+            // because the callback may modify widgets (re-entrant borrow).
+            let closure_f64 = SHORTCUT_CALLBACKS.with(|cbs| {
+                cbs.borrow().get(&key).copied()
             });
+            if let Some(closure_f64) = closure_f64 {
+                let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
+                unsafe {
+                    js_closure_call0(closure_ptr as *const u8);
+                }
+            }
         }
     }
 );

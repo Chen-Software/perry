@@ -452,9 +452,11 @@ pub extern "C" fn js_get_string_pointer_unified(value: f64) -> i64 {
         return jsval.as_string_ptr() as i64;
     }
 
-    // Otherwise, assume it's a raw pointer bitcast to f64
-    let upper_16 = bits >> 48;
-    if upper_16 < 0x7FFC {
+    // Otherwise, assume it's a raw pointer bitcast to f64.
+    // Real heap pointers have small upper bits (e.g., 0x0000 or 0x0001),
+    // so as f64 they are tiny denormalized numbers (NOT NaN).
+    // Any remaining NaN value (0x7FF0+ upper bits) is not a string pointer.
+    if !value.is_nan() && bits != 0 {
         return bits as i64;
     }
 

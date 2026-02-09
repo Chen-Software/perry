@@ -31,15 +31,17 @@ define_class!(
         #[unsafe(method(buttonPressed:))]
         fn button_pressed(&self, _sender: &AnyObject) {
             let key = self.ivars().callback_key.get();
-            BUTTON_CALLBACKS.with(|cbs| {
-                if let Some(&closure_f64) = cbs.borrow().get(&key) {
-                    // Extract raw closure pointer from NaN-boxed value
-                    let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
-                    unsafe {
-                        js_closure_call0(closure_ptr as *const u8);
-                    }
-                }
+            // Extract closure pointer and drop the borrow BEFORE calling it,
+            // because the callback may create new buttons (re-entrant borrow).
+            let closure_f64 = BUTTON_CALLBACKS.with(|cbs| {
+                cbs.borrow().get(&key).copied()
             });
+            if let Some(closure_f64) = closure_f64 {
+                let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
+                unsafe {
+                    js_closure_call0(closure_ptr as *const u8);
+                }
+            }
         }
     }
 );

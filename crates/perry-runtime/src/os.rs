@@ -178,13 +178,29 @@ pub extern "C" fn js_process_argv() -> *mut ArrayHeader {
     use crate::value::js_nanbox_string;
 
     let args: Vec<String> = std::env::args().collect();
-    let arr = js_array_alloc(args.len() as u32);
+    // Match Node.js behavior: argv[0] = binary path (like node path),
+    // argv[1] = binary path again (like script path), argv[2+] = user args.
+    // Node.js: ["/usr/bin/node", "/path/to/script.js", ...user_args]
+    // Compiled: ["/path/to/binary", ...user_args]
+    // We insert the binary path twice to shift user args to index 2+.
+    let arr = js_array_alloc((args.len() + 1) as u32);
 
     let mut result = arr;
-    for arg in args {
+    if let Some(binary_path) = args.first() {
+        // argv[0]: binary path (mimics node executable path)
+        let bytes = binary_path.as_bytes();
+        let str_ptr = js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32);
+        let nanboxed = js_nanbox_string(str_ptr as i64);
+        result = js_array_push_f64(result, nanboxed);
+        // argv[1]: binary path again (mimics script path)
+        let str_ptr2 = js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32);
+        let nanboxed2 = js_nanbox_string(str_ptr2 as i64);
+        result = js_array_push_f64(result, nanboxed2);
+    }
+    // argv[2+]: user arguments
+    for arg in args.iter().skip(1) {
         let bytes = arg.as_bytes();
         let str_ptr = js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32);
-        // NaN-box the string pointer so it's properly tagged
         let nanboxed = js_nanbox_string(str_ptr as i64);
         result = js_array_push_f64(result, nanboxed);
     }

@@ -1029,6 +1029,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     let target = args.target.clone();
 
     // Compile native modules
+    let mut failed_modules: Vec<String> = Vec::new();
     for (path, hir_module) in &ctx.native_modules {
         let mut compiler = perry_codegen::Compiler::new(target.as_deref())?;
 
@@ -1111,8 +1112,30 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             }
         }
 
-        let object_code = compiler.compile_module(hir_module)
-            .map_err(|e| anyhow::anyhow!("Error compiling module '{}' ({}): {}", hir_module.name, path.display(), e))?;
+        let module_name_for_err = hir_module.name.clone();
+        let module_path_for_err = path.display().to_string();
+        let object_code = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            compiler.compile_module(hir_module)
+        })) {
+            Ok(Ok(code)) => code,
+            Ok(Err(e)) => {
+                eprintln!("Error compiling module '{}' ({}): {}", module_name_for_err, module_path_for_err, e);
+                failed_modules.push(module_name_for_err);
+                continue;
+            }
+            Err(panic_info) => {
+                let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
+                    s.clone()
+                } else if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    s.to_string()
+                } else {
+                    "unknown panic".to_string()
+                };
+                eprintln!("PANIC compiling module '{}' ({}): {}", module_name_for_err, module_path_for_err, msg);
+                failed_modules.push(module_name_for_err);
+                continue;
+            }
+        };
 
         // Generate a unique object file name to handle files with same basename in different directories
         // e.g., routes/auth.ts -> routes_auth.o, middleware/auth.ts -> middleware_auth.o
@@ -1152,8 +1175,9 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         let mut defined_syms: HashSet<String> = HashSet::new();
         let runtime_lib_path = find_runtime_library(target.as_deref()).ok();
         let stdlib_lib_path = find_stdlib_library(target.as_deref());
-        // Also scan jsruntime if it will be used - it defines js_call_function, js_load_module, etc.
-        let jsruntime_lib_path = if ctx.needs_js_runtime || args.enable_js_runtime {
+        // Check if jsruntime will be used - if so, don't generate stubs for its symbols
+        let use_jsruntime = ctx.needs_js_runtime || args.enable_js_runtime;
+        let jsruntime_lib_path = if use_jsruntime {
             find_jsruntime_library(target.as_deref())
         } else {
             None
@@ -1169,8 +1193,16 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                     if parts.len() >= 2 {
                         let (st, sn) = if parts.len() == 3 { (parts[1], parts[2]) } else { (parts[0], parts[1]) };
                         let cn = sn.strip_prefix('_').unwrap_or(sn);
-                        if st == "U" && (cn.starts_with("__export_") || cn.starts_with("__wrapper_") || cn == "js_call_function" || cn == "js_load_module" || cn == "js_new_from_handle") {
-                            undefined_syms.insert(cn.to_string());
+                        if st == "U" {
+                            // Add export/wrapper symbols to undefined list
+                            if cn.starts_with("__export_") || cn.starts_with("__wrapper_") {
+                                undefined_syms.insert(cn.to_string());
+                            }
+                            // Only add jsruntime symbols if jsruntime is NOT being used
+                            // (these are defined in libperry_jsruntime.a)
+                            else if !use_jsruntime && (cn == "js_call_function" || cn == "js_load_module" || cn == "js_new_from_handle") {
+                                undefined_syms.insert(cn.to_string());
+                            }
                         } else if matches!(st, "T" | "t" | "D" | "d" | "S" | "s" | "B" | "b") {
                             defined_syms.insert(cn.to_string());
                         }
@@ -1208,6 +1240,14 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         .and_then(|s| s.to_str())
         .unwrap_or("output");
     let exe_path = args.output.unwrap_or_else(|| PathBuf::from(stem));
+
+    if !failed_modules.is_empty() {
+        eprintln!("\n{} module(s) failed to compile:", failed_modules.len());
+        for m in &failed_modules {
+            eprintln!("  - {}", m);
+        }
+        return Err(anyhow!("{} module(s) failed to compile", failed_modules.len()));
+    }
 
     if args.no_link {
         return Ok(());
@@ -1307,13 +1347,20 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             }
         }
 
-        // On Linux, link against pthread and dl for V8
+        // On Linux, link against system libraries
         #[cfg(target_os = "linux")]
         {
+            cmd.arg("-lm")
+               .arg("-lpthread")
+               .arg("-ldl");
+
+            if stdlib_lib.is_some() || jsruntime_lib.is_some() {
+                cmd.arg("-lssl")
+                   .arg("-lcrypto");
+            }
+
             if jsruntime_lib.is_some() {
-                cmd.arg("-lpthread")
-                   .arg("-ldl")
-                   .arg("-lstdc++");
+                cmd.arg("-lstdc++");
             }
         }
     }

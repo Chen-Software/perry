@@ -9,7 +9,14 @@ bench_*
 !bench_*.ts
 
 # Other compiled binaries
+worker
+controls
 main
+05_fibonacci
+07_object_create
+10_nested_loops
+11_prime_sieve
+16_matrix_multiply
 index
 http-server
 http_server_test

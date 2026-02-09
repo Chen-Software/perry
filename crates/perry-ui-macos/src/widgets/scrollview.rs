@@ -1,6 +1,6 @@
 use objc2::rc::Retained;
 use objc2::msg_send;
-use objc2_app_kit::{NSScrollView, NSView};
+use objc2_app_kit::{NSLayoutConstraint, NSScrollView, NSView};
 use objc2_core_foundation::CGPoint;
 use objc2_foundation::MainThreadMarker;
 
@@ -15,11 +15,29 @@ pub fn create() -> i64 {
 }
 
 /// Set the document (content) view of a scroll view.
+/// Pins the document view's width to the clip view so vertical scrolling works.
 pub fn set_child(scroll_handle: i64, child_handle: i64) {
     if let (Some(scroll_view), Some(child)) = (super::get_widget(scroll_handle), super::get_widget(child_handle)) {
         unsafe {
             let sv: &NSScrollView = &*(Retained::as_ptr(&scroll_view) as *const NSScrollView);
+            // Enable Auto Layout on the document view
+            child.setTranslatesAutoresizingMaskIntoConstraints(false);
             sv.setDocumentView(Some(&child));
+
+            // Pin document view to the clip view edges.
+            // Top/leading/trailing are equal; bottom uses >= so the
+            // document can grow taller than the visible area (scrolling).
+            let clip = sv.contentView();
+            let bottom_constraint = child.bottomAnchor()
+                .constraintGreaterThanOrEqualToAnchor(&clip.bottomAnchor());
+            NSLayoutConstraint::activateConstraints(
+                &objc2_foundation::NSArray::from_retained_slice(&[
+                    child.topAnchor().constraintEqualToAnchor(&clip.topAnchor()),
+                    child.leadingAnchor().constraintEqualToAnchor(&clip.leadingAnchor()),
+                    child.trailingAnchor().constraintEqualToAnchor(&clip.trailingAnchor()),
+                    bottom_constraint,
+                ]),
+            );
         }
     }
 }

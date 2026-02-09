@@ -20,7 +20,7 @@ members = [
 [profile.release]
 lto = "thin"          # Thin LTO for faster builds and fewer duplicate symbols
 codegen-units = 1     # Better optimization, slower compile
-panic = "abort"       # Smaller binary, no unwinding
+panic = "unwind"      # Allow catch_unwind for graceful error recovery
 strip = true          # Strip symbols automatically
 opt-level = 3         # Maximum optimization
 
@@ -35,7 +35,7 @@ opt-level = "s"       # Optimize for size in stdlib
 opt-level = 3
 
 [workspace.package]
-version = "0.2.142"
+version = "0.2.146"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/skelpo/perry"

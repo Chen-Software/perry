@@ -4,12 +4,24 @@ use std::fs;
 use std::path::Path;
 
 use crate::string::{js_string_from_bytes, StringHeader};
+use crate::value::POINTER_MASK;
+
+/// Extract a string pointer from a NaN-boxed f64 value
+/// Handles both NaN-boxed strings (with STRING_TAG) and raw pointers
+#[inline]
+fn extract_string_ptr(value: f64) -> *const StringHeader {
+    let bits = value.to_bits();
+    // Mask off the tag bits to get the raw pointer
+    (bits & POINTER_MASK) as *const StringHeader
+}
 
 /// Read a file synchronously and return its contents as a string
 /// Returns null pointer on error
+/// Accepts NaN-boxed string path
 #[no_mangle]
-pub extern "C" fn js_fs_read_file_sync(path_ptr: *const StringHeader) -> *mut StringHeader {
+pub extern "C" fn js_fs_read_file_sync(path_value: f64) -> *mut StringHeader {
     unsafe {
+        let path_ptr = extract_string_ptr(path_value);
         if path_ptr.is_null() {
             return std::ptr::null_mut();
         }
@@ -35,12 +47,15 @@ pub extern "C" fn js_fs_read_file_sync(path_ptr: *const StringHeader) -> *mut St
 
 /// Write content to a file synchronously
 /// Returns 1 on success, 0 on failure
+/// Accepts NaN-boxed string values
 #[no_mangle]
 pub extern "C" fn js_fs_write_file_sync(
-    path_ptr: *const StringHeader,
-    content_ptr: *const StringHeader,
+    path_value: f64,
+    content_value: f64,
 ) -> i32 {
     unsafe {
+        let path_ptr = extract_string_ptr(path_value);
+        let content_ptr = extract_string_ptr(content_value);
         if path_ptr.is_null() || content_ptr.is_null() {
             return 0;
         }
@@ -68,15 +83,18 @@ pub extern "C" fn js_fs_write_file_sync(
 
 /// Append content to a file synchronously
 /// Returns 1 on success, 0 on failure
+/// Accepts NaN-boxed string values
 #[no_mangle]
 pub extern "C" fn js_fs_append_file_sync(
-    path_ptr: *const StringHeader,
-    content_ptr: *const StringHeader,
+    path_value: f64,
+    content_value: f64,
 ) -> i32 {
     use std::io::Write;
     use std::fs::OpenOptions;
 
     unsafe {
+        let path_ptr = extract_string_ptr(path_value);
+        let content_ptr = extract_string_ptr(content_value);
         if path_ptr.is_null() || content_ptr.is_null() {
             return 0;
         }
@@ -110,9 +128,11 @@ pub extern "C" fn js_fs_append_file_sync(
 
 /// Check if a file or directory exists
 /// Returns 1 if exists, 0 if not
+/// Accepts NaN-boxed string path
 #[no_mangle]
-pub extern "C" fn js_fs_exists_sync(path_ptr: *const StringHeader) -> i32 {
+pub extern "C" fn js_fs_exists_sync(path_value: f64) -> i32 {
     unsafe {
+        let path_ptr = extract_string_ptr(path_value);
         if path_ptr.is_null() {
             return 0;
         }
@@ -132,9 +152,11 @@ pub extern "C" fn js_fs_exists_sync(path_ptr: *const StringHeader) -> i32 {
 
 /// Create a directory synchronously
 /// Returns 1 on success, 0 on failure
+/// Accepts NaN-boxed string path
 #[no_mangle]
-pub extern "C" fn js_fs_mkdir_sync(path_ptr: *const StringHeader) -> i32 {
+pub extern "C" fn js_fs_mkdir_sync(path_value: f64) -> i32 {
     unsafe {
+        let path_ptr = extract_string_ptr(path_value);
         if path_ptr.is_null() {
             return 0;
         }
@@ -157,9 +179,11 @@ pub extern "C" fn js_fs_mkdir_sync(path_ptr: *const StringHeader) -> i32 {
 
 /// Remove a file synchronously
 /// Returns 1 on success, 0 on failure
+/// Accepts NaN-boxed string path
 #[no_mangle]
-pub extern "C" fn js_fs_unlink_sync(path_ptr: *const StringHeader) -> i32 {
+pub extern "C" fn js_fs_unlink_sync(path_value: f64) -> i32 {
     unsafe {
+        let path_ptr = extract_string_ptr(path_value);
         if path_ptr.is_null() {
             return 0;
         }

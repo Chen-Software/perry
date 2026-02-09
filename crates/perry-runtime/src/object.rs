@@ -303,6 +303,9 @@ pub extern "C" fn js_object_set_keys(obj: *mut ObjectHeader, keys_array: *mut Ar
 /// Returns the stored keys array, or an empty array if no keys were stored
 #[no_mangle]
 pub extern "C" fn js_object_keys(obj: *const ObjectHeader) -> *mut ArrayHeader {
+    if obj.is_null() {
+        return crate::array::js_array_alloc(0);
+    }
     unsafe {
         let keys = (*obj).keys_array;
         if keys.is_null() {
@@ -318,6 +321,9 @@ pub extern "C" fn js_object_keys(obj: *const ObjectHeader) -> *mut ArrayHeader {
 /// Returns an array of the object's field values
 #[no_mangle]
 pub extern "C" fn js_object_values(obj: *const ObjectHeader) -> *mut ArrayHeader {
+    if obj.is_null() {
+        return crate::array::js_array_alloc(0);
+    }
     unsafe {
         let field_count = (*obj).field_count as usize;
         let result = crate::array::js_array_alloc(field_count as u32);
@@ -336,6 +342,9 @@ pub extern "C" fn js_object_values(obj: *const ObjectHeader) -> *mut ArrayHeader
 /// Returns an array where each element is a 2-element array [key, value]
 #[no_mangle]
 pub extern "C" fn js_object_entries(obj: *const ObjectHeader) -> *mut ArrayHeader {
+    if obj.is_null() {
+        return crate::array::js_array_alloc(0);
+    }
     unsafe {
         let keys = (*obj).keys_array;
         let field_count = (*obj).field_count as usize;
