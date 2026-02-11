@@ -16,7 +16,7 @@ use crate::common::{register_handle, Handle};
 const DEFAULT_TIMEOUT_SECS: u64 = 10;
 
 /// Redis client handle - stores connection URL and cached connection
-struct RedisClient {
+pub(crate) struct RedisClient {
     url: String,
 }
 
@@ -44,8 +44,18 @@ unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
 pub unsafe extern "C" fn js_ioredis_new(
     _config_ptr: *const std::ffi::c_void,
 ) -> Handle {
-    // Default connection URL - TODO: Parse config object for host, port, password, db
-    let url = "redis://127.0.0.1:6379".to_string();
+    // Build connection URL from environment variables (same as TS redis-config.ts)
+    let host = std::env::var("REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("REDIS_PORT").unwrap_or_else(|_| "6379".to_string());
+    let password = std::env::var("REDIS_PASSWORD").ok();
+    let use_tls = std::env::var("REDIS_TLS").map(|v| v != "false").unwrap_or(true);
+
+    let scheme = if use_tls { "rediss" } else { "redis" };
+    let url = if let Some(pw) = password {
+        format!("{}://:{}@{}:{}", scheme, pw, host, port)
+    } else {
+        format!("{}://{}:{}", scheme, host, port)
+    };
 
     // Register handle and store URL
     let handle = register_handle(RedisClient { url: url.clone() });
@@ -486,6 +496,157 @@ pub unsafe extern "C" fn js_ioredis_expire(
                     }
                     Err(e) => {
                         let err_msg = format!("Redis EXPIRE error: {}", e);
+                        queue_deferred_resolution(promise_ptr, false, move || {
+                            let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+                            JSValue::string_ptr(err_str).bits()
+                        });
+                    }
+                }
+            }
+            Err(e) => {
+                queue_deferred_resolution(promise_ptr, false, move || {
+                    let err_str = js_string_from_bytes(e.as_ptr(), e.len() as u32);
+                    JSValue::string_ptr(err_str).bits()
+                });
+            }
+        }
+    });
+
+    promise
+}
+
+/// CONNECT command - explicitly establish connection
+/// redis.connect() -> Promise<void>
+#[no_mangle]
+pub unsafe extern "C" fn js_ioredis_connect(handle: Handle) -> *mut perry_runtime::Promise {
+    let promise = perry_runtime::js_promise_new();
+    let promise_ptr = promise as usize;
+
+    spawn(async move {
+        match get_connection(handle).await {
+            Ok(_) => {
+                queue_promise_resolution(promise_ptr, true, JSValue::undefined().bits());
+            }
+            Err(e) => {
+                queue_deferred_resolution(promise_ptr, false, move || {
+                    let err_str = js_string_from_bytes(e.as_ptr(), e.len() as u32);
+                    JSValue::string_ptr(err_str).bits()
+                });
+            }
+        }
+    });
+
+    promise
+}
+
+/// SETEX command - set key with expiration
+/// redis.setex(key, seconds, value) -> Promise<"OK">
+#[no_mangle]
+pub unsafe extern "C" fn js_ioredis_setex(
+    handle: Handle,
+    key_ptr: *const StringHeader,
+    seconds: f64,
+    value_ptr: *const StringHeader,
+) -> *mut perry_runtime::Promise {
+    let promise = perry_runtime::js_promise_new();
+    let promise_ptr = promise as usize;
+
+    let key = match string_from_header(key_ptr) {
+        Some(k) => k,
+        None => {
+            let err_msg = "Invalid key";
+            let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+            queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
+            return promise;
+        }
+    };
+
+    let value = match string_from_header(value_ptr) {
+        Some(v) => v,
+        None => {
+            let err_msg = "Invalid value";
+            let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+            queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
+            return promise;
+        }
+    };
+
+    let secs = seconds as u64;
+
+    spawn(async move {
+        match get_connection(handle).await {
+            Ok(mut conn) => {
+                let result: redis::RedisResult<()> = tokio::time::timeout(
+                    Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+                    conn.set_ex::<_, _, ()>(&key, &value, secs)
+                )
+                .await
+                .map_err(|_| redis::RedisError::from((redis::ErrorKind::IoError, "Operation timed out")))
+                .and_then(|r| r);
+
+                match result {
+                    Ok(_) => {
+                        queue_deferred_resolution(promise_ptr, true, || {
+                            let ok_str = "OK";
+                            let result_str = js_string_from_bytes(ok_str.as_ptr(), ok_str.len() as u32);
+                            JSValue::string_ptr(result_str).bits()
+                        });
+                    }
+                    Err(e) => {
+                        let err_msg = format!("Redis SETEX error: {}", e);
+                        queue_deferred_resolution(promise_ptr, false, move || {
+                            let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+                            JSValue::string_ptr(err_str).bits()
+                        });
+                    }
+                }
+            }
+            Err(e) => {
+                queue_deferred_resolution(promise_ptr, false, move || {
+                    let err_str = js_string_from_bytes(e.as_ptr(), e.len() as u32);
+                    JSValue::string_ptr(err_str).bits()
+                });
+            }
+        }
+    });
+
+    promise
+}
+
+/// DISCONNECT command - close connection
+/// redis.disconnect() -> void (synchronous in ioredis)
+#[no_mangle]
+pub unsafe extern "C" fn js_ioredis_disconnect(handle: Handle) {
+    CONNECTIONS.lock().unwrap().remove(&handle);
+}
+
+/// PING command - test connection
+/// redis.ping() -> Promise<"PONG">
+#[no_mangle]
+pub unsafe extern "C" fn js_ioredis_ping(handle: Handle) -> *mut perry_runtime::Promise {
+    let promise = perry_runtime::js_promise_new();
+    let promise_ptr = promise as usize;
+
+    spawn(async move {
+        match get_connection(handle).await {
+            Ok(mut conn) => {
+                let result: redis::RedisResult<String> = tokio::time::timeout(
+                    Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+                    redis::cmd("PING").query_async(&mut conn)
+                )
+                .await
+                .map_err(|_| redis::RedisError::from((redis::ErrorKind::IoError, "Operation timed out")))
+                .and_then(|r| r);
+
+                match result {
+                    Ok(pong) => {
+                        queue_deferred_resolution(promise_ptr, true, move || {
+                            let result_str = js_string_from_bytes(pong.as_ptr(), pong.len() as u32);
+                            JSValue::string_ptr(result_str).bits()
+                        });
+                    }
+                    Err(e) => {
+                        let err_msg = format!("Redis PING error: {}", e);
                         queue_deferred_resolution(promise_ptr, false, move || {
                             let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
                             JSValue::string_ptr(err_str).bits()

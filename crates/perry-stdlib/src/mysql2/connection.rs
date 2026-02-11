@@ -126,6 +126,7 @@ pub unsafe extern "C" fn js_mysql2_connection_query(
         String::from_utf8_lossy(bytes).to_string()
     };
 
+
     // Use spawn_for_promise_deferred to safely create JSValues on the main thread
     crate::common::spawn_for_promise_deferred(
         promise as *mut u8,

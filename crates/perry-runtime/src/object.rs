@@ -229,6 +229,8 @@ pub extern "C" fn js_object_alloc_with_shape(
 /// Get a field from an object by index
 #[no_mangle]
 pub extern "C" fn js_object_get_field(obj: *const ObjectHeader, field_index: u32) -> JSValue {
+    let obj = { let b = obj as usize; let t = b >> 48; if t >= 0x7FF8 { if t == 0x7FFC || (b & 0x0000_FFFF_FFFF_FFFF) == 0 || (b & 0x0000_FFFF_FFFF_FFFF) < 0x10000 { return JSValue::undefined(); } (b & 0x0000_FFFF_FFFF_FFFF) as *const ObjectHeader } else { obj } };
+    if obj.is_null() || (obj as usize) < 0x10000 { return JSValue::undefined(); }
     unsafe {
         let fields_ptr = (obj as *const u8).add(std::mem::size_of::<ObjectHeader>()) as *const JSValue;
         *fields_ptr.add(field_index as usize)
@@ -238,6 +240,8 @@ pub extern "C" fn js_object_get_field(obj: *const ObjectHeader, field_index: u32
 /// Set a field on an object by index
 #[no_mangle]
 pub extern "C" fn js_object_set_field(obj: *mut ObjectHeader, field_index: u32, value: JSValue) {
+    let obj = { let b = obj as usize; let t = b >> 48; if t >= 0x7FF8 { if t == 0x7FFC || (b & 0x0000_FFFF_FFFF_FFFF) == 0 || (b & 0x0000_FFFF_FFFF_FFFF) < 0x10000 { return; } (b & 0x0000_FFFF_FFFF_FFFF) as *mut ObjectHeader } else { obj } };
+    if obj.is_null() || (obj as usize) < 0x10000 { return; }
     unsafe {
         let fields_ptr = (obj as *mut u8).add(std::mem::size_of::<ObjectHeader>()) as *mut JSValue;
         ptr::write(fields_ptr.add(field_index as usize), value);
@@ -287,6 +291,7 @@ pub extern "C" fn js_object_set_field_f64(obj: *mut ObjectHeader, field_index: u
 /// This is a convenience wrapper that takes field_index as u32 and value as f64
 #[no_mangle]
 pub extern "C" fn js_object_set_field_by_index(obj: *mut ObjectHeader, _key: *const crate::string::StringHeader, field_index: u32, value: f64) {
+    if obj.is_null() { return; }
     js_object_set_field(obj, field_index, JSValue::from_bits(value.to_bits()));
 }
 
@@ -432,7 +437,23 @@ pub extern "C" fn js_object_has_property(obj: f64, key: f64) -> f64 {
 /// Returns the field value or undefined if the key is not found
 #[no_mangle]
 pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *const crate::StringHeader) -> JSValue {
-    if obj.is_null() {
+    // Strip NaN-boxing tags if present (defensive: handle POINTER_TAG, UNDEFINED, NULL, etc.)
+    let obj = {
+        let bits = obj as usize;
+        let top16 = bits >> 48;
+        if top16 >= 0x7FF8 {
+            // NaN-boxed value — extract lower 48 bits as pointer
+            let raw = (bits & 0x0000_FFFF_FFFF_FFFF) as *const ObjectHeader;
+            if raw.is_null() || top16 == 0x7FFC || (raw as usize) < 0x10000 {
+                // undefined/null tag, null pointer, or small handle — return undefined
+                return JSValue::undefined();
+            }
+            raw
+        } else {
+            obj
+        }
+    };
+    if obj.is_null() || (obj as usize) < 0x10000 {
         return JSValue::undefined();
     }
     unsafe {
@@ -473,7 +494,23 @@ pub extern "C" fn js_object_get_field_by_name_f64(obj: *const ObjectHeader, key:
 /// If the key doesn't exist, it adds it to the object.
 #[no_mangle]
 pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *const crate::StringHeader, value: f64) {
-    if obj.is_null() {
+    // Strip NaN-boxing tags if present (defensive: handle POINTER_TAG, UNDEFINED, NULL, etc.)
+    let obj = {
+        let bits = obj as usize;
+        let top16 = bits >> 48;
+        if top16 >= 0x7FF8 {
+            // NaN-boxed value — extract lower 48 bits as pointer
+            let raw = (bits & 0x0000_FFFF_FFFF_FFFF) as *mut ObjectHeader;
+            if raw.is_null() || top16 == 0x7FFC || (raw as usize) < 0x10000 {
+                // undefined/null tag, null pointer, or small handle — silently ignore
+                return;
+            }
+            raw
+        } else {
+            obj
+        }
+    };
+    if obj.is_null() || (obj as usize) < 0x10000 {
         return;
     }
     unsafe {
@@ -649,6 +686,19 @@ pub unsafe extern "C" fn js_native_call_method(
         std::str::from_utf8(bytes).unwrap_or("")
     };
 
+    // Check if this is a JS handle (V8 object from JS runtime)
+    if crate::value::is_js_handle(object) {
+        let func_ptr = crate::value::JS_HANDLE_CALL_METHOD.load(std::sync::atomic::Ordering::SeqCst);
+        if !func_ptr.is_null() {
+            let func: unsafe extern "C" fn(f64, *const i8, usize, *const f64, usize) -> f64 =
+                std::mem::transmute(func_ptr);
+            let result = func(object, method_name_ptr, method_name_len, args_ptr, args_len);
+            return result;
+        }
+        eprintln!("[js_native_call_method] JS handle callback not set!");
+        return f64::from_bits(0x7FF8_0000_0000_0001); // undefined
+    }
+
     let jsval = JSValue::from_bits(object.to_bits());
 
     // Check if this is a handle-based object (small integer, not a real heap pointer)
@@ -754,7 +804,6 @@ pub unsafe extern "C" fn js_native_call_method(
                         let field_val = js_object_get_field(obj as *mut _, i as u32);
                         if field_val.is_pointer() {
                             // Assume it's a closure and call it
-                            let closure = field_val.as_pointer::<crate::closure::ClosureHeader>();
                             return crate::closure::js_native_call_value(
                                 f64::from_bits(field_val.bits()),
                                 args_ptr,

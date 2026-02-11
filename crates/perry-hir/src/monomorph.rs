@@ -1249,6 +1249,7 @@ fn substitute_expr(expr: &Expr, substitutions: &HashMap<String, Type>) -> Expr {
         },
         Expr::ParseFloat(string) => Expr::ParseFloat(Box::new(substitute_expr(string, substitutions))),
         Expr::NumberCoerce(value) => Expr::NumberCoerce(Box::new(substitute_expr(value, substitutions))),
+        Expr::BigIntCoerce(value) => Expr::BigIntCoerce(Box::new(substitute_expr(value, substitutions))),
         Expr::StringCoerce(value) => Expr::StringCoerce(Box::new(substitute_expr(value, substitutions))),
         Expr::IsNaN(value) => Expr::IsNaN(Box::new(substitute_expr(value, substitutions))),
         Expr::IsFinite(value) => Expr::IsFinite(Box::new(substitute_expr(value, substitutions))),

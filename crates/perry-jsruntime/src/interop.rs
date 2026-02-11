@@ -3,7 +3,7 @@
 //! These functions are called from compiled native code to interact with
 //! JavaScript modules loaded in the V8 runtime.
 
-use crate::bridge::{native_to_v8, v8_to_native, get_js_handle, store_js_handle, make_js_handle_value, is_js_handle, get_handle_id};
+use crate::bridge::{native_to_v8, v8_to_native, get_js_handle, store_js_handle, make_js_handle_value, is_js_handle, get_handle_id, fixup_native_for_v8};
 use crate::{ensure_runtime_initialized, get_tokio_runtime, with_runtime, JsRuntimeState, JS_RUNTIME};
 use deno_core::v8;
 use std::ffi::CStr;
@@ -37,6 +37,7 @@ pub extern "C" fn js_runtime_init() {
     perry_runtime::js_set_handle_array_length(js_handle_array_length);
     perry_runtime::js_set_handle_object_get_property(js_handle_object_get_property);
     perry_runtime::js_set_handle_to_string(js_handle_to_string);
+    perry_runtime::js_set_handle_call_method(js_call_method);
 }
 
 /// Shutdown the JavaScript runtime and release resources
@@ -103,12 +104,16 @@ pub unsafe extern "C" fn js_load_module(
     };
 
     let tokio_rt = get_tokio_runtime();
+
     let result = tokio_rt.block_on(async {
         JS_RUNTIME.with(|cell| {
             let mut opt = cell.borrow_mut();
             let state = match opt.as_mut() {
                 Some(s) => s,
-                None => return Err(()),
+                None => {
+                    eprintln!("[js_load_module] no JS runtime state!");
+                    return Err(());
+                }
             };
 
             // Check if already loaded
@@ -119,11 +124,11 @@ pub unsafe extern "C" fn js_load_module(
             // Use block_in_place to allow async operations
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
-                    // Load the module
-                    let module_id = match state.runtime.load_main_es_module(&specifier).await {
+                    // Load the module (use load_side_es_module since native code is the main module)
+                    let module_id = match state.runtime.load_side_es_module(&specifier).await {
                         Ok(id) => id,
                         Err(e) => {
-                            log::error!("Failed to load module: {}", e);
+                            eprintln!("[js_load_module] FAILED to load '{}': {}", path_str, e);
                             return Err(());
                         }
                     };
@@ -131,11 +136,11 @@ pub unsafe extern "C" fn js_load_module(
                     // Evaluate the module
                     let result = state.runtime.mod_evaluate(module_id);
                     if let Err(e) = state.runtime.run_event_loop(Default::default()).await {
-                        log::error!("Event loop error: {}", e);
+                        eprintln!("[js_load_module] event loop error for '{}': {}", path_str, e);
                         return Err(());
                     }
                     if let Err(e) = result.await {
-                        log::error!("Module evaluation error: {}", e);
+                        eprintln!("[js_load_module] evaluation error for '{}': {}", path_str, e);
                         return Err(());
                     }
 
@@ -177,13 +182,19 @@ pub unsafe extern "C" fn js_get_export(
         let namespace = match state.runtime.get_module_namespace(module_id) {
             Ok(ns) => ns,
             Err(e) => {
-                log::error!("Failed to get module namespace: {}", e);
+                eprintln!("[js_get_export] failed to get namespace: {}", e);
                 return f64::from_bits(0x7FFC_0000_0000_0001);
             }
         };
 
         let scope = &mut state.runtime.handle_scope();
         let namespace = v8::Local::new(scope, namespace);
+
+        // For namespace imports (export_name == "*"), return the entire module namespace object
+        if export_name == "*" {
+            let result = v8_to_native(scope, namespace.into());
+            return result;
+        }
 
         let key = match v8::String::new(scope, export_name) {
             Some(k) => k,
@@ -275,7 +286,7 @@ fn call_function_impl(
     // Convert arguments from native to V8
     let v8_args: Vec<v8::Local<v8::Value>> = args
         .iter()
-        .map(|&arg| native_to_v8(scope, arg))
+        .map(|&arg| native_to_v8(scope, fixup_native_for_v8(arg)))
         .collect();
 
     // Call the function
@@ -357,17 +368,22 @@ pub unsafe extern "C" fn js_call_method(
         // Convert arguments
         let v8_args: Vec<v8::Local<v8::Value>> = args
             .iter()
-            .map(|&arg| native_to_v8(scope, arg))
+            .map(|&arg| native_to_v8(scope, fixup_native_for_v8(arg)))
             .collect();
 
         // Call with 'this' bound to the object
         let result = match method.call(scope, obj.into(), &v8_args) {
             Some(r) => r,
             None => {
-                log::error!("Method call failed");
+                eprintln!("[js_call_method] '{}' call returned None", method_name);
                 return f64::from_bits(0x7FFC_0000_0000_0001);
             }
         };
+
+        let is_promise = result.is_promise();
+        if is_promise || method_name == "getReserves" {
+            eprintln!("[js_call_method] '{}' returned is_promise={} is_obj={} is_undef={}", method_name, is_promise, result.is_object(), result.is_undefined());
+        }
 
         v8_to_native(scope, result)
     })
@@ -412,7 +428,7 @@ pub unsafe extern "C" fn js_call_value(
         // Convert arguments
         let v8_args: Vec<v8::Local<v8::Value>> = args
             .iter()
-            .map(|&arg| native_to_v8(scope, arg))
+            .map(|&arg| native_to_v8(scope, fixup_native_for_v8(arg)))
             .collect();
 
         // Call with undefined as 'this'
@@ -471,20 +487,20 @@ pub extern "C" fn js_handle_array_get(array_handle: f64, index: i32) -> f64 {
 
         // Convert the handle to a V8 value
         let arr_val = native_to_v8(scope, array_handle);
-        if !arr_val.is_array() {
-            log::error!("Value is not an array");
-            return f64::from_bits(0x7FFC_0000_0000_0001); // undefined
+
+        // Use Object::get_index which works for both arrays and array-like objects
+        // (e.g., ethers.js Result extends Array but V8 is_array() returns false)
+        if arr_val.is_object() {
+            let obj = v8::Local::<v8::Object>::try_from(arr_val).unwrap();
+            let elem = match obj.get_index(scope, index as u32) {
+                Some(v) => v,
+                None => return f64::from_bits(0x7FFC_0000_0000_0001),
+            };
+            return v8_to_native(scope, elem);
         }
 
-        let arr = v8::Local::<v8::Array>::try_from(arr_val).unwrap();
-
-        // Get the element
-        let elem = match arr.get_index(scope, index as u32) {
-            Some(v) => v,
-            None => return f64::from_bits(0x7FFC_0000_0000_0001),
-        };
-
-        v8_to_native(scope, elem)
+        // Fallback for non-objects
+        f64::from_bits(0x7FFC_0000_0000_0001) // undefined
     })
 }
 
@@ -498,13 +514,25 @@ pub extern "C" fn js_handle_array_length(array_handle: f64) -> i32 {
 
         // Convert the handle to a V8 value
         let arr_val = native_to_v8(scope, array_handle);
-        if !arr_val.is_array() {
-            log::error!("Value is not an array");
-            return 0;
+
+        // For actual arrays, use Array::length()
+        if arr_val.is_array() {
+            let arr = v8::Local::<v8::Array>::try_from(arr_val).unwrap();
+            return arr.length() as i32;
         }
 
-        let arr = v8::Local::<v8::Array>::try_from(arr_val).unwrap();
-        arr.length() as i32
+        // For array-like objects (e.g., ethers.js Result), get the "length" property
+        if arr_val.is_object() {
+            let obj = v8::Local::<v8::Object>::try_from(arr_val).unwrap();
+            let key = v8::String::new(scope, "length").unwrap();
+            if let Some(length_val) = obj.get(scope, key.into()) {
+                if length_val.is_number() {
+                    return length_val.number_value(scope).unwrap_or(0.0) as i32;
+                }
+            }
+        }
+
+        0
     })
 }
 
@@ -537,7 +565,7 @@ pub extern "C" fn js_handle_object_get_property(
         // Convert the object pointer to a V8 object
         let obj_val = native_to_v8(scope, object_ptr);
         if !obj_val.is_object() {
-            log::error!("Value is not an object");
+            eprintln!("[js_handle_object_get_property] value is not an object!");
             return f64::from_bits(0x7FFC_0000_0000_0001);
         }
 
@@ -551,7 +579,9 @@ pub extern "C" fn js_handle_object_get_property(
 
         let prop_val = match obj.get(scope, key.into()) {
             Some(v) => v,
-            None => return f64::from_bits(0x7FFC_0000_0000_0001),
+            None => {
+                return f64::from_bits(0x7FFC_0000_0000_0001);
+            }
         };
 
         v8_to_native(scope, prop_val)
@@ -703,7 +733,7 @@ pub unsafe extern "C" fn js_new_instance(
         // Convert arguments from native to V8
         let v8_args: Vec<v8::Local<v8::Value>> = args
             .iter()
-            .map(|&arg| native_to_v8(scope, arg))
+            .map(|&arg| native_to_v8(scope, fixup_native_for_v8(arg)))
             .collect();
 
         // Call the constructor with 'new'
@@ -748,21 +778,33 @@ pub unsafe extern "C" fn js_new_from_handle(
         let constructor = v8::Local::<v8::Function>::try_from(constructor_val).unwrap();
 
         // Convert arguments from native to V8
+        // Fix up raw pointers that weren't NaN-boxed properly
         let v8_args: Vec<v8::Local<v8::Value>> = args
             .iter()
-            .map(|&arg| native_to_v8(scope, arg))
+            .enumerate()
+            .map(|(_, &arg)| {
+                let fixed = fixup_native_for_v8(arg);
+                native_to_v8(scope, fixed)
+            })
             .collect();
 
         // Call the constructor with 'new'
-        let result = match constructor.new_instance(scope, &v8_args) {
+        // Use try_catch to capture any V8 exception
+        let tc_scope = &mut v8::TryCatch::new(scope);
+        let result = match constructor.new_instance(tc_scope, &v8_args) {
             Some(r) => r,
             None => {
-                log::error!("Constructor call failed");
+                if let Some(exception) = tc_scope.exception() {
+                    let msg = exception.to_rust_string_lossy(tc_scope);
+                    eprintln!("[js_new_from_handle] CONSTRUCTOR FAILED: {}", msg);
+                } else {
+                    eprintln!("[js_new_from_handle] CONSTRUCTOR FAILED (no exception)");
+                }
                 return f64::from_bits(0x7FFC_0000_0000_0001);
             }
         };
 
-        v8_to_native(scope, result.into())
+        v8_to_native(tc_scope, result.into())
     })
 }
 
@@ -916,6 +958,145 @@ pub unsafe extern "C" fn js_should_use_runtime(
     }
 
     0
+}
+
+/// Await a V8 JavaScript Promise that was returned as a JS handle.
+/// Takes a NaN-boxed f64 containing a JS handle to a V8 Promise.
+/// Runs the V8 event loop until the Promise settles, then returns the resolved value.
+/// If the value is not a Promise, returns it as-is.
+/// Returns the resolved value as NaN-boxed f64.
+#[no_mangle]
+pub extern "C" fn js_await_js_promise(value: f64) -> f64 {
+    let bits = value.to_bits();
+    eprintln!("[js_await_js_promise] CALLED bits=0x{:016X} tag=0x{:04X}", bits, bits >> 48);
+    let handle_id = match get_handle_id(value) {
+        Some(id) => id,
+        None => {
+            eprintln!("[js_await_js_promise] NOT a JS handle, returning as-is");
+            return value;
+        }
+    };
+
+    let tokio_rt = get_tokio_runtime();
+    tokio_rt.block_on(async {
+        JS_RUNTIME.with(|cell| {
+            let mut opt = cell.borrow_mut();
+            let state = match opt.as_mut() {
+                Some(s) => s,
+                None => {
+                    eprintln!("[js_await_js_promise] no JS runtime state!");
+                    return f64::from_bits(0x7FFC_0000_0000_0001);
+                }
+            };
+
+            // Check if the value is a Promise and if it's already settled
+            {
+                let scope = &mut state.runtime.handle_scope();
+                let v8_val = match get_js_handle(scope, handle_id) {
+                    Some(v) => v,
+                    None => {
+                        eprintln!("[js_await_js_promise] handle {} not found!", handle_id);
+                        return f64::from_bits(0x7FFC_0000_0000_0001);
+                    }
+                };
+
+                if !v8_val.is_promise() {
+                    // Not a Promise, convert and return
+                    let type_str = if v8_val.is_object() { "object" }
+                        else if v8_val.is_array() { "array" }
+                        else if v8_val.is_function() { "function" }
+                        else if v8_val.is_string() { "string" }
+                        else if v8_val.is_number() { "number" }
+                        else { "other" };
+                    eprintln!("[js_await_js_promise] handle {} is NOT a promise (type={}), returning directly", handle_id, type_str);
+                    return v8_to_native(scope, v8_val);
+                }
+
+                let promise = v8::Local::<v8::Promise>::try_from(v8_val).unwrap();
+                let state_val = promise.state();
+                if state_val != v8::PromiseState::Pending {
+                    // Already settled, return the result
+                    let result = promise.result(scope);
+                    let result_str = result.to_rust_string_lossy(scope);
+                    eprintln!("[js_await_js_promise] handle {} ALREADY SETTLED ({:?}): is_obj={} is_arr={} str={}",
+                        handle_id, state_val, result.is_object(), result.is_array(), &result_str[..result_str.len().min(200)]);
+                    return v8_to_native(scope, result);
+                }
+            }
+
+            // Promise is pending - run the event loop to settle it
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    // Run event loop (processes all pending async operations)
+                    let _ = state.runtime.run_event_loop(Default::default()).await;
+                })
+            });
+
+            // Now get the resolved value
+            let scope = &mut state.runtime.handle_scope();
+            let v8_val = match get_js_handle(scope, handle_id) {
+                Some(v) => v,
+                None => {
+                    eprintln!("[js_await_js_promise] handle {} gone after event loop!", handle_id);
+                    return f64::from_bits(0x7FFC_0000_0000_0001);
+                }
+            };
+
+            if v8_val.is_promise() {
+                let promise = v8::Local::<v8::Promise>::try_from(v8_val).unwrap();
+                let final_state = promise.state();
+                match final_state {
+                    v8::PromiseState::Fulfilled => {
+                        let result = promise.result(scope);
+                        let result_str = result.to_rust_string_lossy(scope);
+                        eprintln!("[js_await_js_promise] FULFILLED: is_obj={} is_arr={} is_undef={} str={}", result.is_object(), result.is_array(), result.is_undefined(), &result_str[..result_str.len().min(200)]);
+                        v8_to_native(scope, result)
+                    }
+                    v8::PromiseState::Rejected => {
+                        let reason = promise.result(scope);
+                        let reason_str = reason.to_rust_string_lossy(scope);
+                        eprintln!("[js_await_js_promise] REJECTED: {}", reason_str);
+                        f64::from_bits(0x7FFC_0000_0000_0001) // undefined
+                    }
+                    v8::PromiseState::Pending => {
+                        eprintln!("[js_await_js_promise] STILL PENDING after event loop!");
+                        f64::from_bits(0x7FFC_0000_0000_0001) // undefined
+                    }
+                }
+            } else {
+                v8_to_native(scope, v8_val)
+            }
+        })
+    })
+}
+
+/// Await any promise — handles both JS handle promises (JS_HANDLE_TAG) and
+/// native POINTER_TAG promises. If the value is neither, returns it as-is.
+///
+/// This is the unified await for F64 values where the type isn't known at compile time
+/// (e.g., generic method dispatch returning either JS or native promises).
+#[no_mangle]
+pub extern "C" fn js_await_any_promise(value: f64) -> f64 {
+    let bits = value.to_bits();
+    let tag = bits >> 48;
+    eprintln!("[js_await_any_promise] bits=0x{:016X} tag=0x{:04X}", bits, tag);
+
+    if tag == 0x7FFB {
+        // JS_HANDLE_TAG — delegate to js_await_js_promise (runs V8 event loop).
+        // This returns the resolved value directly (not a Promise).
+        // Wrap it in a fulfilled native Promise so the Cranelift busy-wait loop
+        // can find state=Fulfilled immediately and read the value.
+        let resolved_value = js_await_js_promise(value);
+        let promise_ptr = perry_runtime::promise::js_promise_resolved(resolved_value);
+        // NaN-box with POINTER_TAG so js_nanbox_get_pointer can extract it
+        let ptr_bits = 0x7FFD_0000_0000_0000u64 | (promise_ptr as u64 & 0x0000_FFFF_FFFF_FFFF);
+        return f64::from_bits(ptr_bits);
+    }
+
+    // For POINTER_TAG (native promises) and all other values, return as-is.
+    // The Cranelift-generated busy-wait loop handles native promise polling correctly
+    // using the same thread's microtask queue.
+    value
 }
 
 #[cfg(test)]

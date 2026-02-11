@@ -43,6 +43,47 @@ pub extern "C" fn js_bigint_from_i64(value: i64) -> *mut BigIntHeader {
     }
 }
 
+/// Create a BigInt from an f64 value (BigInt() coercion)
+/// Converts f64 to i64 then to BigInt. Handles NaN-boxed values too.
+#[no_mangle]
+pub extern "C" fn js_bigint_from_f64(value: f64) -> *mut BigIntHeader {
+    use crate::value::JSValue;
+    let jsval = JSValue::from_bits(value.to_bits());
+
+    // If already a BigInt (NaN-boxed), just return the pointer
+    if jsval.is_bigint() {
+        return jsval.as_bigint_ptr() as *mut BigIntHeader;
+    }
+
+    // If it's an INT32 (NaN-boxed i32), extract and convert
+    if jsval.is_int32() {
+        let int_value = jsval.as_int32() as i64;
+        return js_bigint_from_i64(int_value);
+    }
+
+    // If it's a string, parse as BigInt (e.g., BigInt("1000000"))
+    if jsval.is_string() {
+        let ptr = jsval.as_string_ptr();
+        if !ptr.is_null() {
+            unsafe {
+                let len = (*ptr).length as u32;
+                let data = (ptr as *const u8).add(std::mem::size_of::<crate::string::StringHeader>());
+                return js_bigint_from_string(data, len);
+            }
+        }
+        return js_bigint_from_i64(0);
+    }
+
+    // If it's undefined or null, return 0 (JavaScript throws TypeError, but we're lenient)
+    if jsval.is_undefined() || jsval.is_null() {
+        return js_bigint_from_i64(0);
+    }
+
+    // Convert f64 to BigInt
+    let int_value = value as i64;
+    js_bigint_from_i64(int_value)
+}
+
 /// Create a BigInt from a string (decimal or hex with 0x prefix)
 #[no_mangle]
 pub extern "C" fn js_bigint_from_string(data: *const u8, len: u32) -> *mut BigIntHeader {
@@ -155,7 +196,10 @@ pub extern "C" fn js_bigint_sub(a: *const BigIntHeader, b: *const BigIntHeader) 
 pub extern "C" fn js_bigint_mul(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
     let ptr = bigint_alloc();
     unsafe {
-
+        if a.is_null() || b.is_null() {
+            (*ptr).limbs = [0, 0, 0, 0];
+            return ptr;
+        }
         let a_limbs = (*a).limbs;
         let b_limbs = (*b).limbs;
         let mut result = [0u64; 4];
@@ -483,6 +527,9 @@ pub extern "C" fn js_bigint_eq(a: *const BigIntHeader, b: *const BigIntHeader) -
 #[no_mangle]
 pub extern "C" fn js_bigint_to_f64(a: *const BigIntHeader) -> f64 {
     unsafe {
+        if a.is_null() {
+            return 0.0;
+        }
         let limbs = (*a).limbs;
         let mut result = 0.0f64;
         let mut multiplier = 1.0f64;

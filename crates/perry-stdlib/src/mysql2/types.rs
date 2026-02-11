@@ -38,10 +38,11 @@ impl MySqlConfig {
             .as_ref()
             .map(|d| format!("/{}", d))
             .unwrap_or_default();
-        format!(
+        let url = format!(
             "mysql://{}:{}@{}:{}{}",
             self.user, self.password, self.host, self.port, db_part
-        )
+        );
+        url
     }
 }
 

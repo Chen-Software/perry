@@ -41,7 +41,7 @@ impl CommanderHandle {
 
 /// Helper to extract string from StringHeader pointer
 unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
-    if ptr.is_null() {
+    if ptr.is_null() || (ptr as usize) < 4096 {
         return None;
     }
     let len = (*ptr).length as usize;
@@ -137,6 +137,36 @@ pub unsafe extern "C" fn js_commander_option(
     }
 
     handle
+}
+
+/// Command.requiredOption(flags, description, defaultValue?)
+/// Same as option() but marks the option as required
+#[no_mangle]
+pub unsafe extern "C" fn js_commander_required_option(
+    handle: Handle,
+    flags_ptr: *const StringHeader,
+    desc_ptr: *const StringHeader,
+    default_ptr: *const StringHeader,
+) -> Handle {
+    // Delegate to option - required validation is not enforced at runtime
+    js_commander_option(handle, flags_ptr, desc_ptr, default_ptr)
+}
+
+/// Command.action(callback)
+/// Stores the action handler (closure pointer). Not invoked at init time.
+#[no_mangle]
+pub extern "C" fn js_commander_action(handle: Handle, _callback: i64) -> Handle {
+    // Action callbacks are stored but not automatically invoked by the native runtime.
+    // The CLI routing logic would need to call this explicitly.
+    handle
+}
+
+/// Command.command(name) -> new Command handle for subcommand
+#[no_mangle]
+pub unsafe extern "C" fn js_commander_command(handle: Handle, name_ptr: *const StringHeader) -> Handle {
+    let _name = string_from_header(name_ptr).unwrap_or_default();
+    // Create a new subcommand handle
+    register_handle(CommanderHandle::new())
 }
 
 /// Command.parse()

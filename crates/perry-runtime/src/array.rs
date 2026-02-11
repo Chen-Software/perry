@@ -8,6 +8,26 @@
 use std::ptr;
 use crate::arena::arena_alloc_gc;
 
+/// Strip NaN-boxing tags from an array pointer (defensive guard).
+#[inline(always)]
+fn clean_arr_ptr(arr: *const ArrayHeader) -> *const ArrayHeader {
+    let bits = arr as usize;
+    let top16 = bits >> 48;
+    if top16 >= 0x7FF8 {
+        if top16 == 0x7FFC || (bits & 0x0000_FFFF_FFFF_FFFF) == 0 {
+            return std::ptr::null();
+        }
+        (bits & 0x0000_FFFF_FFFF_FFFF) as *const ArrayHeader
+    } else {
+        arr
+    }
+}
+
+#[inline(always)]
+fn clean_arr_ptr_mut(arr: *mut ArrayHeader) -> *mut ArrayHeader {
+    clean_arr_ptr(arr as *const ArrayHeader) as *mut ArrayHeader
+}
+
 /// Array header - precedes the elements in memory
 #[repr(C)]
 pub struct ArrayHeader {
@@ -73,12 +93,16 @@ pub extern "C" fn js_array_from_f64(elements: *const f64, count: u32) -> *mut Ar
 /// Get the length of an array
 #[no_mangle]
 pub extern "C" fn js_array_length(arr: *const ArrayHeader) -> u32 {
+    let arr = clean_arr_ptr(arr);
+    if arr.is_null() { return 0; }
     unsafe { (*arr).length }
 }
 
 /// Get an element from an array by index (returns f64)
 #[no_mangle]
 pub extern "C" fn js_array_get_f64(arr: *const ArrayHeader, index: u32) -> f64 {
+    let arr = clean_arr_ptr(arr);
+    if arr.is_null() { return f64::NAN; }
     unsafe {
         let length = (*arr).length;
         if index >= length {
@@ -93,6 +117,8 @@ pub extern "C" fn js_array_get_f64(arr: *const ArrayHeader, index: u32) -> f64 {
 /// Note: This does NOT extend the array if index >= length
 #[no_mangle]
 pub extern "C" fn js_array_set_f64(arr: *mut ArrayHeader, index: u32, value: f64) {
+    let arr = clean_arr_ptr_mut(arr);
+    if arr.is_null() { return; }
     unsafe {
         let length = (*arr).length;
         if index >= length {

@@ -13,8 +13,8 @@ pub const NATIVE_MODULES: &[&str] = &[
     "pg",
     "uuid",
     "bcrypt",
-    // Note: ioredis removed - native impl uses functions, not class instantiation
-    // Users can use the native redis functions via direct FFI or use JS runtime
+    // Note: ioredis NOT in NATIVE_MODULES - native class tracking happens via class name detection
+    // in lower.rs. Adding it here would make imports skip JS module loading.
     "node-fetch",
     "ws",
     "zlib",
@@ -26,7 +26,9 @@ pub const NATIVE_MODULES: &[&str] = &[
     "nanoid",
     "slugify",
     "validator",
-    "ethers",
+    // Note: ethers NOT in NATIVE_MODULES - Contract/Provider need V8 JS runtime.
+    // Only utility functions (formatUnits, parseUnits, getAddress) had native stubs,
+    // but Contract (Proxy-based dynamic dispatch) requires V8.
     // Node.js built-ins
     "events",
     "os",
@@ -41,7 +43,6 @@ pub const NATIVE_MODULES: &[&str] = &[
     // Utility libraries
     "lru-cache",
     "commander",
-    "big.js",
     "decimal.js",
     "bignumber.js",
     "exponential-backoff",
@@ -139,6 +140,9 @@ pub struct Module {
     /// Exported native module instances: (export_name, module_name, class_name)
     /// This tracks variables like `export const pool = new Pool(...)` from pg
     pub exported_native_instances: Vec<(String, String, String)>,
+    /// Exported functions that return native module instances: (func_name, module_name, class_name)
+    /// e.g., `export function getRedis(): Promise<Redis>` -> ("getRedis", "ioredis", "Redis")
+    pub exported_func_return_native_instances: Vec<(String, String, String)>,
     /// Exported object literals: export_name
     /// This tracks variables like `export const config = { ... }`
     pub exported_objects: Vec<String>,
@@ -1031,6 +1035,9 @@ pub enum Expr {
     /// Number(value) -> number
     /// Type coercion to number
     NumberCoerce(Box<Expr>),
+    /// BigInt(value) -> bigint
+    /// Type coercion to bigint
+    BigIntCoerce(Box<Expr>),
     /// String(value) -> string
     /// Type coercion to string
     StringCoerce(Box<Expr>),
@@ -1212,6 +1219,7 @@ impl Module {
             functions: Vec::new(),
             init: Vec::new(),
             exported_native_instances: Vec::new(),
+            exported_func_return_native_instances: Vec::new(),
             exported_objects: Vec::new(),
             exported_functions: Vec::new(),
         }

@@ -268,6 +268,14 @@ fn find_max_local_id(stmts: &[Stmt]) -> LocalId {
             Expr::PropertyGet { object, .. } | Expr::PropertySet { object, .. } => {
                 check_expr(object, max_id);
             }
+            Expr::NativeMethodCall { object, args, .. } => {
+                if let Some(obj) = object {
+                    check_expr(obj, max_id);
+                }
+                for arg in args {
+                    check_expr(arg, max_id);
+                }
+            }
             _ => {}
         }
     }
@@ -531,6 +539,14 @@ fn inline_calls_in_expr(
         }
         Expr::LocalSet(_, value) => {
             inline_calls_in_expr(value, func_candidates, method_candidates, local_types, next_local_id);
+        }
+        Expr::NativeMethodCall { object, args, .. } => {
+            if let Some(obj) = object {
+                inline_calls_in_expr(obj, func_candidates, method_candidates, local_types, next_local_id);
+            }
+            for arg in args {
+                inline_calls_in_expr(arg, func_candidates, method_candidates, local_types, next_local_id);
+            }
         }
         _ => {}
     }
@@ -957,6 +973,16 @@ fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_l
         Expr::Closure { body, .. } => {
             substitute_locals_in_stmts(body, param_map, next_local_id);
         }
+        // Native method calls
+        Expr::NativeMethodCall { object, args, .. } => {
+            if let Some(obj) = object {
+                substitute_locals(obj, param_map, next_local_id);
+            }
+            for arg in args {
+                substitute_locals(arg, param_map, next_local_id);
+            }
+        }
+        Expr::NativeModuleRef(_) => {}
         // String operations
         Expr::StringSplit(string, delimiter) => {
             substitute_locals(string, param_map, next_local_id);

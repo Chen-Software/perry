@@ -53,11 +53,15 @@ pub struct JsRuntimeState {
 
 impl JsRuntimeState {
     fn new() -> Self {
-        let runtime = JsRuntime::new(RuntimeOptions {
+        let mut runtime = JsRuntime::new(RuntimeOptions {
             module_loader: Some(std::rc::Rc::new(modules::NodeModuleLoader::new())),
             extensions: vec![ops::perry_ops::init_ops()],
             ..Default::default()
         });
+
+        // Set up Node.js global polyfills before any modules are loaded
+        runtime.execute_script("<node-polyfills>", deno_core::ascii_str_include!("node_polyfills.js"))
+            .expect("Failed to initialize Node.js polyfills");
 
         Self {
             runtime,

@@ -8,6 +8,28 @@ use std::alloc::{alloc, dealloc, realloc, Layout};
 use std::ptr;
 use crate::string::StringHeader;
 
+/// Strip NaN-boxing tags from a map pointer (defensive guard).
+/// If the pointer has NaN-boxing tags in the upper 16 bits, strip them.
+/// Returns null for undefined/null NaN-boxing tags.
+#[inline(always)]
+fn clean_map_ptr(map: *const MapHeader) -> *const MapHeader {
+    let bits = map as usize;
+    let top16 = bits >> 48;
+    if top16 >= 0x7FF8 {
+        if top16 == 0x7FFC || (bits & 0x0000_FFFF_FFFF_FFFF) == 0 {
+            return std::ptr::null();
+        }
+        (bits & 0x0000_FFFF_FFFF_FFFF) as *const MapHeader
+    } else {
+        map
+    }
+}
+
+#[inline(always)]
+fn clean_map_ptr_mut(map: *mut MapHeader) -> *mut MapHeader {
+    clean_map_ptr(map as *const MapHeader) as *mut MapHeader
+}
+
 /// Map header - stable address, entries allocated separately
 #[repr(C)]
 pub struct MapHeader {
@@ -128,6 +150,8 @@ pub extern "C" fn js_map_alloc(capacity: u32) -> *mut MapHeader {
 /// Get the number of entries in the map
 #[no_mangle]
 pub extern "C" fn js_map_size(map: *const MapHeader) -> u32 {
+    let map = clean_map_ptr(map);
+    if map.is_null() { return 0; }
     unsafe { (*map).size }
 }
 
@@ -173,6 +197,8 @@ unsafe fn ensure_capacity(map: *mut MapHeader) {
 /// The map pointer is stable (never reallocated)
 #[no_mangle]
 pub extern "C" fn js_map_set(map: *mut MapHeader, key: f64, value: f64) -> *mut MapHeader {
+    let map = clean_map_ptr_mut(map);
+    if map.is_null() { return map; }
     unsafe {
         // Check if key already exists
         let idx = find_key_index(map, key);
@@ -202,6 +228,8 @@ pub extern "C" fn js_map_set(map: *mut MapHeader, key: f64, value: f64) -> *mut 
 /// Returns the value, or NaN (representing undefined) if not found
 #[no_mangle]
 pub extern "C" fn js_map_get(map: *const MapHeader, key: f64) -> f64 {
+    let map = clean_map_ptr(map);
+    if map.is_null() { return f64::from_bits(0x7FF8_0000_0000_0001); }
     unsafe {
         let idx = find_key_index(map, key);
 
@@ -220,6 +248,8 @@ pub extern "C" fn js_map_get(map: *const MapHeader, key: f64) -> f64 {
 /// Returns 1 if found, 0 if not found
 #[no_mangle]
 pub extern "C" fn js_map_has(map: *const MapHeader, key: f64) -> i32 {
+    let map = clean_map_ptr(map);
+    if map.is_null() { return 0; }
     unsafe {
         if find_key_index(map, key) >= 0 { 1 } else { 0 }
     }
@@ -229,6 +259,8 @@ pub extern "C" fn js_map_has(map: *const MapHeader, key: f64) -> i32 {
 /// Returns 1 if deleted, 0 if key not found
 #[no_mangle]
 pub extern "C" fn js_map_delete(map: *mut MapHeader, key: f64) -> i32 {
+    let map = clean_map_ptr_mut(map);
+    if map.is_null() { return 0; }
     unsafe {
         let idx = find_key_index(map, key);
 
@@ -255,6 +287,8 @@ pub extern "C" fn js_map_delete(map: *mut MapHeader, key: f64) -> i32 {
 /// Clear all entries from the map
 #[no_mangle]
 pub extern "C" fn js_map_clear(map: *mut MapHeader) {
+    let map = clean_map_ptr_mut(map);
+    if map.is_null() { return; }
     unsafe {
         (*map).size = 0;
     }
@@ -264,6 +298,7 @@ pub extern "C" fn js_map_clear(map: *mut MapHeader) {
 /// Returns an array where each element is a 2-element array [key, value]
 #[no_mangle]
 pub extern "C" fn js_map_entries(map: *const MapHeader) -> *mut crate::array::ArrayHeader {
+    let map = clean_map_ptr(map);
     if map.is_null() {
         return crate::array::js_array_alloc(0);
     }
@@ -292,6 +327,7 @@ pub extern "C" fn js_map_entries(map: *const MapHeader) -> *mut crate::array::Ar
 /// Get the keys of a map as an array
 #[no_mangle]
 pub extern "C" fn js_map_keys(map: *const MapHeader) -> *mut crate::array::ArrayHeader {
+    let map = clean_map_ptr(map);
     if map.is_null() {
         return crate::array::js_array_alloc(0);
     }
@@ -312,6 +348,7 @@ pub extern "C" fn js_map_keys(map: *const MapHeader) -> *mut crate::array::Array
 /// Get the values of a map as an array
 #[no_mangle]
 pub extern "C" fn js_map_values(map: *const MapHeader) -> *mut crate::array::ArrayHeader {
+    let map = clean_map_ptr(map);
     if map.is_null() {
         return crate::array::js_array_alloc(0);
     }
@@ -332,6 +369,7 @@ pub extern "C" fn js_map_values(map: *const MapHeader) -> *mut crate::array::Arr
 /// Iterate over map entries, calling a callback with (value, key, map) for each
 #[no_mangle]
 pub extern "C" fn js_map_foreach(map: *const MapHeader, callback: f64) {
+    let map = clean_map_ptr(map);
     if map.is_null() {
         return;
     }

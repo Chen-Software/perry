@@ -695,10 +695,13 @@ pub extern "C" fn js_value_typeof(value: f64) -> *mut StringHeader {
     } else if jsval.is_string() {
         // String pointer (uses STRING_TAG)
         "string"
+    } else if crate::value::is_js_handle(value) {
+        // JS handle from V8 runtime - always an object
+        "object"
     } else if jsval.is_pointer() {
         // Object/array/closure pointer - check if it's a closure
         let ptr = jsval.as_pointer::<u8>();
-        if !ptr.is_null() {
+        if !ptr.is_null() && (ptr as usize) > 0x10000 {
             // ClosureHeader has type_tag at offset 12 (after func_ptr:8 + capture_count:4)
             let type_tag = unsafe { *(ptr.add(12) as *const u32) };
             if type_tag == crate::closure::CLOSURE_MAGIC {
@@ -868,6 +871,16 @@ pub extern "C" fn js_number_coerce(value: f64) -> f64 {
                 f64::NAN
             }
         }
+    } else if jsval.is_int32() {
+        // INT32 NaN-boxed value → convert to f64
+        jsval.as_int32() as f64
+    } else if jsval.is_bigint() {
+        // BigInt → number conversion
+        let ptr = jsval.as_bigint_ptr();
+        crate::bigint::js_bigint_to_f64(ptr)
+    } else if jsval.is_pointer() {
+        // Object → NaN (can't convert object to number directly)
+        f64::NAN
     } else {
         // Already a number
         value

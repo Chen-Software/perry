@@ -66,6 +66,13 @@ pub struct LoweringContext {
     /// Variables that hold closures or other values needing cross-module export globals
     /// (arrow functions, object literals, call expressions, arrays, new expressions)
     exportable_object_vars: HashSet<String>,
+    /// Functions created during expression lowering (e.g., object literal methods)
+    /// These are flushed to the module after the enclosing statement is lowered.
+    pending_functions: Vec<Function>,
+    /// Functions that return native module instances: func_name -> (module_name, class_name)
+    /// Tracks user-defined functions whose return type annotation is a native module type
+    /// (e.g., initializePool(): mysql.Pool -> ("mysql2/promise", "Pool"))
+    func_return_native_instances: Vec<(String, String, String)>,
 }
 
 impl LoweringContext {
@@ -96,6 +103,8 @@ impl LoweringContext {
             extern_func_types: Vec::new(),
             source_file_path: source_file_path.into(),
             exportable_object_vars: HashSet::new(),
+            pending_functions: Vec::new(),
+            func_return_native_instances: Vec::new(),
         }
     }
 
@@ -352,6 +361,12 @@ impl LoweringContext {
     fn lookup_native_instance(&self, name: &str) -> Option<(&str, &str)> {
         self.native_instances.iter()
             .find(|(n, _, _)| n == name)
+            .map(|(_, module, class)| (module.as_str(), class.as_str()))
+    }
+
+    fn lookup_func_return_native_instance(&self, func_name: &str) -> Option<(&str, &str)> {
+        self.func_return_native_instances.iter()
+            .find(|(n, _, _)| n == func_name)
             .map(|(_, module, class)| (module.as_str(), class.as_str()))
     }
 
@@ -832,6 +847,11 @@ pub fn lower_module(ast_module: &ast::Module, name: &str, source_file_path: &str
                 lower_module_decl(&mut ctx, &mut module, decl)?;
             }
         }
+        // Flush any pending functions created during expression lowering
+        // (e.g., inline methods in object literals)
+        for func in ctx.pending_functions.drain(..) {
+            module.functions.push(func);
+        }
     }
 
     // Populate exported_native_instances by matching native_instances with exports
@@ -845,6 +865,35 @@ pub fn lower_module(ast_module: &ast::Module, name: &str, source_file_path: &str
                         module_name.clone(),
                         class_name.clone(),
                     ));
+                }
+            }
+        }
+    }
+
+    // Populate exported_func_return_native_instances for functions that return native instances
+    for (name, module_n, class_n) in &ctx.func_return_native_instances {
+        eprintln!("[DEBUG lower] func_return_native_instance: name={} module={} class={}", name, module_n, class_n);
+    }
+    for (func_name, native_module, native_class) in &ctx.func_return_native_instances {
+        // Check if this function is directly exported
+        let is_exported = module.functions.iter().any(|f| f.name == *func_name && f.is_exported);
+        if is_exported {
+            module.exported_func_return_native_instances.push((
+                func_name.clone(),
+                native_module.clone(),
+                native_class.clone(),
+            ));
+        } else {
+            // Also check named exports (e.g., `export { getRedis }`)
+            for export in &module.exports {
+                if let Export::Named { local, exported } = export {
+                    if local == func_name {
+                        module.exported_func_return_native_instances.push((
+                            exported.clone(),
+                            native_module.clone(),
+                            native_class.clone(),
+                        ));
+                    }
                 }
             }
         }
@@ -1065,6 +1114,50 @@ fn lower_module_decl(
                                 }
                             }
 
+                            // Check if this is an arrow function with a native return type
+                            // e.g., export const getRedis = async (): Promise<Redis> => { ... }
+                            if let ast::Expr::Arrow(arrow) = init.as_ref() {
+                                if let Some(ref rt) = arrow.return_type {
+                                    let return_type = extract_ts_type_with_ctx(&rt.type_ann, Some(ctx));
+                                    // Unwrap Promise<T> for async functions
+                                    let check_type = match &return_type {
+                                        Type::Generic { base, type_args } if base == "Promise" => {
+                                            type_args.first().unwrap_or(&return_type)
+                                        }
+                                        Type::Promise(inner) => inner.as_ref(),
+                                        other => other,
+                                    };
+                                    if let Type::Named(type_name) = check_type {
+                                        let module_info = match type_name.as_str() {
+                                            "Redis" => Some(("ioredis", "Redis")),
+                                            "EventEmitter" => Some(("events", "EventEmitter")),
+                                            "Pool" => Some(("mysql2/promise", "Pool")),
+                                            "PoolConnection" => Some(("mysql2/promise", "PoolConnection")),
+                                            "WebSocket" | "WebSocketServer" => Some(("ws", type_name.as_str())),
+                                            _ => {
+                                                // Also check dotted names (e.g., mysql.Pool)
+                                                if let Some(dot_pos) = type_name.find('.') {
+                                                    let module_alias = &type_name[..dot_pos];
+                                                    let class_name = &type_name[dot_pos + 1..];
+                                                    if let Some((module_name, _)) = ctx.lookup_native_module(module_alias) {
+                                                        Some((module_name, class_name))
+                                                    } else {
+                                                        None
+                                                    }
+                                                } else {
+                                                    None
+                                                }
+                                            }
+                                        };
+                                        if let Some((module, class)) = module_info {
+                                            ctx.func_return_native_instances.push((
+                                                name.clone(), module.to_string(), class.to_string()
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+
                             // Track exported values that need cross-module access
                             // Include: object literals, call expressions (e.g., Router()), array literals,
                             // new expressions (e.g., new Router()), and arrow functions (e.g., () => {})
@@ -1095,13 +1188,16 @@ fn lower_module_decl(
                                 module.exported_objects.push(name.clone());
                             }
 
-                            // Handle function aliases: export const foo = existingFunc;
-                            // If the init is an identifier that refers to a function, add to exported_functions
+                            // Handle identifier aliases: export const foo = existingVar;
                             if let ast::Expr::Ident(ident) = init.as_ref() {
                                 let ref_name = ident.sym.to_string();
                                 if let Some(func_id) = ctx.lookup_func(&ref_name) {
-                                    // The exported name is an alias to an existing function
+                                    // Function alias - add to exported_functions
                                     module.exported_functions.push((name, func_id));
+                                } else {
+                                    // Non-function alias (e.g., export const alias = someObject)
+                                    // Needs its own export global for cross-module access
+                                    module.exported_objects.push(name.clone());
                                 }
                             }
                         }
@@ -1824,6 +1920,44 @@ fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) -> Result<Fun
     let return_type = fn_decl.function.return_type.as_ref()
         .map(|rt| extract_ts_type_with_ctx(&rt.type_ann, Some(ctx)))
         .unwrap_or(Type::Any);
+
+    // Check if return type is a native module type (e.g., mysql.Pool, mysql.PoolConnection)
+    // For async functions, unwrap Promise<T> first
+    let check_type = match &return_type {
+        Type::Generic { base, type_args } if base == "Promise" => {
+            type_args.first().unwrap_or(&return_type)
+        }
+        Type::Promise(inner) => inner.as_ref(),
+        other => other,
+    };
+    if let Type::Named(type_name) = check_type {
+        if let Some(dot_pos) = type_name.find('.') {
+            let module_alias = &type_name[..dot_pos];
+            let class_name = &type_name[dot_pos + 1..];
+            if let Some((module_name, _)) = ctx.lookup_native_module(module_alias) {
+                ctx.func_return_native_instances.push((
+                    name.clone(),
+                    module_name.to_string(),
+                    class_name.to_string(),
+                ));
+            }
+        } else {
+            // Bare type name check (e.g., `Redis` instead of `ioredis.Redis`)
+            let module_info = match type_name.as_str() {
+                "Redis" => Some(("ioredis", "Redis")),
+                "EventEmitter" => Some(("events", "EventEmitter")),
+                "Pool" => Some(("mysql2/promise", "Pool")),
+                "PoolConnection" => Some(("mysql2/promise", "PoolConnection")),
+                "WebSocket" | "WebSocketServer" => Some(("ws", type_name.as_str())),
+                _ => None,
+            };
+            if let Some((module, class)) = module_info {
+                ctx.func_return_native_instances.push((
+                    name.clone(), module.to_string(), class.to_string()
+                ));
+            }
+        }
+    }
 
     // Lower body
     let body = if let Some(ref block) = fn_decl.function.body {
@@ -4471,6 +4605,66 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                         }
                     }
 
+                    // Check for array-only methods on any expression (e.g., Object.entries(x).reduce(...))
+                    // ONLY match methods that are unique to arrays (not shared with strings)
+                    // "includes", "indexOf", "slice", "join" also exist on strings, so skip those
+                    if let ast::Callee::Expr(expr) = &call.callee {
+                        if let ast::Expr::Member(member) = expr.as_ref() {
+                            if let ast::MemberProp::Ident(method_ident) = &member.prop {
+                                let method_name = method_ident.sym.as_ref();
+                                match method_name {
+                                    "reduce" if args.len() >= 1 => {
+                                        let array_expr = lower_expr(ctx, &member.obj)?;
+                                        let mut args_iter = args.into_iter();
+                                        let callback = args_iter.next().unwrap();
+                                        let initial = args_iter.next().map(Box::new);
+                                        return Ok(Expr::ArrayReduce {
+                                            array: Box::new(array_expr),
+                                            callback: Box::new(callback),
+                                            initial,
+                                        });
+                                    }
+                                    "map" if args.len() >= 1 => {
+                                        let array_expr = lower_expr(ctx, &member.obj)?;
+                                        return Ok(Expr::ArrayMap {
+                                            array: Box::new(array_expr),
+                                            callback: Box::new(args.into_iter().next().unwrap()),
+                                        });
+                                    }
+                                    "filter" if args.len() >= 1 => {
+                                        let array_expr = lower_expr(ctx, &member.obj)?;
+                                        return Ok(Expr::ArrayFilter {
+                                            array: Box::new(array_expr),
+                                            callback: Box::new(args.into_iter().next().unwrap()),
+                                        });
+                                    }
+                                    "forEach" if args.len() >= 1 => {
+                                        let array_expr = lower_expr(ctx, &member.obj)?;
+                                        return Ok(Expr::ArrayForEach {
+                                            array: Box::new(array_expr),
+                                            callback: Box::new(args.into_iter().next().unwrap()),
+                                        });
+                                    }
+                                    "find" if args.len() >= 1 => {
+                                        let array_expr = lower_expr(ctx, &member.obj)?;
+                                        return Ok(Expr::ArrayFind {
+                                            array: Box::new(array_expr),
+                                            callback: Box::new(args.into_iter().next().unwrap()),
+                                        });
+                                    }
+                                    "findIndex" if args.len() >= 1 => {
+                                        let array_expr = lower_expr(ctx, &member.obj)?;
+                                        return Ok(Expr::ArrayFindIndex {
+                                            array: Box::new(array_expr),
+                                            callback: Box::new(args.into_iter().next().unwrap()),
+                                        });
+                                    }
+                                    _ => {} // Fall through - includes, indexOf, slice, join are ambiguous with string methods
+                                }
+                            }
+                        }
+                    }
+
                     // Check for global built-in function calls (parseInt, parseFloat, Number, String, isNaN, isFinite)
                     if let ast::Expr::Ident(ident) = expr.as_ref() {
                         let func_name = ident.sym.as_ref();
@@ -4501,6 +4695,14 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                 } else {
                                     // Number() with no args returns 0
                                     return Ok(Expr::Number(0.0));
+                                }
+                            }
+                            "BigInt" => {
+                                if args.len() >= 1 {
+                                    return Ok(Expr::BigIntCoerce(Box::new(args.remove(0))));
+                                } else {
+                                    // BigInt() with no args returns 0n
+                                    return Ok(Expr::BigInt("0".to_string()));
                                 }
                             }
                             "String" => {
@@ -5196,27 +5398,120 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
             }
         }
         ast::Expr::Object(obj) => {
-            let props = obj.props.iter()
-                .filter_map(|prop| {
-                    match prop {
-                        ast::PropOrSpread::Prop(prop) => {
-                            match prop.as_ref() {
-                                ast::Prop::KeyValue(kv) => {
-                                    let key = match &kv.key {
-                                        ast::PropName::Ident(ident) => ident.sym.to_string(),
-                                        ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
-                                        _ => return None,
-                                    };
-                                    let value = lower_expr(ctx, &kv.value).ok()?;
-                                    Some(Ok((key, value)))
-                                }
-                                _ => None,
+            let mut props = Vec::new();
+            for prop in &obj.props {
+                match prop {
+                    ast::PropOrSpread::Prop(prop) => {
+                        match prop.as_ref() {
+                            ast::Prop::KeyValue(kv) => {
+                                let key = match &kv.key {
+                                    ast::PropName::Ident(ident) => ident.sym.to_string(),
+                                    ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+                                    ast::PropName::Num(n) => n.value.to_string(),
+                                    ast::PropName::Computed(computed) => {
+                                        // Handle computed property keys like [ChainName.ETHEREUM]
+                                        // Try to resolve enum member access to string keys
+                                        match computed.expr.as_ref() {
+                                            ast::Expr::Member(member) => {
+                                                if let (ast::Expr::Ident(obj), ast::MemberProp::Ident(prop)) = (member.obj.as_ref(), &member.prop) {
+                                                    let enum_name = obj.sym.to_string();
+                                                    let member_name = prop.sym.to_string();
+                                                    if let Some(value) = ctx.lookup_enum_member(&enum_name, &member_name) {
+                                                        match value {
+                                                            EnumValue::String(s) => s.clone(),
+                                                            EnumValue::Number(n) => n.to_string(),
+                                                        }
+                                                    } else {
+                                                        continue;
+                                                    }
+                                                } else {
+                                                    continue;
+                                                }
+                                            }
+                                            ast::Expr::Lit(ast::Lit::Str(s)) => s.value.as_str().unwrap_or("").to_string(),
+                                            ast::Expr::Lit(ast::Lit::Num(n)) => n.value.to_string(),
+                                            _ => continue,
+                                        }
+                                    }
+                                    _ => continue,
+                                };
+                                let value = lower_expr(ctx, &kv.value)?;
+                                props.push((key, value));
                             }
+                            ast::Prop::Shorthand(ident) => {
+                                // Shorthand property: { help } → { help: help }
+                                let name = ident.sym.to_string();
+                                let value = if let Some(func_id) = ctx.lookup_func(&name) {
+                                    Expr::FuncRef(func_id)
+                                } else if let Some(local_id) = ctx.lookup_local(&name) {
+                                    Expr::LocalGet(local_id)
+                                } else {
+                                    continue;
+                                };
+                                props.push((name, value));
+                            }
+                            ast::Prop::Method(method) => {
+                                // Inline method: { help(): string { ... } }
+                                // Lower as a named function and reference via FuncRef
+                                // This avoids closure compilation complexity (async try-catch etc.)
+                                let key = match &method.key {
+                                    ast::PropName::Ident(ident) => ident.sym.to_string(),
+                                    ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+                                    _ => continue,
+                                };
+                                let func_id = ctx.fresh_func();
+                                // Use a unique synthetic name to avoid collisions
+                                let func_name = format!("__obj_method_{}_{}", key, func_id);
+                                ctx.functions.push((func_name.clone(), func_id));
+                                let scope_mark = ctx.enter_scope();
+                                let mut params = Vec::new();
+                                for param in method.function.params.iter() {
+                                    let param_name = get_pat_name(&param.pat)?;
+                                    let param_type = extract_param_type_with_ctx(&param.pat, Some(ctx));
+                                    let param_default = get_param_default(ctx, &param.pat)?;
+                                    let param_id = ctx.define_local(param_name.clone(), param_type.clone());
+                                    params.push(Param {
+                                        id: param_id,
+                                        name: param_name,
+                                        ty: param_type,
+                                        default: param_default,
+                                        is_rest: is_rest_param(&param.pat),
+                                    });
+                                }
+                                let return_type = method.function.return_type.as_ref()
+                                    .map(|rt| extract_ts_type_with_ctx(&rt.type_ann, Some(ctx)))
+                                    .unwrap_or(Type::Any);
+                                let body = if let Some(ref block) = method.function.body {
+                                    lower_block_stmt(ctx, block)?
+                                } else {
+                                    Vec::new()
+                                };
+                                ctx.exit_scope(scope_mark);
+                                // Store parameter defaults for call-site resolution
+                                let defaults: Vec<Option<Expr>> = params.iter().map(|p| p.default.clone()).collect();
+                                let param_ids: Vec<LocalId> = params.iter().map(|p| p.id).collect();
+                                ctx.func_defaults.push((func_id, defaults, param_ids));
+                                // Add as pending function to be flushed to the module
+                                ctx.pending_functions.push(Function {
+                                    id: func_id,
+                                    name: func_name,
+                                    type_params: Vec::new(),
+                                    params,
+                                    return_type,
+                                    body,
+                                    is_async: method.function.is_async,
+                                    is_exported: false,
+                                    captures: Vec::new(),
+                                    decorators: Vec::new(),
+                                });
+                                props.push((key, Expr::FuncRef(func_id)));
+                            }
+                            _ => {}
                         }
-                        _ => None,
                     }
-                })
-                .collect::<Result<Vec<_>>>()?;
+                    _ => {}
+                }
+            }
             Ok(Expr::Object(props))
         }
         ast::Expr::This(_) => {
@@ -7061,6 +7356,54 @@ fn lower_var_decl_with_destructuring(
                 }
             }
 
+            // Check if calling a function whose return type is a native module type
+            // e.g., const dbPool = initializePool() where initializePool(): mysql.Pool
+            // Also handles: const dbPool = await initializePool()
+            if let Some(init_expr) = &decl.init {
+                let call_expr = match init_expr.as_ref() {
+                    ast::Expr::Call(c) => Some(c),
+                    ast::Expr::Await(await_expr) => {
+                        if let ast::Expr::Call(c) = await_expr.arg.as_ref() {
+                            Some(c)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(call_expr) = call_expr {
+                    if let ast::Callee::Expr(callee_expr) = &call_expr.callee {
+                        // Check direct function calls: const x = someFunc()
+                        if let ast::Expr::Ident(func_ident) = callee_expr.as_ref() {
+                            let func_name = func_ident.sym.as_ref();
+                            if let Some((module, class)) = ctx.lookup_func_return_native_instance(func_name) {
+                                ctx.register_native_instance(name.clone(), module.to_string(), class.to_string());
+                            }
+                        }
+                        // Check method calls on native instances: const conn = pool.getConnection()
+                        if let ast::Expr::Member(member_expr) = callee_expr.as_ref() {
+                            if let ast::Expr::Ident(obj_ident) = member_expr.obj.as_ref() {
+                                let obj_name = obj_ident.sym.as_ref();
+                                if let Some((module, class)) = ctx.lookup_native_instance(obj_name) {
+                                    if let ast::MemberProp::Ident(method_ident) = &member_expr.prop {
+                                        let method_name = method_ident.sym.as_ref();
+                                        // Map method calls to their return types
+                                        let return_class = match (module, class, method_name) {
+                                            ("mysql2" | "mysql2/promise", "Pool", "getConnection") => Some("PoolConnection"),
+                                            ("pg", "Pool", "connect") => Some("Client"),
+                                            _ => None,
+                                        };
+                                        if let Some(ret_class) = return_class {
+                                            ctx.register_native_instance(name.clone(), module.to_string(), ret_class.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             let init = decl.init.as_ref().map(|e| lower_expr(ctx, e)).transpose()?;
             let id = ctx.define_local(name.clone(), ty.clone());
             result.push(Stmt::Let {
@@ -7792,6 +8135,9 @@ fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>) {
         Expr::NumberCoerce(value) => {
             collect_local_refs_expr(value, refs);
         }
+        Expr::BigIntCoerce(value) => {
+            collect_local_refs_expr(value, refs);
+        }
         Expr::StringCoerce(value) => {
             collect_local_refs_expr(value, refs);
         }
@@ -8485,6 +8831,9 @@ fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<LocalId>) {
             collect_assigned_locals_expr(string, assigned);
         }
         Expr::NumberCoerce(value) => {
+            collect_assigned_locals_expr(value, assigned);
+        }
+        Expr::BigIntCoerce(value) => {
             collect_assigned_locals_expr(value, assigned);
         }
         Expr::StringCoerce(value) => {

@@ -53,11 +53,13 @@ type JsHandleArrayGetFn = extern "C" fn(f64, i32) -> f64;
 type JsHandleArrayLengthFn = extern "C" fn(f64) -> i32;
 type JsHandleObjectGetPropertyFn = extern "C" fn(f64, *const i8, usize) -> f64;
 type JsHandleToStringFn = extern "C" fn(f64) -> *mut crate::string::StringHeader;
+type JsHandleCallMethodFn = unsafe extern "C" fn(f64, *const i8, usize, *const f64, usize) -> f64;
 
 static JS_HANDLE_ARRAY_GET: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 static JS_HANDLE_ARRAY_LENGTH: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 static JS_HANDLE_OBJECT_GET_PROPERTY: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 static JS_HANDLE_TO_STRING: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+pub static JS_HANDLE_CALL_METHOD: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 
 /// Set the JS handle array get function (called by perry-jsruntime)
 #[no_mangle]
@@ -81,6 +83,12 @@ pub extern "C" fn js_set_handle_object_get_property(func: JsHandleObjectGetPrope
 #[no_mangle]
 pub extern "C" fn js_set_handle_to_string(func: JsHandleToStringFn) {
     JS_HANDLE_TO_STRING.store(func as *mut (), Ordering::SeqCst);
+}
+
+/// Set the JS handle method call function (called by perry-jsruntime)
+#[no_mangle]
+pub extern "C" fn js_set_handle_call_method(func: JsHandleCallMethodFn) {
+    JS_HANDLE_CALL_METHOD.store(func as *mut (), Ordering::SeqCst);
 }
 
 /// Check if a NaN-boxed value is a JS handle
@@ -333,8 +341,15 @@ impl Default for JSValue {
 
 /// Create a NaN-boxed pointer value from an i64 raw pointer.
 /// Returns the value as f64 for storage in union-typed variables.
+/// If the value already has a NaN-box tag (JS_HANDLE, STRING, POINTER, etc.),
+/// it is preserved as-is to prevent tag corruption.
 #[no_mangle]
 pub extern "C" fn js_nanbox_pointer(ptr: i64) -> f64 {
+    let bits = ptr as u64;
+    // If value already has a NaN-box tag (top bits in NaN range), preserve it
+    if bits & 0xFFF0_0000_0000_0000 >= 0x7FF0_0000_0000_0000 {
+        return f64::from_bits(bits);
+    }
     let jsval = JSValue::pointer(ptr as *const u8);
     f64::from_bits(jsval.bits())
 }
@@ -391,6 +406,7 @@ pub extern "C" fn js_nanbox_is_pointer(value: f64) -> bool {
 #[no_mangle]
 pub extern "C" fn js_nanbox_get_pointer(value: f64) -> i64 {
     let bits = value.to_bits();
+
     let jsval = JSValue::from_bits(bits);
 
     // First check for properly NaN-boxed pointers (with POINTER_TAG)
@@ -401,6 +417,11 @@ pub extern "C" fn js_nanbox_get_pointer(value: f64) -> i64 {
     // Also check for string pointers (with STRING_TAG)
     if jsval.is_string() {
         return jsval.as_string_ptr() as i64;
+    }
+
+    // Also check for BigInt pointers (with BIGINT_TAG 0x7FFA)
+    if jsval.is_bigint() {
+        return jsval.as_bigint_ptr() as i64;
     }
 
     // Check for raw pointer bits (from bitcast, not NaN-boxed)
@@ -426,7 +447,6 @@ pub extern "C" fn js_nanbox_get_pointer(value: f64) -> i64 {
     0
 }
 
-/// Extract a string pointer from a NaN-boxed f64 value.
 /// Returns the pointer as i64.
 #[no_mangle]
 pub extern "C" fn js_nanbox_get_string_pointer(value: f64) -> i64 {
@@ -455,8 +475,10 @@ pub extern "C" fn js_get_string_pointer_unified(value: f64) -> i64 {
     // Otherwise, assume it's a raw pointer bitcast to f64.
     // Real heap pointers have small upper bits (e.g., 0x0000 or 0x0001),
     // so as f64 they are tiny denormalized numbers (NOT NaN).
-    // Any remaining NaN value (0x7FF0+ upper bits) is not a string pointer.
-    if !value.is_nan() && bits != 0 {
+    // Only treat as raw pointer if within valid 48-bit address space.
+    // Regular f64 numbers (e.g., 30101.0 = 0x40DD65A000000000) have large upper bits
+    // and must NOT be treated as pointers.
+    if !value.is_nan() && bits != 0 && bits < 0x0001_0000_0000_0000 {
         return bits as i64;
     }
 

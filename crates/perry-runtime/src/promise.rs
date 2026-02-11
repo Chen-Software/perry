@@ -85,7 +85,8 @@ pub extern "C" fn js_promise_value(promise: *mut Promise) -> f64 {
     if promise.is_null() {
         return 0.0;
     }
-    unsafe { (*promise).value }
+    let val = unsafe { (*promise).value };
+    val
 }
 
 /// Get promise reason (if rejected)

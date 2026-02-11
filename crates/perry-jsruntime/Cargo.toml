@@ -37,5 +37,8 @@ serde_json.workspace = true
 # Regex for CommonJS parsing
 regex = "1"
 
+# HTTP client for fetch() polyfill (blocking, no Tokio dependency)
+ureq = "2"
+
 [features]
 default = []

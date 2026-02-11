@@ -88,6 +88,22 @@ pub fn make_js_handle_value(handle_id: u64) -> f64 {
     f64::from_bits(JS_HANDLE_TAG | (handle_id & POINTER_MASK))
 }
 
+/// Fix up a native value for JS interop boundary.
+/// Raw pointers (non-NaN-boxed I64 values bitcast to F64) need POINTER_TAG
+/// so that native_to_v8 can properly convert them to V8 arrays/objects.
+pub fn fixup_native_for_v8(value: f64) -> f64 {
+    let bits = value.to_bits();
+    // Raw heap pointers on arm64 are typically 0x0000_0001_xxxx_xxxx to 0x0000_000F_xxxx_xxxx
+    // These appear as subnormal f64 values (exponent = 0, mantissa != 0)
+    // No legitimate JS number would have bits in this range
+    if bits > 0x0000_0001_0000_0000 && bits < 0x0001_0000_0000_0000 {
+        // Raw pointer - add POINTER_TAG so native_to_v8 can convert it
+        f64::from_bits(POINTER_TAG | (bits & POINTER_MASK))
+    } else {
+        value
+    }
+}
+
 /// Convert a native NaN-boxed value to a V8 value
 pub fn native_to_v8<'s>(
     scope: &mut v8::HandleScope<'s>,
@@ -285,11 +301,100 @@ fn native_object_to_v8<'s>(scope: &mut v8::HandleScope<'s>, ptr: *const u8) -> v
         return v8::null(scope).into();
     }
 
-    // For now, create a generic object
-    // TODO: Properly detect array vs object and convert fields
-    let obj = v8::Object::new(scope);
+    // Use GcHeader (8 bytes before user pointer) to reliably determine type.
+    // All Perry arrays and objects are arena-allocated with GcHeader via arena_alloc_gc.
+    let gc_header_ptr = (ptr as usize).wrapping_sub(perry_runtime::gc::GC_HEADER_SIZE);
+    if gc_header_ptr > 0x1000 {
+        let gc_header = unsafe { &*(gc_header_ptr as *const perry_runtime::gc::GcHeader) };
+        let is_arena = (gc_header.gc_flags & perry_runtime::gc::GC_FLAG_ARENA) != 0;
 
-    // Store the native pointer as an external value for round-tripping
+        if is_arena && gc_header.obj_type == perry_runtime::gc::GC_TYPE_ARRAY {
+            // GC-tracked array: ArrayHeader { length: u32, capacity: u32 } + f64 elements
+            let header = ptr as *const perry_runtime::array::ArrayHeader;
+            let length = unsafe { (*header).length };
+            let elements_ptr = unsafe {
+                ptr.add(std::mem::size_of::<perry_runtime::array::ArrayHeader>()) as *const f64
+            };
+            let v8_array = v8::Array::new(scope, length as i32);
+            for i in 0..length {
+                let elem_f64 = unsafe { *elements_ptr.add(i as usize) };
+                let v8_elem = native_to_v8(scope, elem_f64);
+                v8_array.set_index(scope, i, v8_elem);
+            }
+            return v8_array.into();
+        }
+
+        if is_arena && gc_header.obj_type == perry_runtime::gc::GC_TYPE_OBJECT {
+            // GC-tracked object: ObjectHeader (24 bytes) + field values
+            let obj_header = ptr as *const perry_runtime::object::ObjectHeader;
+            let field_count = unsafe { (*obj_header).field_count };
+            let keys_array = unsafe { (*obj_header).keys_array };
+
+            let v8_obj = v8::Object::new(scope);
+
+            if !keys_array.is_null() && field_count > 0 {
+                // Object has named keys - iterate and set each field
+                let keys_length = unsafe { (*keys_array).length };
+                let keys_elements_ptr = unsafe {
+                    (keys_array as *const u8)
+                        .add(std::mem::size_of::<perry_runtime::array::ArrayHeader>())
+                        as *const f64
+                };
+                // Fields are stored as f64 (NaN-boxed JSValues) right after ObjectHeader
+                let fields_ptr = unsafe {
+                    ptr.add(std::mem::size_of::<perry_runtime::object::ObjectHeader>())
+                        as *const f64
+                };
+
+                let count = std::cmp::min(field_count, keys_length);
+                for i in 0..count {
+                    // Get key string from keys_array (NaN-boxed with STRING_TAG)
+                    let key_f64 = unsafe { *keys_elements_ptr.add(i as usize) };
+                    let key_bits = key_f64.to_bits();
+                    let key_ptr = (key_bits & POINTER_MASK) as *const u8;
+                    if key_ptr.is_null() || (key_ptr as usize) < 0x1000 {
+                        continue;
+                    }
+                    let key_str = unsafe { native_string_to_rust(key_ptr) };
+                    if key_str.is_empty() {
+                        continue;
+                    }
+                    let v8_key = match v8::String::new(scope, &key_str) {
+                        Some(k) => k,
+                        None => continue,
+                    };
+
+                    // Get field value (NaN-boxed f64)
+                    let field_f64 = unsafe { *fields_ptr.add(i as usize) };
+                    let v8_val = native_to_v8(scope, field_f64);
+
+                    v8_obj.set(scope, v8_key.into(), v8_val);
+                }
+            }
+
+            return v8_obj.into();
+        }
+    }
+
+    // Fallback: heuristic array detection for non-arena allocations (Maps, etc.)
+    let header = ptr as *const perry_runtime::array::ArrayHeader;
+    let length = unsafe { (*header).length };
+    let capacity = unsafe { (*header).capacity };
+    if length <= 100_000 && capacity >= length && capacity <= 200_000 {
+        let elements_ptr = unsafe {
+            ptr.add(std::mem::size_of::<perry_runtime::array::ArrayHeader>()) as *const f64
+        };
+        let v8_array = v8::Array::new(scope, length as i32);
+        for i in 0..length {
+            let elem_f64 = unsafe { *elements_ptr.add(i as usize) };
+            let v8_elem = native_to_v8(scope, elem_f64);
+            v8_array.set_index(scope, i, v8_elem);
+        }
+        return v8_array.into();
+    }
+
+    // Unknown type - wrap native pointer for opaque access
+    let obj = v8::Object::new(scope);
     let external = v8::External::new(scope, ptr as *mut std::ffi::c_void);
     let key = v8::String::new(scope, "__native_ptr__").unwrap();
     obj.set(scope, key.into(), external.into());

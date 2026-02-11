@@ -404,8 +404,14 @@ fn transform_expr(
 
         // New expressions - may be for JS classes
         Expr::New { class_name, args, .. } => {
-            // Check if this is a JS class
-            if tracker.is_js_class(class_name) {
+            // Classes with native codegen support should NOT be converted to JsNew
+            // even if imported from JS modules - the codegen handles them directly
+            const NATIVE_CODEGEN_CLASSES: &[&str] = &[
+                "Redis", "Command", "Pool", "WebSocket", "WebSocketServer",
+                "LRUCache", "Big", "Decimal", "BigNumber", "URLSearchParams",
+            ];
+            // Check if this is a JS class (but not one handled natively)
+            if !NATIVE_CODEGEN_CLASSES.contains(&class_name.as_str()) && tracker.is_js_class(class_name) {
                 // Find the module that exports this class
                 if let Some((module_source, export_name)) = local_name_to_js.get(class_name) {
                     if let Some(info) = js_imports.get(module_source) {
@@ -578,12 +584,49 @@ fn transform_expr(
             }
         }
         // Native method calls may have expressions in args
-        Expr::NativeMethodCall { object, args, .. } => {
-            if let Some(obj) = object {
-                transform_expr(obj, js_imports, extern_func_to_js, local_name_to_js, tracker);
+        // If the object is a JS value, convert to JsCallMethod for V8 dispatch
+        Expr::NativeMethodCall { object, args, method, module, .. } => {
+            // Transform children first
+            if let Some(obj) = object.as_mut() {
+                transform_expr(obj.as_mut(), js_imports, extern_func_to_js, local_name_to_js, tracker);
             }
-            for arg in args {
+            for arg in args.iter_mut() {
                 transform_expr(arg, js_imports, extern_func_to_js, local_name_to_js, tracker);
+            }
+
+            // Check if the object is a JS value - if so, dispatch through V8
+            if let Some(obj) = object {
+                if is_js_object_expr(obj, tracker, extern_func_to_js) {
+                    let method_name = method.clone();
+                    let object_expr = std::mem::replace(obj.as_mut(), Expr::Undefined);
+                    let args_owned: Vec<Expr> = args.drain(..).collect();
+                    *expr = Expr::JsCallMethod {
+                        object: Box::new(object_expr),
+                        method_name,
+                        args: args_owned,
+                    };
+                    return;
+                }
+            }
+
+            // Check if the module itself is a JS import (object: None = static method)
+            if object.is_none() {
+                if let Some((module_source, export_name)) = extern_func_to_js.get(module.as_str()) {
+                    if let Some(info) = js_imports.get(module_source) {
+                        let method_name = method.clone();
+                        let module_expr = Expr::JsGetExport {
+                            module_handle: Box::new(Expr::JsLoadModule { path: info.path.clone() }),
+                            export_name: export_name.clone(),
+                        };
+                        let args_owned: Vec<Expr> = args.drain(..).collect();
+                        *expr = Expr::JsCallMethod {
+                            object: Box::new(module_expr),
+                            method_name,
+                            args: args_owned,
+                        };
+                        return;
+                    }
+                }
             }
         }
         Expr::StaticMethodCall { args, .. } => {
@@ -738,7 +781,7 @@ fn transform_expr(
                 transform_expr(r, js_imports, extern_func_to_js, local_name_to_js, tracker);
             }
         }
-        Expr::ParseFloat(e) | Expr::NumberCoerce(e) | Expr::StringCoerce(e) | Expr::IsNaN(e) | Expr::IsFinite(e) => {
+        Expr::ParseFloat(e) | Expr::NumberCoerce(e) | Expr::BigIntCoerce(e) | Expr::StringCoerce(e) | Expr::IsNaN(e) | Expr::IsFinite(e) => {
             transform_expr(e, js_imports, extern_func_to_js, local_name_to_js, tracker);
         }
         // JS Runtime expressions (already transformed, just recurse into subexpressions)
@@ -818,9 +861,12 @@ pub struct ExportedNativeInstance {
 pub fn fix_cross_module_native_instances(
     module: &mut Module,
     exported_instances: &HashMap<(String, String), ExportedNativeInstance>,
+    exported_func_return_instances: &HashMap<(String, String), ExportedNativeInstance>,
 ) {
     // Build a map from local variable names to native instance info
     let mut local_native_instances: HashMap<String, (String, String)> = HashMap::new();
+    // Build a map from imported function local names to native return info
+    let mut func_return_instances: HashMap<String, (String, String)> = HashMap::new();
 
     for import in &module.imports {
         // Only check imports from local TypeScript modules (NativeCompiled)
@@ -841,26 +887,67 @@ pub fn fix_cross_module_native_instances(
             };
 
             // Check if this import is a native instance
-            let key = (resolved_path.clone(), exported_name);
+            let key = (resolved_path.clone(), exported_name.clone());
             if let Some(info) = exported_instances.get(&key) {
-                local_native_instances.insert(local_name, (info.native_module.clone(), info.native_class.clone()));
+                local_native_instances.insert(local_name.clone(), (info.native_module.clone(), info.native_class.clone()));
+            }
+
+            // Check if this import is a function that returns a native instance
+            let func_key = (resolved_path.clone(), exported_name);
+            if let Some(info) = exported_func_return_instances.get(&func_key) {
+                func_return_instances.insert(local_name, (info.native_module.clone(), info.native_class.clone()));
             }
         }
     }
 
-    if local_native_instances.is_empty() {
+    // Scan for variables assigned from calls to native-returning functions
+    // Maps LocalId -> (module_name, class_name)
+    let mut local_id_native_instances: HashMap<perry_types::LocalId, (String, String)> = HashMap::new();
+
+    if !func_return_instances.is_empty() {
+        // Scan init statements
+        for stmt in &module.init {
+            scan_for_native_func_returns(stmt, &func_return_instances, &mut local_native_instances, &mut local_id_native_instances);
+        }
+        // Scan function bodies
+        for func in &module.functions {
+            for stmt in &func.body {
+                scan_for_native_func_returns(stmt, &func_return_instances, &mut local_native_instances, &mut local_id_native_instances);
+            }
+        }
+        // Scan class methods
+        for class in &module.classes {
+            if let Some(ctor) = &class.constructor {
+                for stmt in &ctor.body {
+                    scan_for_native_func_returns(stmt, &func_return_instances, &mut local_native_instances, &mut local_id_native_instances);
+                }
+            }
+            for method in &class.methods {
+                for stmt in &method.body {
+                    scan_for_native_func_returns(stmt, &func_return_instances, &mut local_native_instances, &mut local_id_native_instances);
+                }
+            }
+            for method in &class.static_methods {
+                for stmt in &method.body {
+                    scan_for_native_func_returns(stmt, &func_return_instances, &mut local_native_instances, &mut local_id_native_instances);
+                }
+            }
+        }
+    }
+
+    if local_native_instances.is_empty() && local_id_native_instances.is_empty() {
         return;
     }
 
     // Transform statements in init
     for stmt in &mut module.init {
-        fix_native_instance_stmt(stmt, &local_native_instances);
+        fix_native_instance_stmt(stmt, &local_native_instances, &local_id_native_instances);
     }
 
     // Transform statements in functions
     for func in &mut module.functions {
         for stmt in &mut func.body {
-            fix_native_instance_stmt(stmt, &local_native_instances);
+            fix_native_instance_stmt(stmt, &local_native_instances, &local_id_native_instances);
         }
     }
 
@@ -868,114 +955,300 @@ pub fn fix_cross_module_native_instances(
     for class in &mut module.classes {
         if let Some(ctor) = &mut class.constructor {
             for stmt in &mut ctor.body {
-                fix_native_instance_stmt(stmt, &local_native_instances);
+                fix_native_instance_stmt(stmt, &local_native_instances, &local_id_native_instances);
             }
         }
         for method in &mut class.methods {
             for stmt in &mut method.body {
-                fix_native_instance_stmt(stmt, &local_native_instances);
+                fix_native_instance_stmt(stmt, &local_native_instances, &local_id_native_instances);
             }
         }
         for method in &mut class.static_methods {
             for stmt in &mut method.body {
-                fix_native_instance_stmt(stmt, &local_native_instances);
+                fix_native_instance_stmt(stmt, &local_native_instances, &local_id_native_instances);
             }
         }
     }
 }
 
-fn fix_native_instance_stmt(stmt: &mut Stmt, native_instances: &HashMap<String, (String, String)>) {
+/// Scan for `let x = await func()` or `let x = func()` where func returns a native instance
+fn scan_for_native_func_returns(
+    stmt: &Stmt,
+    func_return_instances: &HashMap<String, (String, String)>,
+    local_native_instances: &mut HashMap<String, (String, String)>,
+    local_id_native_instances: &mut HashMap<perry_types::LocalId, (String, String)>,
+) {
     match stmt {
-        Stmt::Expr(expr) => fix_native_instance_expr(expr, native_instances),
-        Stmt::Let { init, .. } => {
-            if let Some(e) = init {
-                fix_native_instance_expr(e, native_instances);
+        Stmt::Let { id, name, init, .. } => {
+            if let Some(init_expr) = init {
+                // Unwrap Await if present
+                let call_expr = match init_expr {
+                    Expr::Await(inner) => inner.as_ref(),
+                    other => other,
+                };
+                // Check if it's a call to a function that returns a native instance
+                if let Expr::Call { callee, .. } = call_expr {
+                    let func_name = match callee.as_ref() {
+                        Expr::ExternFuncRef { name, .. } => Some(name.as_str()),
+                        Expr::FuncRef(_) => None, // local funcs already handled by lower.rs
+                        _ => None,
+                    };
+                    if let Some(fname) = func_name {
+                        if let Some((module, class)) = func_return_instances.get(fname) {
+                            local_native_instances.insert(name.clone(), (module.clone(), class.clone()));
+                            local_id_native_instances.insert(*id, (module.clone(), class.clone()));
+                        }
+                    }
+                }
             }
         }
-        Stmt::Return(Some(e)) => fix_native_instance_expr(e, native_instances),
-        Stmt::Return(None) => {}
-        Stmt::If { condition, then_branch, else_branch } => {
-            fix_native_instance_expr(condition, native_instances);
+        Stmt::If { then_branch, else_branch, .. } => {
             for s in then_branch {
-                fix_native_instance_stmt(s, native_instances);
+                scan_for_native_func_returns(s, func_return_instances, local_native_instances, local_id_native_instances);
             }
             if let Some(else_stmts) = else_branch {
                 for s in else_stmts {
-                    fix_native_instance_stmt(s, native_instances);
+                    scan_for_native_func_returns(s, func_return_instances, local_native_instances, local_id_native_instances);
+                }
+            }
+        }
+        Stmt::While { body, .. } | Stmt::For { body, .. } => {
+            for s in body {
+                scan_for_native_func_returns(s, func_return_instances, local_native_instances, local_id_native_instances);
+            }
+        }
+        Stmt::Try { body, catch, finally } => {
+            for s in body {
+                scan_for_native_func_returns(s, func_return_instances, local_native_instances, local_id_native_instances);
+            }
+            if let Some(catch_block) = catch {
+                for s in &catch_block.body {
+                    scan_for_native_func_returns(s, func_return_instances, local_native_instances, local_id_native_instances);
+                }
+            }
+            if let Some(finally_stmts) = finally {
+                for s in finally_stmts {
+                    scan_for_native_func_returns(s, func_return_instances, local_native_instances, local_id_native_instances);
+                }
+            }
+        }
+        Stmt::Switch { cases, .. } => {
+            for case in cases {
+                for s in &case.body {
+                    scan_for_native_func_returns(s, func_return_instances, local_native_instances, local_id_native_instances);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn fix_native_instance_stmt(stmt: &mut Stmt, native_instances: &HashMap<String, (String, String)>, local_id_instances: &HashMap<perry_types::LocalId, (String, String)>) {
+    match stmt {
+        Stmt::Expr(expr) => fix_native_instance_expr(expr, native_instances, local_id_instances),
+        Stmt::Let { init, .. } => {
+            if let Some(e) = init {
+                fix_native_instance_expr(e, native_instances, local_id_instances);
+            }
+        }
+        Stmt::Return(Some(e)) => fix_native_instance_expr(e, native_instances, local_id_instances),
+        Stmt::Return(None) => {}
+        Stmt::If { condition, then_branch, else_branch } => {
+            fix_native_instance_expr(condition, native_instances, local_id_instances);
+            for s in then_branch {
+                fix_native_instance_stmt(s, native_instances, local_id_instances);
+            }
+            if let Some(else_stmts) = else_branch {
+                for s in else_stmts {
+                    fix_native_instance_stmt(s, native_instances, local_id_instances);
                 }
             }
         }
         Stmt::While { condition, body } => {
-            fix_native_instance_expr(condition, native_instances);
+            fix_native_instance_expr(condition, native_instances, local_id_instances);
             for s in body {
-                fix_native_instance_stmt(s, native_instances);
+                fix_native_instance_stmt(s, native_instances, local_id_instances);
             }
         }
         Stmt::For { init, condition, update, body } => {
             if let Some(init_stmt) = init {
-                fix_native_instance_stmt(init_stmt, native_instances);
+                fix_native_instance_stmt(init_stmt, native_instances, local_id_instances);
             }
             if let Some(e) = condition {
-                fix_native_instance_expr(e, native_instances);
+                fix_native_instance_expr(e, native_instances, local_id_instances);
             }
             if let Some(e) = update {
-                fix_native_instance_expr(e, native_instances);
+                fix_native_instance_expr(e, native_instances, local_id_instances);
             }
             for s in body {
-                fix_native_instance_stmt(s, native_instances);
+                fix_native_instance_stmt(s, native_instances, local_id_instances);
             }
         }
         Stmt::Switch { discriminant, cases } => {
-            fix_native_instance_expr(discriminant, native_instances);
+            fix_native_instance_expr(discriminant, native_instances, local_id_instances);
             for case in cases {
                 if let Some(ref mut test) = case.test {
-                    fix_native_instance_expr(test, native_instances);
+                    fix_native_instance_expr(test, native_instances, local_id_instances);
                 }
                 for s in &mut case.body {
-                    fix_native_instance_stmt(s, native_instances);
+                    fix_native_instance_stmt(s, native_instances, local_id_instances);
                 }
             }
         }
         Stmt::Try { body, catch, finally } => {
             for s in body {
-                fix_native_instance_stmt(s, native_instances);
+                fix_native_instance_stmt(s, native_instances, local_id_instances);
             }
             if let Some(catch_block) = catch {
                 for s in &mut catch_block.body {
-                    fix_native_instance_stmt(s, native_instances);
+                    fix_native_instance_stmt(s, native_instances, local_id_instances);
                 }
             }
             if let Some(finally_stmts) = finally {
                 for s in finally_stmts {
-                    fix_native_instance_stmt(s, native_instances);
+                    fix_native_instance_stmt(s, native_instances, local_id_instances);
                 }
             }
         }
-        Stmt::Throw(e) => fix_native_instance_expr(e, native_instances),
+        Stmt::Throw(e) => fix_native_instance_expr(e, native_instances, local_id_instances),
         Stmt::Break | Stmt::Continue => {}
     }
 }
 
-fn fix_native_instance_expr(expr: &mut Expr, native_instances: &HashMap<String, (String, String)>) {
+/// Try to resolve native instance info from an object expression
+fn resolve_native_instance<'a>(
+    object: &Expr,
+    native_instances: &'a HashMap<String, (String, String)>,
+    local_id_instances: &'a HashMap<perry_types::LocalId, (String, String)>,
+) -> Option<(&'a String, &'a String)> {
+    match object {
+        Expr::ExternFuncRef { name, .. } => {
+            native_instances.get(name).map(|(m, c)| (m, c))
+        }
+        Expr::LocalGet(id) => {
+            local_id_instances.get(id).map(|(m, c)| (m, c))
+        }
+        _ => None,
+    }
+}
+
+fn fix_native_instance_expr(expr: &mut Expr, native_instances: &HashMap<String, (String, String)>, local_id_instances: &HashMap<perry_types::LocalId, (String, String)>) {
     match expr {
         // The key case: method calls that might be on native instances
         Expr::Call { callee, args, .. } => {
             // Check if this is a method call: obj.method(args)
             if let Expr::PropertyGet { object, property } = callee.as_mut() {
-                // Check if the object is an ExternFuncRef that's a native instance
-                if let Expr::ExternFuncRef { name, .. } = object.as_ref() {
-                    if let Some((native_module, native_class)) = native_instances.get(name) {
+                // Check if the object is a native instance (ExternFuncRef or LocalGet)
+                if let Some((native_module, native_class)) = resolve_native_instance(object.as_ref(), native_instances, local_id_instances) {
+                    let native_module = native_module.clone();
+                    let native_class = native_class.clone();
+                    // Transform args first
+                    for arg in args.iter_mut() {
+                        fix_native_instance_expr(arg, native_instances, local_id_instances);
+                    }
+                    let args_owned: Vec<Expr> = args.drain(..).collect();
+                    let object_expr = std::mem::replace(object.as_mut(), Expr::Undefined);
+
+                    // Transform to NativeMethodCall
+                    *expr = Expr::NativeMethodCall {
+                        module: native_module,
+                        class_name: Some(native_class),
+                        object: Some(Box::new(object_expr)),
+                        method: property.clone(),
+                        args: args_owned,
+                    };
+                    return;
+                }
+            }
+
+            // Not a native instance call, recurse
+            fix_native_instance_expr(callee, native_instances, local_id_instances);
+            for arg in args {
+                fix_native_instance_expr(arg, native_instances, local_id_instances);
+            }
+        }
+        // Recurse into other expressions
+        Expr::Binary { left, right, .. } => {
+            fix_native_instance_expr(left, native_instances, local_id_instances);
+            fix_native_instance_expr(right, native_instances, local_id_instances);
+        }
+        Expr::Unary { operand, .. } => {
+            fix_native_instance_expr(operand, native_instances, local_id_instances);
+        }
+        Expr::Logical { left, right, .. } => {
+            fix_native_instance_expr(left, native_instances, local_id_instances);
+            fix_native_instance_expr(right, native_instances, local_id_instances);
+        }
+        Expr::Compare { left, right, .. } => {
+            fix_native_instance_expr(left, native_instances, local_id_instances);
+            fix_native_instance_expr(right, native_instances, local_id_instances);
+        }
+        Expr::LocalSet(_, value) => {
+            fix_native_instance_expr(value, native_instances, local_id_instances);
+        }
+        Expr::GlobalSet(_, value) => {
+            fix_native_instance_expr(value, native_instances, local_id_instances);
+        }
+        Expr::Conditional { condition, then_expr, else_expr } => {
+            fix_native_instance_expr(condition, native_instances, local_id_instances);
+            fix_native_instance_expr(then_expr, native_instances, local_id_instances);
+            fix_native_instance_expr(else_expr, native_instances, local_id_instances);
+        }
+        Expr::Array(elements) => {
+            for elem in elements {
+                fix_native_instance_expr(elem, native_instances, local_id_instances);
+            }
+        }
+        Expr::ArraySpread(elements) => {
+            for elem in elements {
+                match elem {
+                    crate::ir::ArrayElement::Expr(e) => fix_native_instance_expr(e, native_instances, local_id_instances),
+                    crate::ir::ArrayElement::Spread(e) => fix_native_instance_expr(e, native_instances, local_id_instances),
+                }
+            }
+        }
+        Expr::Object(properties) => {
+            for (_, value) in properties {
+                fix_native_instance_expr(value, native_instances, local_id_instances);
+            }
+        }
+        Expr::PropertyGet { object, .. } => {
+            fix_native_instance_expr(object, native_instances, local_id_instances);
+        }
+        Expr::PropertySet { object, value, .. } => {
+            fix_native_instance_expr(object, native_instances, local_id_instances);
+            fix_native_instance_expr(value, native_instances, local_id_instances);
+        }
+        Expr::PropertyUpdate { object, .. } => {
+            fix_native_instance_expr(object, native_instances, local_id_instances);
+        }
+        Expr::IndexGet { object, index } => {
+            fix_native_instance_expr(object, native_instances, local_id_instances);
+            fix_native_instance_expr(index, native_instances, local_id_instances);
+        }
+        Expr::IndexSet { object, index, value } => {
+            fix_native_instance_expr(object, native_instances, local_id_instances);
+            fix_native_instance_expr(index, native_instances, local_id_instances);
+            fix_native_instance_expr(value, native_instances, local_id_instances);
+        }
+        Expr::Await(inner) => {
+            // Handle Await(Call{PropertyGet{obj...}}) pattern for native instances
+            if let Expr::Call { callee, args, .. } = inner.as_mut() {
+                if let Expr::PropertyGet { object, property } = callee.as_mut() {
+                    if let Some((native_module, native_class)) = resolve_native_instance(object.as_ref(), native_instances, local_id_instances) {
+                        let native_module = native_module.clone();
+                        let native_class = native_class.clone();
                         // Transform args first
                         for arg in args.iter_mut() {
-                            fix_native_instance_expr(arg, native_instances);
+                            fix_native_instance_expr(arg, native_instances, local_id_instances);
                         }
                         let args_owned: Vec<Expr> = args.drain(..).collect();
                         let object_expr = std::mem::replace(object.as_mut(), Expr::Undefined);
 
-                        // Transform to NativeMethodCall
-                        *expr = Expr::NativeMethodCall {
-                            module: native_module.clone(),
-                            class_name: Some(native_class.clone()),
+                        // Replace the inner Call with NativeMethodCall (wrapped by Await)
+                        *inner.as_mut() = Expr::NativeMethodCall {
+                            module: native_module,
+                            class_name: Some(native_class),
                             object: Some(Box::new(object_expr)),
                             method: property.clone(),
                             args: args_owned,
@@ -984,177 +1257,79 @@ fn fix_native_instance_expr(expr: &mut Expr, native_instances: &HashMap<String, 
                     }
                 }
             }
-
-            // Not a native instance call, recurse
-            fix_native_instance_expr(callee, native_instances);
-            for arg in args {
-                fix_native_instance_expr(arg, native_instances);
-            }
-        }
-        // Recurse into other expressions
-        Expr::Binary { left, right, .. } => {
-            fix_native_instance_expr(left, native_instances);
-            fix_native_instance_expr(right, native_instances);
-        }
-        Expr::Unary { operand, .. } => {
-            fix_native_instance_expr(operand, native_instances);
-        }
-        Expr::Logical { left, right, .. } => {
-            fix_native_instance_expr(left, native_instances);
-            fix_native_instance_expr(right, native_instances);
-        }
-        Expr::Compare { left, right, .. } => {
-            fix_native_instance_expr(left, native_instances);
-            fix_native_instance_expr(right, native_instances);
-        }
-        Expr::LocalSet(_, value) => {
-            fix_native_instance_expr(value, native_instances);
-        }
-        Expr::GlobalSet(_, value) => {
-            fix_native_instance_expr(value, native_instances);
-        }
-        Expr::Conditional { condition, then_expr, else_expr } => {
-            fix_native_instance_expr(condition, native_instances);
-            fix_native_instance_expr(then_expr, native_instances);
-            fix_native_instance_expr(else_expr, native_instances);
-        }
-        Expr::Array(elements) => {
-            for elem in elements {
-                fix_native_instance_expr(elem, native_instances);
-            }
-        }
-        Expr::ArraySpread(elements) => {
-            for elem in elements {
-                match elem {
-                    crate::ir::ArrayElement::Expr(e) => fix_native_instance_expr(e, native_instances),
-                    crate::ir::ArrayElement::Spread(e) => fix_native_instance_expr(e, native_instances),
-                }
-            }
-        }
-        Expr::Object(properties) => {
-            for (_, value) in properties {
-                fix_native_instance_expr(value, native_instances);
-            }
-        }
-        Expr::PropertyGet { object, .. } => {
-            fix_native_instance_expr(object, native_instances);
-        }
-        Expr::PropertySet { object, value, .. } => {
-            fix_native_instance_expr(object, native_instances);
-            fix_native_instance_expr(value, native_instances);
-        }
-        Expr::PropertyUpdate { object, .. } => {
-            fix_native_instance_expr(object, native_instances);
-        }
-        Expr::IndexGet { object, index } => {
-            fix_native_instance_expr(object, native_instances);
-            fix_native_instance_expr(index, native_instances);
-        }
-        Expr::IndexSet { object, index, value } => {
-            fix_native_instance_expr(object, native_instances);
-            fix_native_instance_expr(index, native_instances);
-            fix_native_instance_expr(value, native_instances);
-        }
-        Expr::Await(inner) => {
-            // Handle Await(Call{PropertyGet{ExternFuncRef...}}) pattern
-            // First try to transform the inner expression as a native call
-            if let Expr::Call { callee, args, .. } = inner.as_mut() {
-                if let Expr::PropertyGet { object, property } = callee.as_mut() {
-                    if let Expr::ExternFuncRef { name, .. } = object.as_ref() {
-                        if let Some((native_module, native_class)) = native_instances.get(name) {
-                            // Transform args first
-                            for arg in args.iter_mut() {
-                                fix_native_instance_expr(arg, native_instances);
-                            }
-                            let args_owned: Vec<Expr> = args.drain(..).collect();
-                            let object_expr = std::mem::replace(object.as_mut(), Expr::Undefined);
-
-                            // Replace the inner Call with NativeMethodCall (wrapped by Await)
-                            *inner.as_mut() = Expr::NativeMethodCall {
-                                module: native_module.clone(),
-                                class_name: Some(native_class.clone()),
-                                object: Some(Box::new(object_expr)),
-                                method: property.clone(),
-                                args: args_owned,
-                            };
-                            return;
-                        }
-                    }
-                }
-            }
             // Otherwise, just recurse
-            fix_native_instance_expr(inner, native_instances);
+            fix_native_instance_expr(inner, native_instances, local_id_instances);
         }
         Expr::Closure { body, .. } => {
             for stmt in body {
-                fix_native_instance_stmt(stmt, native_instances);
+                fix_native_instance_stmt(stmt, native_instances, local_id_instances);
             }
         }
         Expr::Sequence(exprs) => {
             for e in exprs {
-                fix_native_instance_expr(e, native_instances);
+                fix_native_instance_expr(e, native_instances, local_id_instances);
             }
         }
         Expr::NativeMethodCall { object, args, .. } => {
             if let Some(obj) = object {
-                fix_native_instance_expr(obj, native_instances);
+                fix_native_instance_expr(obj, native_instances, local_id_instances);
             }
             for arg in args {
-                fix_native_instance_expr(arg, native_instances);
+                fix_native_instance_expr(arg, native_instances, local_id_instances);
             }
         }
         Expr::New { args, .. } | Expr::SuperCall(args) => {
             for arg in args {
-                fix_native_instance_expr(arg, native_instances);
+                fix_native_instance_expr(arg, native_instances, local_id_instances);
             }
         }
         Expr::NewDynamic { callee, args } => {
-            fix_native_instance_expr(callee, native_instances);
+            fix_native_instance_expr(callee, native_instances, local_id_instances);
             for arg in args {
-                fix_native_instance_expr(arg, native_instances);
+                fix_native_instance_expr(arg, native_instances, local_id_instances);
             }
         }
         // JS interop expressions that may contain native instance calls
         Expr::JsCallMethod { object, args, .. } => {
-            fix_native_instance_expr(object, native_instances);
+            fix_native_instance_expr(object, native_instances, local_id_instances);
             for arg in args {
-                fix_native_instance_expr(arg, native_instances);
+                fix_native_instance_expr(arg, native_instances, local_id_instances);
             }
         }
         Expr::JsCallFunction { module_handle, args, .. } => {
-            fix_native_instance_expr(module_handle, native_instances);
+            fix_native_instance_expr(module_handle, native_instances, local_id_instances);
             for arg in args {
-                fix_native_instance_expr(arg, native_instances);
+                fix_native_instance_expr(arg, native_instances, local_id_instances);
             }
         }
         Expr::JsCreateCallback { closure, .. } => {
-            fix_native_instance_expr(closure, native_instances);
+            fix_native_instance_expr(closure, native_instances, local_id_instances);
         }
         Expr::JsGetProperty { object, .. } => {
-            fix_native_instance_expr(object, native_instances);
+            fix_native_instance_expr(object, native_instances, local_id_instances);
         }
         Expr::JsSetProperty { object, value, .. } => {
-            fix_native_instance_expr(object, native_instances);
-            fix_native_instance_expr(value, native_instances);
+            fix_native_instance_expr(object, native_instances, local_id_instances);
+            fix_native_instance_expr(value, native_instances, local_id_instances);
         }
         Expr::JsNew { module_handle, args, .. } => {
-            fix_native_instance_expr(module_handle, native_instances);
+            fix_native_instance_expr(module_handle, native_instances, local_id_instances);
             for arg in args {
-                fix_native_instance_expr(arg, native_instances);
+                fix_native_instance_expr(arg, native_instances, local_id_instances);
             }
         }
         Expr::JsNewFromHandle { constructor, args } => {
-            fix_native_instance_expr(constructor, native_instances);
+            fix_native_instance_expr(constructor, native_instances, local_id_instances);
             for arg in args {
-                fix_native_instance_expr(arg, native_instances);
+                fix_native_instance_expr(arg, native_instances, local_id_instances);
             }
         }
         Expr::JsGetExport { module_handle, .. } => {
-            fix_native_instance_expr(module_handle, native_instances);
+            fix_native_instance_expr(module_handle, native_instances, local_id_instances);
         }
         Expr::StaticMethodCall { args, .. } => {
             for arg in args {
-                fix_native_instance_expr(arg, native_instances);
+                fix_native_instance_expr(arg, native_instances, local_id_instances);
             }
         }
         // Many more expressions can contain sub-expressions, but for the first pass,

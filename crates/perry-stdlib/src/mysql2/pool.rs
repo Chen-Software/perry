@@ -329,11 +329,15 @@ pub unsafe extern "C" fn js_mysql2_pool_get_connection(pool_handle: Handle) -> *
                     let nanboxed = perry_runtime::js_nanbox_pointer(handle as i64);
                     Ok(nanboxed.to_bits())
                 }
-                Ok(Err(e)) => Err(format!("Failed to get connection: {}", e)),
-                Err(_) => Err(format!(
-                    "Connection acquisition timed out after {} seconds",
-                    DEFAULT_ACQUIRE_TIMEOUT_SECS
-                )),
+                Ok(Err(e)) => {
+                    Err(format!("Failed to get connection: {}", e))
+                }
+                Err(_) => {
+                    Err(format!(
+                        "Connection acquisition timed out after {} seconds",
+                        DEFAULT_ACQUIRE_TIMEOUT_SECS
+                    ))
+                }
             }
         } else {
             Err("Invalid pool handle".to_string())
@@ -357,6 +361,7 @@ pub unsafe extern "C" fn js_mysql2_pool_connection_release(conn_handle: Handle) 
     // Take and drop the connection handle - this releases the connection back to the pool
     if let Some(_conn) = take_handle::<MysqlPoolConnectionHandle>(conn_handle) {
         // Connection is automatically returned to pool when dropped
+    } else {
     }
 }
 
@@ -381,6 +386,7 @@ pub unsafe extern "C" fn js_mysql2_pool_connection_query(
         String::from_utf8_lossy(bytes).to_string()
     };
 
+
     crate::common::spawn_for_promise_deferred(
         promise as *mut u8,
         async move {
@@ -396,7 +402,9 @@ pub unsafe extern "C" fn js_mysql2_pool_connection_query(
                             let raw_result = RawQueryResult::from_mysql_rows(rows);
                             Ok(raw_result)
                         }
-                        Ok(Err(e)) => Err(format!("Query failed: {}", e)),
+                        Ok(Err(e)) => {
+                            Err(format!("Query failed: {}", e))
+                        }
                         Err(_) => Err(format!(
                             "Query timed out after {} seconds",
                             DEFAULT_QUERY_TIMEOUT_SECS

@@ -84,6 +84,10 @@ pub extern "C" fn js_closure_set_capture_ptr(closure: *mut ClosureHeader, index:
 /// Call a closure with 0 arguments, returning f64
 #[no_mangle]
 pub extern "C" fn js_closure_call0(closure: *const ClosureHeader) -> f64 {
+    if closure.is_null() {
+        eprintln!("[js_closure_call0] ERROR: null closure pointer!");
+        return 0.0;
+    }
     unsafe {
         let func: extern "C" fn(*const ClosureHeader) -> f64 = std::mem::transmute((*closure).func_ptr);
         func(closure)
@@ -185,6 +189,9 @@ pub unsafe extern "C" fn js_native_call_value(
     // For native compilation, function values are stored as NaN-boxed pointers
     let closure: *const ClosureHeader = if jsval.is_pointer() {
         jsval.as_pointer()
+    } else if jsval.is_undefined() || jsval.is_null() || func_value.is_nan() {
+        // TAG_UNDEFINED, TAG_NULL, or other NaN values are not callable
+        return f64::from_bits(JSValue::undefined().bits());
     } else {
         // Try treating the value directly as a pointer (for i64 representation)
         func_value.to_bits() as *const ClosureHeader

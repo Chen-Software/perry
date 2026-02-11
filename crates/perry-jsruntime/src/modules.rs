@@ -24,6 +24,39 @@ impl NodeModuleLoader {
         Self { base_dir }
     }
 
+    /// Check if a resolved path has a browser field mapping in its package.json
+    /// Returns the browser-mapped path if found, None otherwise.
+    fn check_browser_field(&self, resolved: &Path) -> Option<PathBuf> {
+        // Canonicalize the resolved path to remove ./ and ../ components
+        let resolved = std::fs::canonicalize(resolved).ok()?;
+        // Walk up from the resolved path to find a package.json with a browser field
+        let mut dir = resolved.parent()?;
+        loop {
+            let pkg_json = dir.join("package.json");
+            if pkg_json.exists() {
+                let content = std::fs::read_to_string(&pkg_json).ok()?;
+                let pkg: serde_json::Value = serde_json::from_str(&content).ok()?;
+                if let Some(browser) = pkg.get("browser") {
+                    if let Some(browser_map) = browser.as_object() {
+                        // Browser field keys are relative to the package root (prefixed with "./")
+                        let relative = resolved.strip_prefix(dir).ok()?;
+                        let relative_str = format!("./{}", relative.to_string_lossy());
+                        if let Some(replacement) = browser_map.get(&relative_str) {
+                            if let Some(replacement_str) = replacement.as_str() {
+                                let browser_path = dir.join(replacement_str.trim_start_matches("./"));
+                                if browser_path.exists() {
+                                    return Some(browser_path);
+                                }
+                            }
+                        }
+                    }
+                }
+                return None; // Found package.json but no browser mapping
+            }
+            dir = dir.parent()?;
+        }
+    }
+
     /// Resolve a module specifier to an absolute path
     fn resolve_module_path(&self, specifier: &str, referrer: &Path) -> Result<PathBuf> {
         // Handle file:// URLs
@@ -40,7 +73,13 @@ impl NodeModuleLoader {
         if specifier.starts_with("./") || specifier.starts_with("../") {
             let referrer_dir = referrer.parent().unwrap_or(&self.base_dir);
             let resolved = referrer_dir.join(specifier);
-            return self.resolve_with_extensions(resolved);
+            let resolved = self.resolve_with_extensions(resolved)?;
+            // Check browser field mapping (e.g., ethers geturl.js -> geturl-browser.js)
+            if let Some(browser_path) = self.check_browser_field(&resolved) {
+                eprintln!("[module-resolve] BROWSER FIELD: {:?} -> {:?}", resolved, browser_path);
+                return Ok(browser_path);
+            }
+            return Ok(resolved);
         }
 
         // Handle absolute paths
@@ -159,8 +198,18 @@ impl NodeModuleLoader {
         let content = std::fs::read_to_string(package_json)?;
         let pkg: serde_json::Value = serde_json::from_str(&content)?;
 
-        // If there's a subpath, resolve it directly
+        // If there's a subpath, first check "exports" field, then fall back to direct resolution
         if let Some(sub) = subpath {
+            // Check "exports" field for subpath (e.g., "./sha3" in @noble/hashes)
+            if let Some(exports) = pkg.get("exports") {
+                let export_key = format!("./{}", sub);
+                if let Some(entry) = resolve_exports(exports, &export_key) {
+                    let entry_path = package_dir.join(entry);
+                    if entry_path.exists() {
+                        return Ok(entry_path);
+                    }
+                }
+            }
             let subpath_resolved = package_dir.join(sub);
             return self.resolve_with_extensions(subpath_resolved);
         }
@@ -256,6 +305,9 @@ impl ModuleLoader for NodeModuleLoader {
         };
 
         let resolved_path = self.resolve_module_path(specifier, &referrer_path)?;
+        if specifier.contains("geturl") {
+            eprintln!("[module-resolve] specifier='{}' referrer='{}' -> resolved='{:?}'", specifier, referrer, resolved_path);
+        }
 
         let canonical = std::fs::canonicalize(&resolved_path)
             .unwrap_or(resolved_path);
@@ -345,22 +397,23 @@ fn resolve_exports(exports: &serde_json::Value, subpath: &str) -> Option<String>
     match exports {
         serde_json::Value::String(s) => Some(s.clone()),
         serde_json::Value::Object(map) => {
-            // Try the specific subpath
-            if let Some(entry) = map.get(subpath) {
-                return resolve_exports(entry, subpath);
-            }
-
-            // Try "." for main entry
-            if subpath == "." {
-                // Try common conditions
+            // Determine if this is a subpath map (keys start with '.') or conditions map
+            let has_subpaths = map.keys().any(|k| k.starts_with('.'));
+            if has_subpaths {
+                // Subpath map - try matching the subpath
+                if let Some(entry) = map.get(subpath) {
+                    return resolve_exports(entry, subpath);
+                }
+                None
+            } else {
+                // Conditions map - try conditions in priority order
                 for condition in ["import", "module", "default", "require", "node"] {
                     if let Some(entry) = map.get(condition) {
                         return resolve_exports(entry, subpath);
                     }
                 }
+                None
             }
-
-            None
         }
         _ => None,
     }
@@ -376,6 +429,30 @@ fn is_commonjs(code: &str) -> bool {
 
 /// Wrap CommonJS code as ESM
 fn wrap_commonjs(code: &str) -> String {
+    // Extract all require() specifiers so we can convert them to ESM imports
+    let require_re = regex::Regex::new(r#"require\s*\(\s*['"]([^'"]+)['"]\s*\)"#).unwrap();
+    let mut require_specs: Vec<String> = Vec::new();
+    for cap in require_re.captures_iter(code) {
+        if let Some(spec) = cap.get(1) {
+            let spec_str = spec.as_str().to_string();
+            if !require_specs.contains(&spec_str) {
+                require_specs.push(spec_str);
+            }
+        }
+    }
+
+    // Generate ESM import statements for each require() specifier
+    let imports = require_specs.iter().enumerate()
+        .map(|(i, spec)| format!("import _req_{} from '{}';", i, spec))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Generate require() lookup cases
+    let require_cases = require_specs.iter().enumerate()
+        .map(|(i, spec)| format!("        if (specifier === '{}') return _req_{};", spec, i))
+        .collect::<Vec<_>>()
+        .join("\n");
+
     // Extract exported names from CommonJS code to properly re-export them
     let mut named_exports = Vec::new();
 
@@ -402,12 +479,13 @@ fn wrap_commonjs(code: &str) -> String {
     };
 
     format!(
-        r#"
+        r#"{}
 const _cjs = (function() {{
     const module = {{ exports: {{}} }};
     const exports = module.exports;
     function require(specifier) {{
-        throw new Error('require() is not supported. Use ESM imports instead: ' + specifier);
+{}
+        throw new Error('require() is not supported: ' + specifier);
     }}
 
     {}
@@ -418,7 +496,7 @@ const _cjs = (function() {{
 export default _cjs;
 {}
 "#,
-        code, named_export_decls
+        imports, require_cases, code, named_export_decls
     )
 }
 

@@ -321,7 +321,8 @@ fn resolve_package_entry(package_dir: &Path, subpath: Option<&str>) -> Option<Pa
             // Look for corresponding .ts file
             let types_file = package_dir.join(types_path);
             let ts_file = types_file.with_extension("ts");
-            if ts_file.exists() {
+            // Skip .d.ts declaration files - they're type-only, not real source
+            if ts_file.exists() && !ts_file.to_string_lossy().ends_with(".d.ts") {
                 return Some(ts_file);
             }
         }
@@ -456,6 +457,21 @@ fn resolve_import(
     }
 
     None
+}
+
+/// Compute a sanitized module prefix from a resolved path for scoped cross-module symbols
+fn compute_module_prefix(resolved_path: &str, project_root: &Path) -> String {
+    let source_path = PathBuf::from(resolved_path);
+    let source_module_name = source_path
+        .strip_prefix(project_root)
+        .ok()
+        .and_then(|p| p.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| source_path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("module")
+            .to_string());
+    source_module_name.replace(|c: char| !c.is_alphanumeric() && c != '_', "_")
 }
 
 /// Collect all modules to compile (transitive closure of imports)
@@ -748,6 +764,29 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         }
     }
 
+    // Build map of exported functions that return native instances
+    let mut exported_func_return_instances: HashMap<(String, String), perry_hir::ExportedNativeInstance> = HashMap::new();
+    for (path, hir_module) in &ctx.native_modules {
+        let path_str = path.to_string_lossy().to_string();
+        for (func_name, native_module, native_class) in &hir_module.exported_func_return_native_instances {
+            exported_func_return_instances.insert(
+                (path_str.clone(), func_name.clone()),
+                perry_hir::ExportedNativeInstance {
+                    native_module: native_module.clone(),
+                    native_class: native_class.clone(),
+                },
+            );
+        }
+    }
+
+    // Debug: print exported func return instances
+    if !exported_func_return_instances.is_empty() {
+        eprintln!("[DEBUG compile] exported_func_return_instances ({}):", exported_func_return_instances.len());
+        for ((path, name), info) in &exported_func_return_instances {
+            eprintln!("  {}:{} -> {}.{}", path, name, info.native_module, info.native_class);
+        }
+    }
+
     // Fix local native instance method calls within each module
     // This handles cases like: const pool = mysql.createPool(); pool.execute();
     for (_, hir_module) in ctx.native_modules.iter_mut() {
@@ -755,9 +794,9 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     }
 
     // Fix cross-module native instance method calls
-    if !exported_instances.is_empty() {
+    if !exported_instances.is_empty() || !exported_func_return_instances.is_empty() {
         for (_, hir_module) in ctx.native_modules.iter_mut() {
-            perry_hir::fix_cross_module_native_instances(hir_module, &exported_instances);
+            perry_hir::fix_cross_module_native_instances(hir_module, &exported_instances, &exported_func_return_instances);
         }
     }
 
@@ -843,57 +882,72 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                     }
                 }
             }
-            deps.insert(path.clone(), module_deps);
-        }
-
-        // Topological sort using Kahn's algorithm
-        let mut in_degree: HashMap<PathBuf, usize> = HashMap::new();
-        for (path, _) in &path_to_name {
-            in_degree.insert(path.clone(), 0);
-        }
-        for (_, module_deps) in &deps {
-            for dep in module_deps {
-                if let Some(count) = in_degree.get_mut(dep) {
-                    *count += 1;
-                }
-            }
-        }
-
-        let mut queue: Vec<PathBuf> = in_degree.iter()
-            .filter(|(_, &count)| count == 0)
-            .map(|(path, _)| path.clone())
-            .collect();
-        queue.sort(); // deterministic order for modules with same in-degree
-
-        let mut sorted = Vec::new();
-        while let Some(path) = queue.pop() {
-            if let Some(name) = path_to_name.get(&path) {
-                sorted.push(name.clone());
-            }
-            if let Some(module_deps) = deps.get(&path) {
-                for dep in module_deps {
-                    if let Some(count) = in_degree.get_mut(dep) {
-                        *count -= 1;
-                        if *count == 0 {
-                            queue.push(dep.clone());
-                            queue.sort();
+            // Also treat ExportAll/ReExport sources as dependencies.
+            // If module A does `export * from './B'`, then B must be initialized before A
+            // so that B's export globals are set before any consumer of A reads them.
+            for export in &hir_module.exports {
+                let source = match export {
+                    perry_hir::Export::ExportAll { source } => Some(source),
+                    perry_hir::Export::ReExport { source, .. } => Some(source),
+                    perry_hir::Export::Named { .. } => None,
+                };
+                if let Some(src) = source {
+                    if let Some((resolved_path, _)) = resolve_import(src, path, &ctx.project_root) {
+                        if resolved_path != entry_path && ctx.native_modules.contains_key(&resolved_path) {
+                            module_deps.push(resolved_path);
                         }
                     }
                 }
             }
+            deps.insert(path.clone(), module_deps);
         }
 
-        // Add any remaining modules not reached by the sort (cycle protection)
-        for (path, name) in &path_to_name {
-            if !sorted.contains(name) {
+        // DFS-based topological sort (handles circular dependencies gracefully)
+        // Dependencies are visited before the module itself. Cycles are broken
+        // at the back-edge (module already being visited), ensuring the best
+        // possible ordering even with circular imports.
+        let mut sorted = Vec::new();
+        let mut visited: HashSet<PathBuf> = HashSet::new();
+        let mut visiting: HashSet<PathBuf> = HashSet::new(); // cycle detection
+
+        fn dfs_visit(
+            path: &PathBuf,
+            deps: &HashMap<PathBuf, Vec<PathBuf>>,
+            path_to_name: &HashMap<PathBuf, String>,
+            visited: &mut HashSet<PathBuf>,
+            visiting: &mut HashSet<PathBuf>,
+            sorted: &mut Vec<String>,
+        ) {
+            if visited.contains(path) || visiting.contains(path) {
+                return; // already done or cycle back-edge
+            }
+            visiting.insert(path.clone());
+
+            // Visit dependencies first (so they get initialized before us)
+            if let Some(module_deps) = deps.get(path) {
+                // Sort deps for deterministic order
+                let mut sorted_deps = module_deps.clone();
+                sorted_deps.sort();
+                for dep in &sorted_deps {
+                    dfs_visit(dep, deps, path_to_name, visited, visiting, sorted);
+                }
+            }
+
+            visiting.remove(path);
+            visited.insert(path.clone());
+            if let Some(name) = path_to_name.get(path) {
                 sorted.push(name.clone());
             }
         }
 
-        // Reverse: dependencies should be initialized first (they have no dependents)
-        // Kahn's gives us "leaves first" (no incoming edges = no one depends on them)
-        // We want "roots first" (modules that others depend on)
-        sorted.reverse();
+        // Sort starting nodes for deterministic iteration order
+        let mut all_paths: Vec<PathBuf> = path_to_name.keys().cloned().collect();
+        all_paths.sort();
+
+        for path in &all_paths {
+            dfs_visit(path, &deps, &path_to_name, &mut visited, &mut visiting, &mut sorted);
+        }
+
         sorted
     };
 
@@ -919,14 +973,25 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         for (path, hir_module) in &ctx.native_modules {
             let path_str = path.to_string_lossy().to_string();
             for export in &hir_module.exports {
-                if let perry_hir::Export::ExportAll { source } = export {
+                let source_str = match export {
+                    perry_hir::Export::ExportAll { source } => Some((source.as_str(), None)),
+                    perry_hir::Export::ReExport { source, imported, exported } => Some((source.as_str(), Some((imported.as_str(), exported.as_str())))),
+                    _ => None,
+                };
+                if let Some((source, re_export_names)) = source_str {
                     if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root) {
                         let source_path_str = resolved_source.to_string_lossy().to_string();
                         for ((src_path, enum_name), members) in &exported_enums {
                             if src_path == &source_path_str {
-                                let key = (path_str.clone(), enum_name.clone());
-                                if !exported_enums.contains_key(&key) {
-                                    new_enum_entries.push((key, members.clone()));
+                                let (propagate, exported_name) = match re_export_names {
+                                    Some((imported, exported)) => (enum_name == imported, exported.to_string()),
+                                    None => (true, enum_name.clone()),
+                                };
+                                if propagate {
+                                    let key = (path_str.clone(), exported_name);
+                                    if !exported_enums.contains_key(&key) {
+                                        new_enum_entries.push((key, members.clone()));
+                                    }
                                 }
                             }
                         }
@@ -990,12 +1055,193 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
 
     // Build a map of all exported functions with their param counts from all modules
     let mut exported_func_param_counts: HashMap<(String, String), usize> = HashMap::new();
+    // Build a map of all exported functions with their return types from all modules
+    let mut exported_func_return_types: HashMap<(String, String), perry_types::Type> = HashMap::new();
     for (path, hir_module) in &ctx.native_modules {
         let path_str = path.to_string_lossy().to_string();
         for func in &hir_module.functions {
             if func.is_exported {
                 exported_func_param_counts.insert((path_str.clone(), func.name.clone()), func.params.len());
+                exported_func_return_types.insert((path_str.clone(), func.name.clone()), func.return_type.clone());
             }
+        }
+        // Also scan init statements for exported closures (arrow functions assigned to const)
+        // These are in exported_objects but not in functions, so they need param counts too
+        let exported_set: std::collections::HashSet<&String> = hir_module.exported_objects.iter().collect();
+        for stmt in &hir_module.init {
+            if let perry_hir::ir::Stmt::Let { name, init: Some(expr), .. } = stmt {
+                if exported_set.contains(name) {
+                    if let perry_hir::ir::Expr::Closure { params, return_type, .. } = expr {
+                        exported_func_param_counts.insert((path_str.clone(), name.clone()), params.len());
+                        exported_func_return_types.insert((path_str.clone(), name.clone()), return_type.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // Build a map of all exports from all modules: module_path -> HashMap<export_name, origin_module_path>
+    // This is used for namespace imports (`import * as X from './module'`) to resolve all exports
+    let mut all_module_exports: HashMap<String, HashMap<String, String>> = HashMap::new();
+    for (path, hir_module) in &ctx.native_modules {
+        let path_str = path.to_string_lossy().to_string();
+        let exports = all_module_exports.entry(path_str.clone()).or_insert_with(HashMap::new);
+        // Exported functions
+        for func in &hir_module.functions {
+            if func.is_exported {
+                exports.insert(func.name.clone(), path_str.clone());
+            }
+        }
+        // Exported objects (export const x = { ... })
+        for obj_name in &hir_module.exported_objects {
+            exports.insert(obj_name.clone(), path_str.clone());
+        }
+        // Exported classes
+        for class in &hir_module.classes {
+            if class.is_exported {
+                exports.insert(class.name.clone(), path_str.clone());
+            }
+        }
+        // Exported enums
+        for en in &hir_module.enums {
+            if en.is_exported {
+                exports.insert(en.name.clone(), path_str.clone());
+            }
+        }
+        // Named exports (export { foo, bar as baz })
+        for export in &hir_module.exports {
+            if let perry_hir::Export::Named { exported, .. } = export {
+                exports.insert(exported.clone(), path_str.clone());
+            }
+            // ReExport is handled in the propagation loop below (avoids borrow issues)
+        }
+    }
+
+    // Propagate exports through ExportAll and ReExport chains
+    loop {
+        let mut new_export_entries: Vec<(String, String, String)> = Vec::new(); // (module_path, export_name, origin_path)
+        for (path, hir_module) in &ctx.native_modules {
+            let path_str = path.to_string_lossy().to_string();
+            for export in &hir_module.exports {
+                match export {
+                    perry_hir::Export::ExportAll { source } => {
+                        if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root) {
+                            let source_path_str = resolved_source.to_string_lossy().to_string();
+                            if let Some(source_exports) = all_module_exports.get(&source_path_str) {
+                                let current_exports = all_module_exports.get(&path_str);
+                                for (name, origin) in source_exports {
+                                    let already_exists = current_exports
+                                        .map(|e| e.contains_key(name))
+                                        .unwrap_or(false);
+                                    if !already_exists {
+                                        new_export_entries.push((path_str.clone(), name.clone(), origin.clone()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    perry_hir::Export::ReExport { source, imported, exported } => {
+                        if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root) {
+                            let source_path_str = resolved_source.to_string_lossy().to_string();
+                            if let Some(source_exports) = all_module_exports.get(&source_path_str) {
+                                if let Some(origin) = source_exports.get(imported) {
+                                    let current_exports = all_module_exports.get(&path_str);
+                                    let already_correct = current_exports
+                                        .and_then(|e| e.get(exported.as_str()))
+                                        .map(|v| v == origin)
+                                        .unwrap_or(false);
+                                    if !already_correct {
+                                        new_export_entries.push((path_str.clone(), exported.clone(), origin.clone()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if new_export_entries.is_empty() { break; }
+        for (module_path, name, origin) in new_export_entries {
+            all_module_exports.entry(module_path).or_insert_with(HashMap::new).insert(name, origin);
+        }
+    }
+
+    // Also propagate exported_func_param_counts through ExportAll/ReExport chains
+    loop {
+        let mut new_func_entries: Vec<((String, String), usize)> = Vec::new();
+        for (path, hir_module) in &ctx.native_modules {
+            let path_str = path.to_string_lossy().to_string();
+            for export in &hir_module.exports {
+                let source_str = match export {
+                    perry_hir::Export::ExportAll { source } => Some((source.as_str(), None)),
+                    perry_hir::Export::ReExport { source, imported, exported } => Some((source.as_str(), Some((imported.as_str(), exported.as_str())))),
+                    _ => None,
+                };
+                if let Some((source, re_export_names)) = source_str {
+                    if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root) {
+                        let source_path_str = resolved_source.to_string_lossy().to_string();
+                        for ((src_path, func_name), &param_count) in &exported_func_param_counts {
+                            if src_path == &source_path_str {
+                                // For ReExport, only propagate the specific imported name (with exported alias)
+                                // For ExportAll, propagate all functions
+                                let (propagate, exported_name) = match re_export_names {
+                                    Some((imported, exported)) => (func_name == imported, exported.to_string()),
+                                    None => (true, func_name.clone()),
+                                };
+                                if propagate {
+                                    let key = (path_str.clone(), exported_name);
+                                    if !exported_func_param_counts.contains_key(&key) {
+                                        new_func_entries.push((key, param_count));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if new_func_entries.is_empty() { break; }
+        for (key, param_count) in new_func_entries {
+            exported_func_param_counts.insert(key, param_count);
+        }
+    }
+
+    // Propagate exported_func_return_types through ExportAll/ReExport chains
+    loop {
+        let mut new_func_entries: Vec<((String, String), perry_types::Type)> = Vec::new();
+        for (path, hir_module) in &ctx.native_modules {
+            let path_str = path.to_string_lossy().to_string();
+            for export in &hir_module.exports {
+                let source_str = match export {
+                    perry_hir::Export::ExportAll { source } => Some((source.as_str(), None)),
+                    perry_hir::Export::ReExport { source, imported, exported } => Some((source.as_str(), Some((imported.as_str(), exported.as_str())))),
+                    _ => None,
+                };
+                if let Some((source, re_export_names)) = source_str {
+                    if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root) {
+                        let source_path_str = resolved_source.to_string_lossy().to_string();
+                        for ((src_path, func_name), return_type) in &exported_func_return_types {
+                            if src_path == &source_path_str {
+                                let (propagate, exported_name) = match re_export_names {
+                                    Some((imported, exported)) => (func_name == imported, exported.to_string()),
+                                    None => (true, func_name.clone()),
+                                };
+                                if propagate {
+                                    let key = (path_str.clone(), exported_name);
+                                    if !exported_func_return_types.contains_key(&key) {
+                                        new_func_entries.push((key, return_type.clone()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if new_func_entries.is_empty() { break; }
+        for (key, return_type) in new_func_entries {
+            exported_func_return_types.insert(key, return_type);
         }
     }
 
@@ -1005,14 +1251,25 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         for (path, hir_module) in &ctx.native_modules {
             let path_str = path.to_string_lossy().to_string();
             for export in &hir_module.exports {
-                if let perry_hir::Export::ExportAll { source } = export {
+                let source_str = match export {
+                    perry_hir::Export::ExportAll { source } => Some((source.as_str(), None)),
+                    perry_hir::Export::ReExport { source, imported, exported } => Some((source.as_str(), Some((imported.as_str(), exported.as_str())))),
+                    _ => None,
+                };
+                if let Some((source, re_export_names)) = source_str {
                     if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root) {
                         let source_path_str = resolved_source.to_string_lossy().to_string();
                         for ((src_path, class_name), class) in &exported_classes {
                             if src_path == &source_path_str {
-                                let key = (path_str.clone(), class_name.clone());
-                                if !exported_classes.contains_key(&key) {
-                                    new_entries.push((key, *class));
+                                let (propagate, exported_name) = match re_export_names {
+                                    Some((imported, exported)) => (class_name == imported, exported.to_string()),
+                                    None => (true, class_name.clone()),
+                                };
+                                if propagate {
+                                    let key = (path_str.clone(), exported_name);
+                                    if !exported_classes.contains_key(&key) {
+                                        new_entries.push((key, *class));
+                                    }
                                 }
                             }
                         }
@@ -1065,45 +1322,89 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 None => continue,
             };
 
+            let resolved_path_str = resolved_path.clone();
+            let source_module_prefix = compute_module_prefix(&resolved_path_str, &ctx.project_root);
+
             for spec in &import.specifiers {
+                match spec {
+                    perry_hir::ImportSpecifier::Namespace { local } => {
+                        // Handle namespace imports: import * as X from './module'
+                        // Register the local name so codegen intercepts PropertyGet on it
+                        compiler.register_namespace_import(local.clone());
+                        // Pre-declare all exports from the target module so PropertyGet resolves them
+                        if let Some(exports) = all_module_exports.get(&resolved_path_str) {
+                            for (export_name, origin_path) in exports {
+                                let origin_prefix = compute_module_prefix(origin_path, &ctx.project_root);
+                                let _ = compiler.pre_declare_import_export(export_name, &origin_prefix);
+
+                                // Also handle functions if re-exported
+                                let key = (origin_path.clone(), export_name.clone());
+                                if let Some(&param_count) = exported_func_param_counts.get(&key) {
+                                    compiler.register_imported_func_param_count(export_name.clone(), param_count);
+                                    let _ = compiler.pre_declare_import_wrapper(export_name, &origin_prefix, param_count);
+                                }
+
+                                // Register imported classes
+                                if let Some(class) = exported_classes.get(&key) {
+                                    compiler.register_imported_class(class, None)?;
+                                }
+
+                                // Register imported enums
+                                if let Some(members) = exported_enums.get(&key) {
+                                    compiler.register_imported_enum(export_name, members);
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+
                 let (local_name, exported_name) = match spec {
                     perry_hir::ImportSpecifier::Named { imported, local } => (local.clone(), imported.clone()),
                     perry_hir::ImportSpecifier::Default { local } => (local.clone(), local.clone()),
-                    perry_hir::ImportSpecifier::Namespace { .. } => continue,
+                    perry_hir::ImportSpecifier::Namespace { .. } => unreachable!(),
                 };
 
                 // Check if this import is a class from another module
-                let key = (resolved_path.clone(), exported_name.clone());
+                let key = (resolved_path_str.clone(), exported_name.clone());
                 if let Some(class) = exported_classes.get(&key) {
                     // Register this class as an import in the current compiler
                     // Pass the local_name as an alias so the class can be found when used with that name
                     compiler.register_imported_class(class, Some(&local_name))?;
                 }
 
-                // Compute source module's symbol prefix for scoped cross-module symbols
-                let source_module_prefix = {
-                    let source_path = PathBuf::from(&resolved_path);
-                    let source_module_name = source_path
-                        .strip_prefix(&ctx.project_root)
-                        .ok()
-                        .and_then(|p| p.to_str())
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| source_path.file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("module")
-                            .to_string());
-                    source_module_name.replace(|c: char| !c.is_alphanumeric() && c != '_', "_")
+                // Resolve through re-export chains to find the origin module prefix.
+                // When importing from a barrel file (e.g., lib.ts with `export * from "./lib/db.js"`),
+                // we need to link to the ORIGIN module's wrapper (___wrapper_lib_db_ts__executeQuery),
+                // not the barrel file's wrapper (___wrapper_lib_ts__executeQuery) which would be a stub.
+                let effective_prefix = if let Some(exports) = all_module_exports.get(&resolved_path_str) {
+                    if let Some(origin_path) = exports.get(&exported_name) {
+                        if origin_path != &resolved_path_str {
+                            compute_module_prefix(origin_path, &ctx.project_root)
+                        } else {
+                            source_module_prefix.clone()
+                        }
+                    } else {
+                        source_module_prefix.clone()
+                    }
+                } else {
+                    source_module_prefix.clone()
                 };
 
                 // Check if this import is a function from another module
-                // Register its param count and pre-declare the scoped wrapper
+                // Register its param count, return type, and pre-declare the scoped wrapper
                 if let Some(&param_count) = exported_func_param_counts.get(&key) {
                     compiler.register_imported_func_param_count(exported_name.clone(), param_count);
-                    let _ = compiler.pre_declare_import_wrapper(&exported_name, &source_module_prefix, param_count);
+                    let _ = compiler.pre_declare_import_wrapper(&exported_name, &effective_prefix, param_count);
+                }
+                // Register the imported function's return type for await type resolution
+                if let Some(return_type) = exported_func_return_types.get(&key) {
+                    compiler.register_imported_func_return_type(local_name.clone(), return_type.clone());
                 }
 
                 // Pre-declare scoped export global for this import
-                let _ = compiler.pre_declare_import_export(&exported_name, &source_module_prefix);
+                let _ = compiler.pre_declare_import_export(&exported_name, &effective_prefix);
 
                 // Check if this import is an enum from another module
                 if let Some(members) = exported_enums.get(&key) {
@@ -1246,7 +1547,20 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         for m in &failed_modules {
             eprintln!("  - {}", m);
         }
-        return Err(anyhow!("{} module(s) failed to compile", failed_modules.len()));
+        eprintln!("Continuing with linking despite failed modules...");
+
+        // Generate stub init functions for failed modules so the binary still links
+        let stub_init_names: Vec<String> = failed_modules.iter().map(|m| {
+            let sanitized = m.replace(|c: char| !c.is_alphanumeric() && c != '_', "_");
+            format!("_perry_init_{}", sanitized)
+        }).collect();
+        if !stub_init_names.is_empty() {
+            let stub_bytes = perry_codegen::generate_stub_object(&[], &stub_init_names, target.as_deref())?;
+            let stub_path = PathBuf::from("_perry_failed_stubs.o");
+            fs::write(&stub_path, &stub_bytes)?;
+            obj_paths.push(stub_path);
+            eprintln!("Generated {} stub init functions for failed modules", stub_init_names.len());
+        }
     }
 
     if args.no_link {
