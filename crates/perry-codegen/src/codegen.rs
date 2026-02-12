@@ -1523,7 +1523,6 @@ impl Compiler {
     }
 
     fn process_class(&mut self, class: &Class, all_classes: &[Class]) -> Result<()> {
-        eprintln!("[CODEGEN-DEBUG] process_class called for: {}", class.name);
 
         // Find parent class name if this class extends another
         // First try to resolve by ClassId, then fall back to extends_name for imported classes
@@ -1578,7 +1577,6 @@ impl Compiler {
             method_return_types,
             type_params,
         });
-        eprintln!("[CODEGEN-DEBUG] Inserted class {} into classes HashMap (id={}, field_count={})", class.name, class.id, own_field_count);
 
         Ok(())
     }
@@ -3074,6 +3072,23 @@ impl Compiler {
                 &sig,
             )?;
             self.extern_funcs.insert("js_object_alloc_fast_with_parent".to_string(), func_id);
+        }
+
+        // Declare js_object_alloc_class_with_keys(class_id: i32, parent_class_id: i32, field_count: i32, packed_keys: i64, packed_keys_len: i32) -> *mut ObjectHeader (i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I32)); // class_id
+            sig.params.push(AbiParam::new(types::I32)); // parent_class_id
+            sig.params.push(AbiParam::new(types::I32)); // field_count
+            sig.params.push(AbiParam::new(types::I64)); // packed_keys ptr
+            sig.params.push(AbiParam::new(types::I32)); // packed_keys_len
+            sig.returns.push(AbiParam::new(types::I64)); // object pointer
+            let func_id = self.module.declare_function(
+                "js_object_alloc_class_with_keys",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_object_alloc_class_with_keys".to_string(), func_id);
         }
 
         // Declare js_object_alloc_with_shape(shape_id: I32, field_count: I32, packed_keys: I64, packed_keys_len: I32) -> I64
@@ -26275,9 +26290,7 @@ fn compile_expr(
 
             // Handle new ClassName(args)
             // First try to find a known class definition
-            eprintln!("[CODEGEN-DEBUG] Looking for class '{}' in classes HashMap (has {} entries)", class_name, classes.len());
             if let Some(class_meta) = classes.get(class_name) {
-                eprintln!("[CODEGEN-DEBUG] Found class '{}' in HashMap!", class_name);
                 // Get parent class ID for inheritance (0 if no parent)
                 let parent_id = if let Some(ref parent_name) = class_meta.parent_class {
                     classes.get(parent_name).map(|p| p.id).unwrap_or(0)
@@ -26285,16 +26298,43 @@ fn compile_expr(
                     0
                 };
 
-                // Allocate with parent class ID for proper instanceof support
-                // Use fast allocation (bump allocator, no field initialization)
-                let alloc_func = extern_funcs.get("js_object_alloc_fast_with_parent")
-                    .ok_or_else(|| anyhow!("js_object_alloc_fast_with_parent not declared"))?;
+                // Allocate with parent class ID and field names for proper instanceof support
+                // and dynamic property access (arr[0].field1)
+                let alloc_func = extern_funcs.get("js_object_alloc_class_with_keys")
+                    .ok_or_else(|| anyhow!("js_object_alloc_class_with_keys not declared"))?;
                 let alloc_ref = module.declare_func_in_func(*alloc_func, builder.func);
+
+                // Pack field names in index order (null-separated)
+                let mut field_names_vec: Vec<(usize, &str)> = class_meta.field_indices.iter()
+                    .map(|(name, &idx)| (idx as usize, name.as_str()))
+                    .collect();
+                field_names_vec.sort_by_key(|(idx, _)| *idx);
+
+                let mut packed_keys = Vec::new();
+                for (_, name) in &field_names_vec {
+                    packed_keys.extend_from_slice(name.as_bytes());
+                    packed_keys.push(0); // null separator
+                }
+
+                // Create global data for packed keys
+                let keys_data_id = module.declare_data(
+                    &format!("__class_keys_{}_{}", class_name, next_js_data_id()),
+                    Linkage::Local,
+                    false,
+                    false,
+                )?;
+                let mut keys_data_desc = cranelift_module::DataDescription::new();
+                keys_data_desc.define(packed_keys.clone().into_boxed_slice());
+                module.define_data(keys_data_id, &keys_data_desc)?;
+
+                let keys_gv = module.declare_data_in_func(keys_data_id, builder.func);
+                let keys_ptr = builder.ins().global_value(types::I64, keys_gv);
+                let keys_len = builder.ins().iconst(types::I32, packed_keys.len() as i64);
 
                 let class_id = builder.ins().iconst(types::I32, class_meta.id as i64);
                 let parent_class_id = builder.ins().iconst(types::I32, parent_id as i64);
                 let field_count = builder.ins().iconst(types::I32, class_meta.field_count as i64);
-                let alloc_call = builder.ins().call(alloc_ref, &[class_id, parent_class_id, field_count]);
+                let alloc_call = builder.ins().call(alloc_ref, &[class_id, parent_class_id, field_count, keys_ptr, keys_len]);
                 let obj_ptr = builder.inst_results(alloc_call)[0];
 
                 // Call the constructor with 'this' as first argument
@@ -26389,8 +26429,6 @@ fn compile_expr(
                 return Ok(inline_nanbox_pointer(builder, obj_ptr));
             }
 
-            eprintln!("[CODEGEN-DEBUG] Class '{}' NOT found in HashMap, trying fallback paths...", class_name);
-            eprintln!("[CODEGEN-DEBUG] Available classes: {:?}", classes.keys().collect::<Vec<_>>());
 
             // Class not found - try to find a local variable with this name
             // This handles dynamically created constructor functions like:
@@ -27170,6 +27208,66 @@ fn compile_expr(
                 let get_ref = module.declare_func_in_func(*get_func, builder.func);
                 let call = builder.ins().call(get_ref, &[obj_ptr, key_str_ptr_i64]);
                 return Ok(builder.inst_results(call)[0]);
+            }
+
+            // Handle class instance field access (obj.field where obj is a local variable with known class)
+            if let Expr::LocalGet(id) = object.as_ref() {
+                if let Some(info) = locals.get(id) {
+                    if let Some(ref class_name) = info.class_name {
+                        if let Some(class_meta) = classes.get(class_name) {
+                            // Check if there's a getter for this property
+                            if let Some(&getter_id) = class_meta.getter_ids.get(property) {
+                                // Get the object pointer - ensure it's i64
+                                let obj_val = builder.use_var(info.var);
+                                let obj_ptr = ensure_i64(builder, obj_val);
+
+                                let func_ref = module.declare_func_in_func(getter_id, builder.func);
+                                // Getter expects this as i64, returns f64
+                                let call = builder.ins().call(func_ref, &[obj_ptr]);
+                                return Ok(builder.inst_results(call)[0]);
+                            }
+
+                            // Fall back to direct field access (inline load)
+                            if let Some(&field_idx) = class_meta.field_indices.get(property) {
+                                // Get the object pointer - ensure it's i64
+                                let obj_val = builder.use_var(info.var);
+                                let obj_ptr = ensure_i64(builder, obj_val);
+
+                                // ObjectHeader is 24 bytes, fields start after that
+                                let field_offset = 24 + (field_idx as i32) * 8;
+                                let field_val = builder.ins().load(types::F64, MemFlags::new(), obj_ptr, field_offset);
+
+                                return Ok(field_val);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Handle this.field access (in constructor/method context)
+            if let Some(ctx) = this_ctx {
+                if matches!(object.as_ref(), Expr::This) {
+                    // Check if there's a getter for this property
+                    if let Some(&getter_id) = ctx.class_meta.getter_ids.get(property) {
+                        let obj_ptr = builder.use_var(ctx.this_var);
+
+                        let func_ref = module.declare_func_in_func(getter_id, builder.func);
+                        // Getter expects this as i64, returns f64
+                        let call = builder.ins().call(func_ref, &[obj_ptr]);
+                        return Ok(builder.inst_results(call)[0]);
+                    }
+
+                    // Fall back to direct field access (inline load)
+                    if let Some(&field_idx) = ctx.class_meta.field_indices.get(property) {
+                        let obj_ptr = builder.use_var(ctx.this_var);
+
+                        // ObjectHeader is 24 bytes, fields start after that
+                        let field_offset = 24 + (field_idx as i32) * 8;
+                        let field_val = builder.ins().load(types::F64, MemFlags::new(), obj_ptr, field_offset);
+
+                        return Ok(field_val);
+                    }
+                }
             }
 
             // Special handling for .length on variables from destructuring/await that might be arrays

@@ -893,19 +893,8 @@ pub unsafe extern "C" fn js_dynamic_object_get_property(
     property_name_ptr: *const i8,
     property_name_len: usize,
 ) -> f64 {
-    let prop_name = if !property_name_ptr.is_null() && property_name_len > 0 {
-        let slice = std::slice::from_raw_parts(property_name_ptr as *const u8, property_name_len);
-        std::str::from_utf8(slice).unwrap_or("<invalid>")
-    } else {
-        "<null>"
-    };
-    let bits = obj_value.to_bits();
-    eprintln!("[DYNAMIC-GET-PROPERTY-DEBUG] Called: property='{}', obj_bits=0x{:016x}, top16=0x{:04x}",
-        prop_name, bits, bits >> 48);
-
     // Check if this is a JS handle
     if is_js_handle(obj_value) {
-        eprintln!("[DYNAMIC-GET-PROPERTY-DEBUG] Object is JS handle");
         // Try to use the JS runtime function if it's been registered
         let func_ptr = JS_HANDLE_OBJECT_GET_PROPERTY.load(Ordering::SeqCst);
         if !func_ptr.is_null() {

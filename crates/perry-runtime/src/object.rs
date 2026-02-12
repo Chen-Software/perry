@@ -177,6 +177,69 @@ pub extern "C" fn js_object_alloc_fast_with_parent(class_id: u32, parent_class_i
     ptr
 }
 
+/// Allocate a class instance with a shape-cached keys array for field names.
+/// This allows dynamic property access (obj.field1) to work on class instances,
+/// not just object literals. Uses class_id as the shape_id for caching.
+#[no_mangle]
+pub extern "C" fn js_object_alloc_class_with_keys(
+    class_id: u32,
+    parent_class_id: u32,
+    field_count: u32,
+    packed_keys: *const u8,
+    packed_keys_len: u32,
+) -> *mut ObjectHeader {
+    // Register parent class if needed
+    if parent_class_id != 0 {
+        register_class(class_id, parent_class_id);
+    }
+
+    let header_size = std::mem::size_of::<ObjectHeader>();
+    let fields_size = (field_count as usize) * std::mem::size_of::<JSValue>();
+    let total_size = header_size + fields_size;
+
+    let ptr = arena_alloc_gc(total_size, 8, crate::gc::GC_TYPE_OBJECT) as *mut ObjectHeader;
+
+    unsafe {
+        (*ptr).object_type = crate::error::OBJECT_TYPE_REGULAR;
+        (*ptr).class_id = class_id;
+        (*ptr).parent_class_id = parent_class_id;
+        (*ptr).field_count = field_count;
+    }
+
+    // Use class_id as shape_id for caching the keys array
+    let keys_arr = SHAPE_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        // Use class_id + 1000000 as shape_id to avoid collision with object literal shapes
+        let shape_id = class_id + 1000000;
+        if let Some(&arr) = cache.get(&shape_id) {
+            return arr;
+        }
+
+        // Create keys array from packed field names
+        let keys_bytes = unsafe { std::slice::from_raw_parts(packed_keys, packed_keys_len as usize) };
+        let keys: Vec<&[u8]> = keys_bytes.split(|&b| b == 0).filter(|s| !s.is_empty()).collect();
+        let num_keys = keys.len();
+        let arr = crate::array::js_array_alloc_with_length(num_keys as u32);
+        let elements_ptr = unsafe { (arr as *mut u8).add(8) as *mut f64 };
+
+        for (i, key_bytes) in keys.iter().enumerate() {
+            let str_ptr = crate::string::js_string_from_bytes(
+                key_bytes.as_ptr(), key_bytes.len() as u32,
+            );
+            let nanboxed = f64::from_bits(
+                crate::value::STRING_TAG | (str_ptr as u64 & crate::value::POINTER_MASK)
+            );
+            unsafe { *elements_ptr.add(i) = nanboxed; }
+        }
+
+        cache.insert(shape_id, arr);
+        arr
+    });
+
+    unsafe { (*ptr).keys_array = keys_arr; }
+    ptr
+}
+
 /// Allocate an object with a shape-cached keys array.
 /// First call per shape_id creates the keys array from packed_keys (null-separated key names);
 /// subsequent calls reuse the cached pointer. This eliminates per-object key string allocation
@@ -460,49 +523,18 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
     unsafe {
         let keys = (*obj).keys_array;
 
-        // Debug output
-        let key_str = if !key.is_null() {
-            let len = (*key).length;
-            let data = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
-            std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len as usize))
-        } else {
-            "<null>"
-        };
-
-        if key_str == "poolAddress" {
-            eprintln!("[OBJECT-GET-FIELD-BY-NAME-DEBUG] Looking for 'poolAddress': obj=0x{:x}, keys_array=0x{:x}, is_null={}",
-                obj as usize, keys as usize, keys.is_null());
-            eprintln!("[OBJECT-HEADER-DEBUG] obj=0x{:x}: object_type={}, class_id={}, parent_class_id={}, field_count={}, keys_array=0x{:x}",
-                obj as usize, (*obj).object_type, (*obj).class_id, (*obj).parent_class_id, (*obj).field_count, (*obj).keys_array as usize);
-        }
-
         if keys.is_null() {
-            if key_str == "poolAddress" {
-                eprintln!("[OBJECT-GET-FIELD-BY-NAME-DEBUG] keys_array is NULL, returning undefined");
-            }
             return JSValue::undefined();
         }
 
         // Search through the keys array for a match
         let key_count = crate::array::js_array_length(keys) as usize;
 
-        if key_str == "poolAddress" {
-            eprintln!("[OBJECT-GET-FIELD-BY-NAME-DEBUG] keys_array has {} keys", key_count);
-        }
-
         for i in 0..key_count {
             let key_val = crate::array::js_array_get(keys, i as u32);
             // Keys are stored as string pointers (NaN-boxed)
             if key_val.is_string() {
                 let stored_key = key_val.as_pointer::<crate::StringHeader>();
-
-                // Debug: print all keys when looking for poolAddress
-                if key_str == "poolAddress" {
-                    let stored_key_len = (*stored_key).length;
-                    let stored_key_data = (stored_key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
-                    let stored_key_str = std::str::from_utf8_unchecked(std::slice::from_raw_parts(stored_key_data, stored_key_len as usize));
-                    eprintln!("[OBJECT-GET-FIELD-BY-NAME-DEBUG] Key {}: '{}'", i, stored_key_str);
-                }
 
                 if crate::string::js_string_equals(key, stored_key) {
                     // Found it - return the field at this index
@@ -521,32 +553,7 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
 #[no_mangle]
 pub extern "C" fn js_object_get_field_by_name_f64(obj: *const ObjectHeader, key: *const crate::StringHeader) -> f64 {
     let value = js_object_get_field_by_name(obj, key);
-    let result_bits = value.bits();
-    let top16 = result_bits >> 48;
-
-    // Debug output for specific properties
-    if !key.is_null() {
-        let key_str = unsafe {
-            let len = (*key).length;
-            let data = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
-            std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len as usize))
-        };
-
-        if key_str == "paths" || key_str == "poolAddress" || key_str == "commands" {
-            eprintln!("[OBJECT-GET-DEBUG] Getting '{}' property: result_bits=0x{:016x}, top16=0x{:04x}, is_pointer={}, is_undefined={}",
-                key_str, result_bits, top16, top16 == 0x7FFD, top16 == 0x7FFC);
-            if top16 == 0x7FFD {
-                let raw_ptr = result_bits & 0x0000_FFFF_FFFF_FFFF;
-                eprintln!("[OBJECT-GET-DEBUG] POINTER_TAG found, raw_ptr=0x{:016x}", raw_ptr);
-            } else if top16 == 0x7FFC {
-                eprintln!("[OBJECT-GET-DEBUG] UNDEFINED tag found");
-            } else if top16 == 0x7FFF {
-                eprintln!("[OBJECT-GET-DEBUG] STRING_TAG found");
-            }
-        }
-    }
-
-    f64::from_bits(result_bits)
+    f64::from_bits(value.bits())
 }
 
 /// Set a field value by its string key name (dynamic property access)
