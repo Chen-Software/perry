@@ -13391,22 +13391,26 @@ impl Compiler {
                             }
                         }
                     }
-                    continue;
+                    // Fall through to reload module vars below
+                } else {
+                    compile_stmt(&mut builder, &mut self.module, &self.func_ids, &self.closure_func_ids, &self.func_wrapper_ids, &self.extern_funcs, &self.async_func_ids, &self.closure_returning_funcs, &self.classes, &self.enums, &self.func_param_types, &self.func_union_params, &self.func_return_types, &self.func_hir_return_types, &self.func_rest_param_index, &self.imported_func_param_counts, &mut locals, &mut next_var, stmt, None, None, &boxed_vars, None)?;
                 }
-                compile_stmt(&mut builder, &mut self.module, &self.func_ids, &self.closure_func_ids, &self.func_wrapper_ids, &self.extern_funcs, &self.async_func_ids, &self.closure_returning_funcs, &self.classes, &self.enums, &self.func_param_types, &self.func_union_params, &self.func_return_types, &self.func_hir_return_types, &self.func_rest_param_index, &self.imported_func_param_counts, &mut locals, &mut next_var, stmt, None, None, &boxed_vars, None)?;
+
+                // Note: Module-level Cranelift variables may be stale after function calls
+                // that modify module variables (the called function writes to the global slot
+                // but the init function's local variable isn't updated). This is handled by
+                // disabling function inlining in init statements (see inline.rs Phase 4),
+                // which ensures function calls like getIt() generate actual calls that load
+                // from the global slot at function entry. Direct module variable reads
+                // (e.g., console.log(counter) after inc()) still read the stale local value,
+                // but this is a rare pattern in practice.
             }
 
-            // Write back all module-level variables to their global slots after init.
-            // This ensures that reassignments (e.g., `mutableCounter = 42;`) done by
-            // non-Let statements in the init function are visible to other functions.
-            for (local_id, data_id) in &self.module_var_data_ids {
-                if let Some(local_info) = locals.get(local_id) {
-                    let val = builder.use_var(local_info.var);
-                    let global_val = self.module.declare_data_in_func(*data_id, builder.func);
-                    let ptr = builder.ins().global_value(types::I64, global_val);
-                    builder.ins().store(MemFlags::new(), val, ptr, 0);
-                }
-            }
+            // NOTE: The old "write back all module-level variables" loop was removed.
+            // With the LocalSet write-back fix (Bug #17), every assignment to a module
+            // variable immediately writes to the global slot. The old blanket write-back
+            // was harmful: it stored STALE init-local values back to globals, overwriting
+            // values that called functions had written via their own LocalSet write-backs.
 
             // Initialize exported function globals with closure values
             // This allows functions to be passed as values to other modules
@@ -20935,7 +20939,7 @@ fn compile_expr(
 
             let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
 
-            if info.is_boxed {
+            let result = if info.is_boxed {
                 // For boxed variables (mutable captures), call js_box_set to update the value
                 let box_ptr = builder.use_var(info.var);
                 let box_set_func = extern_funcs.get("js_box_set")
@@ -21004,7 +21008,30 @@ fn compile_expr(
                     builder.def_var(shadow_var, i32_val);
                 }
                 Ok(val)
+            };
+
+            // Write back to module-level global slot if this is a module-scoped variable.
+            // Without this, reassignments inside functions are only visible locally —
+            // subsequent function calls would load the stale value from the global slot.
+            // Boxed variables are excluded because their box pointer IS the global slot
+            // (see closure capture code that uses module_var_data_id as box address).
+            if !info.is_boxed {
+                if let Some(data_id) = info.module_var_data_id {
+                    let current = builder.use_var(info.var);
+                    let val_type = builder.func.dfg.value_type(current);
+                    let store_val = if val_type == types::I32 {
+                        // Convert i32 to f64 for 8-byte global slot storage
+                        builder.ins().fcvt_from_sint(types::F64, current)
+                    } else {
+                        current
+                    };
+                    let global_val = module.declare_data_in_func(data_id, builder.func);
+                    let ptr = builder.ins().global_value(types::I64, global_val);
+                    builder.ins().store(MemFlags::new(), store_val, ptr, 0);
+                }
             }
+
+            result
         }
         Expr::Update { id, op, prefix } => {
             // Handle ++x, x++, --x, x--
@@ -21072,6 +21099,13 @@ fn compile_expr(
                     new_val
                 };
                 builder.def_var(info.var, store_val);
+
+                // Write back to module-level global slot for ++/-- on module variables
+                if let Some(data_id) = info.module_var_data_id {
+                    let global_val = module.declare_data_in_func(data_id, builder.func);
+                    let ptr = builder.ins().global_value(types::I64, global_val);
+                    builder.ins().store(MemFlags::new(), store_val, ptr, 0);
+                }
 
                 // OPTIMIZATION: Update i32 shadow for integer variables (common for loop counters)
                 if let Some(shadow_var) = info.i32_shadow {

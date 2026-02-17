@@ -55,10 +55,15 @@ pub fn inline_functions(module: &mut Module) {
         .map(|c| (c.name.clone(), c.name.clone()))
         .collect();
 
-    // Phase 4: Inline calls in init statements
-    let mut next_local_id = find_max_local_id(&module.init) + 1;
-    let mut local_types: HashMap<LocalId, String> = HashMap::new();
-    inline_calls_in_stmts(&mut module.init, &func_candidates, &method_candidates, &class_names, &mut local_types, &mut next_local_id);
+    // Phase 4: Inline calls in init statements — DISABLED
+    // Inlining in init statements is unsafe because module-level variables are cached
+    // in Cranelift local variables during compile_init. If an inlined function reads a
+    // module variable that was modified by a prior function call, it reads the stale
+    // cached value instead of the updated global slot value. Init runs once so the
+    // performance cost of not inlining is negligible.
+    // let mut next_local_id = find_max_local_id(&module.init) + 1;
+    // let mut local_types: HashMap<LocalId, String> = HashMap::new();
+    // inline_calls_in_stmts(&mut module.init, &func_candidates, &method_candidates, &class_names, &mut local_types, &mut next_local_id);
 
     // Phase 5: Inline calls in function bodies
     for func in &mut module.functions {
