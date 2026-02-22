@@ -1548,12 +1548,24 @@ fn lower_stmt(
 
             // If the iterable is a Map, wrap in MapEntries to convert to array
             // This handles: for (const [k, v] of myMap) { ... }
+            // Also extract the Map's key/value type args for proper type propagation.
+            let mut map_key_type: Option<Type> = None;
+            let mut map_val_type: Option<Type> = None;
             let arr_expr = if let ast::Expr::Ident(ident) = &*for_of_stmt.right {
                 let name = ident.sym.to_string();
-                let is_map = ctx.lookup_local_type(&name)
-                    .map(|ty| matches!(ty, Type::Generic { base, .. } if base == "Map"))
-                    .unwrap_or(false);
-                if is_map {
+                let map_type_args = ctx.lookup_local_type(&name)
+                    .and_then(|ty| {
+                        if let Type::Generic { base, type_args } = ty {
+                            if base == "Map" { Some(type_args.clone()) } else { None }
+                        } else {
+                            None
+                        }
+                    });
+                if let Some(type_args) = map_type_args {
+                    if type_args.len() >= 2 {
+                        map_key_type = Some(type_args[0].clone());
+                        map_val_type = Some(type_args[1].clone());
+                    }
                     Expr::MapEntries(Box::new(arr_expr))
                 } else {
                     arr_expr
@@ -1562,18 +1574,26 @@ fn lower_stmt(
                 arr_expr
             };
 
+            // Determine the array element type: Tuple(K, V) for Maps, Any otherwise
+            let elem_type = if let (Some(ref k), Some(ref v)) = (&map_key_type, &map_val_type) {
+                Type::Tuple(vec![k.clone(), v.clone()])
+            } else {
+                Type::Any
+            };
+            let arr_type = Type::Array(Box::new(elem_type.clone()));
+
             // Create internal variables for the array and index
             let arr_id = ctx.fresh_local();
             let idx_id = ctx.fresh_local();
             // Register these in the context so they can be looked up
-            ctx.locals.push((format!("__arr_{}", arr_id), arr_id, Type::Array(Box::new(Type::Any))));
+            ctx.locals.push((format!("__arr_{}", arr_id), arr_id, arr_type.clone()));
             ctx.locals.push((format!("__idx_{}", idx_id), idx_id, Type::Number));
 
             // Store array reference: let __arr = arr
             module.init.push(Stmt::Let {
                 id: arr_id,
                 name: format!("__arr_{}", arr_id),
-                ty: Type::Array(Box::new(Type::Any)),
+                ty: arr_type,
                 mutable: false,
                 init: Some(arr_expr),
             });
@@ -1581,7 +1601,7 @@ fn lower_stmt(
             // IMPORTANT: Define iteration variables BEFORE lowering the body
             // so the body can reference them
             let item_id = ctx.fresh_local();
-            ctx.locals.push((format!("__item_{}", item_id), item_id, Type::Any));
+            ctx.locals.push((format!("__item_{}", item_id), item_id, elem_type.clone()));
 
             // Pre-define all variables from the pattern so body can reference them
             let var_ids: Vec<(String, u32)> = match &for_of_stmt.left {
@@ -1590,16 +1610,22 @@ fn lower_stmt(
                         match &decl.name {
                             ast::Pat::Ident(ident) => {
                                 let name = ident.id.sym.to_string();
-                                let id = ctx.define_local(name.clone(), Type::Any);
+                                let id = ctx.define_local(name.clone(), elem_type.clone());
                                 vec![(name, id)]
                             }
                             ast::Pat::Array(arr_pat) => {
                                 let mut ids = Vec::new();
-                                for elem in &arr_pat.elems {
+                                for (idx, elem) in arr_pat.elems.iter().enumerate() {
                                     if let Some(elem_pat) = elem {
                                         if let ast::Pat::Ident(ident) = elem_pat {
                                             let name = ident.id.sym.to_string();
-                                            let id = ctx.define_local(name.clone(), Type::Any);
+                                            // For Map destructuring [k, v], use key type for idx 0, value type for idx 1
+                                            let var_type = if let Type::Tuple(ref types) = elem_type {
+                                                types.get(idx).cloned().unwrap_or(Type::Any)
+                                            } else {
+                                                Type::Any
+                                            };
+                                            let id = ctx.define_local(name.clone(), var_type);
                                             ids.push((name, id));
                                         }
                                     }
@@ -1664,7 +1690,7 @@ fn lower_stmt(
                                 vec![Stmt::Let {
                                     id,
                                     name,
-                                    ty: Type::Any,
+                                    ty: elem_type.clone(),
                                     mutable: false,
                                     init: Some(item_expr),
                                 }]
@@ -1674,7 +1700,7 @@ fn lower_stmt(
                                 let mut stmts = vec![Stmt::Let {
                                     id: item_id,
                                     name: format!("__item_{}", item_id),
-                                    ty: Type::Any,
+                                    ty: elem_type.clone(),
                                     mutable: false,
                                     init: Some(item_expr),
                                 }];
@@ -1686,10 +1712,16 @@ fn lower_stmt(
                                         if let ast::Pat::Ident(_) = elem_pat {
                                             let (name, id) = var_ids[var_idx].clone();
                                             var_idx += 1;
+                                            // For Map destructuring, use the Tuple element type
+                                            let var_type = if let Type::Tuple(ref types) = elem_type {
+                                                types.get(idx).cloned().unwrap_or(Type::Any)
+                                            } else {
+                                                Type::Any
+                                            };
                                             stmts.push(Stmt::Let {
                                                 id,
                                                 name,
-                                                ty: Type::Any,
+                                                ty: var_type,
                                                 mutable: false,
                                                 init: Some(Expr::IndexGet {
                                                     object: Box::new(Expr::LocalGet(item_id)),
@@ -4253,6 +4285,14 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                                 });
                                             }
                                         }
+                                        "sort" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::ArraySort {
+                                                    array: Box::new(Expr::LocalGet(array_id)),
+                                                    comparator: Box::new(args.into_iter().next().unwrap()),
+                                                });
+                                            }
+                                        }
                                         "reduce" => {
                                             if args.len() >= 1 {
                                                 let mut args_iter = args.into_iter();
@@ -4572,6 +4612,14 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                                         });
                                                     }
                                                 }
+                                                "sort" => {
+                                                    if args.len() >= 1 {
+                                                        return Ok(Expr::ArraySort {
+                                                            array: Box::new(extern_ref),
+                                                            comparator: Box::new(args.into_iter().next().unwrap()),
+                                                        });
+                                                    }
+                                                }
                                                 "indexOf" => {
                                                     if args.len() >= 1 {
                                                         return Ok(Expr::ArrayIndexOf {
@@ -4667,6 +4715,14 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                                 return Ok(Expr::ArrayFind {
                                                     array: Box::new(array_expr),
                                                     callback: Box::new(args.into_iter().next().unwrap()),
+                                                });
+                                            }
+                                        }
+                                        "sort" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::ArraySort {
+                                                    array: Box::new(array_expr),
+                                                    comparator: Box::new(args.into_iter().next().unwrap()),
                                                 });
                                             }
                                         }
@@ -4781,13 +4837,20 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                             callback: Box::new(args.into_iter().next().unwrap()),
                                         });
                                     }
+                                    "sort" if args.len() >= 1 => {
+                                        let array_expr = lower_expr(ctx, &member.obj)?;
+                                        return Ok(Expr::ArraySort {
+                                            array: Box::new(array_expr),
+                                            comparator: Box::new(args.into_iter().next().unwrap()),
+                                        });
+                                    }
                                     // join/indexOf/includes are ambiguous with string methods,
                                     // but if the receiver is a known array-returning expression,
                                     // we can safely create the array version directly.
                                     "join" if args.len() <= 1 => {
                                         let array_expr = lower_expr(ctx, &member.obj)?;
                                         if matches!(&array_expr,
-                                            Expr::ArrayMap { .. } | Expr::ArrayFilter { .. } |
+                                            Expr::ArrayMap { .. } | Expr::ArrayFilter { .. } | Expr::ArraySort { .. } |
                                             Expr::ArraySlice { .. } | Expr::Array(_) |
                                             Expr::ArrayFrom(_) | Expr::StringSplit(_, _) |
                                             Expr::ObjectKeys(_) | Expr::ObjectValues(_)
@@ -4802,7 +4865,7 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                     "indexOf" if args.len() >= 1 => {
                                         let array_expr = lower_expr(ctx, &member.obj)?;
                                         if matches!(&array_expr,
-                                            Expr::ArrayMap { .. } | Expr::ArrayFilter { .. } |
+                                            Expr::ArrayMap { .. } | Expr::ArrayFilter { .. } | Expr::ArraySort { .. } |
                                             Expr::ArraySlice { .. } | Expr::Array(_) |
                                             Expr::ArrayFrom(_) | Expr::StringSplit(_, _) |
                                             Expr::ObjectKeys(_) | Expr::ObjectValues(_)
@@ -4817,7 +4880,7 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                     "includes" if args.len() >= 1 => {
                                         let array_expr = lower_expr(ctx, &member.obj)?;
                                         if matches!(&array_expr,
-                                            Expr::ArrayMap { .. } | Expr::ArrayFilter { .. } |
+                                            Expr::ArrayMap { .. } | Expr::ArrayFilter { .. } | Expr::ArraySort { .. } |
                                             Expr::ArraySlice { .. } | Expr::Array(_) |
                                             Expr::ArrayFrom(_) | Expr::StringSplit(_, _) |
                                             Expr::ObjectKeys(_) | Expr::ObjectValues(_)
@@ -4830,6 +4893,37 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                         }
                                     }
                                     _ => {} // Fall through - ambiguous methods on non-array expressions use generic dispatch
+                                }
+                            }
+                        }
+                    }
+
+                    // Check for regex .test() method call on any expression
+                    if let ast::Callee::Expr(callee_expr) = &call.callee {
+                        if let ast::Expr::Member(member) = callee_expr.as_ref() {
+                            if let ast::MemberProp::Ident(method_ident) = &member.prop {
+                                if method_ident.sym.as_ref() == "test" && args.len() == 1 {
+                                    // Check if the object is a regex literal or a local assigned to a regex
+                                    let is_regex_obj = match member.obj.as_ref() {
+                                        ast::Expr::Lit(ast::Lit::Regex(_)) => true,
+                                        ast::Expr::Ident(ident) => {
+                                            ctx.lookup_local_type(&ident.sym.to_string())
+                                                .map(|ty| matches!(ty, Type::Any | Type::Unknown))
+                                                .unwrap_or(true)
+                                        }
+                                        _ => false,
+                                    };
+                                    if is_regex_obj {
+                                        let regex_expr = lower_expr(ctx, &member.obj)?;
+                                        // Only emit RegExpTest if the object is actually a regex
+                                        if matches!(&regex_expr, Expr::RegExp { .. }) || matches!(&regex_expr, Expr::LocalGet(_)) {
+                                            let string_expr = args.into_iter().next().unwrap();
+                                            return Ok(Expr::RegExpTest {
+                                                regex: Box::new(regex_expr),
+                                                string: Box::new(string_expr),
+                                            });
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -8036,6 +8130,10 @@ fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>) {
             collect_local_refs_expr(array, refs);
             collect_local_refs_expr(callback, refs);
         }
+        Expr::ArraySort { array, comparator } => {
+            collect_local_refs_expr(array, refs);
+            collect_local_refs_expr(comparator, refs);
+        }
         Expr::ArrayReduce { array, callback, initial } => {
             collect_local_refs_expr(array, refs);
             collect_local_refs_expr(callback, refs);
@@ -8734,6 +8832,10 @@ fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<LocalId>) {
             collect_assigned_locals_expr(array, assigned);
             collect_assigned_locals_expr(callback, assigned);
         }
+        Expr::ArraySort { array, comparator } => {
+            collect_assigned_locals_expr(array, assigned);
+            collect_assigned_locals_expr(comparator, assigned);
+        }
         Expr::ArrayReduce { array, callback, initial } => {
             collect_assigned_locals_expr(array, assigned);
             collect_assigned_locals_expr(callback, assigned);
@@ -9230,7 +9332,7 @@ fn is_builtin_function(name: &str) -> bool {
 /// `PropertyGet { object: ExternFuncRef { name }, property }` because the enum
 /// isn't in scope during lowering. This pass replaces those with `EnumMember`
 /// expressions so codegen can emit the correct constant values.
-pub fn fix_imported_enums(module: &mut Module, imported_enums: &HashMap<String, Vec<(String, EnumValue)>>) {
+pub fn fix_imported_enums(module: &mut Module, imported_enums: &BTreeMap<String, Vec<(String, EnumValue)>>) {
     if imported_enums.is_empty() {
         return;
     }
@@ -9251,7 +9353,7 @@ pub fn fix_imported_enums(module: &mut Module, imported_enums: &HashMap<String, 
     fix_imported_enums_in_stmts(&mut module.init, imported_enums);
 }
 
-fn fix_imported_enums_in_stmts(stmts: &mut Vec<Stmt>, enums: &HashMap<String, Vec<(String, EnumValue)>>) {
+fn fix_imported_enums_in_stmts(stmts: &mut Vec<Stmt>, enums: &BTreeMap<String, Vec<(String, EnumValue)>>) {
     for stmt in stmts.iter_mut() {
         match stmt {
             Stmt::Let { init: Some(expr), .. } => fix_imported_enums_in_expr(expr, enums),
@@ -9304,7 +9406,7 @@ fn fix_imported_enums_in_stmts(stmts: &mut Vec<Stmt>, enums: &HashMap<String, Ve
     }
 }
 
-fn fix_imported_enums_in_expr(expr: &mut Expr, enums: &HashMap<String, Vec<(String, EnumValue)>>) {
+fn fix_imported_enums_in_expr(expr: &mut Expr, enums: &BTreeMap<String, Vec<(String, EnumValue)>>) {
     match expr {
         // The key pattern: PropertyGet on an ExternFuncRef that's actually an enum
         Expr::PropertyGet { object, property } => {
@@ -9392,4 +9494,4 @@ fn fix_imported_enums_in_expr(expr: &mut Expr, enums: &HashMap<String, Vec<(Stri
     }
 }
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};

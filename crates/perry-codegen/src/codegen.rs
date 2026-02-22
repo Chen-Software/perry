@@ -11,7 +11,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{DataDescription, Init, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -295,20 +295,20 @@ fn inline_nanbox_pointer(builder: &mut FunctionBuilder, ptr: Value) -> Value {
 fn compile_condition_to_bool(
     builder: &mut FunctionBuilder,
     module: &mut ObjectModule,
-    func_ids: &HashMap<u32, cranelift_module::FuncId>,
-    closure_func_ids: &HashMap<u32, cranelift_module::FuncId>,
-    func_wrapper_ids: &HashMap<u32, cranelift_module::FuncId>,
-    extern_funcs: &HashMap<String, cranelift_module::FuncId>,
-    async_func_ids: &std::collections::HashSet<u32>,
-    classes: &HashMap<String, ClassMeta>,
-    enums: &HashMap<(String, String), EnumMemberValue>,
-    func_param_types: &HashMap<u32, Vec<types::Type>>,
-    func_union_params: &HashMap<u32, Vec<bool>>,
-    func_return_types: &HashMap<u32, types::Type>,
-    func_hir_return_types: &HashMap<u32, perry_types::Type>,
-    func_rest_param_index: &HashMap<u32, usize>,
-    imported_func_param_counts: &HashMap<String, usize>,
-    locals: &HashMap<LocalId, LocalInfo>,
+    func_ids: &BTreeMap<u32, cranelift_module::FuncId>,
+    closure_func_ids: &BTreeMap<u32, cranelift_module::FuncId>,
+    func_wrapper_ids: &BTreeMap<u32, cranelift_module::FuncId>,
+    extern_funcs: &BTreeMap<String, cranelift_module::FuncId>,
+    async_func_ids: &std::collections::BTreeSet<u32>,
+    classes: &BTreeMap<String, ClassMeta>,
+    enums: &BTreeMap<(String, String), EnumMemberValue>,
+    func_param_types: &BTreeMap<u32, Vec<types::Type>>,
+    func_union_params: &BTreeMap<u32, Vec<bool>>,
+    func_return_types: &BTreeMap<u32, types::Type>,
+    func_hir_return_types: &BTreeMap<u32, perry_types::Type>,
+    func_rest_param_index: &BTreeMap<u32, usize>,
+    imported_func_param_counts: &BTreeMap<String, usize>,
+    locals: &BTreeMap<LocalId, LocalInfo>,
     expr: &Expr,
     this_ctx: Option<&ThisContext>,
 ) -> Result<Value> {
@@ -345,7 +345,7 @@ fn compile_condition_to_bool(
 fn try_compile_index_as_i32(
     builder: &mut FunctionBuilder,
     expr: &Expr,
-    locals: &HashMap<LocalId, LocalInfo>,
+    locals: &BTreeMap<LocalId, LocalInfo>,
 ) -> Option<Value> {
     match expr {
         Expr::Integer(n) if *n >= 0 && *n <= i32::MAX as i64 => {
@@ -417,30 +417,30 @@ struct ClassMeta {
     /// Total number of fields (including inherited)
     field_count: u32,
     /// Mapping from field name to index (includes inherited fields)
-    field_indices: HashMap<String, u32>,
+    field_indices: BTreeMap<String, u32>,
     /// Mapping from field name to type (includes inherited fields)
-    field_types: HashMap<String, perry_types::Type>,
+    field_types: BTreeMap<String, perry_types::Type>,
     /// Constructor function ID (if any)
     constructor_id: Option<cranelift_module::FuncId>,
     /// Method function IDs: method name -> func_id (includes inherited methods)
-    method_ids: HashMap<String, cranelift_module::FuncId>,
+    method_ids: BTreeMap<String, cranelift_module::FuncId>,
     /// Getter function IDs: property name -> func_id
-    getter_ids: HashMap<String, cranelift_module::FuncId>,
+    getter_ids: BTreeMap<String, cranelift_module::FuncId>,
     /// Setter function IDs: property name -> func_id
-    setter_ids: HashMap<String, cranelift_module::FuncId>,
+    setter_ids: BTreeMap<String, cranelift_module::FuncId>,
     /// Static method function IDs: method name -> func_id
-    static_method_ids: HashMap<String, cranelift_module::FuncId>,
+    static_method_ids: BTreeMap<String, cranelift_module::FuncId>,
     /// Static field global IDs: field name -> (data_id, has_init)
-    static_field_ids: HashMap<String, cranelift_module::DataId>,
+    static_field_ids: BTreeMap<String, cranelift_module::DataId>,
     /// Method return types: method name -> return type (for determining if method returns string)
-    method_return_types: HashMap<String, perry_types::Type>,
+    method_return_types: BTreeMap<String, perry_types::Type>,
     /// Static method return types: method name -> return type (for singleton pattern getInstance() etc.)
-    static_method_return_types: HashMap<String, perry_types::Type>,
+    static_method_return_types: BTreeMap<String, perry_types::Type>,
     /// Type parameters of the class (e.g., ["T"] for class Box<T>)
     type_params: Vec<String>,
     /// Field default initializer expressions: field name -> init expr
     /// Used by Expr::New to initialize field defaults before calling constructor
-    field_inits: HashMap<String, Expr>,
+    field_inits: BTreeMap<String, Expr>,
 }
 
 /// Enum member value (resolved at compile time)
@@ -459,36 +459,36 @@ pub struct Compiler {
     /// Function builder context (reused across functions)
     func_ctx: FunctionBuilderContext,
     /// Mapping from HIR function IDs to Cranelift function IDs
-    func_ids: HashMap<u32, cranelift_module::FuncId>,
+    func_ids: BTreeMap<u32, cranelift_module::FuncId>,
     /// Mapping from external function names to their IDs
-    extern_funcs: HashMap<String, cranelift_module::FuncId>,
+    extern_funcs: BTreeMap<String, cranelift_module::FuncId>,
     /// Class metadata: class name -> metadata
-    classes: HashMap<String, ClassMeta>,
+    classes: BTreeMap<String, ClassMeta>,
     /// Enum member values: (enum_name, member_name) -> value
-    enums: HashMap<(String, String), EnumMemberValue>,
+    enums: BTreeMap<(String, String), EnumMemberValue>,
     /// String literal data: string content -> data ID
-    string_data: HashMap<String, cranelift_module::DataId>,
+    string_data: BTreeMap<String, cranelift_module::DataId>,
     /// Closure function IDs: closure HIR func_id -> Cranelift func_id
-    closure_func_ids: HashMap<u32, cranelift_module::FuncId>,
+    closure_func_ids: BTreeMap<u32, cranelift_module::FuncId>,
     /// Set of async function IDs (for proper return type handling)
-    async_func_ids: std::collections::HashSet<u32>,
+    async_func_ids: std::collections::BTreeSet<u32>,
     /// Set of function IDs that return closures
-    closure_returning_funcs: std::collections::HashSet<u32>,
+    closure_returning_funcs: std::collections::BTreeSet<u32>,
     /// Wrapper functions for named functions used as callbacks: HIR func_id -> wrapper Cranelift func_id
-    func_wrapper_ids: HashMap<u32, cranelift_module::FuncId>,
+    func_wrapper_ids: BTreeMap<u32, cranelift_module::FuncId>,
     /// HIR functions (needed for wrapper generation)
     hir_functions: Vec<Function>,
     /// Function parameter ABI types: func_id -> Vec<abi_type>
-    func_param_types: HashMap<u32, Vec<types::Type>>,
+    func_param_types: BTreeMap<u32, Vec<types::Type>>,
     /// Function return ABI types: func_id -> abi_type
-    func_return_types: HashMap<u32, types::Type>,
+    func_return_types: BTreeMap<u32, types::Type>,
     /// Function HIR return types: func_id -> full HirType (for detecting Map, Set, etc.)
-    func_hir_return_types: HashMap<u32, perry_types::Type>,
+    func_hir_return_types: BTreeMap<u32, perry_types::Type>,
     /// Rest parameter info: func_id -> index of rest parameter (if any)
     /// The rest parameter collects all arguments from this index onwards into an array
-    func_rest_param_index: HashMap<u32, usize>,
+    func_rest_param_index: BTreeMap<u32, usize>,
     /// Union parameter info: func_id -> Vec<bool> (true if parameter is union type)
-    func_union_params: HashMap<u32, Vec<bool>>,
+    func_union_params: BTreeMap<u32, Vec<bool>>,
     /// Whether the JS runtime is needed for this module
     needs_js_runtime: bool,
     /// Whether dotenv/config was imported (needs auto-init call)
@@ -500,35 +500,35 @@ pub struct Compiler {
     /// JavaScript module specifiers that need to be loaded at runtime
     js_modules: Vec<String>,
     /// Exported native instance data IDs: variable name -> data ID
-    exported_native_instance_ids: HashMap<String, cranelift_module::DataId>,
+    exported_native_instance_ids: BTreeMap<String, cranelift_module::DataId>,
     /// Exported object literal data IDs: variable name -> data ID
-    exported_object_ids: HashMap<String, cranelift_module::DataId>,
+    exported_object_ids: BTreeMap<String, cranelift_module::DataId>,
     /// Exported function data IDs: function name -> (data ID, FuncId)
     /// These are functions that need globals so they can be passed as values to other modules
-    exported_function_ids: HashMap<String, (cranelift_module::DataId, u32)>,
+    exported_function_ids: BTreeMap<String, (cranelift_module::DataId, u32)>,
     /// Module-level variable data IDs: LocalId -> data ID
     /// These are variables defined at module scope that need to be accessible from functions
-    module_var_data_ids: HashMap<LocalId, cranelift_module::DataId>,
+    module_var_data_ids: BTreeMap<LocalId, cranelift_module::DataId>,
     /// Module-level variable info: LocalId -> LocalInfo
     /// Populated during compile_init, used by compile_function for GlobalGet
-    module_level_locals: HashMap<LocalId, LocalInfo>,
+    module_level_locals: BTreeMap<LocalId, LocalInfo>,
     /// Imported function parameter counts: function name -> param count
     /// Used to ensure consistent wrapper signatures for functions with optional params
-    imported_func_param_counts: HashMap<String, usize>,
+    imported_func_param_counts: BTreeMap<String, usize>,
     /// Imported function return types: function name -> HIR return type
     /// Used to resolve types for await expressions on cross-module async function calls
-    imported_func_return_types: HashMap<String, perry_types::Type>,
+    imported_func_return_types: BTreeMap<String, perry_types::Type>,
     /// Module symbol prefix for scoping cross-module symbols (sanitized module path)
     module_symbol_prefix: String,
     /// Mapping from imported function name -> source module's symbol prefix
     /// Used to construct the correct scoped wrapper name when calling cross-module functions
-    import_module_prefixes: HashMap<String, String>,
+    import_module_prefixes: BTreeMap<String, String>,
     /// Pre-declared import wrapper function IDs: unscoped func_name -> (scoped FuncId, param_count)
     /// Populated by pre_declare_import_wrapper before compile_module
-    pre_declared_import_wrappers: HashMap<String, (cranelift_module::FuncId, usize)>,
+    pre_declared_import_wrappers: BTreeMap<String, (cranelift_module::FuncId, usize)>,
     /// Set of import names that are namespace imports (import * as X from './module')
     /// Used to intercept PropertyGet(ExternFuncRef { name: X }, prop) and resolve prop directly
-    namespace_imports: HashSet<String>,
+    namespace_imports: std::collections::BTreeSet<String>,
     /// Static fields that need runtime initialization (strings, expressions)
     /// Collected during compile_static_field, processed in compile_init
     static_field_runtime_inits: Vec<(cranelift_module::DataId, Expr)>,
@@ -555,6 +555,16 @@ impl Compiler {
                     .finish(settings::Flags::new(flag_builder))
                     .map_err(|e| anyhow!("{}", e))?
             }
+            Some("android") => {
+                // Cross-compile for aarch64-linux-android (ELF)
+                let triple = target_lexicon::Triple::from_str("aarch64-unknown-linux-android")
+                    .map_err(|e| anyhow!("Bad triple: {}", e))?;
+                let isa_builder = cranelift::codegen::isa::lookup(triple)
+                    .map_err(|e| anyhow!("Failed to create Android ISA: {}", e))?;
+                isa_builder
+                    .finish(settings::Flags::new(flag_builder))
+                    .map_err(|e| anyhow!("{}", e))?
+            }
             _ => {
                 // Native host target
                 let isa_builder = cranelift_native::builder().map_err(|e| anyhow!("{}", e))?;
@@ -576,37 +586,37 @@ impl Compiler {
             module,
             ctx,
             func_ctx: FunctionBuilderContext::new(),
-            func_ids: HashMap::new(),
-            extern_funcs: HashMap::new(),
-            classes: HashMap::new(),
-            enums: HashMap::new(),
-            string_data: HashMap::new(),
-            closure_func_ids: HashMap::new(),
-            async_func_ids: std::collections::HashSet::new(),
-            closure_returning_funcs: std::collections::HashSet::new(),
-            func_wrapper_ids: HashMap::new(),
+            func_ids: BTreeMap::new(),
+            extern_funcs: BTreeMap::new(),
+            classes: BTreeMap::new(),
+            enums: BTreeMap::new(),
+            string_data: BTreeMap::new(),
+            closure_func_ids: BTreeMap::new(),
+            async_func_ids: std::collections::BTreeSet::new(),
+            closure_returning_funcs: std::collections::BTreeSet::new(),
+            func_wrapper_ids: BTreeMap::new(),
             hir_functions: Vec::new(),
-            func_param_types: HashMap::new(),
-            func_return_types: HashMap::new(),
-            func_hir_return_types: HashMap::new(),
-            func_rest_param_index: HashMap::new(),
-            func_union_params: HashMap::new(),
+            func_param_types: BTreeMap::new(),
+            func_return_types: BTreeMap::new(),
+            func_hir_return_types: BTreeMap::new(),
+            func_rest_param_index: BTreeMap::new(),
+            func_union_params: BTreeMap::new(),
             needs_js_runtime: false,
             needs_dotenv_init: false,
             is_entry_module: true,  // Default to true for single-module compilation
             native_module_inits: Vec::new(),
             js_modules: Vec::new(),
-            exported_native_instance_ids: HashMap::new(),
-            exported_object_ids: HashMap::new(),
-            exported_function_ids: HashMap::new(),
-            module_var_data_ids: HashMap::new(),
-            module_level_locals: HashMap::new(),
-            imported_func_param_counts: HashMap::new(),
-            imported_func_return_types: HashMap::new(),
+            exported_native_instance_ids: BTreeMap::new(),
+            exported_object_ids: BTreeMap::new(),
+            exported_function_ids: BTreeMap::new(),
+            module_var_data_ids: BTreeMap::new(),
+            module_level_locals: BTreeMap::new(),
+            imported_func_param_counts: BTreeMap::new(),
+            imported_func_return_types: BTreeMap::new(),
             module_symbol_prefix: String::new(),
-            import_module_prefixes: HashMap::new(),
-            pre_declared_import_wrappers: HashMap::new(),
-            namespace_imports: HashSet::new(),
+            import_module_prefixes: BTreeMap::new(),
+            pre_declared_import_wrappers: BTreeMap::new(),
+            namespace_imports: std::collections::BTreeSet::new(),
             static_field_runtime_inits: Vec::new(),
         })
     }
@@ -767,21 +777,21 @@ impl Compiler {
         }
 
         // Build field indices and types
-        let mut field_indices = HashMap::new();
-        let mut field_types = HashMap::new();
+        let mut field_indices = BTreeMap::new();
+        let mut field_types = BTreeMap::new();
         for (i, field) in class.fields.iter().enumerate() {
             field_indices.insert(field.name.clone(), i as u32);
             field_types.insert(field.name.clone(), field.ty.clone());
         }
 
         // Collect method return types
-        let mut method_return_types = HashMap::new();
+        let mut method_return_types = BTreeMap::new();
         for method in &class.methods {
             method_return_types.insert(method.name.clone(), method.return_type.clone());
         }
 
         // Collect static method return types
-        let mut static_method_return_types = HashMap::new();
+        let mut static_method_return_types = BTreeMap::new();
         for method in &class.static_methods {
             static_method_return_types.insert(method.name.clone(), method.return_type.clone());
         }
@@ -790,7 +800,7 @@ impl Compiler {
         let type_params: Vec<String> = class.type_params.iter().map(|tp| tp.name.clone()).collect();
 
         // Collect field default initializer expressions
-        let mut field_inits = HashMap::new();
+        let mut field_inits = BTreeMap::new();
         for field in &class.fields {
             if let Some(ref init) = field.init {
                 field_inits.insert(field.name.clone(), init.clone());
@@ -808,11 +818,11 @@ impl Compiler {
             field_indices,
             field_types,
             constructor_id: None,
-            method_ids: HashMap::new(),
-            getter_ids: HashMap::new(),
-            setter_ids: HashMap::new(),
-            static_method_ids: HashMap::new(),
-            static_field_ids: HashMap::new(),
+            method_ids: BTreeMap::new(),
+            getter_ids: BTreeMap::new(),
+            setter_ids: BTreeMap::new(),
+            static_method_ids: BTreeMap::new(),
+            static_field_ids: BTreeMap::new(),
             method_return_types,
             static_method_return_types,
             type_params,
@@ -972,6 +982,19 @@ impl Compiler {
         self.analyze_module_var_types_recursive(init_stmts);
     }
 
+    /// Check if an init expression produces a bigint value (for type analysis)
+    fn is_bigint_init_expr(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::BigInt(_) | Expr::BigIntCoerce(_) => true,
+            Expr::LocalGet(id) => self.module_level_locals.get(id).map(|i| i.is_bigint).unwrap_or(false),
+            Expr::Binary { left, right, .. } => {
+                self.is_bigint_init_expr(left) || self.is_bigint_init_expr(right)
+            }
+            Expr::Unary { operand, .. } => self.is_bigint_init_expr(operand),
+            _ => false,
+        }
+    }
+
     /// Recursively analyze variable types in nested statements
     fn analyze_module_var_types_recursive(&mut self, stmts: &[Stmt]) {
         use perry_types::Type as HirType;
@@ -1103,7 +1126,15 @@ impl Compiler {
                     is_pointer: is_pointer || is_pointer_from_init,
                     is_array,
                     is_string,
-                    is_bigint: false,
+                    is_bigint: matches!(ty, HirType::BigInt) || matches!(init, Some(Expr::BigInt(_))) || matches!(init, Some(Expr::BigIntCoerce(_))) || {
+                        // Check if init is a LocalGet of a known bigint variable,
+                        // or a binary/unary expression involving bigint operands
+                        if let Some(init_expr) = init {
+                            self.is_bigint_init_expr(init_expr)
+                        } else {
+                            false
+                        }
+                    },
                     is_closure,
                     is_boxed: false,
                     is_map: matches!(init, Some(Expr::MapNew)),
@@ -1324,7 +1355,7 @@ impl Compiler {
 
         // Collect FuncRef expressions that need closure-compatible wrappers
         // NOTE: This must be done BEFORE compiling closures, as closures may use FuncRefs
-        let mut func_refs_needing_wrappers: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut func_refs_needing_wrappers: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
         for func in &hir.functions {
             self.collect_func_refs_needing_wrappers_from_stmts(&func.body, &mut func_refs_needing_wrappers);
         }
@@ -1369,6 +1400,53 @@ impl Compiler {
 
         // Pre-compute which module-level variables are pointers
         self.analyze_module_var_types(&hir.init);
+
+        // Also analyze function body variables for closure capture type propagation
+        // This populates module_level_locals with type info for function-local variables
+        // that may be captured by closures (e.g., bigint variables captured from enclosing functions)
+        for func in &hir.functions {
+            // Analyze function parameter types FIRST (body may reference params via LocalGet)
+            for param in &func.params {
+                let is_bigint = matches!(param.ty, perry_types::Type::BigInt);
+                let is_string = matches!(param.ty, perry_types::Type::String);
+                let is_array = matches!(param.ty, perry_types::Type::Array(_));
+                let is_closure = matches!(param.ty, perry_types::Type::Function(_));
+                let is_pointer = matches!(param.ty, perry_types::Type::String | perry_types::Type::Array(_) |
+                    perry_types::Type::Object(_) | perry_types::Type::Named(_) | perry_types::Type::Generic { .. } |
+                    perry_types::Type::Function(_));
+                let is_map = matches!(&param.ty, perry_types::Type::Generic { base, .. } if base == "Map");
+                let is_set = matches!(&param.ty, perry_types::Type::Generic { base, .. } if base == "Set");
+                let is_union = matches!(param.ty, perry_types::Type::Union(_) | perry_types::Type::Named(_) |
+                    perry_types::Type::Object(_) | perry_types::Type::Any | perry_types::Type::Unknown);
+                // Only insert if not already present (module-level takes precedence)
+                if !self.module_level_locals.contains_key(&param.id) {
+                    self.module_level_locals.insert(param.id, LocalInfo {
+                        var: Variable::new(0),
+                        name: Some(param.name.clone()),
+                        class_name: None,
+                        type_args: Vec::new(),
+                        is_pointer,
+                        is_array,
+                        is_string,
+                        is_bigint,
+                        is_closure,
+                        is_boxed: false,
+                        is_map, is_set,
+                        is_buffer: false, is_event_emitter: false, is_union,
+                        is_mixed_array: false,
+                        is_integer: false, is_integer_array: false,
+                        is_i32: false, i32_shadow: None,
+                        bounded_by_array: None, bounded_by_constant: None,
+                        scalar_fields: None,
+                        squared_cache: None, product_cache: None, cached_array_ptr: None,
+                        const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
+                        module_var_data_id: None,
+                    });
+                }
+            }
+            // Now analyze function body variables (after params are registered)
+            self.analyze_module_var_types_recursive(&func.body);
+        }
 
         // Now compile closures (after wrappers are created and module vars are registered)
         for (func_id, params, body, captures, mutable_captures, captures_this, enclosing_class, is_async) in deduped_closures {
@@ -1580,8 +1658,8 @@ impl Compiler {
 
         // Start with own fields only - inheritance will be resolved later
         // If there's a native parent, field 0 is reserved for the native handle
-        let mut field_indices = HashMap::new();
-        let mut field_types = HashMap::new();
+        let mut field_indices = BTreeMap::new();
+        let mut field_types = BTreeMap::new();
         if native_parent.is_some() {
             field_indices.insert("__native_handle__".to_string(), 0);
         }
@@ -1591,13 +1669,13 @@ impl Compiler {
         }
 
         // Collect method return types for type-aware console.log handling
-        let mut method_return_types = HashMap::new();
+        let mut method_return_types = BTreeMap::new();
         for method in &class.methods {
             method_return_types.insert(method.name.clone(), method.return_type.clone());
         }
 
         // Collect static method return types for singleton pattern (getInstance() etc.)
-        let mut static_method_return_types = HashMap::new();
+        let mut static_method_return_types = BTreeMap::new();
         for method in &class.static_methods {
             static_method_return_types.insert(method.name.clone(), method.return_type.clone());
         }
@@ -1606,7 +1684,7 @@ impl Compiler {
         let type_params: Vec<String> = class.type_params.iter().map(|tp| tp.name.clone()).collect();
 
         // Collect field default initializer expressions
-        let mut field_inits = HashMap::new();
+        let mut field_inits = BTreeMap::new();
         for field in &class.fields {
             if let Some(ref init) = field.init {
                 field_inits.insert(field.name.clone(), init.clone());
@@ -1622,11 +1700,11 @@ impl Compiler {
             field_indices,
             field_types,
             constructor_id: None,
-            method_ids: HashMap::new(),
-            getter_ids: HashMap::new(),
-            setter_ids: HashMap::new(),
-            static_method_ids: HashMap::new(),
-            static_field_ids: HashMap::new(),
+            method_ids: BTreeMap::new(),
+            getter_ids: BTreeMap::new(),
+            setter_ids: BTreeMap::new(),
+            static_method_ids: BTreeMap::new(),
+            static_field_ids: BTreeMap::new(),
             method_return_types,
             static_method_return_types,
             type_params,
@@ -1637,8 +1715,9 @@ impl Compiler {
     }
 
     fn resolve_class_inheritance(&mut self) {
-        // Get list of class names to process
-        let class_names: Vec<String> = self.classes.keys().cloned().collect();
+        // Get list of class names to process — MUST be sorted for deterministic compilation
+        let mut class_names: Vec<String> = self.classes.keys().cloned().collect();
+        class_names.sort();
 
         for class_name in &class_names {
             self.resolve_class_fields(class_name);
@@ -1692,7 +1771,9 @@ impl Compiler {
     /// Resolve method inheritance - copy parent methods to child classes
     /// This must be called AFTER all methods have been declared
     fn resolve_method_inheritance(&mut self) {
-        let class_names: Vec<String> = self.classes.keys().cloned().collect();
+        // MUST be sorted for deterministic compilation
+        let mut class_names: Vec<String> = self.classes.keys().cloned().collect();
+        class_names.sort();
 
         for class_name in &class_names {
             self.resolve_methods_for_class(class_name);
@@ -1826,7 +1907,7 @@ impl Compiler {
             builder.def_var(this_var, this_val);
 
             // Create variables for other parameters
-            let mut locals: HashMap<LocalId, LocalInfo> = HashMap::new();
+            let mut locals: BTreeMap<LocalId, LocalInfo> = BTreeMap::new();
             let mut next_var = 1usize;
             for (i, param) in method.params.iter().enumerate() {
                 let var = Variable::new(next_var);
@@ -2131,7 +2212,7 @@ impl Compiler {
             builder.def_var(this_var, this_val);
 
             // No other parameters for getters
-            let mut locals: HashMap<LocalId, LocalInfo> = HashMap::new();
+            let mut locals: BTreeMap<LocalId, LocalInfo> = BTreeMap::new();
             let mut next_var = 1usize;
 
             // Load module-level variables from their global slots
@@ -2267,7 +2348,7 @@ impl Compiler {
             builder.def_var(this_var, this_val);
 
             // Create variables for value parameters
-            let mut locals: HashMap<LocalId, LocalInfo> = HashMap::new();
+            let mut locals: BTreeMap<LocalId, LocalInfo> = BTreeMap::new();
             let mut next_var = 1usize;
             for (i, param) in setter.params.iter().enumerate() {
                 let var = Variable::new(next_var);
@@ -2461,7 +2542,7 @@ impl Compiler {
             builder.seal_block(entry_block);
 
             // Create variables for parameters (no 'this')
-            let mut locals: HashMap<LocalId, LocalInfo> = HashMap::new();
+            let mut locals: BTreeMap<LocalId, LocalInfo> = BTreeMap::new();
             let mut next_var = 0usize;
             for (i, param) in method.params.iter().enumerate() {
                 let var = Variable::new(next_var);
@@ -2677,7 +2758,7 @@ impl Compiler {
             let obj_ptr = builder.block_params(entry_block)[0];
 
             // 'this' is the object pointer
-            let mut locals: HashMap<LocalId, LocalInfo> = HashMap::new();
+            let mut locals: BTreeMap<LocalId, LocalInfo> = BTreeMap::new();
             let this_var = Variable::new(0);
             builder.declare_var(this_var, types::I64);
             builder.def_var(this_var, obj_ptr);
@@ -3784,6 +3865,20 @@ impl Compiler {
             self.extern_funcs.insert("js_array_map".to_string(), func_id);
         }
 
+        // js_array_sort_with_comparator(arr: *mut ArrayHeader, comparator: *const ClosureHeader) -> *mut ArrayHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // array pointer
+            sig.params.push(AbiParam::new(types::I64)); // comparator closure pointer
+            sig.returns.push(AbiParam::new(types::I64)); // same array pointer (in-place sort)
+            let func_id = self.module.declare_function(
+                "js_array_sort_with_comparator",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_array_sort_with_comparator".to_string(), func_id);
+        }
+
         // js_array_filter(arr: *const ArrayHeader, callback: *const ClosureHeader) -> *mut ArrayHeader
         {
             let mut sig = self.module.make_signature();
@@ -4201,6 +4296,20 @@ impl Compiler {
                 &sig,
             )?;
             self.extern_funcs.insert("js_number_to_string".to_string(), func_id);
+        }
+
+        // js_number_to_fixed(value: f64, decimals: f64) -> *mut StringHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // number value
+            sig.params.push(AbiParam::new(types::F64)); // decimal places
+            sig.returns.push(AbiParam::new(types::I64)); // result string pointer
+            let func_id = self.module.declare_function(
+                "js_number_to_fixed",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_number_to_fixed".to_string(), func_id);
         }
 
         // js_jsvalue_to_string(value: f64) -> *mut StringHeader
@@ -4694,6 +4803,19 @@ impl Compiler {
             self.extern_funcs.insert("js_bigint_from_f64".to_string(), func_id);
         }
 
+        // js_bigint_neg(a: *const BigIntHeader) -> *mut BigIntHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // a pointer
+            sig.returns.push(AbiParam::new(types::I64)); // result pointer
+            let func_id = self.module.declare_function(
+                "js_bigint_neg",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_bigint_neg".to_string(), func_id);
+        }
+
         // js_bigint_add(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader
         {
             let mut sig = self.module.make_signature();
@@ -5081,6 +5203,23 @@ impl Compiler {
                 &sig,
             )?;
             self.extern_funcs.insert("js_closure_call8".to_string(), func_id);
+        }
+
+        // js_closure_call9 through js_closure_call16
+        for n in 9..=16u32 {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // closure
+            for _ in 0..n {
+                sig.params.push(AbiParam::new(types::F64)); // argN
+            }
+            sig.returns.push(AbiParam::new(types::F64));
+            let name = format!("js_closure_call{}", n);
+            let func_id = self.module.declare_function(
+                &name,
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(name, func_id);
         }
 
         // Box runtime functions for mutable captured variables
@@ -6128,6 +6267,60 @@ impl Compiler {
             sig.returns.push(AbiParam::new(types::I64)); // Promise ptr
             let func_id = self.module.declare_function("js_ioredis_setex", Linkage::Import, &sig)?;
             self.extern_funcs.insert("js_ioredis_setex".to_string(), func_id);
+        }
+
+        // js_ioredis_hget(handle: i64, key: i64, field: i64) -> Promise (i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // handle
+            sig.params.push(AbiParam::new(types::I64)); // key string ptr
+            sig.params.push(AbiParam::new(types::I64)); // field string ptr
+            sig.returns.push(AbiParam::new(types::I64)); // Promise ptr
+            let func_id = self.module.declare_function("js_ioredis_hget", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_ioredis_hget".to_string(), func_id);
+        }
+
+        // js_ioredis_hset(handle: i64, key: i64, field: i64, value: i64) -> Promise (i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // handle
+            sig.params.push(AbiParam::new(types::I64)); // key string ptr
+            sig.params.push(AbiParam::new(types::I64)); // field string ptr
+            sig.params.push(AbiParam::new(types::I64)); // value string ptr
+            sig.returns.push(AbiParam::new(types::I64)); // Promise ptr
+            let func_id = self.module.declare_function("js_ioredis_hset", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_ioredis_hset".to_string(), func_id);
+        }
+
+        // js_ioredis_hgetall(handle: i64, key: i64) -> Promise (i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // handle
+            sig.params.push(AbiParam::new(types::I64)); // key string ptr
+            sig.returns.push(AbiParam::new(types::I64)); // Promise ptr
+            let func_id = self.module.declare_function("js_ioredis_hgetall", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_ioredis_hgetall".to_string(), func_id);
+        }
+
+        // js_ioredis_hdel(handle: i64, key: i64, field: i64) -> Promise (i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // handle
+            sig.params.push(AbiParam::new(types::I64)); // key string ptr
+            sig.params.push(AbiParam::new(types::I64)); // field string ptr
+            sig.returns.push(AbiParam::new(types::I64)); // Promise ptr
+            let func_id = self.module.declare_function("js_ioredis_hdel", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_ioredis_hdel".to_string(), func_id);
+        }
+
+        // js_ioredis_hlen(handle: i64, key: i64) -> Promise (i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // handle
+            sig.params.push(AbiParam::new(types::I64)); // key string ptr
+            sig.returns.push(AbiParam::new(types::I64)); // Promise ptr
+            let func_id = self.module.declare_function("js_ioredis_hlen", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_ioredis_hlen".to_string(), func_id);
         }
 
         // js_ioredis_disconnect(handle: i64) -> void
@@ -10688,7 +10881,7 @@ impl Compiler {
             builder.seal_block(entry_block);
 
             // Create variables for parameters using sequential indices (0, 1, 2, ...)
-            let mut locals: HashMap<LocalId, LocalInfo> = HashMap::new();
+            let mut locals: BTreeMap<LocalId, LocalInfo> = BTreeMap::new();
             for (i, param) in func.params.iter().enumerate() {
                 let var = Variable::new(i);  // Use sequential index, not param.id
                 let abi_type = param_abi_types[i];
@@ -11595,6 +11788,10 @@ impl Compiler {
                 self.collect_closures_from_expr(array, closures, enclosing_class);
                 self.collect_closures_from_expr(callback, closures, enclosing_class);
             }
+            Expr::ArraySort { array, comparator } => {
+                self.collect_closures_from_expr(array, closures, enclosing_class);
+                self.collect_closures_from_expr(comparator, closures, enclosing_class);
+            }
             Expr::ArrayReduce { array, callback, initial } => {
                 self.collect_closures_from_expr(array, closures, enclosing_class);
                 self.collect_closures_from_expr(callback, closures, enclosing_class);
@@ -12235,6 +12432,10 @@ impl Compiler {
                 self.collect_mutable_captures_from_expr(array, captures);
                 self.collect_mutable_captures_from_expr(callback, captures);
             }
+            Expr::ArraySort { array, comparator } => {
+                self.collect_mutable_captures_from_expr(array, captures);
+                self.collect_mutable_captures_from_expr(comparator, captures);
+            }
             Expr::ArrayReduce { array, callback, initial } => {
                 self.collect_mutable_captures_from_expr(array, captures);
                 self.collect_mutable_captures_from_expr(callback, captures);
@@ -12331,13 +12532,13 @@ impl Compiler {
 
     /// Collect FuncRef expressions that are used as values (not as call callees)
     /// These need wrapper functions for closure-compatible calling convention
-    fn collect_func_refs_needing_wrappers_from_stmts(&self, stmts: &[Stmt], func_refs: &mut std::collections::HashSet<u32>) {
+    fn collect_func_refs_needing_wrappers_from_stmts(&self, stmts: &[Stmt], func_refs: &mut std::collections::BTreeSet<u32>) {
         for stmt in stmts {
             self.collect_func_refs_from_stmt(stmt, func_refs);
         }
     }
 
-    fn collect_func_refs_from_stmt(&self, stmt: &Stmt, func_refs: &mut std::collections::HashSet<u32>) {
+    fn collect_func_refs_from_stmt(&self, stmt: &Stmt, func_refs: &mut std::collections::BTreeSet<u32>) {
         match stmt {
             Stmt::Let { init: Some(expr), .. } => {
                 self.collect_func_refs_from_expr(expr, func_refs);
@@ -12375,7 +12576,7 @@ impl Compiler {
         }
     }
 
-    fn collect_func_refs_from_expr(&self, expr: &Expr, func_refs: &mut std::collections::HashSet<u32>) {
+    fn collect_func_refs_from_expr(&self, expr: &Expr, func_refs: &mut std::collections::BTreeSet<u32>) {
         match expr {
             Expr::Call { callee, args, .. } => {
                 // Callee FuncRef is NOT a wrapper candidate (it's being called directly)
@@ -12439,6 +12640,15 @@ impl Compiler {
                         func_refs.insert(*func_id);
                     }
                     _ => self.collect_func_refs_from_expr(callback, func_refs),
+                }
+            }
+            Expr::ArraySort { array, comparator } => {
+                self.collect_func_refs_from_expr(array, func_refs);
+                match comparator.as_ref() {
+                    Expr::FuncRef(func_id) => {
+                        func_refs.insert(*func_id);
+                    }
+                    _ => self.collect_func_refs_from_expr(comparator, func_refs),
                 }
             }
             Expr::ArrayReduce { array, callback, initial } => {
@@ -12536,7 +12746,7 @@ impl Compiler {
             builder.def_var(closure_ptr_var, closure_ptr);
 
             // Create variables for regular parameters
-            let mut locals: HashMap<LocalId, LocalInfo> = HashMap::new();
+            let mut locals: BTreeMap<LocalId, LocalInfo> = BTreeMap::new();
             let mut next_var = 1usize;
 
             for (i, param) in params.iter().enumerate() {
@@ -13145,7 +13355,8 @@ impl Compiler {
                 };
 
                 // Get closure call function based on param count
-                let call_func_name = match params.len() {
+                let call_func_name_owned;
+                let call_func_name: &str = match params.len() {
                     0 => "js_closure_call0",
                     1 => "js_closure_call1",
                     2 => "js_closure_call2",
@@ -13155,6 +13366,10 @@ impl Compiler {
                     6 => "js_closure_call6",
                     7 => "js_closure_call7",
                     8 => "js_closure_call8",
+                    n @ 9..=16 => {
+                        call_func_name_owned = format!("js_closure_call{}", n);
+                        &call_func_name_owned
+                    }
                     _ => {
                         log::warn!("Exported closure {} has too many params ({}), skipping wrapper", name, params.len());
                         continue;
@@ -13245,7 +13460,13 @@ impl Compiler {
         self.ctx.func.signature = sig;
 
         // Collect all variables that will be mutably captured by closures (before borrowing self.ctx)
-        let boxed_vars = self.collect_mutable_captures_from_stmts(stmts);
+        let all_boxed_vars = self.collect_mutable_captures_from_stmts(stmts);
+        // Module-level variables use global slots as their box pointer (handled after
+        // data_id assignment below). Only pass non-module-level vars for heap-boxing in Stmt::Let.
+        let boxed_vars: std::collections::HashSet<LocalId> = all_boxed_vars.iter()
+            .filter(|id| !self.module_var_data_ids.contains_key(id))
+            .copied()
+            .collect();
 
         // Check if we need to call js_runtime_init
         let needs_js_runtime = self.needs_js_runtime;
@@ -13341,7 +13562,7 @@ impl Compiler {
 
             // Runtime-initialize static fields that need heap allocation (strings, etc.)
             for (data_id, init_expr) in std::mem::take(&mut self.static_field_runtime_inits) {
-                let empty_locals: HashMap<LocalId, LocalInfo> = HashMap::new();
+                let empty_locals: BTreeMap<LocalId, LocalInfo> = BTreeMap::new();
                 let val = compile_expr(
                     &mut builder, &mut self.module,
                     &self.func_ids, &self.closure_func_ids, &self.func_wrapper_ids,
@@ -13357,7 +13578,7 @@ impl Compiler {
                 builder.ins().store(MemFlags::new(), val, ptr, 0);
             }
 
-            let mut locals: HashMap<LocalId, LocalInfo> = HashMap::new();
+            let mut locals: BTreeMap<LocalId, LocalInfo> = BTreeMap::new();
             let mut next_var = 0;
 
             for stmt in stmts {
@@ -13422,6 +13643,25 @@ impl Compiler {
                             // the box, keeping named-function reads in sync.
                             if let Some(local_info_mut) = locals.get_mut(id) {
                                 local_info_mut.module_var_data_id = Some(data_id);
+                            }
+
+                            // For module-level variables that are mutably captured by closures,
+                            // convert to boxed access using the global slot address as the box pointer.
+                            // This ensures the outer scope always reads the latest value after
+                            // closures modify the variable via js_box_set on the global slot.
+                            if all_boxed_vars.contains(id) {
+                                let global_val = self.module.declare_data_in_func(data_id, builder.func);
+                                let slot_addr = builder.ins().global_value(types::I64, global_val);
+
+                                let box_var = Variable::new(next_var);
+                                next_var += 1;
+                                builder.declare_var(box_var, types::I64);
+                                builder.def_var(box_var, slot_addr);
+
+                                if let Some(local_info_mut) = locals.get_mut(id) {
+                                    local_info_mut.var = box_var;
+                                    local_info_mut.is_boxed = true;
+                                }
                             }
                         }
                     }
@@ -13570,20 +13810,20 @@ fn contains_loop_control(stmts: &[Stmt]) -> bool {
 fn compile_async_stmt(
     builder: &mut FunctionBuilder,
     module: &mut ObjectModule,
-    func_ids: &HashMap<u32, cranelift_module::FuncId>,
-    closure_func_ids: &HashMap<u32, cranelift_module::FuncId>,
-    func_wrapper_ids: &HashMap<u32, cranelift_module::FuncId>,
-    extern_funcs: &HashMap<String, cranelift_module::FuncId>,
-    async_func_ids: &std::collections::HashSet<u32>,
-    closure_returning_funcs: &std::collections::HashSet<u32>,
-    classes: &HashMap<String, ClassMeta>,
-    enums: &HashMap<(String, String), EnumMemberValue>,
-    func_param_types: &HashMap<u32, Vec<types::Type>>, func_union_params: &HashMap<u32, Vec<bool>>,
-    func_return_types: &HashMap<u32, types::Type>,
-    func_hir_return_types: &HashMap<u32, perry_types::Type>,
-    func_rest_param_index: &HashMap<u32, usize>,
-    imported_func_param_counts: &HashMap<String, usize>,
-    locals: &mut HashMap<LocalId, LocalInfo>,
+    func_ids: &BTreeMap<u32, cranelift_module::FuncId>,
+    closure_func_ids: &BTreeMap<u32, cranelift_module::FuncId>,
+    func_wrapper_ids: &BTreeMap<u32, cranelift_module::FuncId>,
+    extern_funcs: &BTreeMap<String, cranelift_module::FuncId>,
+    async_func_ids: &std::collections::BTreeSet<u32>,
+    closure_returning_funcs: &std::collections::BTreeSet<u32>,
+    classes: &BTreeMap<String, ClassMeta>,
+    enums: &BTreeMap<(String, String), EnumMemberValue>,
+    func_param_types: &BTreeMap<u32, Vec<types::Type>>, func_union_params: &BTreeMap<u32, Vec<bool>>,
+    func_return_types: &BTreeMap<u32, types::Type>,
+    func_hir_return_types: &BTreeMap<u32, perry_types::Type>,
+    func_rest_param_index: &BTreeMap<u32, usize>,
+    imported_func_param_counts: &BTreeMap<String, usize>,
+    locals: &mut BTreeMap<LocalId, LocalInfo>,
     next_var: &mut usize,
     stmt: &Stmt,
     promise_var: Variable,
@@ -13598,7 +13838,7 @@ fn compile_async_stmt(
 
             // Helper to detect if an expression returns a Promise
             // This is needed for Promise unwrapping - when returning a Promise from async function
-            fn is_promise_expr(expr: &Expr, async_func_ids: &std::collections::HashSet<u32>) -> bool {
+            fn is_promise_expr(expr: &Expr, async_func_ids: &std::collections::BTreeSet<u32>) -> bool {
                 match expr {
                     // new Promise(...) returns a Promise
                     Expr::New { class_name, .. } if class_name == "Promise" => true,
@@ -13615,7 +13855,7 @@ fn compile_async_stmt(
             }
 
             // Helper to detect if an expression is an object/array (pointer type)
-            fn is_object_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>, async_func_ids: &std::collections::HashSet<u32>) -> bool {
+            fn is_object_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>, async_func_ids: &std::collections::BTreeSet<u32>) -> bool {
                 // Promises are handled separately - don't treat them as generic objects
                 if is_promise_expr(expr, async_func_ids) {
                     return false;
@@ -13630,7 +13870,7 @@ fn compile_async_stmt(
             }
 
             // Helper to detect if an expression is a string
-            fn is_string_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+            fn is_string_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
                     Expr::StringFromCharCode(_) => true,  // String.fromCharCode() returns a string
@@ -13803,7 +14043,7 @@ fn compile_async_stmt(
 fn emit_try_end_cleanup(
     builder: &mut FunctionBuilder,
     module: &mut ObjectModule,
-    extern_funcs: &HashMap<String, cranelift_module::FuncId>,
+    extern_funcs: &BTreeMap<String, cranelift_module::FuncId>,
     count: usize,
 ) -> Result<()> {
     if count > 0 {
@@ -13820,20 +14060,20 @@ fn emit_try_end_cleanup(
 fn compile_stmt(
     builder: &mut FunctionBuilder,
     module: &mut ObjectModule,
-    func_ids: &HashMap<u32, cranelift_module::FuncId>,
-    closure_func_ids: &HashMap<u32, cranelift_module::FuncId>,
-    func_wrapper_ids: &HashMap<u32, cranelift_module::FuncId>,
-    extern_funcs: &HashMap<String, cranelift_module::FuncId>,
-    async_func_ids: &std::collections::HashSet<u32>,
-    closure_returning_funcs: &std::collections::HashSet<u32>,
-    classes: &HashMap<String, ClassMeta>,
-    enums: &HashMap<(String, String), EnumMemberValue>,
-    func_param_types: &HashMap<u32, Vec<types::Type>>, func_union_params: &HashMap<u32, Vec<bool>>,
-    func_return_types: &HashMap<u32, types::Type>,
-    func_hir_return_types: &HashMap<u32, perry_types::Type>,
-    func_rest_param_index: &HashMap<u32, usize>,
-    imported_func_param_counts: &HashMap<String, usize>,
-    locals: &mut HashMap<LocalId, LocalInfo>,
+    func_ids: &BTreeMap<u32, cranelift_module::FuncId>,
+    closure_func_ids: &BTreeMap<u32, cranelift_module::FuncId>,
+    func_wrapper_ids: &BTreeMap<u32, cranelift_module::FuncId>,
+    extern_funcs: &BTreeMap<String, cranelift_module::FuncId>,
+    async_func_ids: &std::collections::BTreeSet<u32>,
+    closure_returning_funcs: &std::collections::BTreeSet<u32>,
+    classes: &BTreeMap<String, ClassMeta>,
+    enums: &BTreeMap<(String, String), EnumMemberValue>,
+    func_param_types: &BTreeMap<u32, Vec<types::Type>>, func_union_params: &BTreeMap<u32, Vec<bool>>,
+    func_return_types: &BTreeMap<u32, types::Type>,
+    func_hir_return_types: &BTreeMap<u32, perry_types::Type>,
+    func_rest_param_index: &BTreeMap<u32, usize>,
+    imported_func_param_counts: &BTreeMap<String, usize>,
+    locals: &mut BTreeMap<LocalId, LocalInfo>,
     next_var: &mut usize,
     stmt: &Stmt,
     this_ctx: Option<&ThisContext>,
@@ -13854,7 +14094,7 @@ fn compile_stmt(
 
             // Helper to detect if an expression produces a string (fallback for untyped cases)
             // Note: EnvGet is NOT included here because it can return undefined if the env var doesn't exist
-            fn is_string_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+            fn is_string_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
                     Expr::StringFromCharCode(_) => true,
@@ -13908,6 +14148,16 @@ fn compile_stmt(
                             if matches!(return_type, perry_types::Type::String) {
                                 return true;
                             }
+                            // Cross-module imports may have Type::Any in ExternFuncRef
+                            // but actual return type stored in IMPORTED_FUNC_RETURN_TYPES
+                            if matches!(return_type, perry_types::Type::Any) {
+                                let is_str = IMPORTED_FUNC_RETURN_TYPES.with(|p| {
+                                    p.borrow().get(func_name).map(|t| matches!(t, perry_types::Type::String)).unwrap_or(false)
+                                });
+                                if is_str {
+                                    return true;
+                                }
+                            }
                             // Fallback: HTTP request methods that return strings
                             if func_name.starts_with("js_http_request_method")
                                 || func_name.starts_with("js_http_request_path")
@@ -13940,7 +14190,7 @@ fn compile_stmt(
             }
 
             // Helper to detect if an expression produces a BigInt
-            fn is_bigint_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>, func_hir_return_types: &HashMap<u32, perry_types::Type>) -> bool {
+            fn is_bigint_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>, func_hir_return_types: &BTreeMap<u32, perry_types::Type>) -> bool {
                 match expr {
                     Expr::BigInt(_) => true,
                     Expr::BigIntCoerce(_) => true,
@@ -13981,7 +14231,7 @@ fn compile_stmt(
             }
 
             // Helper to detect if an expression produces a Closure
-            fn is_closure_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>, closure_returning_funcs: &std::collections::HashSet<u32>) -> bool {
+            fn is_closure_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>, closure_returning_funcs: &std::collections::BTreeSet<u32>) -> bool {
                 match expr {
                     Expr::Closure { .. } => true,
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_closure).unwrap_or(false),
@@ -13997,7 +14247,7 @@ fn compile_stmt(
             }
 
             // Helper to detect if an expression produces an integer value (for native i64 optimization)
-            fn is_integer_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+            fn is_integer_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     // Integer literals
                     Expr::Integer(_) => true,
@@ -14037,7 +14287,7 @@ fn compile_stmt(
             let is_typed_generic_object = matches!(ty, HirType::Named(_) | HirType::Object(_) | HirType::Any);
 
             // Helper to detect mixed-type array from expression
-            fn is_mixed_array_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+            fn is_mixed_array_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::Array(elements) => {
                         // Check if array contains both strings and numbers
@@ -14047,8 +14297,8 @@ fn compile_stmt(
                     }
                     // ProcessArgv returns an array of NaN-boxed strings
                     Expr::ProcessArgv => true,
-                    // ArraySlice/ArrayMap/ArrayFilter inherit mixed-ness from source
-                    Expr::ArraySlice { array, .. } | Expr::ArrayMap { array, .. } | Expr::ArrayFilter { array, .. } => {
+                    // ArraySlice/ArrayMap/ArrayFilter/ArraySort inherit mixed-ness from source
+                    Expr::ArraySlice { array, .. } | Expr::ArrayMap { array, .. } | Expr::ArrayFilter { array, .. } | Expr::ArraySort { array, .. } => {
                         is_mixed_array_expr(array, locals)
                         || if let Expr::LocalGet(id) = array.as_ref() {
                             locals.get(id).map(|i| i.is_mixed_array).unwrap_or(false)
@@ -14158,9 +14408,10 @@ fn compile_stmt(
                     Some(Expr::Array(_)) | Some(Expr::ArraySpread(_)) | Some(Expr::ProcessArgv) => (None, true, true, false, false, false, false, false, false, false),
                     // Object literals return object pointers
                     Some(Expr::Object(_)) => (None, true, false, false, false, false, false, false, false, false),
-                    // ArrayMap, ArrayFilter, ArraySlice, and ArraySplice return arrays
+                    // ArrayMap, ArrayFilter, ArraySort, ArraySlice, and ArraySplice return arrays
                     Some(Expr::ArrayMap { .. }) | Some(Expr::ArrayFilter { .. }) |
-                    Some(Expr::ArraySlice { .. }) | Some(Expr::ArraySplice { .. }) => (None, true, true, false, false, false, false, false, false, false),
+                    Some(Expr::ArraySort { .. }) | Some(Expr::ArraySlice { .. }) |
+                    Some(Expr::ArraySplice { .. }) => (None, true, true, false, false, false, false, false, false, false),
                     // MapNew returns a Map pointer
                     Some(Expr::MapNew) => (None, true, false, false, false, false, true, false, false, false),
                     // SetNew returns a Set pointer
@@ -14333,6 +14584,54 @@ fn compile_stmt(
                             (None, false, false, false, false, false, false, false, false, false)
                         }
                     }
+                    // MapGet - infer value type from the map's generic type args
+                    Some(Expr::MapGet { map, .. }) => {
+                        // Try to determine the map's value type from LocalInfo.type_args
+                        let value_type = if let Expr::LocalGet(map_id) = map.as_ref() {
+                            locals.get(map_id).and_then(|info| {
+                                if info.is_map && info.type_args.len() >= 2 {
+                                    Some(info.type_args[1].clone())
+                                } else {
+                                    None
+                                }
+                            })
+                        } else {
+                            None
+                        };
+                        match value_type {
+                            Some(perry_types::Type::Number) | Some(perry_types::Type::Boolean) => {
+                                // Primitive number/boolean - not a pointer
+                                (None, false, false, false, false, false, false, false, false, false)
+                            }
+                            Some(perry_types::Type::BigInt) => {
+                                (None, false, false, false, true, false, false, false, false, false)
+                            }
+                            Some(perry_types::Type::String) => {
+                                (None, false, false, true, false, false, false, false, false, false)
+                            }
+                            Some(perry_types::Type::Array(_)) => {
+                                (None, true, true, false, false, false, false, false, false, false)
+                            }
+                            Some(perry_types::Type::Generic { ref base, .. }) if base == "Map" => {
+                                (None, true, false, false, false, false, true, false, false, false)
+                            }
+                            Some(perry_types::Type::Generic { ref base, .. }) if base == "Set" => {
+                                (None, true, false, false, false, false, false, true, false, false)
+                            }
+                            Some(perry_types::Type::Named(ref name)) => {
+                                (Some(name.clone()), true, false, false, false, false, false, false, false, false)
+                            }
+                            Some(_) => {
+                                // Unknown/Any/other types - conservatively treat as pointer
+                                // so NaN-boxing extraction runs (safe for non-pointers too)
+                                (None, true, false, false, false, false, false, false, false, false)
+                            }
+                            None => {
+                                // Can't determine map's value type - conservatively treat as pointer
+                                (None, true, false, false, false, false, false, false, false, false)
+                            }
+                        }
+                    }
                     _ => (None, false, false, false, false, false, false, false, false, false),
                 }
             };
@@ -14399,8 +14698,10 @@ fn compile_stmt(
             let is_await_union = is_await_init && !is_pointer;
             let is_union = is_typed_union || is_typed_generic_object_union || is_json_parse_init || is_property_from_generic_object || is_js_interop_init || is_conditional_init || is_await_union || is_localget_union || is_indexget_init || is_envget_init;
 
-            // Extract type arguments from Expr::New for generic class instances
+            // Extract type arguments from Expr::New or from the HIR type annotation for generic types
             let type_args = if let Some(Expr::New { type_args, .. }) = init {
+                type_args.clone()
+            } else if let HirType::Generic { type_args, .. } = ty {
                 type_args.clone()
             } else {
                 Vec::new()
@@ -14478,8 +14779,10 @@ fn compile_stmt(
                                 Expr::Object(_) => true,
                                 // Array/Map/Set constructors may return NaN-boxed
                                 Expr::Array(_) | Expr::ArraySpread(_) | Expr::ArrayMap { .. } |
-                                Expr::ArrayFilter { .. } | Expr::ArraySlice { .. } |
+                                Expr::ArrayFilter { .. } | Expr::ArraySort { .. } | Expr::ArraySlice { .. } |
                                 Expr::MapNew | Expr::SetNew => true,
+                                // Map.get() returns NaN-boxed value (may be POINTER_TAG object)
+                                Expr::MapGet { .. } => true,
                                 Expr::New { .. } => true,
                                 // Await returns NaN-boxed value from js_promise_value (F64 with POINTER_TAG)
                                 Expr::Await(_) => true,
@@ -14493,6 +14796,9 @@ fn compile_stmt(
                                         true
                                     }
                                 }
+                                // Function calls returning F64 when stored as pointer must be NaN-boxed
+                                // (e.g., closure-returning functions with Type::Any return type)
+                                Expr::Call { .. } => true,
                                 _ => false,
                             };
 
@@ -14579,7 +14885,31 @@ fn compile_stmt(
                 None
             };
 
-            locals.insert(*id, LocalInfo { var, name: Some(var_name.clone()), class_name, type_args, is_pointer, is_array, is_string, is_bigint, is_closure, is_boxed: false, is_map, is_set, is_buffer, is_event_emitter, is_union, is_mixed_array, is_integer, is_integer_array: false, is_i32: should_use_i32, i32_shadow, bounded_by_array: None, bounded_by_constant: None, scalar_fields: None, squared_cache: None, product_cache: None, cached_array_ptr: None, const_value, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None });
+            // If this variable will be captured mutably by a closure, wrap it in a heap box
+            // so both the outer scope and the closure share the same storage location.
+            // Reads go through js_box_get, writes through js_box_set (handled by is_boxed flag).
+            let (final_var, is_boxed_var) = if boxed_vars.contains(id) {
+                let orig_val = builder.use_var(var);
+                let val_f64 = ensure_f64(builder, orig_val);
+
+                let box_alloc_func = extern_funcs.get("js_box_alloc")
+                    .ok_or_else(|| anyhow!("js_box_alloc not declared"))?;
+                let box_alloc_ref = module.declare_func_in_func(*box_alloc_func, builder.func);
+                let box_call = builder.ins().call(box_alloc_ref, &[val_f64]);
+                let box_ptr = builder.inst_results(box_call)[0]; // I64
+
+                // Create a new variable for the box pointer (I64)
+                let box_var = Variable::new(*next_var);
+                *next_var += 1;
+                builder.declare_var(box_var, types::I64);
+                builder.def_var(box_var, box_ptr);
+
+                (box_var, true)
+            } else {
+                (var, false)
+            };
+
+            locals.insert(*id, LocalInfo { var: final_var, name: Some(var_name.clone()), class_name, type_args, is_pointer, is_array, is_string, is_bigint, is_closure, is_boxed: is_boxed_var, is_map, is_set, is_buffer, is_event_emitter, is_union, is_mixed_array, is_integer, is_integer_array: false, is_i32: should_use_i32, i32_shadow, bounded_by_array: None, bounded_by_constant: None, scalar_fields: None, squared_cache: None, product_cache: None, cached_array_ptr: None, const_value, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: None });
         }
         Stmt::Return(expr) => {
             // Emit js_try_end() for each enclosing try block before returning
@@ -14977,7 +15307,7 @@ fn compile_stmt(
             }
 
             // Create cache variables for product pairs and set up product_cache in LocalInfo
-            let mut product_cache_vars: HashMap<(LocalId, LocalId), Variable> = HashMap::new();
+            let mut product_cache_vars: BTreeMap<(LocalId, LocalId), Variable> = BTreeMap::new();
             for (id1, id2) in &cse_product_pairs {
                 let cache_var = Variable::new(*next_var);
                 *next_var += 1;
@@ -17027,7 +17357,7 @@ fn compile_stmt(
             // Create stack slots for variables that exist before the try and are assigned in try
             // Map: LocalId -> (StackSlot, actual_var_type, original_var, was_i32)
             // We need to store the original Variable because loop optimization might change info.var
-            let mut try_var_slots: HashMap<LocalId, (StackSlot, types::Type, Variable, bool)> = HashMap::new();
+            let mut try_var_slots: BTreeMap<LocalId, (StackSlot, types::Type, Variable, bool)> = BTreeMap::new();
             for local_id in &try_assigned {
                 if let Some(info) = locals.get(local_id) {
                     // Get the ACTUAL declared type of the variable from the builder
@@ -17538,19 +17868,19 @@ fn detect_state_condition(expr: &Expr) -> Option<&Expr> {
 fn compile_expr(
     builder: &mut FunctionBuilder,
     module: &mut ObjectModule,
-    func_ids: &HashMap<u32, cranelift_module::FuncId>,
-    closure_func_ids: &HashMap<u32, cranelift_module::FuncId>,
-    func_wrapper_ids: &HashMap<u32, cranelift_module::FuncId>,
-    extern_funcs: &HashMap<String, cranelift_module::FuncId>,
-    async_func_ids: &std::collections::HashSet<u32>,
-    classes: &HashMap<String, ClassMeta>,
-    enums: &HashMap<(String, String), EnumMemberValue>,
-    func_param_types: &HashMap<u32, Vec<types::Type>>, func_union_params: &HashMap<u32, Vec<bool>>,
-    func_return_types: &HashMap<u32, types::Type>,
-    func_hir_return_types: &HashMap<u32, perry_types::Type>,
-    func_rest_param_index: &HashMap<u32, usize>,
-    imported_func_param_counts: &HashMap<String, usize>,
-    locals: &HashMap<LocalId, LocalInfo>,
+    func_ids: &BTreeMap<u32, cranelift_module::FuncId>,
+    closure_func_ids: &BTreeMap<u32, cranelift_module::FuncId>,
+    func_wrapper_ids: &BTreeMap<u32, cranelift_module::FuncId>,
+    extern_funcs: &BTreeMap<String, cranelift_module::FuncId>,
+    async_func_ids: &std::collections::BTreeSet<u32>,
+    classes: &BTreeMap<String, ClassMeta>,
+    enums: &BTreeMap<(String, String), EnumMemberValue>,
+    func_param_types: &BTreeMap<u32, Vec<types::Type>>, func_union_params: &BTreeMap<u32, Vec<bool>>,
+    func_return_types: &BTreeMap<u32, types::Type>,
+    func_hir_return_types: &BTreeMap<u32, perry_types::Type>,
+    func_rest_param_index: &BTreeMap<u32, usize>,
+    imported_func_param_counts: &BTreeMap<String, usize>,
+    locals: &BTreeMap<LocalId, LocalInfo>,
     expr: &Expr,
     this_ctx: Option<&ThisContext>,
 ) -> Result<Value> {
@@ -18135,7 +18465,7 @@ fn compile_expr(
         }
         Expr::JsonStringify(value_expr) => {
             // Check if the value is a string expression - need to call specialized stringify
-            fn is_string_value_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+            fn is_string_value_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
@@ -19639,8 +19969,13 @@ fn compile_expr(
             let call = builder.ins().call(func_ref, &[regex_ptr, string_ptr]);
             let result_i32 = builder.inst_results(call)[0];
 
-            // Convert bool (i32) to f64 (0.0 or 1.0)
-            Ok(builder.ins().fcvt_from_uint(types::F64, result_i32))
+            // Convert i32 result to NaN-boxed boolean (TAG_TRUE or TAG_FALSE)
+            let is_match = builder.ins().icmp_imm(IntCC::NotEqual, result_i32, 0);
+            const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+            const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+            let true_val = builder.ins().f64const(f64::from_bits(TAG_TRUE));
+            let false_val = builder.ins().f64const(f64::from_bits(TAG_FALSE));
+            Ok(builder.ins().select(is_match, true_val, false_val))
         }
         // string.match(regex) -> string[] | null
         Expr::StringMatch { string, regex } => {
@@ -20193,6 +20528,31 @@ fn compile_expr(
 
             // Result is an array pointer (i64) - use simple bitcast to f64
             // (consistent with Expr::Array which also uses bitcast, not NaN-boxing)
+            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result))
+        }
+        Expr::ArraySort { array, comparator } => {
+            // Compile array and comparator
+            let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, array, this_ctx)?;
+
+            // Extract pointer via js_nanbox_get_pointer to strip POINTER_TAG
+            let arr_f64 = ensure_f64(builder, arr_val);
+            let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+            let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+            let ptr_call = builder.ins().call(get_ptr_ref, &[arr_f64]);
+            let arr_ptr = builder.inst_results(ptr_call)[0];
+
+            let cmp_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, comparator, this_ctx)?;
+            // Ensure comparator is i64 (closure pointer)
+            let cmp_ptr = ensure_i64(builder, cmp_val);
+
+            let func = extern_funcs.get("js_array_sort_with_comparator")
+                .ok_or_else(|| anyhow!("js_array_sort_with_comparator not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[arr_ptr, cmp_ptr]);
+            let result = builder.inst_results(call)[0];
+
+            // Sort returns the same array pointer (in-place) - bitcast to f64
             Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result))
         }
         Expr::ArrayFilter { array, callback } => {
@@ -20914,7 +21274,7 @@ fn compile_expr(
         }
         Expr::LocalSet(id, value) => {
             // Helper to detect if an expression produces a string
-            fn is_string_expr_for_union(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+            fn is_string_expr_for_union(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
                     Expr::EnvGet(_) | Expr::EnvGetDynamic(_) => true,
@@ -21004,7 +21364,7 @@ fn compile_expr(
                             // Use js_string_append for in-place appending
 
                             // Helper to check if expression is a string
-                            fn is_string_operand(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                            fn is_string_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                                 match expr {
                                     Expr::String(_) => true,
                                     Expr::StringFromCharCode(_) => true,
@@ -21277,7 +21637,7 @@ fn compile_expr(
         }
         Expr::Binary { op, left, right } => {
             // CONSTANT FOLDING: Evaluate constant expressions at compile time
-            fn get_constant_value(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> Option<f64> {
+            fn get_constant_value(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> Option<f64> {
                 match expr {
                     Expr::Integer(n) => Some(*n as f64),
                     Expr::Number(f) => Some(*f),
@@ -21307,7 +21667,7 @@ fn compile_expr(
 
             // Check if this is string concatenation (recursively for nested binary expressions)
             // Note: EnvGet is NOT included because it can return undefined (handled as union type)
-            fn is_string_operand(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+            fn is_string_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
                     Expr::StringFromCharCode(_) => true,
@@ -21343,7 +21703,7 @@ fn compile_expr(
             }
 
             // Check if an expression produces a NaN-boxed string (from Conditional)
-            fn is_nanboxed_string_operand(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+            fn is_nanboxed_string_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::Conditional { then_expr, else_expr, .. } => {
                         is_string_operand(then_expr, locals) && is_string_operand(else_expr, locals)
@@ -21355,7 +21715,7 @@ fn compile_expr(
 
             // Check if an expression is a union type (NaN-boxed, could be any value)
             // These need js_jsvalue_to_string to handle both strings and numbers
-            fn is_union_operand(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+            fn is_union_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_union).unwrap_or(false),
                     // EnvGet returns NaN-boxed string or undefined - treat as union
@@ -21512,7 +21872,7 @@ fn compile_expr(
             }
 
             // Check if this is BigInt arithmetic (recursive check for nested BigInt expressions)
-            fn is_bigint_operand(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>, func_hir_return_types: &HashMap<u32, perry_types::Type>) -> bool {
+            fn is_bigint_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>, func_hir_return_types: &BTreeMap<u32, perry_types::Type>) -> bool {
                 match expr {
                     Expr::BigInt(_) => true,
                     Expr::BigIntCoerce(_) => true,
@@ -21601,7 +21961,7 @@ fn compile_expr(
             }
 
             // Check if both operands are integers for native i64 arithmetic optimization
-            fn is_int_operand(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+            fn is_int_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::Integer(_) => true,
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_integer).unwrap_or(false),
@@ -21890,6 +22250,55 @@ fn compile_expr(
             Ok(result)
         }
         Expr::Unary { op, operand } => {
+            // Check if operand is a bigint expression for unary negation
+            if matches!(op, UnaryOp::Neg) {
+                fn is_bigint_unary_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>, func_hir_return_types: &BTreeMap<u32, perry_types::Type>) -> bool {
+                    match expr {
+                        Expr::BigInt(_) => true,
+                        Expr::BigIntCoerce(_) => true,
+                        Expr::LocalGet(id) => locals.get(id).map(|i| i.is_bigint).unwrap_or(false),
+                        Expr::Binary { left, right, .. } => {
+                            is_bigint_unary_operand(left, locals, func_hir_return_types) || is_bigint_unary_operand(right, locals, func_hir_return_types)
+                        }
+                        Expr::Unary { operand, .. } => is_bigint_unary_operand(operand, locals, func_hir_return_types),
+                        Expr::Call { callee, .. } => {
+                            match callee.as_ref() {
+                                Expr::FuncRef(id) => {
+                                    func_hir_return_types.get(id).map(|t| matches!(t, perry_types::Type::BigInt)).unwrap_or(false)
+                                }
+                                _ => false,
+                            }
+                        }
+                        _ => false,
+                    }
+                }
+                if is_bigint_unary_operand(operand, locals, func_hir_return_types) {
+                    let val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, operand, this_ctx)?;
+                    let val = ensure_f64(builder, val_raw);
+
+                    // Extract BigInt pointer from NaN-boxed value
+                    let get_bigint_func = extern_funcs.get("js_nanbox_get_bigint")
+                        .ok_or_else(|| anyhow!("js_nanbox_get_bigint not declared"))?;
+                    let get_bigint_ref = module.declare_func_in_func(*get_bigint_func, builder.func);
+                    let get_call = builder.ins().call(get_bigint_ref, &[val]);
+                    let bigint_ptr = builder.inst_results(get_call)[0];
+
+                    // Call js_bigint_neg
+                    let neg_func = extern_funcs.get("js_bigint_neg")
+                        .ok_or_else(|| anyhow!("js_bigint_neg not declared"))?;
+                    let neg_ref = module.declare_func_in_func(*neg_func, builder.func);
+                    let neg_call = builder.ins().call(neg_ref, &[bigint_ptr]);
+                    let result_ptr = builder.inst_results(neg_call)[0];
+
+                    // NaN-box the result BigInt pointer
+                    let nanbox_func = extern_funcs.get("js_nanbox_bigint")
+                        .ok_or_else(|| anyhow!("js_nanbox_bigint not declared"))?;
+                    let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                    let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
+                    return Ok(builder.inst_results(nanbox_call)[0]);
+                }
+            }
+
             let val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, operand, this_ctx)?;
             let val = ensure_f64(builder, val_raw);
             match op {
@@ -21943,7 +22352,7 @@ fn compile_expr(
             // - One side is a string literal
             // - One side is a string local variable
             // - One side is a PropertyGet (might return a NaN-boxed string)
-            fn is_known_string_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+            fn is_known_string_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::TypeOf(_) => true,
                     Expr::String(_) => true,
@@ -21951,7 +22360,7 @@ fn compile_expr(
                     _ => false,
                 }
             }
-            fn may_be_string_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+            fn may_be_string_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::PropertyGet { .. } => true,
                     Expr::IndexGet { .. } => true,
@@ -22046,21 +22455,42 @@ fn compile_expr(
                     Ok(builder.ins().select(cmp, one, zero))
                 }
             } else if is_null_compare && (lhs_type == types::I64 || rhs_type == types::I64) {
-                // For null comparisons with objects, use integer comparison
-                // Convert both to i64 for comparison
-                let lhs_i64 = if lhs_type == types::I64 { lhs } else {
-                    builder.ins().iconst(types::I64, 0)  // null = 0
+                // For null comparisons with objects (i64), check all nullish representations:
+                // 1. Raw null pointer (0)
+                // 2. NaN-boxed TAG_NULL (0x7FFC_0000_0000_0002)
+                // 3. NaN-boxed TAG_UNDEFINED (0x7FFC_0000_0000_0001)
+                let is_lhs_null = matches!(left.as_ref(), Expr::Null | Expr::Undefined);
+                let val_i64 = if is_lhs_null {
+                    if rhs_type == types::I64 { rhs } else {
+                        builder.ins().bitcast(types::I64, MemFlags::new(), rhs)
+                    }
+                } else {
+                    if lhs_type == types::I64 { lhs } else {
+                        builder.ins().bitcast(types::I64, MemFlags::new(), lhs)
+                    }
                 };
-                let rhs_i64 = if rhs_type == types::I64 { rhs } else {
-                    builder.ins().iconst(types::I64, 0)  // null = 0
-                };
-                let icc = match op {
-                    CompareOp::Eq => IntCC::Equal,
-                    CompareOp::Ne => IntCC::NotEqual,
-                    _ => return Err(anyhow!("Invalid null comparison operator")),
-                };
-                let cmp = builder.ins().icmp(icc, lhs_i64, rhs_i64);
-                Ok(builder.ins().select(cmp, one, zero))
+
+                // Check all three nullish representations
+                let null_ptr = builder.ins().iconst(types::I64, 0);
+                let is_null_ptr = builder.ins().icmp(IntCC::Equal, val_i64, null_ptr);
+
+                let tag_null = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0002u64 as i64);
+                let is_tag_null = builder.ins().icmp(IntCC::Equal, val_i64, tag_null);
+
+                let tag_undef = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0001u64 as i64);
+                let is_tag_undef = builder.ins().icmp(IntCC::Equal, val_i64, tag_undef);
+
+                let is_nullish = builder.ins().bor(is_null_ptr, is_tag_null);
+                let is_nullish = builder.ins().bor(is_nullish, is_tag_undef);
+
+                match op {
+                    CompareOp::Eq => Ok(builder.ins().select(is_nullish, one, zero)),
+                    CompareOp::Ne => {
+                        let not_nullish = builder.ins().bxor_imm(is_nullish, 1);
+                        Ok(builder.ins().select(not_nullish, one, zero))
+                    }
+                    _ => Err(anyhow!("Invalid null comparison operator")),
+                }
             } else if is_null_compare {
                 // F64 null comparison implementing JS loose equality: null == undefined is true
                 // null = TAG_NULL (0x7FFC_0000_0000_0002), undefined = TAG_UNDEFINED (0x7FFC_0000_0000_0001)
@@ -22096,7 +22526,7 @@ fn compile_expr(
                 }
             } else {
                 // Check if this is a BigInt comparison
-                fn is_bigint_compare_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                fn is_bigint_compare_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                     match expr {
                         Expr::BigInt(_) => true,
                         Expr::LocalGet(id) => locals.get(id).map(|i| i.is_bigint).unwrap_or(false),
@@ -22434,7 +22864,7 @@ fn compile_expr(
                     }
 
                     // Helper to check if argument expression is a string
-                    fn is_string_arg_expr(arg: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                    fn is_string_arg_expr(arg: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                         match arg {
                             Expr::String(_) => true,
                             Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
@@ -22681,7 +23111,7 @@ fn compile_expr(
                         if args.len() > 1 {
                             if let Some(spread_func) = extern_funcs.get("js_console_log_spread") {
                                 // Helper to check if an expression produces a string
-                                fn is_string_expr_for_multi(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                                fn is_string_expr_for_multi(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                                     match expr {
                                         Expr::String(_) => true,
                                         Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) => true,
@@ -22718,7 +23148,7 @@ fn compile_expr(
                                 }
 
                                 // Helper to check if an expression needs dynamic printing (union types)
-                                fn is_union_expr_for_multi(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                                fn is_union_expr_for_multi(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                                     match expr {
                                         Expr::LocalGet(id) => locals.get(id).map(|i| i.is_union).unwrap_or(false),
                                         Expr::Conditional { .. } => true,
@@ -22740,10 +23170,10 @@ fn compile_expr(
                                 }
 
                                 // Helper to check if an expression is an array
-                                fn is_array_expr_for_multi(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                                fn is_array_expr_for_multi(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                                     match expr {
                                         Expr::Array(_) | Expr::ArraySpread(_) | Expr::ProcessArgv => true,
-                                        Expr::ArrayMap { .. } | Expr::ArrayFilter { .. } | Expr::ArraySlice { .. } | Expr::ArraySplice { .. } => true,
+                                        Expr::ArrayMap { .. } | Expr::ArrayFilter { .. } | Expr::ArraySort { .. } | Expr::ArraySlice { .. } | Expr::ArraySplice { .. } => true,
                                         Expr::LocalGet(id) => locals.get(id).map(|i| i.is_array).unwrap_or(false),
                                         // Check for chained array method calls (e.g., arr.filter().map())
                                         Expr::Call { callee, .. } => {
@@ -22791,9 +23221,9 @@ fn compile_expr(
                                     .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
                                 let nanbox_pointer_ref = module.declare_func_in_func(*nanbox_pointer_func, builder.func);
 
-                                // Process each argument
+                                // Process each argument (use pre-compiled arg_vals to avoid double-evaluation of side effects)
                                 for (i, arg) in args.iter().enumerate() {
-                                    let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, arg, this_ctx)?;
+                                    let val = arg_vals[i];
 
                                     // Determine how to encode this value for the spread array
                                     let val_f64 = if is_string_expr_for_multi(arg, locals) {
@@ -22874,7 +23304,7 @@ fn compile_expr(
                                 }
                                 // Binary Add with string operands (from template literals)
                                 Expr::Binary { op: BinaryOp::Add, left, right } => {
-                                    fn is_string_in_binary(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                                    fn is_string_in_binary(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                                         match expr {
                                             Expr::String(_) => true,
                                             Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
@@ -22983,7 +23413,7 @@ fn compile_expr(
                         let is_array_arg = if let Some(arg) = args.first() {
                             match arg {
                                 Expr::Array(_) | Expr::ArraySpread(_) | Expr::ProcessArgv => true,
-                                Expr::ArrayMap { .. } | Expr::ArrayFilter { .. } | Expr::ArraySlice { .. } | Expr::ArraySplice { .. } => true,
+                                Expr::ArrayMap { .. } | Expr::ArrayFilter { .. } | Expr::ArraySort { .. } | Expr::ArraySlice { .. } | Expr::ArraySplice { .. } => true,
                                 Expr::LocalGet(id) => locals.get(id).map(|i| i.is_array).unwrap_or(false),
                                 _ => false,
                             }
@@ -23123,7 +23553,7 @@ fn compile_expr(
                         if args.len() > 1 {
                             if let Some(spread_func) = extern_funcs.get("js_console_error_spread") {
                                 // Reuse the same helper functions from console.log
-                                fn is_string_expr_for_error(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                                fn is_string_expr_for_error(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                                     match expr {
                                         Expr::String(_) => true,
                                         Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) => true,
@@ -23156,7 +23586,7 @@ fn compile_expr(
                                     }
                                 }
 
-                                fn is_union_expr_for_error(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                                fn is_union_expr_for_error(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                                     match expr {
                                         Expr::LocalGet(id) => locals.get(id).map(|i| i.is_union).unwrap_or(false),
                                         Expr::Conditional { .. } => true,
@@ -23177,10 +23607,10 @@ fn compile_expr(
                                     }
                                 }
 
-                                fn is_array_expr_for_error(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                                fn is_array_expr_for_error(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                                     match expr {
                                         Expr::Array(_) | Expr::ArraySpread(_) | Expr::ProcessArgv => true,
-                                        Expr::ArrayMap { .. } | Expr::ArrayFilter { .. } | Expr::ArraySlice { .. } | Expr::ArraySplice { .. } => true,
+                                        Expr::ArrayMap { .. } | Expr::ArrayFilter { .. } | Expr::ArraySort { .. } | Expr::ArraySlice { .. } | Expr::ArraySplice { .. } => true,
                                         Expr::LocalGet(id) => locals.get(id).map(|i| i.is_array).unwrap_or(false),
                                         Expr::Call { callee, .. } => {
                                             if let Expr::PropertyGet { object, property } = callee.as_ref() {
@@ -23226,9 +23656,9 @@ fn compile_expr(
                                     .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
                                 let nanbox_pointer_ref = module.declare_func_in_func(*nanbox_pointer_func, builder.func);
 
-                                // Process each argument
+                                // Process each argument (use pre-compiled arg_vals to avoid double-evaluation of side effects)
                                 for (i, arg) in args.iter().enumerate() {
-                                    let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, arg, this_ctx)?;
+                                    let val = arg_vals[i];
 
                                     let val_f64 = if is_string_expr_for_error(arg, locals) {
                                         let ptr = ensure_i64(builder, val);
@@ -23284,7 +23714,7 @@ fn compile_expr(
                                     || (module == "ethers" && (method == "formatUnits" || method == "getAddress" || method == "formatEther"))
                                 }
                                 Expr::Binary { op: BinaryOp::Add, left, right } => {
-                                    fn is_string_in_binary(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                                    fn is_string_in_binary(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                                         match expr {
                                             Expr::String(_) => true,
                                             Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
@@ -23463,7 +23893,7 @@ fn compile_expr(
                                     || (module == "ethers" && (method == "formatUnits" || method == "getAddress" || method == "formatEther"))
                                 }
                                 Expr::Binary { op: BinaryOp::Add, left, right } => {
-                                    fn is_string_in_binary(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                                    fn is_string_in_binary(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                                         match expr {
                                             Expr::String(_) => true,
                                             Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
@@ -24098,6 +24528,40 @@ fn compile_expr(
                                             let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
                                             return Ok(builder.inst_results(nanbox_call)[0]);
                                         }
+                                    }
+                                    _ => {}
+                                }
+                            }
+
+                            // Handle number method calls (toFixed, toString)
+                            // Must exclude is_bigint to avoid intercepting bigint.toString() calls
+                            if !info.is_string && !info.is_array && !info.is_map && !info.is_set && !info.is_buffer && !info.is_bigint && info.class_name.is_none() {
+                                let num_val = builder.use_var(info.var);
+                                let num_f64 = ensure_f64(builder, num_val);
+
+                                match property.as_str() {
+                                    "toFixed" => {
+                                        // n.toFixed(decimals)
+                                        let decimals = if arg_vals.len() > 0 {
+                                            ensure_f64(builder, arg_vals[0])
+                                        } else {
+                                            builder.ins().f64const(0.0)
+                                        };
+                                        let func = extern_funcs.get("js_number_to_fixed")
+                                            .ok_or_else(|| anyhow!("js_number_to_fixed not declared"))?;
+                                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                                        let call = builder.ins().call(func_ref, &[num_f64, decimals]);
+                                        let result_ptr = builder.inst_results(call)[0];
+                                        return Ok(inline_nanbox_string(builder, result_ptr));
+                                    }
+                                    "toString" => {
+                                        // n.toString()
+                                        let func = extern_funcs.get("js_number_to_string")
+                                            .ok_or_else(|| anyhow!("js_number_to_string not declared"))?;
+                                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                                        let call = builder.ins().call(func_ref, &[num_f64]);
+                                        let result_ptr = builder.inst_results(call)[0];
+                                        return Ok(inline_nanbox_string(builder, result_ptr));
                                     }
                                     _ => {}
                                 }
@@ -25410,6 +25874,20 @@ fn compile_expr(
                                 return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result));
                             }
                         }
+                        "sort" => {
+                            if arg_vals.len() >= 1 {
+                                let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
+                                let arr_ptr = ensure_i64(builder, arr_val);
+                                let cmp_ptr = ensure_i64(builder, arg_vals[0]);
+
+                                let func = extern_funcs.get("js_array_sort_with_comparator")
+                                    .ok_or_else(|| anyhow!("js_array_sort_with_comparator not declared"))?;
+                                let func_ref = module.declare_func_in_func(*func, builder.func);
+                                let call = builder.ins().call(func_ref, &[arr_ptr, cmp_ptr]);
+                                let result = builder.inst_results(call)[0];
+                                return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result));
+                            }
+                        }
                         "includes" => {
                             if arg_vals.len() >= 1 {
                                 let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
@@ -25626,7 +26104,8 @@ fn compile_expr(
                             let closure_ptr = ensure_i64(builder, closure_val);
 
                             // Select the appropriate js_closure_call* function based on arg count
-                            let call_func_name = match arg_vals.len() {
+                            let call_func_name_owned;
+                            let call_func_name: &str = match arg_vals.len() {
                                 0 => "js_closure_call0",
                                 1 => "js_closure_call1",
                                 2 => "js_closure_call2",
@@ -25636,7 +26115,11 @@ fn compile_expr(
                                 6 => "js_closure_call6",
                                 7 => "js_closure_call7",
                                 8 => "js_closure_call8",
-                                n => return Err(anyhow!("Closure calls with {} arguments not supported (max 8)", n)),
+                                n @ 9..=16 => {
+                                    call_func_name_owned = format!("js_closure_call{}", n);
+                                    &call_func_name_owned
+                                }
+                                n => return Err(anyhow!("Closure calls with {} arguments not supported (max 16)", n)),
                             };
 
                             let call_func = extern_funcs.get(call_func_name)
@@ -26230,7 +26713,7 @@ fn compile_expr(
                             let nanbox_string_ref = module.declare_func_in_func(*nanbox_string_func, builder.func);
 
                             // Helper to check if an expression produces a string
-                            fn is_string_expr_for_spread(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                            fn is_string_expr_for_spread(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                                 match expr {
                                     Expr::String(_) => true,
                                     Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) => true,
@@ -26591,7 +27074,7 @@ fn compile_expr(
         }
         Expr::Conditional { condition, then_expr, else_expr } => {
             // Helper to detect if an expression produces a string at the HIR level
-            fn is_string_conditional_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+            fn is_string_conditional_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
                     Expr::EnvGet(_) | Expr::EnvGetDynamic(_) => true,
@@ -27722,7 +28205,7 @@ fn compile_expr(
             // Also handles obj[key]++ with string keys
 
             // Helper to check if an expression produces a string
-            fn is_string_index(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+            fn is_string_index(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
@@ -28409,7 +28892,7 @@ fn compile_expr(
         }
         Expr::Array(elements) => {
             // Helper to detect if an expression is a string
-            fn is_string_element(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+            fn is_string_element(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
                     Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) => true,
@@ -28429,7 +28912,7 @@ fn compile_expr(
             }
 
             // Helper to detect if an expression is an object/array (pointer type)
-            fn is_object_element(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+            fn is_object_element(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::Object(_) | Expr::Array(_) | Expr::ArraySpread(_) => true,
                     Expr::Call { .. } | Expr::New { .. } | Expr::NativeMethodCall { .. } => true,
@@ -28942,7 +29425,7 @@ fn compile_expr(
             // This handles cases like: result.rows[0], obj[key], or variables not marked as arrays
 
             // Helper to check if an expression produces a string
-            fn is_string_index_expr_get(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+            fn is_string_index_expr_get(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
@@ -28990,7 +29473,7 @@ fn compile_expr(
             } else {
                 // Integer index - check if object is a string for character access
                 // Helper to check if an expression is a string (for character access)
-                fn is_string_object_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                fn is_string_object_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                     match expr {
                         Expr::String(_) => true,
                         Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
@@ -29178,7 +29661,7 @@ fn compile_expr(
                         if info.is_mixed_array {
                             // For mixed-type arrays, we need to properly encode the value
                             // Check if the value being assigned is a string (needs NaN-boxing)
-                            fn is_string_value(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                            fn is_string_value(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                                 match expr {
                                     Expr::String(_) => true,
                                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
@@ -29326,7 +29809,7 @@ fn compile_expr(
             // where the object is not a simple LocalGet with known array type
 
             // Helper to check if an expression produces a string
-            fn is_string_index_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+            fn is_string_index_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
@@ -29559,6 +30042,12 @@ fn compile_expr(
                                 let slot_addr = builder.ins().global_value(types::I64, global_val);
                                 // Convert slot address to f64 for closure capture storage
                                 builder.ins().bitcast(types::F64, MemFlags::new(), slot_addr)
+                            } else if info.is_boxed {
+                            // Variable was already boxed at declaration time (by Stmt::Let when
+                            // boxed_vars detected it). Reuse the existing box pointer so both
+                            // the outer scope and the closure share the same box.
+                            let box_ptr = builder.use_var(info.var); // I64 box pointer
+                            builder.ins().bitcast(types::F64, MemFlags::new(), box_ptr)
                             } else {
                             // For mutable captures without a global slot, allocate a box
                             // Ensure value is f64 for js_box_alloc
@@ -30053,7 +30542,7 @@ fn compile_expr(
                         fn create_field_name_str(
                             module: &mut dyn cranelift_module::Module,
                             builder: &mut FunctionBuilder,
-                            extern_funcs: &std::collections::HashMap<String, cranelift_module::FuncId>,
+                            extern_funcs: &BTreeMap<String, cranelift_module::FuncId>,
                             name: &str,
                         ) -> Result<Value> {
                             use cranelift_module::Linkage;
@@ -30801,6 +31290,11 @@ fn compile_expr(
                 ("ioredis", true, "setex") => "js_ioredis_setex",
                 ("ioredis", true, "disconnect") => "js_ioredis_disconnect",
                 ("ioredis", true, "ping") => "js_ioredis_ping",
+                ("ioredis", true, "hget") => "js_ioredis_hget",
+                ("ioredis", true, "hset") => "js_ioredis_hset",
+                ("ioredis", true, "hgetall") => "js_ioredis_hgetall",
+                ("ioredis", true, "hdel") => "js_ioredis_hdel",
+                ("ioredis", true, "hlen") => "js_ioredis_hlen",
 
                 // crypto module functions (no object)
                 ("crypto", false, "sha256") => "js_crypto_sha256",
@@ -31606,6 +32100,61 @@ fn compile_expr(
                                 call_args.push(key_ptr);
                                 call_args.push(arg_vals[1]); // seconds as f64
                                 call_args.push(val_ptr);
+                            }
+                        }
+                        "hget" | "hdel" => {
+                            // hget(key, field) / hdel(key, field) - both are NaN-boxed strings
+                            if arg_vals.len() >= 2 {
+                                let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+
+                                let key_f64 = ensure_f64(builder, arg_vals[0]);
+                                let key_call = builder.ins().call(get_str_ptr_ref, &[key_f64]);
+                                let key_ptr = builder.inst_results(key_call)[0];
+
+                                let field_f64 = ensure_f64(builder, arg_vals[1]);
+                                let field_call = builder.ins().call(get_str_ptr_ref, &[field_f64]);
+                                let field_ptr = builder.inst_results(field_call)[0];
+
+                                call_args.push(key_ptr);
+                                call_args.push(field_ptr);
+                            }
+                        }
+                        "hset" => {
+                            // hset(key, field, value) - all NaN-boxed strings
+                            if arg_vals.len() >= 3 {
+                                let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+
+                                let key_f64 = ensure_f64(builder, arg_vals[0]);
+                                let key_call = builder.ins().call(get_str_ptr_ref, &[key_f64]);
+                                let key_ptr = builder.inst_results(key_call)[0];
+
+                                let field_f64 = ensure_f64(builder, arg_vals[1]);
+                                let field_call = builder.ins().call(get_str_ptr_ref, &[field_f64]);
+                                let field_ptr = builder.inst_results(field_call)[0];
+
+                                let val_f64 = ensure_f64(builder, arg_vals[2]);
+                                let val_call = builder.ins().call(get_str_ptr_ref, &[val_f64]);
+                                let val_ptr = builder.inst_results(val_call)[0];
+
+                                call_args.push(key_ptr);
+                                call_args.push(field_ptr);
+                                call_args.push(val_ptr);
+                            }
+                        }
+                        "hgetall" | "hlen" => {
+                            // hgetall(key) / hlen(key) - single key argument
+                            if !arg_vals.is_empty() {
+                                let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+                                let key_f64 = ensure_f64(builder, arg_vals[0]);
+                                let key_call = builder.ins().call(get_str_ptr_ref, &[key_f64]);
+                                let key_ptr = builder.inst_results(key_call)[0];
+                                call_args.push(key_ptr);
                             }
                         }
                         _ => {}
@@ -33189,14 +33738,18 @@ fn compile_expr(
                 val
             };
 
-            // Call js_string_coerce(value) - returns string pointer
+            // Call js_string_coerce(value) - returns string pointer (i64)
             let coerce_func = extern_funcs.get("js_string_coerce")
                 .ok_or_else(|| anyhow!("js_string_coerce not declared"))?;
             let coerce_ref = module.declare_func_in_func(*coerce_func, builder.func);
             let call = builder.ins().call(coerce_ref, &[val_f64]);
             let str_ptr = builder.inst_results(call)[0];
-            // Return as f64 (NaN-boxed pointer)
-            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), str_ptr))
+            // NaN-box with STRING_TAG for proper string handling
+            let nanbox_func = extern_funcs.get("js_nanbox_string")
+                .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+            let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+            let nanbox_call = builder.ins().call(nanbox_ref, &[str_ptr]);
+            Ok(builder.inst_results(nanbox_call)[0])
         }
         Expr::IsNaN(value) => {
             // Compile the value
@@ -33348,7 +33901,7 @@ fn compile_expr(
                 let args_ptr = builder.ins().stack_addr(types::I64, stack_slot, 0);
 
                 // Helper to detect if an expression is a string
-                fn is_string_js_arg(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                fn is_string_js_arg(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                     match expr {
                         Expr::String(_) => true,
                         Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
@@ -33767,20 +34320,20 @@ fn compile_expr(
 fn compile_stmt_with_this(
     builder: &mut FunctionBuilder,
     module: &mut ObjectModule,
-    func_ids: &HashMap<u32, cranelift_module::FuncId>,
-    closure_func_ids: &HashMap<u32, cranelift_module::FuncId>,
-    func_wrapper_ids: &HashMap<u32, cranelift_module::FuncId>,
-    extern_funcs: &HashMap<String, cranelift_module::FuncId>,
-    async_func_ids: &std::collections::HashSet<u32>,
-    closure_returning_funcs: &std::collections::HashSet<u32>,
-    classes: &HashMap<String, ClassMeta>,
-    enums: &HashMap<(String, String), EnumMemberValue>,
-    func_param_types: &HashMap<u32, Vec<types::Type>>, func_union_params: &HashMap<u32, Vec<bool>>,
-    func_return_types: &HashMap<u32, types::Type>,
-    func_hir_return_types: &HashMap<u32, perry_types::Type>,
-    func_rest_param_index: &HashMap<u32, usize>,
-    imported_func_param_counts: &HashMap<String, usize>,
-    locals: &mut HashMap<LocalId, LocalInfo>,
+    func_ids: &BTreeMap<u32, cranelift_module::FuncId>,
+    closure_func_ids: &BTreeMap<u32, cranelift_module::FuncId>,
+    func_wrapper_ids: &BTreeMap<u32, cranelift_module::FuncId>,
+    extern_funcs: &BTreeMap<String, cranelift_module::FuncId>,
+    async_func_ids: &std::collections::BTreeSet<u32>,
+    closure_returning_funcs: &std::collections::BTreeSet<u32>,
+    classes: &BTreeMap<String, ClassMeta>,
+    enums: &BTreeMap<(String, String), EnumMemberValue>,
+    func_param_types: &BTreeMap<u32, Vec<types::Type>>, func_union_params: &BTreeMap<u32, Vec<bool>>,
+    func_return_types: &BTreeMap<u32, types::Type>,
+    func_hir_return_types: &BTreeMap<u32, perry_types::Type>,
+    func_rest_param_index: &BTreeMap<u32, usize>,
+    imported_func_param_counts: &BTreeMap<String, usize>,
+    locals: &mut BTreeMap<LocalId, LocalInfo>,
     next_var: &mut usize,
     stmt: &Stmt,
     this_var: Variable,
@@ -33806,6 +34359,13 @@ pub fn generate_stub_object(missing_data_symbols: &[String], missing_func_symbol
                 .map_err(|e| anyhow!("Bad triple: {}", e))?;
             let isa_builder = cranelift::codegen::isa::lookup(triple)
                 .map_err(|e| anyhow!("Failed to create iOS ISA: {}", e))?;
+            isa_builder.finish(settings::Flags::new(flag_builder)).map_err(|e| anyhow!("{}", e))?
+        }
+        Some("android") => {
+            let triple = target_lexicon::Triple::from_str("aarch64-unknown-linux-android")
+                .map_err(|e| anyhow!("Bad triple: {}", e))?;
+            let isa_builder = cranelift::codegen::isa::lookup(triple)
+                .map_err(|e| anyhow!("Failed to create Android ISA: {}", e))?;
             isa_builder.finish(settings::Flags::new(flag_builder)).map_err(|e| anyhow!("{}", e))?
         }
         _ => {

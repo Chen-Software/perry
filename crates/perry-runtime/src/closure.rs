@@ -166,6 +166,78 @@ pub extern "C" fn js_closure_call8(closure: *const ClosureHeader, arg0: f64, arg
     }
 }
 
+/// Call a closure with 9 arguments, returning f64
+#[no_mangle]
+pub extern "C" fn js_closure_call9(closure: *const ClosureHeader, arg0: f64, arg1: f64, arg2: f64, arg3: f64, arg4: f64, arg5: f64, arg6: f64, arg7: f64, arg8: f64) -> f64 {
+    unsafe {
+        let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute((*closure).func_ptr);
+        func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8)
+    }
+}
+
+/// Call a closure with 10 arguments, returning f64
+#[no_mangle]
+pub extern "C" fn js_closure_call10(closure: *const ClosureHeader, arg0: f64, arg1: f64, arg2: f64, arg3: f64, arg4: f64, arg5: f64, arg6: f64, arg7: f64, arg8: f64, arg9: f64) -> f64 {
+    unsafe {
+        let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute((*closure).func_ptr);
+        func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9)
+    }
+}
+
+/// Call a closure with 11 arguments, returning f64
+#[no_mangle]
+pub extern "C" fn js_closure_call11(closure: *const ClosureHeader, arg0: f64, arg1: f64, arg2: f64, arg3: f64, arg4: f64, arg5: f64, arg6: f64, arg7: f64, arg8: f64, arg9: f64, arg10: f64) -> f64 {
+    unsafe {
+        let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute((*closure).func_ptr);
+        func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10)
+    }
+}
+
+/// Call a closure with 12 arguments, returning f64
+#[no_mangle]
+pub extern "C" fn js_closure_call12(closure: *const ClosureHeader, arg0: f64, arg1: f64, arg2: f64, arg3: f64, arg4: f64, arg5: f64, arg6: f64, arg7: f64, arg8: f64, arg9: f64, arg10: f64, arg11: f64) -> f64 {
+    unsafe {
+        let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute((*closure).func_ptr);
+        func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11)
+    }
+}
+
+/// Call a closure with 13 arguments, returning f64
+#[no_mangle]
+pub extern "C" fn js_closure_call13(closure: *const ClosureHeader, arg0: f64, arg1: f64, arg2: f64, arg3: f64, arg4: f64, arg5: f64, arg6: f64, arg7: f64, arg8: f64, arg9: f64, arg10: f64, arg11: f64, arg12: f64) -> f64 {
+    unsafe {
+        let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute((*closure).func_ptr);
+        func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12)
+    }
+}
+
+/// Call a closure with 14 arguments, returning f64
+#[no_mangle]
+pub extern "C" fn js_closure_call14(closure: *const ClosureHeader, arg0: f64, arg1: f64, arg2: f64, arg3: f64, arg4: f64, arg5: f64, arg6: f64, arg7: f64, arg8: f64, arg9: f64, arg10: f64, arg11: f64, arg12: f64, arg13: f64) -> f64 {
+    unsafe {
+        let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute((*closure).func_ptr);
+        func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13)
+    }
+}
+
+/// Call a closure with 15 arguments, returning f64
+#[no_mangle]
+pub extern "C" fn js_closure_call15(closure: *const ClosureHeader, arg0: f64, arg1: f64, arg2: f64, arg3: f64, arg4: f64, arg5: f64, arg6: f64, arg7: f64, arg8: f64, arg9: f64, arg10: f64, arg11: f64, arg12: f64, arg13: f64, arg14: f64) -> f64 {
+    unsafe {
+        let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute((*closure).func_ptr);
+        func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13, arg14)
+    }
+}
+
+/// Call a closure with 16 arguments, returning f64
+#[no_mangle]
+pub extern "C" fn js_closure_call16(closure: *const ClosureHeader, arg0: f64, arg1: f64, arg2: f64, arg3: f64, arg4: f64, arg5: f64, arg6: f64, arg7: f64, arg8: f64, arg9: f64, arg10: f64, arg11: f64, arg12: f64, arg13: f64, arg14: f64, arg15: f64) -> f64 {
+    unsafe {
+        let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute((*closure).func_ptr);
+        func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13, arg14, arg15)
+    }
+}
+
 /// Call a JavaScript function value with variable arguments
 /// This is the native implementation for dynamic function dispatch.
 /// func_value: NaN-boxed f64 containing a closure pointer
@@ -265,19 +337,42 @@ pub unsafe extern "C" fn js_native_call_value(
             let arg7 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(7) };
             js_closure_call8(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7)
         }
+        9 => {
+            let a = |i: usize| if args_ptr.is_null() { 0.0 } else { *args_ptr.add(i) };
+            js_closure_call9(closure, a(0), a(1), a(2), a(3), a(4), a(5), a(6), a(7), a(8))
+        }
+        10 => {
+            let a = |i: usize| if args_ptr.is_null() { 0.0 } else { *args_ptr.add(i) };
+            js_closure_call10(closure, a(0), a(1), a(2), a(3), a(4), a(5), a(6), a(7), a(8), a(9))
+        }
+        11 => {
+            let a = |i: usize| if args_ptr.is_null() { 0.0 } else { *args_ptr.add(i) };
+            js_closure_call11(closure, a(0), a(1), a(2), a(3), a(4), a(5), a(6), a(7), a(8), a(9), a(10))
+        }
+        12 => {
+            let a = |i: usize| if args_ptr.is_null() { 0.0 } else { *args_ptr.add(i) };
+            js_closure_call12(closure, a(0), a(1), a(2), a(3), a(4), a(5), a(6), a(7), a(8), a(9), a(10), a(11))
+        }
+        13 => {
+            let a = |i: usize| if args_ptr.is_null() { 0.0 } else { *args_ptr.add(i) };
+            js_closure_call13(closure, a(0), a(1), a(2), a(3), a(4), a(5), a(6), a(7), a(8), a(9), a(10), a(11), a(12))
+        }
+        14 => {
+            let a = |i: usize| if args_ptr.is_null() { 0.0 } else { *args_ptr.add(i) };
+            js_closure_call14(closure, a(0), a(1), a(2), a(3), a(4), a(5), a(6), a(7), a(8), a(9), a(10), a(11), a(12), a(13))
+        }
+        15 => {
+            let a = |i: usize| if args_ptr.is_null() { 0.0 } else { *args_ptr.add(i) };
+            js_closure_call15(closure, a(0), a(1), a(2), a(3), a(4), a(5), a(6), a(7), a(8), a(9), a(10), a(11), a(12), a(13), a(14))
+        }
+        16 => {
+            let a = |i: usize| if args_ptr.is_null() { 0.0 } else { *args_ptr.add(i) };
+            js_closure_call16(closure, a(0), a(1), a(2), a(3), a(4), a(5), a(6), a(7), a(8), a(9), a(10), a(11), a(12), a(13), a(14), a(15))
+        }
         _ => {
-            // For more than 8 arguments, we'd need a more generic approach
-            // For now, just call with as many as we can handle
-            eprintln!("Warning: js_native_call_value called with {} args, only supporting up to 8", args_len);
-            let arg0 = if args_ptr.is_null() { 0.0 } else { *args_ptr };
-            let arg1 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(1) };
-            let arg2 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(2) };
-            let arg3 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(3) };
-            let arg4 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(4) };
-            let arg5 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(5) };
-            let arg6 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(6) };
-            let arg7 = if args_ptr.is_null() { 0.0 } else { *args_ptr.add(7) };
-            js_closure_call8(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7)
+            eprintln!("Warning: js_native_call_value called with {} args, only supporting up to 16", args_len);
+            let a = |i: usize| if args_ptr.is_null() { 0.0 } else { *args_ptr.add(i) };
+            js_closure_call16(closure, a(0), a(1), a(2), a(3), a(4), a(5), a(6), a(7), a(8), a(9), a(10), a(11), a(12), a(13), a(14), a(15))
         }
     }
 }
