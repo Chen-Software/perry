@@ -90,6 +90,8 @@ fn rust_target_triple(target: Option<&str>) -> Option<&'static str> {
         Some("ios-simulator") => Some("aarch64-apple-ios-sim"),
         Some("ios") => Some("aarch64-apple-ios"),
         Some("android") => Some("aarch64-linux-android"),
+        Some("linux") => Some("x86_64-unknown-linux-gnu"),
+        Some("windows") => Some("x86_64-pc-windows-msvc"),
         _ => None,
     }
 }
@@ -154,6 +156,8 @@ fn find_ui_library(target: Option<&str>) -> Option<PathBuf> {
     let lib_name = match target {
         Some("ios-simulator") | Some("ios") => "libperry_ui_ios.a",
         Some("android") => "libperry_ui_android.a",
+        Some("linux") => "libperry_ui_gtk4.a",
+        Some("windows") => "perry_ui_windows.lib",
         _ => "libperry_ui_macos.a",
     };
     find_library(lib_name, target)
@@ -1513,7 +1517,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         if !missing.is_empty() {
             let (mut md, mut mf) = (Vec::new(), Vec::new());
             for s in &missing { if s.starts_with("__export_") { md.push(s.clone()); } else { mf.push(s.clone()); } }
-            if let OutputFormat::Text = format { eprintln!("  Generating stubs for {} missing symbols ({} data, {} functions)", missing.len(), md.len(), mf.len()); }
+            if let OutputFormat::Text = format { eprintln!("  Generating stubs for {} missing symbols ({} data, {} functions)", missing.len(), md.len(), mf.len()); for s in &missing { eprintln!("    - {}", s); } }
             let stub_bytes = perry_codegen::generate_stub_object(&md, &mf, target.as_deref())?;
             let stub_path = PathBuf::from("_perry_stubs.o");
             fs::write(&stub_path, &stub_bytes)?;
@@ -1572,10 +1576,12 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
 
     let is_ios = matches!(target.as_deref(), Some("ios-simulator") | Some("ios"));
     let is_android = matches!(target.as_deref(), Some("android"));
+    let is_linux = matches!(target.as_deref(), Some("linux"));
+    let is_windows = matches!(target.as_deref(), Some("windows"));
 
     let runtime_lib = find_runtime_library(target.as_deref())?;
     let stdlib_lib = find_stdlib_library(target.as_deref());
-    let jsruntime_lib = if !is_ios && !is_android && (ctx.needs_js_runtime || args.enable_js_runtime) {
+    let jsruntime_lib = if !is_ios && !is_android && !is_windows && (ctx.needs_js_runtime || args.enable_js_runtime) {
         match find_jsruntime_library(target.as_deref()) {
             Some(lib) => {
                 match format {
@@ -1631,7 +1637,23 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         let mut c = Command::new(clang);
         c.arg("-shared")
          .arg("-fPIC")
-         .arg("-target").arg("aarch64-linux-android24");
+         .arg("-target").arg("aarch64-linux-android24")
+         .arg("-Wl,-z,max-page-size=16384")
+         .arg("-Wl,-z,separate-loadable-segments");
+        c
+    } else if is_linux {
+        // Cross-compile for Linux x86_64
+        // When building on Linux natively, "cc" will work fine.
+        // When cross-compiling from macOS, use a cross-compilation toolchain.
+        let mut c = Command::new("cc");
+        c.arg("-target").arg("x86_64-unknown-linux-gnu");
+        c
+    } else if is_windows {
+        // Windows target — use MSVC link.exe (native) or lld-link (cross)
+        let mut c = Command::new("link.exe");
+        c.arg("/SUBSYSTEM:WINDOWS")
+         .arg("/ENTRY:mainCRTStartup")
+         .arg("/NOLOGO");
         c
     } else {
         Command::new("cc")
@@ -1647,7 +1669,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     // When UI lib is also linked, it bundles its own copy of perry-runtime.
     // For Android (ELF), ld.lld errors on duplicate symbols, so skip the standalone
     // runtime when the UI library will provide it.
-    let skip_runtime = is_android && ctx.needs_ui && find_ui_library(target.as_deref()).is_some();
+    let skip_runtime = (is_android || is_linux) && ctx.needs_ui && find_ui_library(target.as_deref()).is_some();
     if !skip_runtime {
         if let Some(ref jsruntime) = jsruntime_lib {
             cmd.arg(jsruntime);
@@ -1658,9 +1680,13 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         }
     }
 
-    cmd.arg("-o")
-        .arg(&exe_path)
-        .arg("-lc");
+    if is_windows {
+        cmd.arg(format!("/OUT:{}", exe_path.display()));
+    } else {
+        cmd.arg("-o")
+            .arg(&exe_path)
+            .arg("-lc");
+    }
 
 
     if is_ios {
@@ -1678,6 +1704,31 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         cmd.arg("-lm")
            .arg("-ldl")
            .arg("-llog");
+    } else if is_linux {
+        // Linux system libraries (cross-compile target)
+        cmd.arg("-lm")
+           .arg("-lpthread")
+           .arg("-ldl");
+
+        if stdlib_lib.is_some() || jsruntime_lib.is_some() {
+            cmd.arg("-lssl")
+               .arg("-lcrypto");
+        }
+
+        if jsruntime_lib.is_some() {
+            cmd.arg("-lstdc++");
+        }
+    } else if is_windows {
+        // Windows system libraries
+        cmd.arg("user32.lib")
+           .arg("gdi32.lib")
+           .arg("kernel32.lib")
+           .arg("shell32.lib")
+           .arg("ole32.lib")
+           .arg("comctl32.lib")
+           .arg("advapi32.lib")
+           .arg("comdlg32.lib")
+           .arg("ws2_32.lib");
     } else {
         // On macOS, we need additional frameworks for the runtime (sysinfo, etc.) and V8
         #[cfg(target_os = "macos")]
@@ -1720,6 +1771,24 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 // UIKit already linked above
             } else if is_android {
                 // Android UI uses JNI - no additional system libs needed
+            } else if is_linux {
+                // GTK4 libraries via pkg-config
+                if let Ok(output) = Command::new("pkg-config").args(["--libs", "gtk4"]).output() {
+                    if output.status.success() {
+                        let libs = String::from_utf8_lossy(&output.stdout);
+                        for flag in libs.trim().split_whitespace() {
+                            cmd.arg(flag);
+                        }
+                    }
+                } else {
+                    // Fallback: link GTK4 libraries directly
+                    cmd.arg("-lgtk-4")
+                       .arg("-lgobject-2.0")
+                       .arg("-lglib-2.0")
+                       .arg("-lgio-2.0");
+                }
+            } else if is_windows {
+                // Win32 system libs already linked above
             } else {
                 #[cfg(target_os = "macos")]
                 {
@@ -1736,6 +1805,10 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 ("libperry_ui_ios.a", "cargo build --release -p perry-ui-ios --target aarch64-apple-ios-sim")
             } else if is_android {
                 ("libperry_ui_android.a", "cargo build --release -p perry-ui-android --target aarch64-linux-android")
+            } else if is_linux {
+                ("libperry_ui_gtk4.a", "cargo build --release -p perry-ui-gtk4 --target x86_64-unknown-linux-gnu")
+            } else if is_windows {
+                ("perry_ui_windows.lib", "cargo build --release -p perry-ui-windows --target x86_64-pc-windows-msvc")
             } else {
                 ("libperry_ui_macos.a", "cargo build --release -p perry-ui-macos")
             };
@@ -1759,7 +1832,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         fs::copy(&exe_path, &bundle_exe)?;
         let _ = fs::remove_file(&exe_path);
 
-        let bundle_id = format!("com.perry.{}", stem);
+        let exe_stem = exe_path.file_stem().and_then(|s| s.to_str()).unwrap_or(stem);
+        let bundle_id = format!("com.perry.{}", exe_stem);
         let info_plist = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1779,9 +1853,26 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     <string>17.0</string>
     <key>UILaunchStoryboardName</key>
     <string></string>
+    <key>UIApplicationSceneManifest</key>
+    <dict>
+        <key>UIApplicationSupportsMultipleScenes</key>
+        <false/>
+        <key>UISceneConfigurations</key>
+        <dict>
+            <key>UIWindowSceneSessionRoleApplication</key>
+            <array>
+                <dict>
+                    <key>UISceneConfigurationName</key>
+                    <string>Default Configuration</string>
+                    <key>UISceneDelegateClassName</key>
+                    <string>PerrySceneDelegate</string>
+                </dict>
+            </array>
+        </dict>
+    </dict>
 </dict>
 </plist>"#,
-            stem, bundle_id, stem
+            exe_stem, bundle_id, exe_stem
         );
         fs::write(app_dir.join("Info.plist"), info_plist)?;
 

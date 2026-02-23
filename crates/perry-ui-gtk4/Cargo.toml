@@ -1,0 +1,13 @@
+[package]
+name = "perry-ui-gtk4"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+perry-ui = { path = "../perry-ui" }
+perry-runtime = { path = "../perry-runtime" }
+libc = "0.2"
+gtk4 = "0.9"

@@ -565,6 +565,26 @@ impl Compiler {
                     .finish(settings::Flags::new(flag_builder))
                     .map_err(|e| anyhow!("{}", e))?
             }
+            Some("linux") => {
+                // Cross-compile for x86_64-linux (ELF)
+                let triple = target_lexicon::Triple::from_str("x86_64-unknown-linux-gnu")
+                    .map_err(|e| anyhow!("Bad triple: {}", e))?;
+                let isa_builder = cranelift::codegen::isa::lookup(triple)
+                    .map_err(|e| anyhow!("Failed to create Linux ISA: {}", e))?;
+                isa_builder
+                    .finish(settings::Flags::new(flag_builder))
+                    .map_err(|e| anyhow!("{}", e))?
+            }
+            Some("windows") => {
+                // Cross-compile for x86_64-windows (PE/COFF)
+                let triple = target_lexicon::Triple::from_str("x86_64-pc-windows-msvc")
+                    .map_err(|e| anyhow!("Bad triple: {}", e))?;
+                let isa_builder = cranelift::codegen::isa::lookup(triple)
+                    .map_err(|e| anyhow!("Failed to create Windows ISA: {}", e))?;
+                isa_builder
+                    .finish(settings::Flags::new(flag_builder))
+                    .map_err(|e| anyhow!("{}", e))?
+            }
             _ => {
                 // Native host target
                 let isa_builder = cranelift_native::builder().map_err(|e| anyhow!("{}", e))?;
