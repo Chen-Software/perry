@@ -100,3 +100,24 @@ pub fn set_selectable(handle: i64, selectable: bool) {
         }
     }
 }
+
+/// Set the font family of a Text widget.
+pub fn set_font_family(handle: i64, family_ptr: *const u8) {
+    let family = str_from_header(family_ptr);
+    if let Some(widget) = super::get_widget(handle) {
+        if let Some(label) = widget.downcast_ref::<Label>() {
+            let attrs = label.attributes().unwrap_or_else(pango::AttrList::new);
+            let resolved = match family {
+                "monospace" | "monospaced" => "monospace",
+                "serif" => "serif",
+                "sans-serif" => "sans-serif",
+                other => other,
+            };
+            let mut font_desc = pango::FontDescription::new();
+            font_desc.set_family(resolved);
+            let attr = pango::AttrFontDesc::new(&font_desc);
+            attrs.insert(attr);
+            label.set_attributes(Some(&attrs));
+        }
+    }
+}

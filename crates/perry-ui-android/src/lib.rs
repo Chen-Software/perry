@@ -1,13 +1,19 @@
 pub mod app;
 pub mod callback;
 pub mod clipboard;
+pub mod dialog;
 pub mod file_dialog;
 pub mod jni_bridge;
 pub mod json;
+pub mod keychain;
 pub mod menu;
+pub mod sheet;
 pub mod state;
 pub mod stdlib_stubs;
+pub mod system;
+pub mod toolbar;
 pub mod widgets;
+pub mod window;
 
 // =============================================================================
 // JNI lifecycle
@@ -452,4 +458,378 @@ pub extern "C" fn perry_ui_textfield_set_string(handle: i64, text_ptr: i64) {
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_add_child_at(parent_handle: i64, child_handle: i64, index: f64) {
     widgets::add_child_at(parent_handle, child_handle, index as i64);
+}
+
+// =============================================================================
+// App Lifecycle (new)
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_app_on_activate(callback: f64) {
+    app::on_activate(callback);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_app_on_terminate(callback: f64) {
+    app::on_terminate(callback);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_app_set_timer(interval_ms: f64, callback: f64) {
+    app::set_timer(interval_ms, callback);
+}
+
+// =============================================================================
+// State Bindings (new)
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_state_on_change(state_handle: i64, callback: f64) {
+    state::on_change(state_handle, callback);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_state_bind_textfield(state_handle: i64, textfield_handle: i64) {
+    state::bind_textfield(state_handle, textfield_handle);
+}
+
+// =============================================================================
+// Text Styling (new)
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_text_set_font_family(handle: i64, family_ptr: i64) {
+    widgets::text::set_font_family(handle, family_ptr as *const u8);
+}
+
+// =============================================================================
+// Widget Creation (new)
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_securefield_create(placeholder_ptr: i64, on_change: f64) -> i64 {
+    widgets::securefield::create(placeholder_ptr as *const u8, on_change)
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_progressview_create() -> i64 {
+    widgets::progressview::create()
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_progressview_set_value(handle: i64, value: f64) {
+    widgets::progressview::set_value(handle, value);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_form_create() -> i64 {
+    widgets::form::create()
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_section_create(title_ptr: i64) -> i64 {
+    widgets::form::section_create(title_ptr as *const u8)
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_zstack_create() -> i64 {
+    widgets::zstack::create()
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_canvas_create(width: f64, height: f64) -> i64 {
+    widgets::canvas::create(width, height)
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_lazyvstack_create(count: f64, render_closure: f64) -> i64 {
+    widgets::lazyvstack::create(count, render_closure)
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_lazyvstack_update(handle: i64, count: i64) {
+    widgets::lazyvstack::update(handle, count);
+}
+
+// =============================================================================
+// Canvas
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_canvas_clear(handle: i64) {
+    widgets::canvas::clear(handle);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_canvas_begin_path(handle: i64) {
+    widgets::canvas::begin_path(handle);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_canvas_move_to(handle: i64, x: f64, y: f64) {
+    widgets::canvas::move_to(handle, x, y);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_canvas_line_to(handle: i64, x: f64, y: f64) {
+    widgets::canvas::line_to(handle, x, y);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_canvas_stroke(handle: i64, r: f64, g: f64, b: f64, a: f64, line_width: f64) {
+    widgets::canvas::stroke(handle, r, g, b, a, line_width);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_canvas_fill_gradient(handle: i64, r1: f64, g1: f64, b1: f64, a1: f64, r2: f64, g2: f64, b2: f64, a2: f64, direction: f64) {
+    widgets::canvas::fill_gradient(handle, r1, g1, b1, a1, r2, g2, b2, a2, direction);
+}
+
+// =============================================================================
+// Picker
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_picker_create(label_ptr: i64, on_change: f64, style: i64) -> i64 {
+    widgets::picker::create(label_ptr as *const u8, on_change, style)
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_picker_add_item(handle: i64, title_ptr: i64) {
+    widgets::picker::add_item(handle, title_ptr as *const u8);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_picker_set_selected(handle: i64, index: i64) {
+    widgets::picker::set_selected(handle, index);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_picker_get_selected(handle: i64) -> i64 {
+    widgets::picker::get_selected(handle)
+}
+
+// =============================================================================
+// Image
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_image_create_file(path_ptr: i64) -> i64 {
+    widgets::image::create_file(path_ptr as *const u8)
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_image_create_symbol(name_ptr: i64) -> i64 {
+    widgets::image::create_symbol(name_ptr as *const u8)
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_image_set_size(handle: i64, width: f64, height: f64) {
+    widgets::image::set_size(handle, width, height);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_image_set_tint(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    widgets::image::set_tint(handle, r, g, b, a);
+}
+
+// =============================================================================
+// Navigation
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_navstack_create(title_ptr: i64, body_handle: i64) -> i64 {
+    widgets::navstack::create(title_ptr as *const u8, body_handle)
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_navstack_push(handle: i64, title_ptr: i64, body_handle: i64) {
+    widgets::navstack::push(handle, title_ptr as *const u8, body_handle);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_navstack_pop(handle: i64) {
+    widgets::navstack::pop(handle);
+}
+
+// =============================================================================
+// Styling (new)
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_enabled(handle: i64, enabled: i64) {
+    widgets::set_enabled(handle, enabled != 0);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_tooltip(handle: i64, text_ptr: i64) {
+    widgets::set_tooltip(handle, text_ptr as *const u8);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_control_size(handle: i64, size: i64) {
+    widgets::set_control_size(handle, size);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_corner_radius(handle: i64, radius: f64) {
+    widgets::set_corner_radius(handle, radius);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_background_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    widgets::set_background_color(handle, r, g, b, a);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_background_gradient(handle: i64, r1: f64, g1: f64, b1: f64, a1: f64, r2: f64, g2: f64, b2: f64, a2: f64, direction: f64) {
+    widgets::set_background_gradient(handle, r1, g1, b1, a1, r2, g2, b2, a2, direction);
+}
+
+// =============================================================================
+// Events (new)
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_on_hover(handle: i64, callback: f64) {
+    widgets::set_on_hover(handle, callback);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_on_double_click(handle: i64, callback: f64) {
+    widgets::set_on_double_click(handle, callback);
+}
+
+// =============================================================================
+// Animation (new)
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_animate_opacity(handle: i64, target: f64, duration_ms: f64) {
+    widgets::animate_opacity(handle, target, duration_ms);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_animate_position(handle: i64, dx: f64, dy: f64, duration_ms: f64) {
+    widgets::animate_position(handle, dx, dy, duration_ms);
+}
+
+// =============================================================================
+// Dialog (new)
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_save_file_dialog(callback: f64, default_name_ptr: i64, allowed_types_ptr: i64) {
+    dialog::save_file_dialog(callback, default_name_ptr as *const u8, allowed_types_ptr as *const u8);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_alert(title_ptr: i64, message_ptr: i64, buttons_ptr: i64, callback: f64) {
+    dialog::alert(title_ptr as *const u8, message_ptr as *const u8, buttons_ptr as *const u8, callback);
+}
+
+// =============================================================================
+// Sheet (new)
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_sheet_create(width: f64, height: f64, title_val: f64) -> i64 {
+    sheet::create(width, height, title_val)
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_sheet_present(sheet_handle: i64) {
+    sheet::present(sheet_handle);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_sheet_dismiss(sheet_handle: i64) {
+    sheet::dismiss(sheet_handle);
+}
+
+// =============================================================================
+// Multi-Window (new)
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_window_create(title_ptr: i64, width: f64, height: f64) -> i64 {
+    window::create(title_ptr as *const u8, width, height)
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_window_set_body(window_handle: i64, widget_handle: i64) {
+    window::set_body(window_handle, widget_handle);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_window_show(window_handle: i64) {
+    window::show(window_handle);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_window_close(window_handle: i64) {
+    window::close(window_handle);
+}
+
+// =============================================================================
+// Toolbar (new)
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_toolbar_create() -> i64 {
+    toolbar::create()
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_toolbar_add_item(toolbar_handle: i64, label_ptr: i64, icon_ptr: i64, callback: f64) {
+    toolbar::add_item(toolbar_handle, label_ptr as *const u8, icon_ptr as *const u8, callback);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_toolbar_attach(toolbar_handle: i64) {
+    toolbar::attach(toolbar_handle);
+}
+
+// =============================================================================
+// System API (new)
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_system_open_url(url_ptr: i64) {
+    system::open_url(url_ptr as *const u8);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_is_dark_mode() -> i64 {
+    system::is_dark_mode()
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_preferences_set(key_ptr: i64, value: f64) {
+    system::preferences_set(key_ptr as *const u8, value);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_preferences_get(key_ptr: i64) -> f64 {
+    system::preferences_get(key_ptr as *const u8)
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_keychain_save(key_ptr: i64, value_ptr: i64) {
+    keychain::save(key_ptr as *const u8, value_ptr as *const u8);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_keychain_get(key_ptr: i64) -> f64 {
+    keychain::get(key_ptr as *const u8)
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_keychain_delete(key_ptr: i64) {
+    keychain::delete(key_ptr as *const u8);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_send(title_ptr: i64, body_ptr: i64) {
+    system::notification_send(title_ptr as *const u8, body_ptr as *const u8);
 }

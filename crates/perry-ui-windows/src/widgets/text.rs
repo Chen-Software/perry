@@ -181,6 +181,31 @@ pub fn set_font_weight(handle: i64, size: f64, weight: f64) {
     }
 }
 
+/// Set the font family of a Text widget.
+pub fn set_font_family(handle: i64, family_ptr: *const u8) {
+    let family = str_from_header(family_ptr);
+
+    #[cfg(target_os = "windows")]
+    {
+        // Map common names to Windows font names
+        let win_family = match family {
+            "monospace" | "monospaced" | ".AppleSystemUIFontMonospaced" => "Consolas",
+            "system" | ".AppleSystemUIFont" => "Segoe UI",
+            "serif" => "Times New Roman",
+            "sans-serif" => "Segoe UI",
+            other => other,
+        };
+
+        let font = create_font_with_family(14, 400, win_family);
+        apply_font(handle, font);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (handle, family);
+    }
+}
+
 /// Set whether a Text widget is selectable.
 pub fn set_selectable(handle: i64, _selectable: bool) {
     // Win32 STATIC controls are not selectable by default.
@@ -219,6 +244,11 @@ pub fn handle_ctlcolor(hdc: HDC, child_hwnd: HWND) -> Option<LRESULT> {
 
 #[cfg(target_os = "windows")]
 fn create_font(size: i32, weight: i32) -> HFONT {
+    create_font_with_family(size, weight, "Segoe UI")
+}
+
+#[cfg(target_os = "windows")]
+fn create_font_with_family(size: i32, weight: i32, family: &str) -> HFONT {
     unsafe {
         CreateFontW(
             -size,              // nHeight (negative = character height)
@@ -234,7 +264,7 @@ fn create_font(size: i32, weight: i32) -> HFONT {
             0,                  // fdwClipPrecision
             0,                  // fdwQuality
             0,                  // fdwPitchAndFamily
-            windows::core::PCWSTR(to_wide("Segoe UI").as_ptr()),
+            windows::core::PCWSTR(to_wide(family).as_ptr()),
         )
     }
 }

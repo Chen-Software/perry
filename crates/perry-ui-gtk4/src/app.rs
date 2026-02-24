@@ -26,8 +26,13 @@ thread_local! {
     static SHORTCUT_CALLBACKS: RefCell<HashMap<usize, f64>> = RefCell::new(HashMap::new());
     /// Counter for generating unique callback keys.
     static NEXT_CALLBACK_KEY: RefCell<usize> = RefCell::new(1);
-    /// Reference to the GTK Application for keyboard shortcuts.
-    static GTK_APP: RefCell<Option<Application>> = RefCell::new(None);
+    /// Reference to the GTK Application (public for sheet/toolbar/window/system access).
+    pub(crate) static GTK_APP: RefCell<Option<Application>> = RefCell::new(None);
+    /// Timer callbacks (interval_ms, callback f64)
+    static TIMER_CALLBACKS: RefCell<Vec<(f64, f64)>> = RefCell::new(Vec::new());
+    /// App lifecycle callbacks
+    static ON_ACTIVATE_CALLBACK: RefCell<Option<f64>> = RefCell::new(None);
+    static ON_TERMINATE_CALLBACK: RefCell<Option<f64>> = RefCell::new(None);
 }
 
 struct PendingShortcut {
@@ -147,6 +152,37 @@ pub fn app_run(_app_handle: i64) {
                 window.present();
             }
         });
+
+        // Install timers
+        TIMER_CALLBACKS.with(|tc| {
+            for (interval_ms, callback) in tc.borrow().iter() {
+                let cb = *callback;
+                let ms = *interval_ms as u64;
+                glib::timeout_add_local(std::time::Duration::from_millis(ms), move || {
+                    let ptr = unsafe { js_nanbox_get_pointer(cb) } as *const u8;
+                    unsafe { js_closure_call0(ptr); }
+                    glib::ControlFlow::Continue
+                });
+            }
+        });
+
+        // Call on_activate callback
+        ON_ACTIVATE_CALLBACK.with(|cb| {
+            if let Some(callback) = *cb.borrow() {
+                let ptr = unsafe { js_nanbox_get_pointer(callback) } as *const u8;
+                unsafe { js_closure_call0(ptr); }
+            }
+        });
+    });
+
+    // Install shutdown handler for on_terminate
+    app.connect_shutdown(move |_app| {
+        ON_TERMINATE_CALLBACK.with(|cb| {
+            if let Some(callback) = *cb.borrow() {
+                let ptr = unsafe { js_nanbox_get_pointer(callback) } as *const u8;
+                unsafe { js_closure_call0(ptr); }
+            }
+        });
     });
 
     // GTK Application::run() blocks like NSApplication.run()
@@ -239,5 +275,26 @@ fn install_shortcuts_on_window(window: &ApplicationWindow) {
 pub fn add_keyboard_shortcut(key_ptr: *const u8, modifiers: f64, callback: f64) {
     PENDING_SHORTCUTS.with(|ps| {
         ps.borrow_mut().push(PendingShortcut { key_ptr, modifiers, callback });
+    });
+}
+
+/// Set a repeating timer. interval_ms = milliseconds between ticks.
+pub fn set_timer(interval_ms: f64, callback: f64) {
+    TIMER_CALLBACKS.with(|tc| {
+        tc.borrow_mut().push((interval_ms, callback));
+    });
+}
+
+/// Register an on_activate callback (called when the app becomes active).
+pub fn on_activate(callback: f64) {
+    ON_ACTIVATE_CALLBACK.with(|cb| {
+        *cb.borrow_mut() = Some(callback);
+    });
+}
+
+/// Register an on_terminate callback (called when the app is shutting down).
+pub fn on_terminate(callback: f64) {
+    ON_TERMINATE_CALLBACK.with(|cb| {
+        *cb.borrow_mut() = Some(callback);
     });
 }

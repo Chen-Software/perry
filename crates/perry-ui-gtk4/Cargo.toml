@@ -11,3 +11,4 @@ perry-ui = { path = "../perry-ui" }
 perry-runtime = { path = "../perry-runtime" }
 libc = "0.2"
 gtk4 = "0.9"
+cairo-rs = "0.20"

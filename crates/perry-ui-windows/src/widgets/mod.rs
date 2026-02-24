@@ -11,6 +11,15 @@ pub mod textfield;
 pub mod toggle;
 pub mod slider;
 pub mod scrollview;
+pub mod securefield;
+pub mod progressview;
+pub mod form;
+pub mod zstack;
+pub mod picker;
+pub mod canvas;
+pub mod navstack;
+pub mod lazyvstack;
+pub mod image;
 
 use std::cell::RefCell;
 
@@ -31,6 +40,16 @@ pub enum WidgetKind {
     Toggle,
     Slider,
     ScrollView,
+    SecureField,
+    ProgressView,
+    Form,
+    Section,
+    ZStack,
+    Picker,
+    Canvas,
+    NavStack,
+    LazyVStack,
+    Image,
 }
 
 pub struct WidgetEntry {
@@ -311,7 +330,7 @@ pub fn set_hidden(handle: i64, hidden: bool) {
     });
 }
 
-/// Handle WM_COMMAND from WndProc — dispatch to button/textfield/toggle callbacks.
+/// Handle WM_COMMAND from WndProc — dispatch to button/textfield/toggle/picker/securefield callbacks.
 #[cfg(target_os = "windows")]
 pub fn handle_command(control_id: u16, notify_code: u16, _lparam: LPARAM) {
     // BN_CLICKED = 0
@@ -335,11 +354,41 @@ pub fn handle_command(control_id: u16, notify_code: u16, _lparam: LPARAM) {
             }
         }
     }
+    // CBN_SELCHANGE = 1
+    if notify_code == 1 {
+        let handle = find_handle_by_control_id(control_id);
+        if handle > 0 {
+            let kind = WIDGETS.with(|w| {
+                let widgets = w.borrow();
+                let idx = (handle - 1) as usize;
+                if idx < widgets.len() {
+                    Some(widgets[idx].kind.clone())
+                } else {
+                    None
+                }
+            });
+            if matches!(kind, Some(WidgetKind::Picker)) {
+                picker::handle_selchange(handle);
+            }
+        }
+    }
     // EN_CHANGE = 0x0300
     if notify_code == 0x0300 {
         let handle = find_handle_by_control_id(control_id);
         if handle > 0 {
-            textfield::handle_change(handle);
+            let kind = WIDGETS.with(|w| {
+                let widgets = w.borrow();
+                let idx = (handle - 1) as usize;
+                if idx < widgets.len() {
+                    Some(widgets[idx].kind.clone())
+                } else {
+                    None
+                }
+            });
+            match kind {
+                Some(WidgetKind::SecureField) => securefield::handle_change(handle),
+                _ => textfield::handle_change(handle),
+            }
         }
     }
 }
@@ -371,3 +420,134 @@ pub fn handle_scroll(wparam: WPARAM, lparam: LPARAM) {
 
 #[cfg(not(target_os = "windows"))]
 pub fn handle_scroll(_wparam: usize, _lparam: isize) {}
+
+// =============================================================================
+// Property setters (new in parity update)
+// =============================================================================
+
+extern "C" {
+    fn js_closure_call1(closure: *const u8, arg: f64) -> f64;
+    fn js_nanbox_get_pointer(value: f64) -> i64;
+}
+
+/// Set the enabled/disabled state of a widget.
+pub fn set_enabled(handle: i64, enabled: bool) {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(hwnd) = get_hwnd(handle) {
+            unsafe {
+                let _ = EnableWindow(hwnd, enabled);
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (handle, enabled);
+    }
+}
+
+/// Set the tooltip of a widget.
+pub fn set_tooltip(handle: i64, _text_ptr: *const u8) {
+    // Win32 tooltips require a shared TOOLTIPS_CLASS control with TTM_ADDTOOL.
+    // For now, this is a best-effort no-op — full tooltip support would require
+    // creating a shared tooltip window and managing per-widget TOOLINFO structs.
+    let _ = handle;
+}
+
+/// Set the control size of a widget (maps to font size).
+pub fn set_control_size(handle: i64, size: i64) {
+    #[cfg(target_os = "windows")]
+    {
+        let font_height = match size {
+            0 => 10, // mini
+            1 => 12, // small
+            2 => 14, // regular
+            3 => 18, // large
+            _ => 14,
+        };
+        if let Some(hwnd) = get_hwnd(handle) {
+            unsafe {
+                let font = CreateFontW(
+                    -font_height, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 0, 0,
+                    windows::core::PCWSTR(
+                        "Segoe UI\0".encode_utf16().collect::<Vec<u16>>().as_ptr(),
+                    ),
+                );
+                SendMessageW(hwnd, WM_SETFONT, WPARAM(font.0 as usize), LPARAM(1));
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (handle, size);
+    }
+}
+
+/// Set the corner radius of a widget.
+pub fn set_corner_radius(handle: i64, radius: f64) {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(hwnd) = get_hwnd(handle) {
+            unsafe {
+                let mut rect = RECT::default();
+                let _ = GetClientRect(hwnd, &mut rect);
+                let rgn = CreateRoundRectRgn(
+                    0, 0,
+                    rect.right + 1, rect.bottom + 1,
+                    radius as i32, radius as i32,
+                );
+                SetWindowRgn(hwnd, Some(rgn), true);
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (handle, radius);
+    }
+}
+
+/// Set the background color of a widget.
+pub fn set_background_color(handle: i64, _r: f64, _g: f64, _b: f64, _a: f64) {
+    // Win32 background color requires handling WM_ERASEBKGND or WM_CTLCOLOR* messages
+    // with a custom brush. This is a best-effort no-op for non-text widgets.
+    // Text widgets use the existing handle_ctlcolor mechanism.
+    let _ = handle;
+}
+
+/// Set the background gradient of a widget.
+pub fn set_background_gradient(handle: i64, _r1: f64, _g1: f64, _b1: f64, _a1: f64, _r2: f64, _g2: f64, _b2: f64, _a2: f64, _direction: f64) {
+    // Win32 gradient would require GradientFill() in WM_ERASEBKGND.
+    // Best-effort no-op.
+    let _ = handle;
+}
+
+/// Set an on-hover callback for a widget.
+pub fn set_on_hover(handle: i64, _callback: f64) {
+    // Win32 hover requires SetWindowSubclass + TrackMouseEvent + WM_MOUSEHOVER/LEAVE.
+    // Best-effort no-op.
+    let _ = handle;
+}
+
+/// Set a double-click callback for a widget.
+pub fn set_on_double_click(handle: i64, _callback: f64) {
+    // Win32 double-click requires CS_DBLCLKS style + WM_LBUTTONDBLCLK handling.
+    // Best-effort no-op.
+    let _ = handle;
+}
+
+/// Animate the opacity of a widget.
+pub fn animate_opacity(handle: i64, _target: f64, _duration_ms: f64) {
+    // Win32 opacity animation requires WS_EX_LAYERED + SetLayeredWindowAttributes + SetTimer.
+    // Best-effort no-op.
+    let _ = handle;
+}
+
+/// Animate the position of a widget.
+pub fn animate_position(handle: i64, _dx: f64, _dy: f64, _duration_ms: f64) {
+    // Win32 position animation requires SetTimer + incremental SetWindowPos.
+    // Best-effort no-op.
+    let _ = handle;
+}

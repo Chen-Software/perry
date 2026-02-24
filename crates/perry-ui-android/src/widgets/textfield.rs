@@ -83,6 +83,10 @@ pub fn focus(handle: i64) {
 /// Set the text of an EditText from a StringHeader pointer.
 pub fn set_string_value(handle: i64, text_ptr: *const u8) {
     let text = str_from_header(text_ptr);
+    set_string_str(handle, text);
+}
+
+pub fn set_string_str(handle: i64, text: &str) {
     if let Some(view_ref) = super::get_widget(handle) {
         let mut env = jni_bridge::get_env();
         let _ = env.push_local_frame(8);

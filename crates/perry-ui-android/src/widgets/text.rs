@@ -104,6 +104,40 @@ pub fn set_font_weight(handle: i64, _size: f64, weight: f64) {
     }
 }
 
+/// Set the font family of a TextView.
+pub fn set_font_family(handle: i64, family_ptr: *const u8) {
+    let family = str_from_header(family_ptr);
+    if let Some(view_ref) = super::get_widget(handle) {
+        let mut env = jni_bridge::get_env();
+        let _ = env.push_local_frame(16);
+
+        let family_name = match family {
+            "monospace" | "monospaced" => "monospace",
+            "system" | "default" => "sans-serif",
+            "serif" => "serif",
+            other => other,
+        };
+
+        let jfamily = env.new_string(family_name).expect("family string");
+        // Typeface.create(String, int) → Typeface
+        let typeface = env.call_static_method(
+            "android/graphics/Typeface",
+            "create",
+            "(Ljava/lang/String;I)Landroid/graphics/Typeface;",
+            &[JValue::Object(&jfamily), JValue::Int(0)], // NORMAL=0
+        ).expect("Typeface.create").l().expect("typeface");
+
+        let _ = env.call_method(
+            view_ref.as_obj(),
+            "setTypeface",
+            "(Landroid/graphics/Typeface;)V",
+            &[JValue::Object(&typeface)],
+        );
+
+        unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
+    }
+}
+
 /// Set whether a TextView is selectable.
 pub fn set_selectable(handle: i64, selectable: bool) {
     if let Some(view_ref) = super::get_widget(handle) {

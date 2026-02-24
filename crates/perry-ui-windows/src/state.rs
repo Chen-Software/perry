@@ -6,6 +6,9 @@ use crate::widgets;
 extern "C" {
     fn js_closure_call1(closure: *const u8, arg: f64) -> f64;
     fn js_nanbox_get_pointer(value: f64) -> i64;
+    fn js_string_from_bytes(ptr: *const u8, len: i64) -> *const u8;
+    fn js_nanbox_string(ptr: i64) -> f64;
+    fn js_get_string_pointer_unified(value: f64) -> *const u8;
 }
 
 struct StateEntry {
@@ -47,6 +50,15 @@ struct ForEachBinding {
     render_closure: f64, // NaN-boxed closure ptr
 }
 
+struct OnChangeBinding {
+    callback_ptr: *const u8,
+}
+
+struct TextFieldBinding {
+    textfield_handle: i64,
+    suppress: std::cell::Cell<bool>,
+}
+
 thread_local! {
     static STATES: RefCell<Vec<StateEntry>> = RefCell::new(Vec::new());
     /// Map from state_handle -> list of text bindings to update when state changes
@@ -63,6 +75,10 @@ thread_local! {
     static VISIBILITY_BINDINGS: RefCell<HashMap<i64, Vec<VisibilityBinding>>> = RefCell::new(HashMap::new());
     /// Map from state_handle -> forEach bindings
     static FOR_EACH_BINDINGS: RefCell<HashMap<i64, Vec<ForEachBinding>>> = RefCell::new(HashMap::new());
+    /// Map from state_handle -> onChange callbacks
+    static ON_CHANGE_BINDINGS: RefCell<HashMap<i64, Vec<OnChangeBinding>>> = RefCell::new(HashMap::new());
+    /// Map from state_handle -> textfield bindings (two-way)
+    static TEXTFIELD_BINDINGS: RefCell<HashMap<i64, Vec<std::rc::Rc<TextFieldBinding>>>> = RefCell::new(HashMap::new());
 }
 
 /// Extract a &str from a *const StringHeader pointer.
@@ -184,6 +200,52 @@ pub fn state_set(handle: i64, value: f64) {
             for binding in bindings {
                 widgets::clear_children(binding.container_handle);
                 render_for_each(binding.container_handle, binding.render_closure, value);
+            }
+        }
+    });
+
+    // Invoke onChange callbacks
+    ON_CHANGE_BINDINGS.with(|b| {
+        if let Some(bindings) = b.borrow().get(&handle) {
+            for binding in bindings {
+                unsafe { js_closure_call1(binding.callback_ptr, value) };
+            }
+        }
+    });
+
+    // Update textfield bindings (state → textfield direction)
+    TEXTFIELD_BINDINGS.with(|b| {
+        if let Some(bindings) = b.borrow().get(&handle) {
+            for binding in bindings {
+                if binding.suppress.get() {
+                    continue;
+                }
+                // Get the string representation of the value
+                let str_ptr = unsafe { js_get_string_pointer_unified(value) };
+                let text = if !str_ptr.is_null() {
+                    str_from_header(str_ptr)
+                } else {
+                    // Format as number
+                    &formatted
+                };
+                #[cfg(target_os = "windows")]
+                {
+                    if let Some(hwnd) = widgets::get_hwnd(binding.textfield_handle) {
+                        binding.suppress.set(true);
+                        let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+                        unsafe {
+                            let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowTextW(
+                                hwnd,
+                                windows::core::PCWSTR(wide.as_ptr()),
+                            );
+                        }
+                        binding.suppress.set(false);
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = text;
+                }
             }
         }
     });
@@ -323,4 +385,54 @@ pub fn for_each_init(container_handle: i64, state_handle: i64, render_closure: f
             .or_default()
             .push(ForEachBinding { container_handle, render_closure });
     });
+}
+
+/// Register an onChange callback for a state cell.
+pub fn on_change(state_handle: i64, callback: f64) {
+    let callback_ptr = unsafe { js_nanbox_get_pointer(callback) } as *const u8;
+    ON_CHANGE_BINDINGS.with(|b| {
+        b.borrow_mut()
+            .entry(state_handle)
+            .or_default()
+            .push(OnChangeBinding { callback_ptr });
+    });
+}
+
+/// Bind a textfield to a state cell (two-way binding).
+/// When state changes, textfield updates. When textfield changes, state updates.
+pub fn bind_textfield(state_handle: i64, textfield_handle: i64) {
+    let binding = std::rc::Rc::new(TextFieldBinding {
+        textfield_handle,
+        suppress: std::cell::Cell::new(false),
+    });
+
+    TEXTFIELD_BINDINGS.with(|b| {
+        b.borrow_mut()
+            .entry(state_handle)
+            .or_default()
+            .push(binding);
+    });
+
+    // Set initial value from state → textfield
+    let value = state_get(state_handle);
+    let str_ptr = unsafe { js_get_string_pointer_unified(value) };
+    if !str_ptr.is_null() {
+        let text = str_from_header(str_ptr);
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(hwnd) = widgets::get_hwnd(textfield_handle) {
+                let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+                unsafe {
+                    let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowTextW(
+                        hwnd,
+                        windows::core::PCWSTR(wide.as_ptr()),
+                    );
+                }
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = text;
+        }
+    }
 }

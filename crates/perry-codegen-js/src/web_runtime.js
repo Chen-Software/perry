@@ -621,6 +621,439 @@ function perry_ui_canvas_set_font(h, font) {
     if (el && el._ctx) el._ctx.font = font;
 }
 
+// --- App Lifecycle ---
+function perry_ui_app_set_body(app_h, root_h) {
+    const root = getHandle(app_h);
+    const child = getHandle(root_h);
+    if (root && child) { root.innerHTML = ""; root.appendChild(child); }
+}
+
+function perry_ui_app_set_min_size(app_h, w, h) {
+    const root = getHandle(app_h);
+    if (root) { root.style.minWidth = w + "px"; root.style.minHeight = h + "px"; }
+}
+
+function perry_ui_app_set_max_size(app_h, w, h) {
+    const root = getHandle(app_h);
+    if (root) { root.style.maxWidth = w + "px"; root.style.maxHeight = h + "px"; }
+}
+
+function perry_ui_app_on_activate(callback) {
+    if (typeof callback === "function") {
+        document.addEventListener("visibilitychange", () => { if (!document.hidden) callback(); });
+    }
+}
+
+function perry_ui_app_on_terminate(callback) {
+    if (typeof callback === "function") {
+        window.addEventListener("beforeunload", () => callback());
+    }
+}
+
+function perry_ui_app_set_timer(interval_ms, callback) {
+    if (typeof callback === "function") setInterval(callback, interval_ms);
+}
+
+// --- Multi-Window ---
+const _windows = new Map();
+let _nextWindowId = 1;
+
+function perry_ui_window_create(title, width, height) {
+    const overlay = document.createElement("div");
+    overlay.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.3);display:none;z-index:1000;justify-content:center;align-items:center;";
+    const win = document.createElement("div");
+    win.style.cssText = `background:#fff;border-radius:8px;box-shadow:0 4px 24px rgba(0,0,0,0.2);width:${width}px;min-height:${height}px;padding:16px;position:relative;`;
+    if (title) { const t = document.createElement("div"); t.textContent = title; t.style.fontWeight = "bold"; t.style.marginBottom = "8px"; win.appendChild(t); }
+    overlay.appendChild(win);
+    document.body.appendChild(overlay);
+    const id = _nextWindowId++;
+    _windows.set(id, { overlay, win, body: null });
+    return id;
+}
+
+function perry_ui_window_set_body(window_h, widget_h) {
+    const w = _windows.get(window_h);
+    const child = getHandle(widget_h);
+    if (w && child) { w.body = child; w.win.appendChild(child); }
+}
+
+function perry_ui_window_show(window_h) {
+    const w = _windows.get(window_h);
+    if (w) w.overlay.style.display = "flex";
+}
+
+function perry_ui_window_close(window_h) {
+    const w = _windows.get(window_h);
+    if (w) w.overlay.style.display = "none";
+}
+
+// --- State (canonical function names) ---
+function perry_ui_state_create(initial) { return stateCreate(initial); }
+function perry_ui_state_get(h) { return stateGet(h); }
+function perry_ui_state_set(h, v) { stateSet(h, v); }
+
+function perry_ui_state_bind_textfield(stateH, widgetH) {
+    const el = getHandle(widgetH);
+    if (!el) return;
+    stateSubscribe(stateH, (v) => { el.value = String(v); });
+    el.value = String(stateGet(stateH) || "");
+    el.addEventListener("input", () => stateSet(stateH, el.value));
+}
+
+// --- Widget Operations ---
+function perry_ui_widget_add_child_at(parent_h, child_h, index) {
+    const parent = getHandle(parent_h);
+    const child = getHandle(child_h);
+    if (parent && child) {
+        const ref = parent.children[Math.floor(index)] || null;
+        parent.insertBefore(child, ref);
+    }
+}
+
+function perry_ui_set_widget_hidden(h, hidden) {
+    const el = getHandle(h);
+    if (el) el.style.display = hidden ? "none" : "";
+}
+
+function perry_ui_lazyvstack_create(count, renderFn) {
+    const scroll = document.createElement("div");
+    scroll.style.overflow = "auto"; scroll.style.flex = "1";
+    const inner = document.createElement("div");
+    inner.style.display = "flex"; inner.style.flexDirection = "column";
+    scroll.appendChild(inner);
+    scroll._inner = inner; scroll._renderFn = renderFn;
+    if (typeof renderFn === "function") {
+        for (let i = 0; i < count; i++) renderFn(i);
+    }
+    return wrapWidget(allocHandle(scroll));
+}
+
+function perry_ui_lazyvstack_update(h, count) {
+    const el = getHandle(h);
+    if (el && el._inner && el._renderFn) {
+        el._inner.innerHTML = "";
+        for (let i = 0; i < count; i++) el._renderFn(i);
+    }
+}
+
+// --- Text Operations ---
+function perry_ui_text_set_string(h, text) {
+    const el = getHandle(h);
+    if (el) el.textContent = text;
+}
+
+function perry_ui_text_set_selectable(h, selectable) {
+    const el = getHandle(h);
+    if (el) el.style.userSelect = selectable ? "text" : "none";
+}
+
+// --- Button Operations ---
+function perry_ui_button_set_bordered(h, bordered) {
+    const el = getHandle(h);
+    if (el) el.style.border = bordered ? "1px solid #ccc" : "none";
+}
+
+function perry_ui_button_set_title(h, title) {
+    const el = getHandle(h);
+    if (el) el.textContent = title;
+}
+
+// --- TextField Operations ---
+function perry_ui_textfield_focus(h) {
+    const el = getHandle(h);
+    if (el) el.focus();
+}
+
+function perry_ui_textfield_set_string(h, text) {
+    const el = getHandle(h);
+    if (el) el.value = text;
+}
+
+// --- ScrollView Operations ---
+function perry_ui_scrollview_set_child(scroll_h, child_h) {
+    const scroll = getHandle(scroll_h);
+    const child = getHandle(child_h);
+    if (scroll && child) { scroll.innerHTML = ""; scroll.appendChild(child); }
+}
+
+function perry_ui_scrollview_scroll_to(scroll_h, child_h) {
+    const scroll = getHandle(scroll_h);
+    const child = getHandle(child_h);
+    if (scroll && child) child.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function perry_ui_scrollview_get_offset(scroll_h) {
+    const el = getHandle(scroll_h);
+    return el ? el.scrollTop : 0;
+}
+
+function perry_ui_scrollview_set_offset(scroll_h, offset) {
+    const el = getHandle(scroll_h);
+    if (el) el.scrollTop = offset;
+}
+
+// --- Styling ---
+function perry_ui_widget_set_background_gradient(h, r1, g1, b1, a1, r2, g2, b2, a2, direction) {
+    const el = getHandle(h);
+    if (!el) return;
+    const c1 = `rgba(${Math.round(r1*255)},${Math.round(g1*255)},${Math.round(b1*255)},${a1})`;
+    const c2 = `rgba(${Math.round(r2*255)},${Math.round(g2*255)},${Math.round(b2*255)},${a2})`;
+    const dir = direction < 0.5 ? "to bottom" : "to right";
+    el.style.background = `linear-gradient(${dir}, ${c1}, ${c2})`;
+}
+
+function perry_ui_canvas_fill_gradient(h, r1, g1, b1, a1, r2, g2, b2, a2, direction) {
+    const el = getHandle(h);
+    if (!el || !el._ctx) return;
+    const ctx = el._ctx;
+    const grad = direction < 0.5
+        ? ctx.createLinearGradient(0, 0, 0, el.height)
+        : ctx.createLinearGradient(0, 0, el.width, 0);
+    grad.addColorStop(0, `rgba(${Math.round(r1*255)},${Math.round(g1*255)},${Math.round(b1*255)},${a1})`);
+    grad.addColorStop(1, `rgba(${Math.round(r2*255)},${Math.round(g2*255)},${Math.round(b2*255)},${a2})`);
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, el.width, el.height);
+}
+
+// --- Layout with Insets ---
+function perry_ui_vstack_create_with_insets(spacing, top, left, bottom, right) {
+    const el = document.createElement("div");
+    el.style.display = "flex"; el.style.flexDirection = "column"; el.style.gap = spacing + "px";
+    el.style.padding = `${top}px ${right}px ${bottom}px ${left}px`;
+    return wrapWidget(allocHandle(el));
+}
+
+function perry_ui_hstack_create_with_insets(spacing, top, left, bottom, right) {
+    const el = document.createElement("div");
+    el.style.display = "flex"; el.style.flexDirection = "row"; el.style.gap = spacing + "px";
+    el.style.alignItems = "center";
+    el.style.padding = `${top}px ${right}px ${bottom}px ${left}px`;
+    return wrapWidget(allocHandle(el));
+}
+
+// --- Navigation ---
+function perry_ui_navstack_push(h, body_h) {
+    const nav = getHandle(h);
+    const body = getHandle(body_h);
+    if (!nav || !body) return;
+    // Hide current children
+    for (const child of nav.children) child.style.display = "none";
+    nav.appendChild(body);
+    if (!nav._navStack) nav._navStack = [];
+    nav._navStack.push(body);
+}
+
+function perry_ui_navstack_pop(h) {
+    const nav = getHandle(h);
+    if (!nav || !nav._navStack || nav._navStack.length <= 1) return;
+    const removed = nav._navStack.pop();
+    if (removed) removed.style.display = "none";
+    const top = nav._navStack[nav._navStack.length - 1];
+    if (top) top.style.display = "";
+}
+
+// --- Picker Operations ---
+function perry_ui_picker_add_item(h, title) {
+    const el = getHandle(h);
+    if (!el) return;
+    const opt = document.createElement("option");
+    opt.value = el.children.length;
+    opt.textContent = title;
+    el.appendChild(opt);
+}
+
+function perry_ui_picker_set_selected(h, index) {
+    const el = getHandle(h);
+    if (el) el.selectedIndex = index;
+}
+
+function perry_ui_picker_get_selected(h) {
+    const el = getHandle(h);
+    return el ? el.selectedIndex : -1;
+}
+
+// --- Image Operations ---
+function perry_ui_image_create_symbol(name) {
+    const el = document.createElement("span");
+    el.textContent = name; // Use text as placeholder for symbols
+    el.style.fontSize = "24px";
+    return wrapWidget(allocHandle(el));
+}
+
+function perry_ui_image_set_size(h, width, height) {
+    const el = getHandle(h);
+    if (el) { el.style.width = width + "px"; el.style.height = height + "px"; }
+}
+
+function perry_ui_image_set_tint(h, r, g, b, a) {
+    const el = getHandle(h);
+    if (el) el.style.color = `rgba(${Math.round(r*255)},${Math.round(g*255)},${Math.round(b*255)},${a})`;
+}
+
+// --- ProgressView ---
+function perry_ui_progressview_set_value(h, value) {
+    const el = getHandle(h);
+    if (el) { el.removeAttribute("indeterminate"); el.value = value; }
+}
+
+// --- Menus ---
+const _menus = new Map();
+let _nextMenuId = 1;
+
+function perry_ui_menu_create() {
+    const id = _nextMenuId++;
+    _menus.set(id, []);
+    return id;
+}
+
+function perry_ui_menu_add_item(menu_h, title, callback) {
+    const items = _menus.get(menu_h);
+    if (items) items.push({ title, callback });
+}
+
+function perry_ui_widget_set_context_menu(widget_h, menu_h) {
+    const el = getHandle(widget_h);
+    const items = _menus.get(menu_h);
+    if (!el || !items) return;
+    el.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        const menu = document.createElement("div");
+        menu.style.cssText = "position:fixed;background:#fff;border:1px solid #ccc;border-radius:4px;box-shadow:0 2px 8px rgba(0,0,0,0.15);z-index:9999;padding:4px 0;";
+        menu.style.left = e.clientX + "px"; menu.style.top = e.clientY + "px";
+        for (const item of items) {
+            const mi = document.createElement("div");
+            mi.textContent = item.title;
+            mi.style.cssText = "padding:4px 16px;cursor:pointer;";
+            mi.addEventListener("mouseenter", () => mi.style.background = "#f0f0f0");
+            mi.addEventListener("mouseleave", () => mi.style.background = "");
+            mi.addEventListener("click", () => { menu.remove(); if (typeof item.callback === "function") item.callback(); });
+            menu.appendChild(mi);
+        }
+        document.body.appendChild(menu);
+        const dismiss = () => { menu.remove(); document.removeEventListener("click", dismiss); };
+        setTimeout(() => document.addEventListener("click", dismiss), 0);
+    });
+}
+
+// --- Clipboard ---
+function perry_ui_clipboard_read() {
+    // Clipboard API is async; return empty for now
+    return "";
+}
+
+function perry_ui_clipboard_write(text) {
+    if (navigator.clipboard) navigator.clipboard.writeText(text);
+}
+
+// --- Dialogs ---
+function perry_ui_open_file_dialog(callback) {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.addEventListener("change", () => {
+        if (input.files.length > 0 && typeof callback === "function") callback(input.files[0].name);
+    });
+    input.click();
+}
+
+function perry_ui_save_file_dialog(callback, defaultName) {
+    const name = prompt("Save as:", defaultName || "file.txt");
+    if (name && typeof callback === "function") callback(name);
+}
+
+function perry_ui_alert(title, message, buttons, callback) {
+    const result = window.confirm(title + "\n\n" + message);
+    if (typeof callback === "function") callback(result ? 0 : 1);
+}
+
+// --- Keyboard Shortcuts ---
+function perry_ui_add_keyboard_shortcut(key, modifiers, callback) {
+    if (typeof callback !== "function") return;
+    document.addEventListener("keydown", (e) => {
+        const wantMeta = (modifiers & 1) !== 0;
+        const wantShift = (modifiers & 2) !== 0;
+        const wantAlt = (modifiers & 4) !== 0;
+        if (e.key.toLowerCase() === key.toLowerCase() &&
+            e.metaKey === wantMeta && e.shiftKey === wantShift && e.altKey === wantAlt) {
+            e.preventDefault(); callback();
+        }
+    });
+}
+
+// --- Sheet (Modal) ---
+const _sheets = new Map();
+let _nextSheetId = 1;
+
+function perry_ui_sheet_create(width, height, title) {
+    const id = _nextSheetId++;
+    const overlay = document.createElement("div");
+    overlay.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);display:none;z-index:2000;justify-content:center;align-items:center;";
+    const sheet = document.createElement("div");
+    sheet.style.cssText = `background:#fff;border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,0.25);width:${width}px;min-height:${height}px;padding:16px;`;
+    overlay.appendChild(sheet);
+    document.body.appendChild(overlay);
+    _sheets.set(id, { overlay, sheet });
+    return id;
+}
+
+function perry_ui_sheet_present(sheet_h) {
+    const s = _sheets.get(sheet_h);
+    if (s) s.overlay.style.display = "flex";
+}
+
+function perry_ui_sheet_dismiss(sheet_h) {
+    const s = _sheets.get(sheet_h);
+    if (s) s.overlay.style.display = "none";
+}
+
+// --- Toolbar ---
+const _toolbars = new Map();
+let _nextToolbarId = 1;
+
+function perry_ui_toolbar_create() {
+    const id = _nextToolbarId++;
+    const bar = document.createElement("div");
+    bar.style.cssText = "display:flex;gap:8px;padding:8px;background:#f5f5f5;border-bottom:1px solid #ddd;";
+    _toolbars.set(id, bar);
+    return id;
+}
+
+function perry_ui_toolbar_add_item(toolbar_h, label, icon, callback) {
+    const bar = _toolbars.get(toolbar_h);
+    if (!bar) return;
+    const btn = document.createElement("button");
+    btn.textContent = label || icon || "";
+    btn.style.cssText = "padding:4px 12px;border:1px solid #ccc;border-radius:4px;background:#fff;cursor:pointer;font:inherit;";
+    if (typeof callback === "function") btn.addEventListener("click", callback);
+    bar.appendChild(btn);
+}
+
+function perry_ui_toolbar_attach(toolbar_h) {
+    const bar = _toolbars.get(toolbar_h);
+    if (bar) { const root = getRoot(); root.insertBefore(bar, root.firstChild); }
+}
+
+// --- System: Keychain (localStorage) ---
+function perry_system_keychain_save(key, value) {
+    localStorage.setItem("perry_keychain_" + key, value);
+}
+
+function perry_system_keychain_get(key) {
+    return localStorage.getItem("perry_keychain_" + key) || "";
+}
+
+function perry_system_keychain_delete(key) {
+    localStorage.removeItem("perry_keychain_" + key);
+}
+
+// --- System: Notifications ---
+function perry_system_notification_send(title, body) {
+    if ("Notification" in window && Notification.permission === "granted") {
+        new Notification(title, { body: body });
+    } else if ("Notification" in window) {
+        Notification.requestPermission().then(p => { if (p === "granted") new Notification(title, { body: body }); });
+    }
+}
+
 // --- Run App ---
 function perry_ui_app_run() {
     // In browser, the app is already "running" once DOM is ready.
@@ -697,8 +1130,11 @@ window.__perry = {
     perry_ui_section_create,
     perry_ui_navigationstack_create,
     perry_ui_canvas_create,
+    perry_ui_lazyvstack_create,
+    perry_ui_lazyvstack_update,
     // Child management
     perry_ui_widget_add_child,
+    perry_ui_widget_add_child_at,
     perry_ui_widget_remove_all_children,
     // Styling
     perry_ui_set_background,
@@ -714,6 +1150,9 @@ window.__perry = {
     perry_ui_set_enabled,
     perry_ui_set_tooltip,
     perry_ui_set_control_size,
+    perry_ui_set_widget_hidden,
+    perry_ui_widget_set_background_gradient,
+    perry_ui_widget_set_context_menu,
     // Animations
     perry_ui_animate_opacity,
     perry_ui_animate_position,
@@ -721,6 +1160,11 @@ window.__perry = {
     perry_ui_set_on_click,
     perry_ui_set_on_hover,
     perry_ui_set_on_double_click,
+    // State system
+    perry_ui_state_create,
+    perry_ui_state_get,
+    perry_ui_state_set,
+    perry_ui_state_bind_textfield,
     // State bindings
     perry_ui_state_bind_text,
     perry_ui_state_bind_text_numeric,
@@ -729,11 +1173,43 @@ window.__perry = {
     perry_ui_state_bind_visibility,
     perry_ui_state_bind_foreach,
     perry_ui_state_on_change,
+    // Text / Button / TextField ops
+    perry_ui_text_set_string,
+    perry_ui_text_set_selectable,
+    perry_ui_button_set_bordered,
+    perry_ui_button_set_title,
+    perry_ui_textfield_focus,
+    perry_ui_textfield_set_string,
+    // ScrollView
+    perry_ui_scrollview_set_child,
+    perry_ui_scrollview_scroll_to,
+    perry_ui_scrollview_get_offset,
+    perry_ui_scrollview_set_offset,
+    // Layout
+    perry_ui_vstack_create_with_insets,
+    perry_ui_hstack_create_with_insets,
+    // Navigation
+    perry_ui_navstack_push,
+    perry_ui_navstack_pop,
+    // Picker
+    perry_ui_picker_add_item,
+    perry_ui_picker_set_selected,
+    perry_ui_picker_get_selected,
+    // Image
+    perry_ui_image_create_symbol,
+    perry_ui_image_set_size,
+    perry_ui_image_set_tint,
+    // ProgressView
+    perry_ui_progressview_set_value,
     // System
     perry_system_open_url,
     perry_system_is_dark_mode,
     perry_system_preferences_get,
     perry_system_preferences_set,
+    perry_system_keychain_save,
+    perry_system_keychain_get,
+    perry_system_keychain_delete,
+    perry_system_notification_send,
     // Canvas
     perry_ui_canvas_fill_rect,
     perry_ui_canvas_stroke_rect,
@@ -750,8 +1226,40 @@ window.__perry = {
     perry_ui_canvas_set_line_width,
     perry_ui_canvas_fill_text,
     perry_ui_canvas_set_font,
+    perry_ui_canvas_fill_gradient,
+    // Menu
+    perry_ui_menu_create,
+    perry_ui_menu_add_item,
+    // Clipboard
+    perry_ui_clipboard_read,
+    perry_ui_clipboard_write,
+    // Dialogs
+    perry_ui_open_file_dialog,
+    perry_ui_save_file_dialog,
+    perry_ui_alert,
+    // Keyboard
+    perry_ui_add_keyboard_shortcut,
+    // Sheets
+    perry_ui_sheet_create,
+    perry_ui_sheet_present,
+    perry_ui_sheet_dismiss,
+    // Toolbar
+    perry_ui_toolbar_create,
+    perry_ui_toolbar_add_item,
+    perry_ui_toolbar_attach,
+    // Windows
+    perry_ui_window_create,
+    perry_ui_window_set_body,
+    perry_ui_window_show,
+    perry_ui_window_close,
     // App lifecycle
     perry_ui_app_run,
+    perry_ui_app_set_body,
+    perry_ui_app_set_min_size,
+    perry_ui_app_set_max_size,
+    perry_ui_app_on_activate,
+    perry_ui_app_on_terminate,
+    perry_ui_app_set_timer,
     // Timers
     perry_set_timeout,
     perry_set_interval,

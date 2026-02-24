@@ -1,9 +1,15 @@
 pub mod app;
 pub mod clipboard;
+pub mod dialog;
 pub mod file_dialog;
+pub mod keychain;
 pub mod menu;
+pub mod sheet;
 pub mod state;
+pub mod system;
+pub mod toolbar;
 pub mod widgets;
+pub mod window;
 
 // =============================================================================
 // FFI exports — these are the functions called from Cranelift-generated code
@@ -28,38 +34,209 @@ pub extern "C" fn perry_ui_app_run(app_handle: i64) {
     app::app_run(app_handle);
 }
 
-/// Create a Text label. text_ptr = raw string pointer. Returns widget handle.
+/// Set minimum window size.
+#[no_mangle]
+pub extern "C" fn perry_ui_app_set_min_size(app_handle: i64, w: f64, h: f64) {
+    app::set_min_size(app_handle, w, h);
+}
+
+/// Set maximum window size.
+#[no_mangle]
+pub extern "C" fn perry_ui_app_set_max_size(app_handle: i64, w: f64, h: f64) {
+    app::set_max_size(app_handle, w, h);
+}
+
+/// Register callback for app activation.
+#[no_mangle]
+pub extern "C" fn perry_ui_app_on_activate(callback: f64) {
+    app::on_activate(callback);
+}
+
+/// Register callback for app termination.
+#[no_mangle]
+pub extern "C" fn perry_ui_app_on_terminate(callback: f64) {
+    app::on_terminate(callback);
+}
+
+/// Set a repeating timer.
+#[no_mangle]
+pub extern "C" fn perry_ui_app_set_timer(interval_ms: f64, callback: f64) {
+    app::set_timer(interval_ms, callback);
+}
+
+// =============================================================================
+// Multi-Window
+// =============================================================================
+
+/// Create a new window.
+#[no_mangle]
+pub extern "C" fn perry_ui_window_create(title_ptr: i64, width: f64, height: f64) -> i64 {
+    window::create(title_ptr as *const u8, width, height)
+}
+
+/// Set the body of a window.
+#[no_mangle]
+pub extern "C" fn perry_ui_window_set_body(window_handle: i64, widget_handle: i64) {
+    window::set_body(window_handle, widget_handle);
+}
+
+/// Show a window.
+#[no_mangle]
+pub extern "C" fn perry_ui_window_show(window_handle: i64) {
+    window::show(window_handle);
+}
+
+/// Close a window.
+#[no_mangle]
+pub extern "C" fn perry_ui_window_close(window_handle: i64) {
+    window::close(window_handle);
+}
+
+// =============================================================================
+// Widget Creation
+// =============================================================================
+
+/// Create a Text label.
 #[no_mangle]
 pub extern "C" fn perry_ui_text_create(text_ptr: i64) -> i64 {
     widgets::text::create(text_ptr as *const u8)
 }
 
-/// Create a Button. label_ptr = raw string, on_press = NaN-boxed closure.
-/// Returns widget handle.
+/// Create a Button.
 #[no_mangle]
 pub extern "C" fn perry_ui_button_create(label_ptr: i64, on_press: f64) -> i64 {
     widgets::button::create(label_ptr as *const u8, on_press)
 }
 
-/// Create a VStack container. spacing = f64. Returns widget handle.
+/// Create a VStack container.
 #[no_mangle]
 pub extern "C" fn perry_ui_vstack_create(spacing: f64) -> i64 {
     widgets::vstack::create(spacing)
 }
 
-/// Create an HStack container. spacing = f64. Returns widget handle.
+/// Create an HStack container.
 #[no_mangle]
 pub extern "C" fn perry_ui_hstack_create(spacing: f64) -> i64 {
     widgets::hstack::create(spacing)
 }
 
-/// Add a child widget to a parent widget.
+/// Create a Spacer.
+#[no_mangle]
+pub extern "C" fn perry_ui_spacer_create() -> i64 {
+    widgets::spacer::create()
+}
+
+/// Create a Divider.
+#[no_mangle]
+pub extern "C" fn perry_ui_divider_create() -> i64 {
+    widgets::divider::create()
+}
+
+/// Create a TextField.
+#[no_mangle]
+pub extern "C" fn perry_ui_textfield_create(placeholder_ptr: i64, on_change: f64) -> i64 {
+    widgets::textfield::create(placeholder_ptr as *const u8, on_change)
+}
+
+/// Create a SecureField (password entry).
+#[no_mangle]
+pub extern "C" fn perry_ui_securefield_create(placeholder_ptr: i64, on_change: f64) -> i64 {
+    widgets::securefield::create(placeholder_ptr as *const u8, on_change)
+}
+
+/// Create a Toggle.
+#[no_mangle]
+pub extern "C" fn perry_ui_toggle_create(label_ptr: i64, on_change: f64) -> i64 {
+    widgets::toggle::create(label_ptr as *const u8, on_change)
+}
+
+/// Create a Slider.
+#[no_mangle]
+pub extern "C" fn perry_ui_slider_create(min: f64, max: f64, initial: f64, on_change: f64) -> i64 {
+    widgets::slider::create(min, max, initial, on_change)
+}
+
+/// Create a ScrollView.
+#[no_mangle]
+pub extern "C" fn perry_ui_scrollview_create() -> i64 {
+    widgets::scrollview::create()
+}
+
+/// Create a Canvas.
+#[no_mangle]
+pub extern "C" fn perry_ui_canvas_create(width: f64, height: f64) -> i64 {
+    widgets::canvas::create(width, height)
+}
+
+/// Create a Form container.
+#[no_mangle]
+pub extern "C" fn perry_ui_form_create() -> i64 {
+    widgets::form::create()
+}
+
+/// Create a Section with title.
+#[no_mangle]
+pub extern "C" fn perry_ui_section_create(title_ptr: i64) -> i64 {
+    widgets::form::section_create(title_ptr as *const u8)
+}
+
+/// Create a ZStack (overlay container).
+#[no_mangle]
+pub extern "C" fn perry_ui_zstack_create() -> i64 {
+    widgets::zstack::create()
+}
+
+/// Create a LazyVStack.
+#[no_mangle]
+pub extern "C" fn perry_ui_lazyvstack_create(count: f64, render_closure: f64) -> i64 {
+    widgets::lazyvstack::create(count, render_closure)
+}
+
+/// Update a LazyVStack with a new item count.
+#[no_mangle]
+pub extern "C" fn perry_ui_lazyvstack_update(handle: i64, count: i64) {
+    widgets::lazyvstack::update(handle, count);
+}
+
+/// Create a ProgressView.
+#[no_mangle]
+pub extern "C" fn perry_ui_progressview_create() -> i64 {
+    widgets::progressview::create()
+}
+
+/// Set progress value (0.0-1.0, negative = indeterminate).
+#[no_mangle]
+pub extern "C" fn perry_ui_progressview_set_value(handle: i64, value: f64) {
+    widgets::progressview::set_value(handle, value);
+}
+
+// =============================================================================
+// Child Management
+// =============================================================================
+
+/// Add a child widget to a parent.
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_add_child(parent_handle: i64, child_handle: i64) {
     widgets::add_child(parent_handle, child_handle);
 }
 
-/// Create a reactive state cell. initial = f64 value. Returns state handle.
+/// Add a child at a specific index.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_add_child_at(parent_handle: i64, child_handle: i64, index: f64) {
+    widgets::add_child_at(parent_handle, child_handle, index as i64);
+}
+
+/// Remove all children from a container.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_clear_children(handle: i64) {
+    widgets::clear_children(handle);
+}
+
+// =============================================================================
+// State System
+// =============================================================================
+
+/// Create a reactive state cell.
 #[no_mangle]
 pub extern "C" fn perry_ui_state_create(initial: f64) -> i64 {
     state::state_create(initial)
@@ -77,57 +254,29 @@ pub extern "C" fn perry_ui_state_set(state_handle: i64, value: f64) {
     state::state_set(state_handle, value);
 }
 
-/// Bind a text widget to a state cell with prefix and suffix strings.
-/// When the state changes, text updates to "{prefix}{value}{suffix}".
+/// Register an onChange callback for a state cell.
+#[no_mangle]
+pub extern "C" fn perry_ui_state_on_change(state_handle: i64, callback: f64) {
+    state::on_change(state_handle, callback);
+}
+
+// =============================================================================
+// State Bindings
+// =============================================================================
+
+/// Bind a text widget to a state cell with prefix/suffix.
 #[no_mangle]
 pub extern "C" fn perry_ui_state_bind_text_numeric(state_handle: i64, text_handle: i64, prefix_ptr: i64, suffix_ptr: i64) {
     state::bind_text_numeric(state_handle, text_handle, prefix_ptr as *const u8, suffix_ptr as *const u8);
 }
 
-/// Create a Spacer (flexible space). Returns widget handle.
-#[no_mangle]
-pub extern "C" fn perry_ui_spacer_create() -> i64 {
-    widgets::spacer::create()
-}
-
-/// Create a Divider (horizontal separator). Returns widget handle.
-#[no_mangle]
-pub extern "C" fn perry_ui_divider_create() -> i64 {
-    widgets::divider::create()
-}
-
-/// Create an editable TextField. placeholder_ptr = string, on_change = NaN-boxed closure.
-/// Returns widget handle.
-#[no_mangle]
-pub extern "C" fn perry_ui_textfield_create(placeholder_ptr: i64, on_change: f64) -> i64 {
-    widgets::textfield::create(placeholder_ptr as *const u8, on_change)
-}
-
-/// Create a Toggle (switch + label). label_ptr = string, on_change = NaN-boxed closure.
-/// Returns widget handle.
-#[no_mangle]
-pub extern "C" fn perry_ui_toggle_create(label_ptr: i64, on_change: f64) -> i64 {
-    widgets::toggle::create(label_ptr as *const u8, on_change)
-}
-
-/// Create a Slider. min/max/initial are f64, on_change = NaN-boxed closure.
-/// Returns widget handle.
-#[no_mangle]
-pub extern "C" fn perry_ui_slider_create(min: f64, max: f64, initial: f64, on_change: f64) -> i64 {
-    widgets::slider::create(min, max, initial, on_change)
-}
-
-// =============================================================================
-// Phase 4: Advanced Reactive UI
-// =============================================================================
-
-/// Bind a slider to a state cell (two-way binding).
+/// Bind a slider to a state cell (two-way).
 #[no_mangle]
 pub extern "C" fn perry_ui_state_bind_slider(state_handle: i64, slider_handle: i64) {
     state::bind_slider(state_handle, slider_handle);
 }
 
-/// Bind a toggle to a state cell (two-way binding).
+/// Bind a toggle to a state cell (two-way).
 #[no_mangle]
 pub extern "C" fn perry_ui_state_bind_toggle(state_handle: i64, toggle_handle: i64) {
     state::bind_toggle(state_handle, toggle_handle);
@@ -135,25 +284,20 @@ pub extern "C" fn perry_ui_state_bind_toggle(state_handle: i64, toggle_handle: i
 
 /// Bind a text widget to multiple states with a template.
 #[no_mangle]
-pub extern "C" fn perry_ui_state_bind_text_template(
-    text_handle: i64,
-    num_parts: i32,
-    types_ptr: i64,
-    values_ptr: i64,
-) {
+pub extern "C" fn perry_ui_state_bind_text_template(text_handle: i64, num_parts: i32, types_ptr: i64, values_ptr: i64) {
     state::bind_text_template(text_handle, num_parts, types_ptr as *const i32, values_ptr as *const i64);
 }
 
-/// Bind visibility of widgets to a state cell (conditional rendering).
+/// Bind visibility of widgets to a state cell.
 #[no_mangle]
 pub extern "C" fn perry_ui_state_bind_visibility(state_handle: i64, show_handle: i64, hide_handle: i64) {
     state::bind_visibility(state_handle, show_handle, hide_handle);
 }
 
-/// Set the hidden state of a widget. hidden: 0=visible, 1=hidden.
+/// Bind a textfield to a state cell (two-way).
 #[no_mangle]
-pub extern "C" fn perry_ui_set_widget_hidden(handle: i64, hidden: i64) {
-    widgets::set_hidden(handle, hidden != 0);
+pub extern "C" fn perry_ui_state_bind_textfield(state_handle: i64, textfield_handle: i64) {
+    state::bind_textfield(state_handle, textfield_handle);
 }
 
 /// Initialize a ForEach dynamic list binding.
@@ -162,14 +306,8 @@ pub extern "C" fn perry_ui_for_each_init(container_handle: i64, state_handle: i6
     state::for_each_init(container_handle, state_handle, render_closure);
 }
 
-/// Remove all children from a container widget.
-#[no_mangle]
-pub extern "C" fn perry_ui_widget_clear_children(handle: i64) {
-    widgets::clear_children(handle);
-}
-
 // =============================================================================
-// Phase A.1: Text Mutation & Layout Control
+// Text Styling
 // =============================================================================
 
 /// Set the text content of a Text widget.
@@ -178,168 +316,470 @@ pub extern "C" fn perry_ui_text_set_string(handle: i64, text_ptr: i64) {
     widgets::text::set_string(handle, text_ptr as *const u8);
 }
 
-/// Create a VStack with custom edge insets.
-#[no_mangle]
-pub extern "C" fn perry_ui_vstack_create_with_insets(spacing: f64, top: f64, left: f64, bottom: f64, right: f64) -> i64 {
-    widgets::vstack::create_with_insets(spacing, top, left, bottom, right)
-}
-
-/// Create an HStack with custom edge insets.
-#[no_mangle]
-pub extern "C" fn perry_ui_hstack_create_with_insets(spacing: f64, top: f64, left: f64, bottom: f64, right: f64) -> i64 {
-    widgets::hstack::create_with_insets(spacing, top, left, bottom, right)
-}
-
-// =============================================================================
-// Phase A.2: ScrollView, Clipboard & Keyboard Shortcuts
-// =============================================================================
-
-/// Create a ScrollView. Returns widget handle.
-#[no_mangle]
-pub extern "C" fn perry_ui_scrollview_create() -> i64 {
-    widgets::scrollview::create()
-}
-
-/// Set the content child of a ScrollView.
-#[no_mangle]
-pub extern "C" fn perry_ui_scrollview_set_child(scroll_handle: i64, child_handle: i64) {
-    widgets::scrollview::set_child(scroll_handle, child_handle);
-}
-
-/// Read text from the system clipboard. Returns NaN-boxed string.
-#[no_mangle]
-pub extern "C" fn perry_ui_clipboard_read() -> f64 {
-    clipboard::read()
-}
-
-/// Write text to the system clipboard.
-#[no_mangle]
-pub extern "C" fn perry_ui_clipboard_write(text_ptr: i64) {
-    clipboard::write(text_ptr as *const u8);
-}
-
-/// Add a keyboard shortcut to the app menu.
-#[no_mangle]
-pub extern "C" fn perry_ui_add_keyboard_shortcut(key_ptr: i64, modifiers: f64, callback: f64) {
-    app::add_keyboard_shortcut(key_ptr as *const u8, modifiers, callback);
-}
-
-// =============================================================================
-// Phase A.3: Text Styling & Button Styling
-// =============================================================================
-
-/// Set the text color of a Text widget (RGBA 0.0-1.0).
+/// Set the text color.
 #[no_mangle]
 pub extern "C" fn perry_ui_text_set_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
     widgets::text::set_color(handle, r, g, b, a);
 }
 
-/// Set the font size of a Text widget.
+/// Set the font size.
 #[no_mangle]
 pub extern "C" fn perry_ui_text_set_font_size(handle: i64, size: f64) {
     widgets::text::set_font_size(handle, size);
 }
 
-/// Set the font weight of a Text widget (size + weight).
+/// Set the font weight.
 #[no_mangle]
 pub extern "C" fn perry_ui_text_set_font_weight(handle: i64, size: f64, weight: f64) {
     widgets::text::set_font_weight(handle, size, weight);
 }
 
-/// Set whether a Text widget is selectable.
+/// Set whether text is selectable.
 #[no_mangle]
 pub extern "C" fn perry_ui_text_set_selectable(handle: i64, selectable: f64) {
     widgets::text::set_selectable(handle, selectable != 0.0);
 }
 
-/// Set whether a Button has a border.
+/// Set the font family.
+#[no_mangle]
+pub extern "C" fn perry_ui_text_set_font_family(handle: i64, family_ptr: i64) {
+    widgets::text::set_font_family(handle, family_ptr as *const u8);
+}
+
+// =============================================================================
+// Button Ops
+// =============================================================================
+
+/// Set whether a button has a border.
 #[no_mangle]
 pub extern "C" fn perry_ui_button_set_bordered(handle: i64, bordered: f64) {
     widgets::button::set_bordered(handle, bordered != 0.0);
 }
 
-/// Set the title of a Button.
+/// Set the title of a button.
 #[no_mangle]
 pub extern "C" fn perry_ui_button_set_title(handle: i64, title_ptr: i64) {
     widgets::button::set_title(handle, title_ptr as *const u8);
 }
 
 // =============================================================================
-// Phase A.4: Focus & Scroll-To
+// TextField Ops
 // =============================================================================
 
-/// Focus a TextField (make it the first responder).
+/// Focus a TextField.
 #[no_mangle]
 pub extern "C" fn perry_ui_textfield_focus(handle: i64) {
     widgets::textfield::focus(handle);
 }
 
-/// Scroll a ScrollView to make a child visible.
+/// Set the text value of a TextField.
+#[no_mangle]
+pub extern "C" fn perry_ui_textfield_set_string(handle: i64, text_ptr: i64) {
+    widgets::textfield::set_string_value(handle, text_ptr as *const u8);
+}
+
+// =============================================================================
+// ScrollView
+// =============================================================================
+
+/// Set the child of a ScrollView.
+#[no_mangle]
+pub extern "C" fn perry_ui_scrollview_set_child(scroll_handle: i64, child_handle: i64) {
+    widgets::scrollview::set_child(scroll_handle, child_handle);
+}
+
+/// Scroll to make a child visible.
 #[no_mangle]
 pub extern "C" fn perry_ui_scrollview_scroll_to(scroll_handle: i64, child_handle: i64) {
     widgets::scrollview::scroll_to(scroll_handle, child_handle);
 }
 
-/// Get the vertical scroll offset.
+/// Get scroll offset.
 #[no_mangle]
 pub extern "C" fn perry_ui_scrollview_get_offset(scroll_handle: i64) -> f64 {
     widgets::scrollview::get_offset(scroll_handle)
 }
 
-/// Set the vertical scroll offset.
+/// Set scroll offset.
 #[no_mangle]
 pub extern "C" fn perry_ui_scrollview_set_offset(scroll_handle: i64, offset: f64) {
     widgets::scrollview::set_offset(scroll_handle, offset);
 }
 
 // =============================================================================
-// Phase A.5: Context Menus, File Dialog & Window Sizing
+// Styling
 // =============================================================================
 
-/// Create a context menu. Returns menu handle.
+/// Set background color.
 #[no_mangle]
-pub extern "C" fn perry_ui_menu_create() -> i64 {
-    menu::create()
+pub extern "C" fn perry_ui_widget_set_background_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    widgets::set_background_color(handle, r, g, b, a);
 }
 
-/// Add an item to a context menu with title and callback.
+/// Set background gradient.
 #[no_mangle]
-pub extern "C" fn perry_ui_menu_add_item(menu_handle: i64, title_ptr: i64, callback: f64) {
-    menu::add_item(menu_handle, title_ptr as *const u8, callback);
+pub extern "C" fn perry_ui_widget_set_background_gradient(handle: i64, r1: f64, g1: f64, b1: f64, a1: f64, r2: f64, g2: f64, b2: f64, a2: f64, direction: f64) {
+    widgets::set_background_gradient(handle, r1, g1, b1, a1, r2, g2, b2, a2, direction);
 }
 
-/// Set a context menu on a widget (right-click menu).
+/// Set corner radius.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_corner_radius(handle: i64, radius: f64) {
+    widgets::set_corner_radius(handle, radius);
+}
+
+/// Set context menu on a widget.
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_set_context_menu(widget_handle: i64, menu_handle: i64) {
     menu::set_context_menu(widget_handle, menu_handle);
 }
 
-/// Open a file dialog. Calls callback with selected path or undefined if cancelled.
+/// Set control size.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_control_size(handle: i64, size: i64) {
+    widgets::set_control_size(handle, size);
+}
+
+/// Set enabled/disabled.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_enabled(handle: i64, enabled: i64) {
+    widgets::set_enabled(handle, enabled != 0);
+}
+
+/// Set tooltip.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_tooltip(handle: i64, text_ptr: i64) {
+    widgets::set_tooltip(handle, text_ptr as *const u8);
+}
+
+/// Set hidden state.
+#[no_mangle]
+pub extern "C" fn perry_ui_set_widget_hidden(handle: i64, hidden: i64) {
+    widgets::set_hidden(handle, hidden != 0);
+}
+
+// =============================================================================
+// Canvas
+// =============================================================================
+
+/// Clear a canvas.
+#[no_mangle]
+pub extern "C" fn perry_ui_canvas_clear(handle: i64) {
+    widgets::canvas::clear(handle);
+}
+
+/// Begin a new path on a canvas.
+#[no_mangle]
+pub extern "C" fn perry_ui_canvas_begin_path(handle: i64) {
+    widgets::canvas::begin_path(handle);
+}
+
+/// Move the path cursor.
+#[no_mangle]
+pub extern "C" fn perry_ui_canvas_move_to(handle: i64, x: f64, y: f64) {
+    widgets::canvas::move_to(handle, x, y);
+}
+
+/// Draw a line to a point.
+#[no_mangle]
+pub extern "C" fn perry_ui_canvas_line_to(handle: i64, x: f64, y: f64) {
+    widgets::canvas::line_to(handle, x, y);
+}
+
+/// Stroke the current path.
+#[no_mangle]
+pub extern "C" fn perry_ui_canvas_stroke(handle: i64, r: f64, g: f64, b: f64, a: f64, line_width: f64) {
+    widgets::canvas::stroke(handle, r, g, b, a, line_width);
+}
+
+/// Fill the current path with a gradient.
+#[no_mangle]
+pub extern "C" fn perry_ui_canvas_fill_gradient(handle: i64, r1: f64, g1: f64, b1: f64, a1: f64, r2: f64, g2: f64, b2: f64, a2: f64, direction: f64) {
+    widgets::canvas::fill_gradient(handle, r1, g1, b1, a1, r2, g2, b2, a2, direction);
+}
+
+// =============================================================================
+// Menu
+// =============================================================================
+
+/// Create a context menu.
+#[no_mangle]
+pub extern "C" fn perry_ui_menu_create() -> i64 {
+    menu::create()
+}
+
+/// Add an item to a menu.
+#[no_mangle]
+pub extern "C" fn perry_ui_menu_add_item(menu_handle: i64, title_ptr: i64, callback: f64) {
+    menu::add_item(menu_handle, title_ptr as *const u8, callback);
+}
+
+// =============================================================================
+// Clipboard
+// =============================================================================
+
+/// Read from clipboard.
+#[no_mangle]
+pub extern "C" fn perry_ui_clipboard_read() -> f64 {
+    clipboard::read()
+}
+
+/// Write to clipboard.
+#[no_mangle]
+pub extern "C" fn perry_ui_clipboard_write(text_ptr: i64) {
+    clipboard::write(text_ptr as *const u8);
+}
+
+// =============================================================================
+// Dialog
+// =============================================================================
+
+/// Open a file dialog.
 #[no_mangle]
 pub extern "C" fn perry_ui_open_file_dialog(callback: f64) {
     file_dialog::open_dialog(callback);
 }
 
-/// Set minimum window size.
+/// Open a save file dialog.
 #[no_mangle]
-pub extern "C" fn perry_ui_app_set_min_size(app_handle: i64, w: f64, h: f64) {
-    app::set_min_size(app_handle, w, h);
+pub extern "C" fn perry_ui_save_file_dialog(callback: f64, default_name_ptr: i64, allowed_types_ptr: i64) {
+    dialog::save_file_dialog(callback, default_name_ptr as *const u8, allowed_types_ptr as *const u8);
 }
 
-/// Set maximum window size.
+/// Show an alert dialog.
 #[no_mangle]
-pub extern "C" fn perry_ui_app_set_max_size(app_handle: i64, w: f64, h: f64) {
-    app::set_max_size(app_handle, w, h);
+pub extern "C" fn perry_ui_alert(title_ptr: i64, message_ptr: i64, buttons_ptr: i64, callback: f64) {
+    dialog::alert(title_ptr as *const u8, message_ptr as *const u8, buttons_ptr as *const u8, callback);
 }
 
-/// Set the text value of an editable TextField.
+// =============================================================================
+// Keyboard Shortcut
+// =============================================================================
+
+/// Add a keyboard shortcut.
 #[no_mangle]
-pub extern "C" fn perry_ui_textfield_set_string(handle: i64, text_ptr: i64) {
-    widgets::textfield::set_string_value(handle, text_ptr as *const u8);
+pub extern "C" fn perry_ui_add_keyboard_shortcut(key_ptr: i64, modifiers: f64, callback: f64) {
+    app::add_keyboard_shortcut(key_ptr as *const u8, modifiers, callback);
 }
 
-/// Add a child widget to a parent widget at a specific position.
+// =============================================================================
+// Events
+// =============================================================================
+
+/// Set an on-hover callback.
 #[no_mangle]
-pub extern "C" fn perry_ui_widget_add_child_at(parent_handle: i64, child_handle: i64, index: f64) {
-    widgets::add_child_at(parent_handle, child_handle, index as i64);
+pub extern "C" fn perry_ui_widget_set_on_hover(handle: i64, callback: f64) {
+    widgets::set_on_hover(handle, callback);
+}
+
+/// Set a double-click callback.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_on_double_click(handle: i64, callback: f64) {
+    widgets::set_on_double_click(handle, callback);
+}
+
+// =============================================================================
+// Animation
+// =============================================================================
+
+/// Animate opacity.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_animate_opacity(handle: i64, target: f64, duration_ms: f64) {
+    widgets::animate_opacity(handle, target, duration_ms);
+}
+
+/// Animate position.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_animate_position(handle: i64, dx: f64, dy: f64, duration_ms: f64) {
+    widgets::animate_position(handle, dx, dy, duration_ms);
+}
+
+// =============================================================================
+// Layout
+// =============================================================================
+
+/// Create a VStack with custom insets.
+#[no_mangle]
+pub extern "C" fn perry_ui_vstack_create_with_insets(spacing: f64, top: f64, left: f64, bottom: f64, right: f64) -> i64 {
+    widgets::vstack::create_with_insets(spacing, top, left, bottom, right)
+}
+
+/// Create an HStack with custom insets.
+#[no_mangle]
+pub extern "C" fn perry_ui_hstack_create_with_insets(spacing: f64, top: f64, left: f64, bottom: f64, right: f64) -> i64 {
+    widgets::hstack::create_with_insets(spacing, top, left, bottom, right)
+}
+
+// =============================================================================
+// Navigation
+// =============================================================================
+
+/// Create a NavigationStack with initial page.
+#[no_mangle]
+pub extern "C" fn perry_ui_navstack_create(title_ptr: i64, body_handle: i64) -> i64 {
+    widgets::navstack::create(title_ptr as *const u8, body_handle)
+}
+
+/// Push a page onto the navigation stack.
+#[no_mangle]
+pub extern "C" fn perry_ui_navstack_push(handle: i64, title_ptr: i64, body_handle: i64) {
+    widgets::navstack::push(handle, title_ptr as *const u8, body_handle);
+}
+
+/// Pop the top page from the navigation stack.
+#[no_mangle]
+pub extern "C" fn perry_ui_navstack_pop(handle: i64) {
+    widgets::navstack::pop(handle);
+}
+
+// =============================================================================
+// Picker
+// =============================================================================
+
+/// Create a Picker (dropdown).
+#[no_mangle]
+pub extern "C" fn perry_ui_picker_create(label_ptr: i64, on_change: f64, style: i64) -> i64 {
+    widgets::picker::create(label_ptr as *const u8, on_change, style)
+}
+
+/// Add an item to a Picker.
+#[no_mangle]
+pub extern "C" fn perry_ui_picker_add_item(handle: i64, title_ptr: i64) {
+    widgets::picker::add_item(handle, title_ptr as *const u8);
+}
+
+/// Set the selected item of a Picker.
+#[no_mangle]
+pub extern "C" fn perry_ui_picker_set_selected(handle: i64, index: i64) {
+    widgets::picker::set_selected(handle, index);
+}
+
+/// Get the selected item of a Picker.
+#[no_mangle]
+pub extern "C" fn perry_ui_picker_get_selected(handle: i64) -> i64 {
+    widgets::picker::get_selected(handle)
+}
+
+// =============================================================================
+// Image
+// =============================================================================
+
+/// Create an image from a file path.
+#[no_mangle]
+pub extern "C" fn perry_ui_image_create_file(path_ptr: i64) -> i64 {
+    widgets::image::create_file(path_ptr as *const u8)
+}
+
+/// Create an image from a named icon/symbol.
+#[no_mangle]
+pub extern "C" fn perry_ui_image_create_symbol(name_ptr: i64) -> i64 {
+    widgets::image::create_symbol(name_ptr as *const u8)
+}
+
+/// Set the size of an image.
+#[no_mangle]
+pub extern "C" fn perry_ui_image_set_size(handle: i64, width: f64, height: f64) {
+    widgets::image::set_size(handle, width, height);
+}
+
+/// Set the tint color of an image.
+#[no_mangle]
+pub extern "C" fn perry_ui_image_set_tint(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    widgets::image::set_tint(handle, r, g, b, a);
+}
+
+// =============================================================================
+// Sheet
+// =============================================================================
+
+/// Create a sheet (modal window).
+#[no_mangle]
+pub extern "C" fn perry_ui_sheet_create(width: f64, height: f64, title_val: f64) -> i64 {
+    sheet::create(width, height, title_val)
+}
+
+/// Present (show) a sheet.
+#[no_mangle]
+pub extern "C" fn perry_ui_sheet_present(sheet_handle: i64) {
+    sheet::present(sheet_handle);
+}
+
+/// Dismiss (close) a sheet.
+#[no_mangle]
+pub extern "C" fn perry_ui_sheet_dismiss(sheet_handle: i64) {
+    sheet::dismiss(sheet_handle);
+}
+
+// =============================================================================
+// Toolbar
+// =============================================================================
+
+/// Create a toolbar.
+#[no_mangle]
+pub extern "C" fn perry_ui_toolbar_create() -> i64 {
+    toolbar::create()
+}
+
+/// Add an item to a toolbar.
+#[no_mangle]
+pub extern "C" fn perry_ui_toolbar_add_item(toolbar_handle: i64, label_ptr: i64, icon_ptr: i64, callback: f64) {
+    toolbar::add_item(toolbar_handle, label_ptr as *const u8, icon_ptr as *const u8, callback);
+}
+
+/// Attach a toolbar to the current window.
+#[no_mangle]
+pub extern "C" fn perry_ui_toolbar_attach(toolbar_handle: i64) {
+    toolbar::attach(toolbar_handle);
+}
+
+// =============================================================================
+// System API
+// =============================================================================
+
+/// Open a URL in the default browser.
+#[no_mangle]
+pub extern "C" fn perry_system_open_url(url_ptr: i64) {
+    system::open_url(url_ptr as *const u8);
+}
+
+/// Check if dark mode is enabled.
+#[no_mangle]
+pub extern "C" fn perry_system_is_dark_mode() -> i64 {
+    system::is_dark_mode()
+}
+
+/// Set a preference value.
+#[no_mangle]
+pub extern "C" fn perry_system_preferences_set(key_ptr: i64, value: f64) {
+    system::preferences_set(key_ptr as *const u8, value);
+}
+
+/// Get a preference value.
+#[no_mangle]
+pub extern "C" fn perry_system_preferences_get(key_ptr: i64) -> f64 {
+    system::preferences_get(key_ptr as *const u8)
+}
+
+/// Save a value to the keychain.
+#[no_mangle]
+pub extern "C" fn perry_system_keychain_save(key_ptr: i64, value_ptr: i64) {
+    keychain::save(key_ptr as *const u8, value_ptr as *const u8);
+}
+
+/// Get a value from the keychain.
+#[no_mangle]
+pub extern "C" fn perry_system_keychain_get(key_ptr: i64) -> f64 {
+    keychain::get(key_ptr as *const u8)
+}
+
+/// Delete a value from the keychain.
+#[no_mangle]
+pub extern "C" fn perry_system_keychain_delete(key_ptr: i64) {
+    keychain::delete(key_ptr as *const u8);
+}
+
+/// Send a desktop notification.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_send(title_ptr: i64, body_ptr: i64) {
+    system::notification_send(title_ptr as *const u8, body_ptr as *const u8);
 }

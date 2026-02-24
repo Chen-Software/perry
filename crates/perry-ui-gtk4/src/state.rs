@@ -1,11 +1,14 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use gtk4::prelude::*;
 
 use crate::widgets;
 
 extern "C" {
     fn js_closure_call1(closure: *const u8, arg: f64) -> f64;
     fn js_nanbox_get_pointer(value: f64) -> i64;
+    fn js_string_from_bytes(ptr: *const u8, len: i64) -> *const u8;
+    fn js_nanbox_string(ptr: i64) -> f64;
 }
 
 struct StateEntry {
@@ -47,6 +50,15 @@ struct ForEachBinding {
     render_closure: f64, // NaN-boxed closure ptr
 }
 
+struct OnChangeBinding {
+    callback: f64, // NaN-boxed closure
+}
+
+struct TextFieldBinding {
+    textfield_handle: i64,
+    suppress: std::cell::Cell<bool>,
+}
+
 thread_local! {
     static STATES: RefCell<Vec<StateEntry>> = RefCell::new(Vec::new());
     /// Map from state_handle -> list of text bindings to update when state changes
@@ -63,6 +75,10 @@ thread_local! {
     static VISIBILITY_BINDINGS: RefCell<HashMap<i64, Vec<VisibilityBinding>>> = RefCell::new(HashMap::new());
     /// Map from state_handle -> forEach bindings
     static FOR_EACH_BINDINGS: RefCell<HashMap<i64, Vec<ForEachBinding>>> = RefCell::new(HashMap::new());
+    /// Map from state_handle -> onChange callback bindings
+    static ON_CHANGE_BINDINGS: RefCell<HashMap<i64, Vec<OnChangeBinding>>> = RefCell::new(HashMap::new());
+    /// Map from state_handle -> textfield bindings (two-way)
+    static TEXTFIELD_BINDINGS: RefCell<HashMap<i64, Vec<std::rc::Rc<TextFieldBinding>>>> = RefCell::new(HashMap::new());
 }
 
 /// Extract a &str from a *const StringHeader pointer.
@@ -184,6 +200,43 @@ pub fn state_set(handle: i64, value: f64) {
             for binding in bindings {
                 widgets::clear_children(binding.container_handle);
                 render_for_each(binding.container_handle, binding.render_closure, value);
+            }
+        }
+    });
+
+    // Invoke onChange callbacks
+    ON_CHANGE_BINDINGS.with(|b| {
+        if let Some(bindings) = b.borrow().get(&handle) {
+            for binding in bindings {
+                let closure_ptr = unsafe { js_nanbox_get_pointer(binding.callback) } as *const u8;
+                unsafe { js_closure_call1(closure_ptr, value); }
+            }
+        }
+    });
+
+    // Update textfield bindings (state -> textfield direction)
+    TEXTFIELD_BINDINGS.with(|b| {
+        if let Some(bindings) = b.borrow().get(&handle) {
+            for binding in bindings {
+                if binding.suppress.get() {
+                    continue;
+                }
+                // Convert value to string for textfield
+                let text = {
+                    let str_ptr = crate::system::js_get_string_pointer_unified_safe(value);
+                    if !str_ptr.is_null() {
+                        str_from_header(str_ptr).to_string()
+                    } else {
+                        format_value(value)
+                    }
+                };
+                if let Some(widget) = widgets::get_widget(binding.textfield_handle) {
+                    if let Some(entry) = widget.downcast_ref::<gtk4::Entry>() {
+                        binding.suppress.set(true);
+                        entry.set_text(&text);
+                        binding.suppress.set(false);
+                    }
+                }
             }
         }
     });
@@ -323,4 +376,71 @@ pub fn for_each_init(container_handle: i64, state_handle: i64, render_closure: f
             .or_default()
             .push(ForEachBinding { container_handle, render_closure });
     });
+}
+
+/// Register an onChange callback for a state cell.
+pub fn on_change(state_handle: i64, callback: f64) {
+    ON_CHANGE_BINDINGS.with(|b| {
+        b.borrow_mut()
+            .entry(state_handle)
+            .or_default()
+            .push(OnChangeBinding { callback });
+    });
+}
+
+/// Bind a textfield to a state cell (two-way binding).
+/// When state changes, textfield updates. When textfield changes, state updates.
+pub fn bind_textfield(state_handle: i64, textfield_handle: i64) {
+    use std::rc::Rc;
+
+    let binding = Rc::new(TextFieldBinding {
+        textfield_handle,
+        suppress: std::cell::Cell::new(false),
+    });
+
+    TEXTFIELD_BINDINGS.with(|b| {
+        b.borrow_mut()
+            .entry(state_handle)
+            .or_default()
+            .push(binding.clone());
+    });
+
+    // Set up the reverse binding (textfield -> state)
+    if let Some(widget) = widgets::get_widget(textfield_handle) {
+        if let Some(entry) = widget.downcast_ref::<gtk4::Entry>() {
+            let sh = state_handle;
+            let bind = binding;
+            entry.connect_changed(move |entry| {
+                if bind.suppress.get() {
+                    return;
+                }
+                let text = entry.text().to_string();
+                let bytes = text.as_bytes();
+                let str_ptr = unsafe { js_string_from_bytes(bytes.as_ptr(), bytes.len() as i64) };
+                let nanboxed = unsafe { js_nanbox_string(str_ptr as i64) };
+                bind.suppress.set(true);
+                state_set(sh, nanboxed);
+                bind.suppress.set(false);
+            });
+        }
+    }
+
+    // Set initial value
+    let value = state_get(state_handle);
+    let text = {
+        extern "C" {
+            fn js_get_string_pointer_unified(value: f64) -> *const u8;
+        }
+        let str_ptr = unsafe { js_get_string_pointer_unified(value) };
+        if !str_ptr.is_null() {
+            str_from_header(str_ptr).to_string()
+        } else {
+            format_value(value)
+        }
+    };
+    if let Some(widget) = widgets::get_widget(textfield_handle) {
+        if let Some(entry) = widget.downcast_ref::<gtk4::Entry>() {
+            entry.set_text(&text);
+        }
+    }
 }

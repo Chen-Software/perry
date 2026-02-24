@@ -1200,6 +1200,15 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         sorted
     };
 
+    // Debug: print init order for crash diagnosis
+    if let OutputFormat::Text = format {
+        eprintln!("\nModule init order ({} modules):", non_entry_module_names.len());
+        for (i, name) in non_entry_module_names.iter().enumerate() {
+            eprintln!("  [{}] {}", i, name);
+        }
+        eprintln!();
+    }
+
     // Build a map of all exported enums from all modules (owned data, no borrows)
     // Key: (resolved_path, enum_name) -> Vec<(member_name, EnumValue)>
     let mut exported_enums: BTreeMap<(String, String), Vec<(String, perry_hir::EnumValue)>> = BTreeMap::new();
@@ -1406,6 +1415,37 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                             }
                         }
                     }
+                    perry_hir::Export::Named { local, exported } => {
+                        // Check if this local was imported from another module
+                        for import in &hir_module.imports {
+                            for spec in &import.specifiers {
+                                let (matches, imported_name) = match spec {
+                                    perry_hir::ImportSpecifier::Named { local: l, imported } =>
+                                        (l == local, imported.clone()),
+                                    perry_hir::ImportSpecifier::Default { local: l } =>
+                                        (l == local, "default".to_string()),
+                                    _ => (false, String::new()),
+                                };
+                                if matches {
+                                    if let Some((resolved_source, _)) = resolve_import(&import.source, path, &ctx.project_root) {
+                                        let source_path_str = resolved_source.to_string_lossy().to_string();
+                                        if let Some(source_exports) = all_module_exports.get(&source_path_str) {
+                                            if let Some(origin) = source_exports.get(&imported_name) {
+                                                let current_exports = all_module_exports.get(&path_str);
+                                                let already_correct = current_exports
+                                                    .and_then(|e| e.get(exported.as_str()))
+                                                    .map(|v| v == origin)
+                                                    .unwrap_or(false);
+                                                if !already_correct {
+                                                    new_export_entries.push((path_str.clone(), exported.clone(), origin.clone()));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1416,30 +1456,19 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         }
     }
 
-    // Also propagate exported_func_param_counts through ExportAll/ReExport chains
+    // Also propagate exported_func_param_counts through ExportAll/ReExport/Named chains
     loop {
         let mut new_func_entries: Vec<((String, String), usize)> = Vec::new();
         for (path, hir_module) in &ctx.native_modules {
             let path_str = path.to_string_lossy().to_string();
             for export in &hir_module.exports {
-                let source_str = match export {
-                    perry_hir::Export::ExportAll { source } => Some((source.as_str(), None)),
-                    perry_hir::Export::ReExport { source, imported, exported } => Some((source.as_str(), Some((imported.as_str(), exported.as_str())))),
-                    _ => None,
-                };
-                if let Some((source, re_export_names)) = source_str {
-                    if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root) {
-                        let source_path_str = resolved_source.to_string_lossy().to_string();
-                        for ((src_path, func_name), &param_count) in &exported_func_param_counts {
-                            if src_path == &source_path_str {
-                                // For ReExport, only propagate the specific imported name (with exported alias)
-                                // For ExportAll, propagate all functions
-                                let (propagate, exported_name) = match re_export_names {
-                                    Some((imported, exported)) => (func_name == imported, exported.to_string()),
-                                    None => (true, func_name.clone()),
-                                };
-                                if propagate {
-                                    let key = (path_str.clone(), exported_name);
+                match export {
+                    perry_hir::Export::ExportAll { source } => {
+                        if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root) {
+                            let source_path_str = resolved_source.to_string_lossy().to_string();
+                            for ((src_path, func_name), &param_count) in &exported_func_param_counts {
+                                if src_path == &source_path_str {
+                                    let key = (path_str.clone(), func_name.clone());
                                     if !exported_func_param_counts.contains_key(&key) {
                                         new_func_entries.push((key, param_count));
                                     }
@@ -1447,6 +1476,45 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                             }
                         }
                     }
+                    perry_hir::Export::ReExport { source, imported, exported } => {
+                        if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root) {
+                            let source_path_str = resolved_source.to_string_lossy().to_string();
+                            for ((src_path, func_name), &param_count) in &exported_func_param_counts {
+                                if src_path == &source_path_str && func_name == imported {
+                                    let key = (path_str.clone(), exported.clone());
+                                    if !exported_func_param_counts.contains_key(&key) {
+                                        new_func_entries.push((key, param_count));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    perry_hir::Export::Named { local, exported } => {
+                        for import in &hir_module.imports {
+                            for spec in &import.specifiers {
+                                let (matches, imported_name) = match spec {
+                                    perry_hir::ImportSpecifier::Named { local: l, imported } =>
+                                        (l == local, imported.clone()),
+                                    perry_hir::ImportSpecifier::Default { local: l } =>
+                                        (l == local, "default".to_string()),
+                                    _ => (false, String::new()),
+                                };
+                                if matches {
+                                    if let Some((resolved_source, _)) = resolve_import(&import.source, path, &ctx.project_root) {
+                                        let source_path_str = resolved_source.to_string_lossy().to_string();
+                                        let key_src = (source_path_str, imported_name);
+                                        if let Some(&param_count) = exported_func_param_counts.get(&key_src) {
+                                            let key = (path_str.clone(), exported.clone());
+                                            if !exported_func_param_counts.contains_key(&key) {
+                                                new_func_entries.push((key, param_count));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -1456,28 +1524,19 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         }
     }
 
-    // Propagate exported_func_return_types through ExportAll/ReExport chains
+    // Propagate exported_func_return_types through ExportAll/ReExport/Named chains
     loop {
         let mut new_func_entries: Vec<((String, String), perry_types::Type)> = Vec::new();
         for (path, hir_module) in &ctx.native_modules {
             let path_str = path.to_string_lossy().to_string();
             for export in &hir_module.exports {
-                let source_str = match export {
-                    perry_hir::Export::ExportAll { source } => Some((source.as_str(), None)),
-                    perry_hir::Export::ReExport { source, imported, exported } => Some((source.as_str(), Some((imported.as_str(), exported.as_str())))),
-                    _ => None,
-                };
-                if let Some((source, re_export_names)) = source_str {
-                    if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root) {
-                        let source_path_str = resolved_source.to_string_lossy().to_string();
-                        for ((src_path, func_name), return_type) in &exported_func_return_types {
-                            if src_path == &source_path_str {
-                                let (propagate, exported_name) = match re_export_names {
-                                    Some((imported, exported)) => (func_name == imported, exported.to_string()),
-                                    None => (true, func_name.clone()),
-                                };
-                                if propagate {
-                                    let key = (path_str.clone(), exported_name);
+                match export {
+                    perry_hir::Export::ExportAll { source } => {
+                        if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root) {
+                            let source_path_str = resolved_source.to_string_lossy().to_string();
+                            for ((src_path, func_name), return_type) in &exported_func_return_types {
+                                if src_path == &source_path_str {
+                                    let key = (path_str.clone(), func_name.clone());
                                     if !exported_func_return_types.contains_key(&key) {
                                         new_func_entries.push((key, return_type.clone()));
                                     }
@@ -1485,6 +1544,45 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                             }
                         }
                     }
+                    perry_hir::Export::ReExport { source, imported, exported } => {
+                        if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root) {
+                            let source_path_str = resolved_source.to_string_lossy().to_string();
+                            for ((src_path, func_name), return_type) in &exported_func_return_types {
+                                if src_path == &source_path_str && func_name == imported {
+                                    let key = (path_str.clone(), exported.clone());
+                                    if !exported_func_return_types.contains_key(&key) {
+                                        new_func_entries.push((key, return_type.clone()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    perry_hir::Export::Named { local, exported } => {
+                        for import in &hir_module.imports {
+                            for spec in &import.specifiers {
+                                let (matches, imported_name) = match spec {
+                                    perry_hir::ImportSpecifier::Named { local: l, imported } =>
+                                        (l == local, imported.clone()),
+                                    perry_hir::ImportSpecifier::Default { local: l } =>
+                                        (l == local, "default".to_string()),
+                                    _ => (false, String::new()),
+                                };
+                                if matches {
+                                    if let Some((resolved_source, _)) = resolve_import(&import.source, path, &ctx.project_root) {
+                                        let source_path_str = resolved_source.to_string_lossy().to_string();
+                                        let key_src = (source_path_str, imported_name);
+                                        if let Some(return_type) = exported_func_return_types.get(&key_src) {
+                                            let key = (path_str.clone(), exported.clone());
+                                            if !exported_func_return_types.contains_key(&key) {
+                                                new_func_entries.push((key, return_type.clone()));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -1494,28 +1592,19 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         }
     }
 
-    // Propagate class re-exports
+    // Propagate class re-exports through ExportAll/ReExport/Named chains
     loop {
         let mut new_entries: Vec<((String, String), &perry_hir::Class)> = Vec::new();
         for (path, hir_module) in &ctx.native_modules {
             let path_str = path.to_string_lossy().to_string();
             for export in &hir_module.exports {
-                let source_str = match export {
-                    perry_hir::Export::ExportAll { source } => Some((source.as_str(), None)),
-                    perry_hir::Export::ReExport { source, imported, exported } => Some((source.as_str(), Some((imported.as_str(), exported.as_str())))),
-                    _ => None,
-                };
-                if let Some((source, re_export_names)) = source_str {
-                    if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root) {
-                        let source_path_str = resolved_source.to_string_lossy().to_string();
-                        for ((src_path, class_name), class) in &exported_classes {
-                            if src_path == &source_path_str {
-                                let (propagate, exported_name) = match re_export_names {
-                                    Some((imported, exported)) => (class_name == imported, exported.to_string()),
-                                    None => (true, class_name.clone()),
-                                };
-                                if propagate {
-                                    let key = (path_str.clone(), exported_name);
+                match export {
+                    perry_hir::Export::ExportAll { source } => {
+                        if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root) {
+                            let source_path_str = resolved_source.to_string_lossy().to_string();
+                            for ((src_path, class_name), class) in &exported_classes {
+                                if src_path == &source_path_str {
+                                    let key = (path_str.clone(), class_name.clone());
                                     if !exported_classes.contains_key(&key) {
                                         new_entries.push((key, *class));
                                     }
@@ -1523,6 +1612,45 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                             }
                         }
                     }
+                    perry_hir::Export::ReExport { source, imported, exported } => {
+                        if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root) {
+                            let source_path_str = resolved_source.to_string_lossy().to_string();
+                            for ((src_path, class_name), class) in &exported_classes {
+                                if src_path == &source_path_str && class_name == imported {
+                                    let key = (path_str.clone(), exported.clone());
+                                    if !exported_classes.contains_key(&key) {
+                                        new_entries.push((key, *class));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    perry_hir::Export::Named { local, exported } => {
+                        for import in &hir_module.imports {
+                            for spec in &import.specifiers {
+                                let (matches, imported_name) = match spec {
+                                    perry_hir::ImportSpecifier::Named { local: l, imported } =>
+                                        (l == local, imported.clone()),
+                                    perry_hir::ImportSpecifier::Default { local: l } =>
+                                        (l == local, "default".to_string()),
+                                    _ => (false, String::new()),
+                                };
+                                if matches {
+                                    if let Some((resolved_source, _)) = resolve_import(&import.source, path, &ctx.project_root) {
+                                        let source_path_str = resolved_source.to_string_lossy().to_string();
+                                        let key_src = (source_path_str, imported_name);
+                                        if let Some(class) = exported_classes.get(&key_src) {
+                                            let key = (path_str.clone(), exported.clone());
+                                            if !exported_classes.contains_key(&key) {
+                                                new_entries.push((key, *class));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }

@@ -119,3 +119,67 @@ pub fn add_keyboard_shortcut(_key_ptr: *const u8, _modifiers: f64, _callback: f6
     // Stub — Android hardware keyboard shortcuts are uncommon.
     // Could be implemented via onKeyDown in PerryActivity if needed.
 }
+
+extern "C" {
+    fn js_closure_call1(closure: *const u8, arg: f64) -> f64;
+}
+
+thread_local! {
+    static ON_ACTIVATE_CALLBACK: RefCell<Option<f64>> = RefCell::new(None);
+    static ON_TERMINATE_CALLBACK: RefCell<Option<f64>> = RefCell::new(None);
+}
+
+/// Set a repeating timer via PerryBridge.setTimer.
+pub fn set_timer(interval_ms: f64, callback: f64) {
+    let mut env = jni_bridge::get_env();
+    let _ = env.push_local_frame(16);
+
+    let cb_key = crate::callback::register(callback);
+    let bridge_class = jni_bridge::with_cache(|c| {
+        env.new_local_ref(c.perry_bridge_class.as_obj()).unwrap()
+    });
+
+    let bridge_cls: &jni::objects::JClass = (&bridge_class).into();
+    let _ = env.call_static_method(
+        bridge_cls,
+        "setTimer",
+        "(JJ)V",
+        &[JValue::Long(cb_key), JValue::Long(interval_ms as i64)],
+    );
+
+    unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
+}
+
+/// Register callback for app activation (resume).
+pub fn on_activate(callback: f64) {
+    ON_ACTIVATE_CALLBACK.with(|c| {
+        *c.borrow_mut() = Some(callback);
+    });
+}
+
+/// Register callback for app termination (destroy).
+pub fn on_terminate(callback: f64) {
+    ON_TERMINATE_CALLBACK.with(|c| {
+        *c.borrow_mut() = Some(callback);
+    });
+}
+
+/// Called from JNI when Activity resumes.
+pub fn handle_activate() {
+    ON_ACTIVATE_CALLBACK.with(|c| {
+        if let Some(callback) = *c.borrow() {
+            let ptr = callback.to_bits() as *const u8;
+            unsafe { js_closure_call1(ptr, 0.0); }
+        }
+    });
+}
+
+/// Called from JNI when Activity is destroyed.
+pub fn handle_terminate() {
+    ON_TERMINATE_CALLBACK.with(|c| {
+        if let Some(callback) = *c.borrow() {
+            let ptr = callback.to_bits() as *const u8;
+            unsafe { js_closure_call1(ptr, 0.0); }
+        }
+    });
+}

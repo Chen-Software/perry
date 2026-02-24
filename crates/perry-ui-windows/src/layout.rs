@@ -26,9 +26,11 @@ pub fn layout_widget(handle: i64, width: i32, height: i32) {
     }
 
     match info.kind {
-        WidgetKind::VStack => layout_stack(handle, width, height, true),
+        WidgetKind::VStack | WidgetKind::Form | WidgetKind::Section | WidgetKind::LazyVStack => layout_stack(handle, width, height, true),
         WidgetKind::HStack => layout_stack(handle, width, height, false),
         WidgetKind::ScrollView => layout_scrollview(handle, width, height),
+        WidgetKind::ZStack => layout_zstack(handle, width, height),
+        WidgetKind::NavStack => layout_navstack(handle, width, height),
         _ => {}
     }
 }
@@ -180,6 +182,56 @@ fn layout_scrollview(handle: i64, width: i32, height: i32) {
     }
 }
 
+/// Layout a ZStack — all children fill the container.
+fn layout_zstack(handle: i64, width: i32, height: i32) {
+    let info = match widgets::get_widget_info(handle) {
+        Some(i) => i,
+        None => return,
+    };
+
+    for &child in &info.children {
+        if let Some(ci) = widgets::get_widget_info(child) {
+            if ci.hidden {
+                continue;
+            }
+            #[cfg(target_os = "windows")]
+            {
+                if let Some(child_hwnd) = widgets::get_hwnd(child) {
+                    unsafe {
+                        let _ = MoveWindow(child_hwnd, 0, 0, width, height, true);
+                    }
+                    layout_widget(child, width, height);
+                }
+            }
+        }
+    }
+}
+
+/// Layout a NavStack — only the top page fills the container.
+fn layout_navstack(handle: i64, width: i32, height: i32) {
+    let info = match widgets::get_widget_info(handle) {
+        Some(i) => i,
+        None => return,
+    };
+
+    for &child in &info.children {
+        if let Some(ci) = widgets::get_widget_info(child) {
+            if ci.hidden {
+                continue;
+            }
+            #[cfg(target_os = "windows")]
+            {
+                if let Some(child_hwnd) = widgets::get_hwnd(child) {
+                    unsafe {
+                        let _ = MoveWindow(child_hwnd, 0, 0, width, height, true);
+                    }
+                    layout_widget(child, width, height);
+                }
+            }
+        }
+    }
+}
+
 /// Measure the intrinsic size of a widget along the main axis.
 fn measure_intrinsic(handle: i64, kind: &WidgetKind, vertical: bool, cross_size: i32) -> i32 {
     match kind {
@@ -211,9 +263,31 @@ fn measure_intrinsic(handle: i64, kind: &WidgetKind, vertical: bool, cross_size:
         WidgetKind::VStack | WidgetKind::HStack => {
             measure_stack_intrinsic(handle, kind, vertical, cross_size)
         }
-        WidgetKind::ScrollView => {
-            // ScrollView takes all available space
+        WidgetKind::ScrollView | WidgetKind::LazyVStack => {
+            // ScrollView/LazyVStack takes all available space
             if vertical { 200 } else { 200 }
+        }
+        WidgetKind::SecureField => {
+            if vertical { 24 } else { 200 }
+        }
+        WidgetKind::ProgressView => {
+            if vertical { 20 } else { 200 }
+        }
+        WidgetKind::Form | WidgetKind::Section => {
+            measure_stack_intrinsic(handle, &WidgetKind::VStack, vertical, cross_size)
+        }
+        WidgetKind::ZStack | WidgetKind::NavStack => {
+            // ZStack/NavStack takes all available space
+            if vertical { 200 } else { 200 }
+        }
+        WidgetKind::Picker => {
+            if vertical { 28 } else { 200 }
+        }
+        WidgetKind::Canvas => {
+            if vertical { 200 } else { 200 }
+        }
+        WidgetKind::Image => {
+            if vertical { 24 } else { 24 }
         }
     }
 }

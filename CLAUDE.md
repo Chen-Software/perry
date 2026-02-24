@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.157
+**Current Version:** 0.2.162
 
 ## Workflow Requirements
 
@@ -134,6 +134,38 @@ Declarative TypeScript compiles to AppKit/UIKit calls. 47 `perry_ui_*` FFI funct
 - `CGPoint`/`CGSize`/`CGRect` in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.162
+- Web platform full feature parity: 60 new JS functions (67→127/127, 100%), all 6 platforms now fully covered
+- Web: app lifecycle (timer, activate/terminate), multi-window (floating divs), state wrappers, lazy VStack, sheets, toolbar, context menus
+- Web: keychain (localStorage), notifications (Notification API), clipboard, dialogs (file/save/alert), keyboard shortcuts, canvas gradient
+- Fix GTK4 compilation: add cairo-rs dep, add prelude imports for Cast/ApplicationExt, use load_from_data for CssProvider
+
+### v0.2.161
+- Android full feature parity: 62 new functions via JNI (50→112/112), all 5 native platforms now at 88%
+- JNI widgets: SecureField (EditText+ES_PASSWORD), ProgressBar, Spinner+ArrayAdapter, Canvas (Bitmap), FrameLayout (ZStack/NavStack), ImageView
+- Dialogs: alert (PerryBridge.showAlert), sheets (Dialog modal), multi-window (Dialog), toolbar (horizontal LinearLayout)
+- System APIs: open_url (Intent.ACTION_VIEW), isDarkMode (Configuration.uiMode), SharedPreferences, keychain, notifications
+- Property setters, ViewPropertyAnimator (opacity/position), state onChange/textfield binding, Typeface font family
+
+### v0.2.160
+- Windows full feature parity: 62 new functions implemented (50→112/112), matching macOS/iOS/GTK4 coverage
+- Win32 widgets: SecureField (ES_PASSWORD), ProgressView (PROGRESS_CLASSW), Form/Section (GroupBox), ZStack, Picker (ComboBox), Canvas (GDI), NavStack, LazyVStack, Image
+- Dialogs: save file dialog (IFileSaveDialog), alert (MessageBoxW), sheets, multi-window, toolbar
+- System APIs: open_url (ShellExecuteW), dark mode (Registry), preferences (Registry), keychain (CredWrite/Read/Delete), notifications
+- Property setters, state onChange/textfield binding, font family, app lifecycle (timer, activate, terminate)
+
+### v0.2.159
+- GTK4 full feature parity: 62 new functions implemented (50→112/112), matching macOS/iOS coverage
+- New widgets: SecureField, ProgressView, Form/Section, ZStack, Picker, Canvas, NavStack, LazyVStack, Image
+- Dialogs: save file dialog, alert (MessageDialog), sheets (modal windows), multi-window support
+- Toolbar (HeaderBar), system APIs (open_url, dark mode, preferences, keychain, notifications)
+- Property setters: enabled, tooltip, control size, corner radius, background color/gradient, hover, double-click, opacity/position animation
+- State: onChange callbacks, two-way textfield binding, font family support
+
+### v0.2.158
+- Cross-platform feature parity test suite: `perry-ui-test` crate with source-scanning symbol verification for all 6 platforms (macOS, iOS, Android, GTK4, Windows, Web)
+- 127-entry feature matrix, per-platform FFI parity tests, coverage report (`PERRY_PRINT_MATRIX=1`), untracked symbol warnings
 
 ### v0.2.157
 - 12 new UI/system features: saveFileDialog, Alert, Sheet, Toolbar, LazyVStack, Window (multi-window), State↔TextField binding

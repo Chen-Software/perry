@@ -65,10 +65,18 @@ struct ShortcutEntry {
     callback_ptr: *const u8,
 }
 
+struct TimerEntry {
+    interval_ms: u32,
+    callback_ptr: *const u8,
+}
+
 thread_local! {
-    static APPS: RefCell<Vec<AppEntry>> = RefCell::new(Vec::new());
+    pub(crate) static APPS: RefCell<Vec<AppEntry>> = RefCell::new(Vec::new());
     static PENDING_SHORTCUTS: RefCell<Vec<PendingShortcut>> = RefCell::new(Vec::new());
     static SHORTCUTS: RefCell<Vec<ShortcutEntry>> = RefCell::new(Vec::new());
+    static TIMERS: RefCell<Vec<TimerEntry>> = RefCell::new(Vec::new());
+    static ON_ACTIVATE_CALLBACK: RefCell<Option<*const u8>> = RefCell::new(None);
+    static ON_TERMINATE_CALLBACK: RefCell<Option<*const u8>> = RefCell::new(None);
 }
 
 #[cfg(target_os = "windows")]
@@ -337,6 +345,85 @@ pub fn set_max_size(app_handle: i64, w: f64, h: f64) {
     });
 }
 
+/// Set a repeating timer.
+pub fn set_timer(interval_ms: f64, callback: f64) {
+    let callback_ptr = unsafe { js_nanbox_get_pointer(callback) } as *const u8;
+    let ms = interval_ms as u32;
+
+    TIMERS.with(|t| {
+        let mut timers = t.borrow_mut();
+        let timer_id = timers.len() + 1;
+        timers.push(TimerEntry {
+            interval_ms: ms,
+            callback_ptr,
+        });
+
+        #[cfg(target_os = "windows")]
+        {
+            APPS.with(|apps| {
+                let apps = apps.borrow();
+                if let Some(app) = apps.first() {
+                    unsafe {
+                        let _ = SetTimer(Some(app.hwnd), timer_id, ms, None);
+                    }
+                }
+            });
+        }
+
+        let _ = timer_id;
+    });
+}
+
+/// Register callback for app activation (WM_ACTIVATEAPP).
+pub fn on_activate(callback: f64) {
+    let callback_ptr = unsafe { js_nanbox_get_pointer(callback) } as *const u8;
+    ON_ACTIVATE_CALLBACK.with(|c| {
+        *c.borrow_mut() = Some(callback_ptr);
+    });
+}
+
+/// Register callback for app termination (WM_CLOSE/WM_DESTROY).
+pub fn on_terminate(callback: f64) {
+    let callback_ptr = unsafe { js_nanbox_get_pointer(callback) } as *const u8;
+    ON_TERMINATE_CALLBACK.with(|c| {
+        *c.borrow_mut() = Some(callback_ptr);
+    });
+}
+
+/// Handle WM_TIMER — dispatch to registered timer callbacks.
+#[cfg(target_os = "windows")]
+pub fn handle_timer(timer_id: usize) {
+    TIMERS.with(|t| {
+        let timers = t.borrow();
+        let idx = timer_id - 1;
+        if idx < timers.len() {
+            unsafe { js_closure_call0(timers[idx].callback_ptr) };
+        }
+    });
+}
+
+/// Handle WM_ACTIVATEAPP — call on_activate callback.
+#[cfg(target_os = "windows")]
+pub fn handle_activate(activating: bool) {
+    if activating {
+        ON_ACTIVATE_CALLBACK.with(|c| {
+            if let Some(ptr) = *c.borrow() {
+                unsafe { js_closure_call0(ptr) };
+            }
+        });
+    }
+}
+
+/// Handle WM_DESTROY — call on_terminate callback before quit.
+#[cfg(target_os = "windows")]
+pub fn handle_terminate() {
+    ON_TERMINATE_CALLBACK.with(|c| {
+        if let Some(ptr) = *c.borrow() {
+            unsafe { js_closure_call0(ptr) };
+        }
+    });
+}
+
 /// Get app min/max sizes for WM_GETMINMAXINFO.
 pub fn get_size_constraints(app_handle: i64) -> (Option<(f64, f64)>, Option<(f64, f64)>) {
     APPS.with(|apps| {
@@ -418,7 +505,18 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             crate::menu::handle_context_menu(hwnd, child_hwnd, x, y);
             LRESULT(0)
         }
+        WM_TIMER => {
+            let timer_id = wparam.0;
+            crate::app::handle_timer(timer_id);
+            LRESULT(0)
+        }
+        WM_ACTIVATEAPP => {
+            let activating = wparam.0 != 0;
+            crate::app::handle_activate(activating);
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         WM_DESTROY => {
+            crate::app::handle_terminate();
             PostQuitMessage(0);
             LRESULT(0)
         }

@@ -46,6 +46,14 @@ struct ForEachBinding {
     render_closure: f64,
 }
 
+struct OnChangeBinding {
+    callback_ptr: f64,
+}
+
+struct TextFieldBinding {
+    textfield_handle: i64,
+}
+
 thread_local! {
     static STATES: RefCell<Vec<StateEntry>> = RefCell::new(Vec::new());
     static TEXT_BINDINGS: RefCell<HashMap<i64, Vec<TextBinding>>> = RefCell::new(HashMap::new());
@@ -55,6 +63,8 @@ thread_local! {
     static MULTI_TEXT_INDEX: RefCell<HashMap<i64, Vec<usize>>> = RefCell::new(HashMap::new());
     static VISIBILITY_BINDINGS: RefCell<HashMap<i64, Vec<VisibilityBinding>>> = RefCell::new(HashMap::new());
     static FOR_EACH_BINDINGS: RefCell<HashMap<i64, Vec<ForEachBinding>>> = RefCell::new(HashMap::new());
+    static ON_CHANGE_BINDINGS: RefCell<HashMap<i64, Vec<OnChangeBinding>>> = RefCell::new(HashMap::new());
+    static TEXTFIELD_BINDINGS: RefCell<HashMap<i64, Vec<TextFieldBinding>>> = RefCell::new(HashMap::new());
 }
 
 fn str_from_header(ptr: *const u8) -> &'static str {
@@ -166,6 +176,35 @@ pub fn state_set(handle: i64, value: f64) {
             for binding in bindings {
                 widgets::clear_children(binding.container_handle);
                 render_for_each(binding.container_handle, binding.render_closure, value);
+            }
+        }
+    });
+
+    ON_CHANGE_BINDINGS.with(|b| {
+        if let Some(bindings) = b.borrow().get(&handle) {
+            for binding in bindings {
+                let closure_ptr = binding.callback_ptr.to_bits() as *const u8;
+                unsafe { js_closure_call1(closure_ptr, value); }
+            }
+        }
+    });
+
+    TEXTFIELD_BINDINGS.with(|b| {
+        if let Some(bindings) = b.borrow().get(&handle) {
+            let bits = value.to_bits();
+            let tag = (bits >> 48) as u16;
+            if tag == 0x7FFF {
+                // String value
+                let ptr = (bits & 0x0000_FFFF_FFFF_FFFF) as *const u8;
+                let s = str_from_header(ptr);
+                for binding in bindings {
+                    widgets::textfield::set_string_str(binding.textfield_handle, s);
+                }
+            } else {
+                let s = format_value(value);
+                for binding in bindings {
+                    widgets::textfield::set_string_str(binding.textfield_handle, &s);
+                }
             }
         }
     });
@@ -296,5 +335,23 @@ pub fn for_each_init(container_handle: i64, state_handle: i64, render_closure: f
             .entry(state_handle)
             .or_default()
             .push(ForEachBinding { container_handle, render_closure });
+    });
+}
+
+pub fn on_change(state_handle: i64, callback: f64) {
+    ON_CHANGE_BINDINGS.with(|b| {
+        b.borrow_mut()
+            .entry(state_handle)
+            .or_default()
+            .push(OnChangeBinding { callback_ptr: callback });
+    });
+}
+
+pub fn bind_textfield(state_handle: i64, textfield_handle: i64) {
+    TEXTFIELD_BINDINGS.with(|b| {
+        b.borrow_mut()
+            .entry(state_handle)
+            .or_default()
+            .push(TextFieldBinding { textfield_handle });
     });
 }

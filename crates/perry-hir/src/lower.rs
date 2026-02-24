@@ -1263,6 +1263,10 @@ fn lower_module_decl(
             }
         }
         ast::ModuleDecl::ExportNamed(export_named) => {
+            // Skip type-only exports (export type { ... }) - they have no runtime value
+            if export_named.type_only {
+                return Ok(());
+            }
             // export { foo, bar as baz }
             // export { foo } from "source"
             if let Some(ref src) = export_named.src {
@@ -1270,6 +1274,8 @@ fn lower_module_decl(
                 let source = src.value.as_str().unwrap_or("").to_string();
                 for spec in &export_named.specifiers {
                     if let ast::ExportSpecifier::Named(named) = spec {
+                        // Skip individual type-only specifiers (export { type Foo, Bar })
+                        if named.is_type_only { continue; }
                         let local = match &named.orig {
                             ast::ModuleExportName::Ident(id) => id.sym.to_string(),
                             ast::ModuleExportName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
@@ -1292,6 +1298,8 @@ fn lower_module_decl(
                 // Local export: export { foo, bar as baz }
                 for spec in &export_named.specifiers {
                     if let ast::ExportSpecifier::Named(named) = spec {
+                        // Skip individual type-only specifiers (export { type Foo, Bar })
+                        if named.is_type_only { continue; }
                         let local = match &named.orig {
                             ast::ModuleExportName::Ident(id) => id.sym.to_string(),
                             ast::ModuleExportName::Str(s) => s.value.as_str().unwrap_or("").to_string(),

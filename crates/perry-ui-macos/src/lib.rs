@@ -808,9 +808,12 @@ pub extern "C" fn perry_ui_alert(title_ptr: i64, message_ptr: i64, buttons_ptr: 
 // =============================================================================
 
 /// Create a sheet (panel). Returns handle.
+/// title_val arrives as NaN-boxed f64 from codegen — extract pointer internally.
 #[no_mangle]
-pub extern "C" fn perry_ui_sheet_create(width: f64, height: f64, title_ptr: i64) -> i64 {
-    widgets::sheet::create(width, height, title_ptr as *const u8)
+pub extern "C" fn perry_ui_sheet_create(width: f64, height: f64, title_val: f64) -> i64 {
+    extern "C" { fn js_nanbox_get_pointer(value: f64) -> i64; }
+    let title_ptr = unsafe { js_nanbox_get_pointer(title_val) } as *const u8;
+    widgets::sheet::create(width, height, title_ptr)
 }
 
 /// Present a sheet on the key window.
@@ -928,9 +931,10 @@ pub extern "C" fn perry_ui_window_close(window_handle: i64) {
 // =============================================================================
 
 /// Create a LazyVStack with row count and render closure. Returns handle.
+/// count arrives as f64 from codegen — cast to i64 internally.
 #[no_mangle]
-pub extern "C" fn perry_ui_lazyvstack_create(count: i64, render_closure: f64) -> i64 {
-    widgets::lazyvstack::create(count, render_closure)
+pub extern "C" fn perry_ui_lazyvstack_create(count: f64, render_closure: f64) -> i64 {
+    widgets::lazyvstack::create(count as i64, render_closure)
 }
 
 /// Update the row count of a LazyVStack.

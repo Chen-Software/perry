@@ -11172,12 +11172,13 @@ impl Compiler {
             self.extern_funcs.insert("perry_ui_alert".to_string(), func_id);
         }
 
-        // perry_ui_sheet_create(width: f64, height: f64, title: i64) -> i64
+        // perry_ui_sheet_create(width: f64, height: f64, title: f64) -> i64
+        // title is NaN-boxed string - Rust side extracts pointer via js_nanbox_get_pointer
         {
             let mut sig = self.module.make_signature();
             sig.params.push(AbiParam::new(types::F64)); // width
             sig.params.push(AbiParam::new(types::F64)); // height
-            sig.params.push(AbiParam::new(types::I64)); // title
+            sig.params.push(AbiParam::new(types::F64)); // title (NaN-boxed)
             sig.returns.push(AbiParam::new(types::I64));
             let func_id = self.module.declare_function("perry_ui_sheet_create", Linkage::Import, &sig)?;
             self.extern_funcs.insert("perry_ui_sheet_create".to_string(), func_id);
@@ -11278,11 +11279,12 @@ impl Compiler {
             self.extern_funcs.insert("perry_ui_window_close".to_string(), func_id);
         }
 
-        // perry_ui_lazyvstack_create(count: i64, render: f64) -> i64
+        // perry_ui_lazyvstack_create(count: f64, render: f64) -> i64
+        // count arrives as f64 (JS number) - Rust side casts to i64
         {
             let mut sig = self.module.make_signature();
-            sig.params.push(AbiParam::new(types::I64));
-            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64)); // count (JS number)
+            sig.params.push(AbiParam::new(types::F64)); // render closure
             sig.returns.push(AbiParam::new(types::I64));
             let func_id = self.module.declare_function("perry_ui_lazyvstack_create", Linkage::Import, &sig)?;
             self.extern_funcs.insert("perry_ui_lazyvstack_create".to_string(), func_id);
@@ -28886,6 +28888,33 @@ fn compile_expr(
                 let call = builder.ins().call(func_ref, &[cap]);
                 let set_ptr = builder.inst_results(call)[0];
                 return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), set_ptr));
+            }
+
+            // new RegExp(pattern, flags?) - call js_regexp_new(pattern, flags)
+            if class_name == "RegExp" {
+                let new_func = extern_funcs.get("js_regexp_new")
+                    .ok_or_else(|| anyhow!("js_regexp_new not declared"))?;
+                let func_ref = module.declare_func_in_func(*new_func, builder.func);
+
+                // First arg: pattern string pointer
+                let pattern_val = if !args.is_empty() {
+                    let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[0], this_ctx)?;
+                    ensure_i64(builder, val)
+                } else {
+                    builder.ins().iconst(types::I64, 0) // null for empty pattern
+                };
+
+                // Second arg: flags string pointer
+                let flags_val = if args.len() > 1 {
+                    let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[1], this_ctx)?;
+                    ensure_i64(builder, val)
+                } else {
+                    builder.ins().iconst(types::I64, 0) // null for no flags
+                };
+
+                let call = builder.ins().call(func_ref, &[pattern_val, flags_val]);
+                let regexp_ptr = builder.inst_results(call)[0];
+                return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), regexp_ptr));
             }
 
             // new LRUCache({ max: number }) - call js_lru_cache_new(max_size)

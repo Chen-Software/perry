@@ -98,6 +98,18 @@ pub extern "C" fn js_array_length(arr: *const ArrayHeader) -> u32 {
     unsafe { (*arr).length }
 }
 
+/// Get the length of an array (i64 bridge for perry-ui-macos)
+#[no_mangle]
+pub extern "C" fn js_array_get_length(arr: i64) -> i64 {
+    js_array_length(arr as *const ArrayHeader) as i64
+}
+
+/// Get an element from an array by index (i64 bridge for perry-ui-macos)
+#[no_mangle]
+pub extern "C" fn js_array_get_element(arr: i64, index: i64) -> f64 {
+    js_array_get_f64(arr as *const ArrayHeader, index as u32)
+}
+
 /// Get an element from an array by index (returns f64)
 #[no_mangle]
 pub extern "C" fn js_array_get_f64(arr: *const ArrayHeader, index: u32) -> f64 {
