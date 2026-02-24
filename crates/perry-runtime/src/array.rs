@@ -276,6 +276,14 @@ pub extern "C" fn js_array_unshift_f64(arr: *mut ArrayHeader, value: f64) -> *mu
     }
 }
 
+/// Unshift an element as raw JSValue bits (u64), for object/pointer values
+/// Returns a pointer to the (possibly reallocated) array
+#[no_mangle]
+pub extern "C" fn js_array_unshift_jsvalue(arr: *mut ArrayHeader, value: u64) -> *mut ArrayHeader {
+    let bits_as_f64 = f64::from_bits(value);
+    js_array_unshift_f64(arr, bits_as_f64)
+}
+
 /// Find the index of an element in an array
 /// Returns -1 if not found
 #[no_mangle]

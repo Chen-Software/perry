@@ -5,10 +5,17 @@ pub mod hstack;
 pub mod spacer;
 pub mod divider;
 pub mod textfield;
+pub mod securefield;
 pub mod toggle;
 pub mod slider;
 pub mod scrollview;
 pub mod canvas;
+pub mod progressview;
+pub mod image;
+pub mod picker;
+pub mod form;
+pub mod navstack;
+pub mod zstack;
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyClass;
@@ -234,6 +241,128 @@ pub fn set_corner_radius(handle: i64, radius: f64) {
                 let _: () = objc2::msg_send![layer, setCornerRadius: radius];
                 let _: () = objc2::msg_send![layer, setMasksToBounds: true];
             }
+        }
+    }
+}
+
+// =============================================================================
+// Cross-cutting: Enabled, Hover, DoubleClick, Animations, Tooltip, ControlSize
+// =============================================================================
+
+extern "C" {
+    fn js_closure_call1(closure: *const u8, arg: f64) -> f64;
+    fn js_nanbox_get_pointer(value: f64) -> i64;
+}
+
+/// Set the enabled state of any NSControl-based widget.
+pub fn set_enabled(handle: i64, enabled: bool) {
+    if let Some(view) = get_widget(handle) {
+        unsafe {
+            let _: () = objc2::msg_send![&*view, setEnabled: enabled];
+        }
+    }
+}
+
+/// Set a tooltip on any widget.
+pub fn set_tooltip(handle: i64, text: &str) {
+    if let Some(view) = get_widget(handle) {
+        let ns_text = objc2_foundation::NSString::from_str(text);
+        unsafe {
+            let _: () = objc2::msg_send![&*view, setToolTip: &*ns_text];
+        }
+    }
+}
+
+/// Set control size variant on NSControl-based widgets.
+/// 0=regular, 1=small, 2=mini, 3=large
+pub fn set_control_size(handle: i64, size: i64) {
+    if let Some(view) = get_widget(handle) {
+        unsafe {
+            let _: () = objc2::msg_send![&*view, setControlSize: size as u64];
+        }
+    }
+}
+
+/// Animate the opacity of a widget.
+pub fn animate_opacity(handle: i64, target: f64, duration_ms: f64) {
+    if let Some(view) = get_widget(handle) {
+        unsafe {
+            let _: () = objc2::msg_send![&*view, setWantsLayer: true];
+            let duration_secs = duration_ms / 1000.0;
+            // Use NSAnimationContext
+            let ctx_cls = AnyClass::get(c"NSAnimationContext").unwrap();
+            let _: () = objc2::msg_send![ctx_cls, beginGrouping];
+            let ctx: *mut AnyObject = objc2::msg_send![ctx_cls, currentContext];
+            let _: () = objc2::msg_send![ctx, setDuration: duration_secs];
+            let _: () = objc2::msg_send![ctx, setAllowsImplicitAnimation: true];
+            let _: () = objc2::msg_send![&*view, setAlphaValue: target];
+            let _: () = objc2::msg_send![ctx_cls, endGrouping];
+        }
+    }
+}
+
+/// Animate the position of a widget by delta.
+pub fn animate_position(handle: i64, dx: f64, dy: f64, duration_ms: f64) {
+    if let Some(view) = get_widget(handle) {
+        unsafe {
+            let duration_secs = duration_ms / 1000.0;
+            let frame: objc2_core_foundation::CGRect = objc2::msg_send![&*view, frame];
+            let new_origin = objc2_core_foundation::CGPoint::new(
+                frame.origin.x + dx,
+                frame.origin.y + dy,
+            );
+            let ctx_cls = AnyClass::get(c"NSAnimationContext").unwrap();
+            let _: () = objc2::msg_send![ctx_cls, beginGrouping];
+            let ctx: *mut AnyObject = objc2::msg_send![ctx_cls, currentContext];
+            let _: () = objc2::msg_send![ctx, setDuration: duration_secs];
+            let _: () = objc2::msg_send![ctx, setAllowsImplicitAnimation: true];
+            let _: () = objc2::msg_send![&*view, setFrameOrigin: new_origin];
+            let _: () = objc2::msg_send![ctx_cls, endGrouping];
+        }
+    }
+}
+
+use std::collections::HashMap;
+
+thread_local! {
+    static HOVER_CALLBACKS: RefCell<HashMap<i64, f64>> = RefCell::new(HashMap::new());
+    static DOUBLE_CLICK_CALLBACKS: RefCell<HashMap<i64, f64>> = RefCell::new(HashMap::new());
+}
+
+/// Set an on-hover callback for a widget (mouse enter/exit).
+pub fn set_on_hover(handle: i64, callback: f64) {
+    HOVER_CALLBACKS.with(|cbs| {
+        cbs.borrow_mut().insert(handle, callback);
+    });
+    if let Some(view) = get_widget(handle) {
+        unsafe {
+            // Add tracking area for mouse enter/exit
+            let ta_cls = AnyClass::get(c"NSTrackingArea").unwrap();
+            let bounds: objc2_core_foundation::CGRect = objc2::msg_send![&*view, bounds];
+            let options: u64 = 0x01 | 0x02 | 0x20; // MouseEnteredAndExited | MouseMoved | ActiveAlways
+            let tracking_area: *mut AnyObject = objc2::msg_send![
+                ta_cls, alloc
+            ];
+            let tracking_area: *mut AnyObject = objc2::msg_send![
+                tracking_area, initWithRect: bounds, options: options, owner: &*view, userInfo: std::ptr::null::<AnyObject>()
+            ];
+            let _: () = objc2::msg_send![&*view, addTrackingArea: tracking_area];
+        }
+    }
+}
+
+/// Set a double-click handler for a widget.
+pub fn set_on_double_click(handle: i64, callback: f64) {
+    DOUBLE_CLICK_CALLBACKS.with(|cbs| {
+        cbs.borrow_mut().insert(handle, callback);
+    });
+    if let Some(view) = get_widget(handle) {
+        unsafe {
+            let gr_cls = AnyClass::get(c"NSClickGestureRecognizer").unwrap();
+            let recognizer: *mut AnyObject = objc2::msg_send![gr_cls, alloc];
+            let recognizer: *mut AnyObject = objc2::msg_send![recognizer, init];
+            let _: () = objc2::msg_send![recognizer, setNumberOfClicksRequired: 2i64];
+            let _: () = objc2::msg_send![&*view, addGestureRecognizer: recognizer];
         }
     }
 }

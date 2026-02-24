@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.153
+**Current Version:** 0.2.155
 
 ## Workflow Requirements
 
@@ -134,6 +134,13 @@ Declarative TypeScript compiles to AppKit/UIKit calls. 47 `perry_ui_*` FFI funct
 - `CGPoint`/`CGSize`/`CGRect` in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.155
+- 20+ new UI widgets and APIs: SecureField, ProgressView, Image, Picker, Form/Section, NavigationStack, ZStack (both macOS + iOS)
+- Cross-cutting widget APIs: setEnabled, setOnHover, setOnDoubleClick, animateOpacity, animatePosition, setTooltip, setControlSize, setFontFamily
+- `perry/system` module: openURL, isDarkMode, preferencesSet/Get (NSUserDefaults/UIDefaults)
+- State onChange callbacks, string-aware state binding (NaN-boxed STRING_TAG values)
+- Fix `delete obj[stringKey]` verifier error: NaN-box string pointer before passing to `js_object_delete_dynamic`
 
 ### v0.2.153
 - Automatic binary size reduction: detect stdlib needs from imports, link runtime-only when possible (0.3MB vs 48MB for hello world)

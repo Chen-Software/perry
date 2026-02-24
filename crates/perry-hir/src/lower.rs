@@ -1468,7 +1468,20 @@ fn lower_stmt(
             let init = if let Some(init) = &for_stmt.init {
                 match init {
                     ast::VarDeclOrExpr::VarDecl(var_decl) => {
-                        // For loop initializers typically have one declaration
+                        // Emit extra declarators (index > 0) as separate Let statements before the loop
+                        for decl in var_decl.decls.iter().skip(1) {
+                            let name = get_binding_name(&decl.name)?;
+                            let init_expr = decl.init.as_ref().map(|e| lower_expr(ctx, e)).transpose()?;
+                            let id = ctx.define_local(name.clone(), Type::Any);
+                            module.init.push(Stmt::Let {
+                                id,
+                                name,
+                                ty: Type::Any,
+                                mutable: true,
+                                init: init_expr,
+                            });
+                        }
+                        // Keep the first declarator as the for-loop init
                         if let Some(decl) = var_decl.decls.first() {
                             let name = get_binding_name(&decl.name)?;
                             let init_expr = decl.init.as_ref().map(|e| lower_expr(ctx, e)).transpose()?;
@@ -2188,6 +2201,11 @@ fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::ClassDecl, is_e
                 }
             }
             ast::ClassMember::ClassProp(prop) => {
+                // Skip computed/Symbol property keys
+                match &prop.key {
+                    ast::PropName::Ident(_) | ast::PropName::Str(_) => {},
+                    _ => continue,
+                }
                 let field = lower_class_prop(ctx, prop)?;
                 if prop.is_static {
                     static_fields.push(field);
@@ -2332,6 +2350,11 @@ fn lower_class_from_ast(ctx: &mut LoweringContext, class: &ast::Class, name: &st
                 }
             }
             ast::ClassMember::ClassProp(prop) => {
+                // Skip computed/Symbol property keys
+                match &prop.key {
+                    ast::PropName::Ident(_) | ast::PropName::Str(_) => {},
+                    _ => continue,
+                }
                 let field = lower_class_prop(ctx, prop)?;
                 if prop.is_static {
                     static_fields.push(field);
@@ -2957,7 +2980,20 @@ fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Result<Vec<St
             let init = if let Some(init) = &for_stmt.init {
                 match init {
                     ast::VarDeclOrExpr::VarDecl(var_decl) => {
-                        // For loop initializers typically have one declaration
+                        // Emit extra declarators (index > 0) as separate Let statements before the loop
+                        for decl in var_decl.decls.iter().skip(1) {
+                            let name = get_binding_name(&decl.name)?;
+                            let init_expr = decl.init.as_ref().map(|e| lower_expr(ctx, e)).transpose()?;
+                            let id = ctx.define_local(name.clone(), Type::Any);
+                            result.push(Stmt::Let {
+                                id,
+                                name,
+                                ty: Type::Any,
+                                mutable: true,
+                                init: init_expr,
+                            });
+                        }
+                        // Keep the first declarator as the for-loop init
                         if let Some(decl) = var_decl.decls.first() {
                             let name = get_binding_name(&decl.name)?;
                             let init_expr = decl.init.as_ref().map(|e| lower_expr(ctx, e)).transpose()?;

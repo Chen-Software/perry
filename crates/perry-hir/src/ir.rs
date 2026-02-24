@@ -52,6 +52,8 @@ pub const NATIVE_MODULES: &[&str] = &[
     "async_hooks",
     // Perry native UI
     "perry/ui",
+    // Perry system APIs
+    "perry/system",
     // Perry plugin system
     "perry/plugin",
     // Node.js worker threads
@@ -69,6 +71,7 @@ pub fn is_native_module(path: &str) -> bool {
 const RUNTIME_ONLY_MODULES: &[&str] = &[
     "fs", "path", "os", "buffer", "child_process", "net", "stream", "url", "util",
     "perry/ui",
+    "perry/system",
 ];
 
 /// Check if a native module import requires linking perry-stdlib.

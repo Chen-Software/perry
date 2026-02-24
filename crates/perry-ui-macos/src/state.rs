@@ -63,6 +63,8 @@ thread_local! {
     static VISIBILITY_BINDINGS: RefCell<HashMap<i64, Vec<VisibilityBinding>>> = RefCell::new(HashMap::new());
     /// Map from state_handle -> forEach bindings
     static FOR_EACH_BINDINGS: RefCell<HashMap<i64, Vec<ForEachBinding>>> = RefCell::new(HashMap::new());
+    /// Map from state_handle -> onChange callbacks
+    static ON_CHANGE_CALLBACKS: RefCell<HashMap<i64, Vec<f64>>> = RefCell::new(HashMap::new());
 }
 
 /// Extract a &str from a *const StringHeader pointer.
@@ -78,8 +80,22 @@ fn str_from_header(ptr: *const u8) -> &'static str {
     }
 }
 
+/// Check if a f64 value is a NaN-boxed string (STRING_TAG = 0x7FFF).
+fn is_nanboxed_string(value: f64) -> bool {
+    let bits = value.to_bits();
+    (bits >> 48) == 0x7FFF
+}
+
+/// Extract the string content from a NaN-boxed string value.
+fn extract_nanboxed_string(value: f64) -> String {
+    let ptr = unsafe { js_nanbox_get_pointer(value) } as *const u8;
+    str_from_header(ptr).to_string()
+}
+
 fn format_value(value: f64) -> String {
-    if value.fract() == 0.0 && value.abs() < 1e15 {
+    if is_nanboxed_string(value) {
+        extract_nanboxed_string(value)
+    } else if value.fract() == 0.0 && value.abs() < 1e15 {
         format!("{}", value as i64)
     } else {
         format!("{}", value)
@@ -184,6 +200,16 @@ pub fn state_set(handle: i64, value: f64) {
             for binding in bindings {
                 widgets::clear_children(binding.container_handle);
                 render_for_each(binding.container_handle, binding.render_closure, value);
+            }
+        }
+    });
+
+    // Invoke onChange callbacks
+    ON_CHANGE_CALLBACKS.with(|cbs| {
+        if let Some(callbacks) = cbs.borrow().get(&handle) {
+            for &closure_f64 in callbacks {
+                let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) } as *const u8;
+                unsafe { js_closure_call1(closure_ptr, value); }
             }
         }
     });
@@ -322,5 +348,15 @@ pub fn for_each_init(container_handle: i64, state_handle: i64, render_closure: f
             .entry(state_handle)
             .or_default()
             .push(ForEachBinding { container_handle, render_closure });
+    });
+}
+
+/// Register a callback to be invoked whenever a state cell changes.
+pub fn state_on_change(state_handle: i64, callback: f64) {
+    ON_CHANGE_CALLBACKS.with(|cbs| {
+        cbs.borrow_mut()
+            .entry(state_handle)
+            .or_default()
+            .push(callback);
     });
 }

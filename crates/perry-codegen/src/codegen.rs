@@ -10797,6 +10797,290 @@ impl Compiler {
         }
 
         // ============================================
+        // Perry UI Phase B: New widgets + interactions
+        // ============================================
+
+        // perry_ui_securefield_create(placeholder_ptr: i64, on_change: f64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_securefield_create", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_securefield_create".to_string(), func_id);
+        }
+
+        // perry_ui_progressview_create() -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_progressview_create", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_progressview_create".to_string(), func_id);
+        }
+
+        // perry_ui_progressview_set_value(handle: i64, value: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_ui_progressview_set_value", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_progressview_set_value".to_string(), func_id);
+        }
+
+        // perry_ui_image_create_symbol(name_ptr: i64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_image_create_symbol", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_image_create_symbol".to_string(), func_id);
+        }
+
+        // perry_ui_image_create_file(path_ptr: i64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_image_create_file", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_image_create_file".to_string(), func_id);
+        }
+
+        // perry_ui_image_set_size(handle: i64, width: f64, height: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_ui_image_set_size", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_image_set_size".to_string(), func_id);
+        }
+
+        // perry_ui_image_set_tint(handle: i64, r: f64, g: f64, b: f64, a: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_ui_image_set_tint", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_image_set_tint".to_string(), func_id);
+        }
+
+        // perry_ui_picker_create(label_ptr: i64, on_change: f64, style: i64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_picker_create", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_picker_create".to_string(), func_id);
+        }
+
+        // perry_ui_picker_add_item(handle: i64, title_ptr: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_picker_add_item", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_picker_add_item".to_string(), func_id);
+        }
+
+        // perry_ui_picker_set_selected(handle: i64, index: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_picker_set_selected", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_picker_set_selected".to_string(), func_id);
+        }
+
+        // perry_ui_picker_get_selected(handle: i64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_picker_get_selected", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_picker_get_selected".to_string(), func_id);
+        }
+
+        // perry_ui_form_create() -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_form_create", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_form_create".to_string(), func_id);
+        }
+
+        // perry_ui_section_create(title_ptr: i64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_section_create", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_section_create".to_string(), func_id);
+        }
+
+        // perry_ui_navstack_create(title_ptr: i64, body_handle: i64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_navstack_create", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_navstack_create".to_string(), func_id);
+        }
+
+        // perry_ui_navstack_push(handle: i64, title_ptr: i64, body_handle: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_navstack_push", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_navstack_push".to_string(), func_id);
+        }
+
+        // perry_ui_navstack_pop(handle: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_navstack_pop", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_navstack_pop".to_string(), func_id);
+        }
+
+        // perry_ui_zstack_create() -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_zstack_create", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_zstack_create".to_string(), func_id);
+        }
+
+        // perry_ui_widget_set_enabled(handle: i64, enabled: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_widget_set_enabled", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_widget_set_enabled".to_string(), func_id);
+        }
+
+        // perry_ui_widget_set_tooltip(handle: i64, text_ptr: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_widget_set_tooltip", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_widget_set_tooltip".to_string(), func_id);
+        }
+
+        // perry_ui_widget_set_control_size(handle: i64, size: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_widget_set_control_size", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_widget_set_control_size".to_string(), func_id);
+        }
+
+        // perry_ui_widget_set_on_hover(handle: i64, callback: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_ui_widget_set_on_hover", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_widget_set_on_hover".to_string(), func_id);
+        }
+
+        // perry_ui_widget_set_on_double_click(handle: i64, callback: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_ui_widget_set_on_double_click", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_widget_set_on_double_click".to_string(), func_id);
+        }
+
+        // perry_ui_widget_animate_opacity(handle: i64, target: f64, duration_ms: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_ui_widget_animate_opacity", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_widget_animate_opacity".to_string(), func_id);
+        }
+
+        // perry_ui_widget_animate_position(handle: i64, dx: f64, dy: f64, duration_ms: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_ui_widget_animate_position", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_widget_animate_position".to_string(), func_id);
+        }
+
+        // perry_ui_state_on_change(state_handle: i64, callback: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_ui_state_on_change", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_state_on_change".to_string(), func_id);
+        }
+
+        // perry_ui_text_set_font_family(handle: i64, family_ptr: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_text_set_font_family", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_text_set_font_family".to_string(), func_id);
+        }
+
+        // ============================================
+        // Perry System APIs (perry/system module)
+        // ============================================
+
+        // perry_system_open_url(url_ptr: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_system_open_url", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_system_open_url".to_string(), func_id);
+        }
+
+        // perry_system_is_dark_mode() -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_system_is_dark_mode", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_system_is_dark_mode".to_string(), func_id);
+        }
+
+        // perry_system_preferences_set(key_ptr: i64, value: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_system_preferences_set", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_system_preferences_set".to_string(), func_id);
+        }
+
+        // perry_system_preferences_get(key_ptr: i64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_system_preferences_get", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_system_preferences_get".to_string(), func_id);
+        }
+
+        // ============================================
         // Perry Plugin System FFI functions
         // ============================================
 
@@ -20472,11 +20756,22 @@ fn compile_expr(
                     let obj_ptr = ensure_i64(builder, obj_val);
                     let index_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
 
+                    // Ensure key is f64 (NaN-boxed) — if I64, it's a raw string pointer that needs NaN-boxing
+                    let key_f64 = if builder.func.dfg.value_type(index_val) == types::I64 {
+                        let nanbox_func = extern_funcs.get("js_nanbox_string")
+                            .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                        let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                        let nanbox_call = builder.ins().call(nanbox_ref, &[index_val]);
+                        builder.inst_results(nanbox_call)[0]
+                    } else {
+                        ensure_f64(builder, index_val)
+                    };
+
                     // Call js_object_delete_dynamic
                     let delete_func = extern_funcs.get("js_object_delete_dynamic")
                         .ok_or_else(|| anyhow!("js_object_delete_dynamic not declared"))?;
                     let delete_ref = module.declare_func_in_func(*delete_func, builder.func);
-                    let call = builder.ins().call(delete_ref, &[obj_ptr, index_val]);
+                    let call = builder.ins().call(delete_ref, &[obj_ptr, key_f64]);
                     let result = builder.inst_results(call)[0];
                     // Convert i32 (0 or 1) to f64 boolean
                     Ok(builder.ins().fcvt_from_sint(types::F64, result))
@@ -20895,10 +21190,43 @@ fn compile_expr(
 
             let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
 
-            let func = extern_funcs.get("js_array_unshift_f64")
-                .ok_or_else(|| anyhow!("js_array_unshift_f64 not declared"))?;
+            // Determine if value is a pointer type (object, array, string, etc.)
+            // Same type dispatch logic as ArrayPush
+            let val_type = builder.func.dfg.value_type(val);
+            let is_string_val = match value.as_ref() {
+                Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
+                Expr::String(_) => true,
+                _ => false,
+            };
+
+            let (func_name, unshift_val) = if val_type == types::I64 && is_string_val {
+                // String value - NaN-box with STRING_TAG
+                let nanbox_func = extern_funcs.get("js_nanbox_string")
+                    .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                let nanbox_call = builder.ins().call(nanbox_ref, &[val]);
+                let tagged_val = builder.inst_results(nanbox_call)[0];
+                ("js_array_unshift_f64", tagged_val)
+            } else if val_type == types::I64 {
+                // Non-string pointer (object, array, etc.) - use jsvalue unshift
+                ("js_array_unshift_jsvalue", val)
+            } else {
+                let is_pointer_expr = matches!(value.as_ref(),
+                    Expr::Object(_) | Expr::Array(_) | Expr::ArraySpread(_) |
+                    Expr::New { .. } | Expr::MapNew | Expr::SetNew |
+                    Expr::JsonParse(_) | Expr::Closure { .. });
+                if is_pointer_expr {
+                    let val_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), val);
+                    ("js_array_unshift_jsvalue", val_i64)
+                } else {
+                    ("js_array_unshift_f64", val)
+                }
+            };
+
+            let func = extern_funcs.get(func_name)
+                .ok_or_else(|| anyhow!("{} not declared", func_name))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
-            let call = builder.ins().call(func_ref, &[arr_ptr, val]);
+            let call = builder.ins().call(func_ref, &[arr_ptr, unshift_val]);
             let new_arr_ptr = builder.inst_results(call)[0];
 
             // Update the local variable with the new pointer
@@ -22118,11 +22446,11 @@ fn compile_expr(
                             let rhs_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, right, this_ctx)?;
 
                             // Convert to string pointer if needed
-                            let rhs_ptr = if is_string_operand(right, locals) {
-                                // String operand - check if already a raw i64 pointer
-                                let rhs_type = builder.func.dfg.value_type(rhs_val);
+                            let rhs_type = builder.func.dfg.value_type(rhs_val);
+                            let rhs_ptr = if is_string_operand(right, locals) || rhs_type == types::I64 {
+                                // String operand or already a raw i64 pointer (e.g., from function call returning string)
                                 if rhs_type == types::I64 {
-                                    // Already a raw pointer (e.g., from string parameter)
+                                    // Already a raw pointer
                                     rhs_val
                                 } else {
                                     // f64 (NaN-boxed) - extract raw pointer (inline, no FFI)
@@ -25548,7 +25876,9 @@ fn compile_expr(
                                                 .ok_or_else(|| anyhow!("js_set_has not declared"))?;
                                             let func_ref = module.declare_func_in_func(*has_func, builder.func);
                                             let call = builder.ins().call(func_ref, &[set_ptr, value]);
-                                            return Ok(builder.inst_results(call)[0]);
+                                            let result_i32 = builder.inst_results(call)[0];
+                                            // Convert i32 boolean to NaN-boxed f64 boolean
+                                            return Ok(builder.ins().fcvt_from_sint(types::F64, result_i32));
                                         }
                                     }
                                     "delete" => {
@@ -25559,7 +25889,9 @@ fn compile_expr(
                                                 .ok_or_else(|| anyhow!("js_set_delete not declared"))?;
                                             let func_ref = module.declare_func_in_func(*delete_func, builder.func);
                                             let call = builder.ins().call(func_ref, &[set_ptr, value]);
-                                            return Ok(builder.inst_results(call)[0]);
+                                            let result_i32 = builder.inst_results(call)[0];
+                                            // Convert i32 boolean to NaN-boxed f64 boolean
+                                            return Ok(builder.ins().fcvt_from_sint(types::F64, result_i32));
                                         }
                                     }
                                     "clear" => {
@@ -32667,6 +32999,42 @@ fn compile_expr(
                 // State methods (with object)
                 ("perry/ui", true, "value") => "perry_ui_state_get",
                 ("perry/ui", true, "set") => "perry_ui_state_set",
+                ("perry/ui", true, "onChange") => "perry_ui_state_on_change",
+                // New widget constructors
+                ("perry/ui", false, "SecureField") => "perry_ui_securefield_create",
+                ("perry/ui", false, "ProgressView") => "perry_ui_progressview_create",
+                ("perry/ui", false, "Image") => "perry_ui_image_create_symbol",
+                ("perry/ui", false, "ImageFile") => "perry_ui_image_create_file",
+                ("perry/ui", false, "Picker") => "perry_ui_picker_create",
+                ("perry/ui", false, "Form") => "perry_ui_form_create",
+                ("perry/ui", false, "Section") => "perry_ui_section_create",
+                ("perry/ui", false, "NavigationStack") => "perry_ui_navstack_create",
+                ("perry/ui", false, "ZStack") => "perry_ui_zstack_create",
+                // Widget instance methods
+                ("perry/ui", true, "setValue") => "perry_ui_progressview_set_value",
+                ("perry/ui", true, "setSize") => "perry_ui_image_set_size",
+                ("perry/ui", true, "setTint") => "perry_ui_image_set_tint",
+                ("perry/ui", true, "addItem") => "perry_ui_picker_add_item",
+                ("perry/ui", true, "setSelected") => "perry_ui_picker_set_selected",
+                ("perry/ui", true, "getSelected") => "perry_ui_picker_get_selected",
+                ("perry/ui", true, "push") => "perry_ui_navstack_push",
+                ("perry/ui", true, "pop") => "perry_ui_navstack_pop",
+                ("perry/ui", true, "setEnabled") => "perry_ui_widget_set_enabled",
+                ("perry/ui", true, "setTooltip") => "perry_ui_widget_set_tooltip",
+                ("perry/ui", true, "setControlSize") => "perry_ui_widget_set_control_size",
+                ("perry/ui", true, "setOnHover") => "perry_ui_widget_set_on_hover",
+                ("perry/ui", true, "setOnDoubleClick") => "perry_ui_widget_set_on_double_click",
+                ("perry/ui", true, "animateOpacity") => "perry_ui_widget_animate_opacity",
+                ("perry/ui", true, "animatePosition") => "perry_ui_widget_animate_position",
+                ("perry/ui", true, "setFontFamily") => "perry_ui_text_set_font_family",
+
+                // ========================================================================
+                // Perry System APIs (perry/system module)
+                // ========================================================================
+                ("perry/system", false, "openURL") => "perry_system_open_url",
+                ("perry/system", false, "isDarkMode") => "perry_system_is_dark_mode",
+                ("perry/system", false, "preferencesSet") => "perry_system_preferences_set",
+                ("perry/system", false, "preferencesGet") => "perry_system_preferences_get",
 
                 // ========================================================================
                 // Perry Plugin System
@@ -32907,6 +33275,7 @@ fn compile_expr(
                           native_module == "async_hooks" ||
                           native_module == "worker_threads" ||
                           native_module == "perry/ui" ||
+                          native_module == "perry/system" ||
                           native_module == "perry/plugin" {
                     // These modules return NaN-boxed pointers, extract the raw pointer
                     let obj_f64 = ensure_f64(builder, obj_val);
@@ -33471,8 +33840,73 @@ fn compile_expr(
                                 call_args.push(ensure_f64(builder, arg_vals[0]));
                             }
                         }
-                        "value" => {
-                            // State.get() - no additional args
+                        "value" | "pop" | "getSelected" => {
+                            // No additional args - just the handle
+                        }
+                        "onChange" | "setOnHover" | "setOnDoubleClick" => {
+                            // Callback arg (f64 NaN-boxed closure)
+                            if !arg_vals.is_empty() {
+                                call_args.push(ensure_f64(builder, arg_vals[0]));
+                            }
+                        }
+                        "setValue" => {
+                            // ProgressView.setValue(value) - f64
+                            if !arg_vals.is_empty() {
+                                call_args.push(ensure_f64(builder, arg_vals[0]));
+                            }
+                        }
+                        "setSize" | "animateOpacity" => {
+                            // Image.setSize(width, height) / animateOpacity(target, duration) - 2 f64
+                            if arg_vals.len() >= 2 {
+                                call_args.push(ensure_f64(builder, arg_vals[0]));
+                                call_args.push(ensure_f64(builder, arg_vals[1]));
+                            }
+                        }
+                        "setTint" => {
+                            // Image.setTint(r, g, b, a) - 4 f64
+                            for i in 0..4.min(arg_vals.len()) {
+                                call_args.push(ensure_f64(builder, arg_vals[i]));
+                            }
+                        }
+                        "animatePosition" => {
+                            // widget.animatePosition(dx, dy, duration) - 3 f64
+                            for i in 0..3.min(arg_vals.len()) {
+                                call_args.push(ensure_f64(builder, arg_vals[i]));
+                            }
+                        }
+                        "setEnabled" | "setControlSize" | "setSelected" => {
+                            // i64 arg (convert from f64 if needed)
+                            if !arg_vals.is_empty() {
+                                call_args.push(ensure_i64(builder, arg_vals[0]));
+                            }
+                        }
+                        "setTooltip" | "addItem" | "setFontFamily" => {
+                            // String arg methods - extract raw string pointer
+                            if !arg_vals.is_empty() {
+                                let str_f64 = ensure_f64(builder, arg_vals[0]);
+                                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                let str_call = builder.ins().call(get_str_ref, &[str_f64]);
+                                call_args.push(builder.inst_results(str_call)[0]);
+                            }
+                        }
+                        "push" => {
+                            // NavStack.push(title, body) - title is string, body is widget handle
+                            if arg_vals.len() >= 2 {
+                                let str_f64 = ensure_f64(builder, arg_vals[0]);
+                                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                let str_call = builder.ins().call(get_str_ref, &[str_f64]);
+                                call_args.push(builder.inst_results(str_call)[0]);
+                                let body_f64 = ensure_f64(builder, arg_vals[1]);
+                                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                    .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                                let ptr_call = builder.ins().call(get_ptr_ref, &[body_f64]);
+                                call_args.push(builder.inst_results(ptr_call)[0]);
+                            }
                         }
                         _ => {}
                     }
@@ -33951,6 +34385,96 @@ fn compile_expr(
                                 vec![builder.ins().f64const(0.0)]
                             }
                         }
+                        "SecureField" => {
+                            // SecureField(placeholder, onChange)
+                            let mut args = Vec::new();
+                            if !arg_vals.is_empty() {
+                                let str_f64 = ensure_f64(builder, arg_vals[0]);
+                                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                let call = builder.ins().call(get_str_ref, &[str_f64]);
+                                args.push(builder.inst_results(call)[0]);
+                            } else {
+                                args.push(builder.ins().iconst(types::I64, 0));
+                            }
+                            if arg_vals.len() >= 2 {
+                                args.push(ensure_f64(builder, arg_vals[1]));
+                            } else {
+                                args.push(builder.ins().f64const(0.0));
+                            }
+                            args
+                        }
+                        "Image" | "ImageFile" => {
+                            // Image(name) / ImageFile(path) - string arg
+                            let mut args = Vec::new();
+                            if !arg_vals.is_empty() {
+                                let str_f64 = ensure_f64(builder, arg_vals[0]);
+                                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                let call = builder.ins().call(get_str_ref, &[str_f64]);
+                                args.push(builder.inst_results(call)[0]);
+                            }
+                            args
+                        }
+                        "Picker" => {
+                            // Picker(label, onChange, style)
+                            let mut args = Vec::new();
+                            if !arg_vals.is_empty() {
+                                let str_f64 = ensure_f64(builder, arg_vals[0]);
+                                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                let call = builder.ins().call(get_str_ref, &[str_f64]);
+                                args.push(builder.inst_results(call)[0]);
+                            }
+                            if arg_vals.len() >= 2 {
+                                args.push(ensure_f64(builder, arg_vals[1]));
+                            } else {
+                                args.push(builder.ins().f64const(0.0));
+                            }
+                            if arg_vals.len() >= 3 {
+                                args.push(ensure_i64(builder, arg_vals[2]));
+                            } else {
+                                args.push(builder.ins().iconst(types::I64, 0));
+                            }
+                            args
+                        }
+                        "Section" => {
+                            // Section(title)
+                            let mut args = Vec::new();
+                            if !arg_vals.is_empty() {
+                                let str_f64 = ensure_f64(builder, arg_vals[0]);
+                                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                let call = builder.ins().call(get_str_ref, &[str_f64]);
+                                args.push(builder.inst_results(call)[0]);
+                            }
+                            args
+                        }
+                        "NavigationStack" => {
+                            // NavigationStack(title, body)
+                            let mut args = Vec::new();
+                            if !arg_vals.is_empty() {
+                                let str_f64 = ensure_f64(builder, arg_vals[0]);
+                                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                let call = builder.ins().call(get_str_ref, &[str_f64]);
+                                args.push(builder.inst_results(call)[0]);
+                            }
+                            if arg_vals.len() >= 2 {
+                                let body_f64 = ensure_f64(builder, arg_vals[1]);
+                                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                    .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                                let ptr_call = builder.ins().call(get_ptr_ref, &[body_f64]);
+                                args.push(builder.inst_results(ptr_call)[0]);
+                            }
+                            args
+                        }
                         _ => {
                             // Convert any i64 arguments to f64 by NaN-boxing
                             arg_vals.iter().map(|&val| {
@@ -33961,6 +34485,40 @@ fn compile_expr(
                                 }
                             }).collect()
                         }
+                    }
+                } else if native_module == "perry/system" {
+                    match method.as_str() {
+                        "openURL" | "preferencesGet" => {
+                            // String arg - extract raw pointer
+                            let mut args = Vec::new();
+                            if !arg_vals.is_empty() {
+                                let str_f64 = ensure_f64(builder, arg_vals[0]);
+                                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                let call = builder.ins().call(get_str_ref, &[str_f64]);
+                                args.push(builder.inst_results(call)[0]);
+                            }
+                            args
+                        }
+                        "preferencesSet" => {
+                            // preferencesSet(key, value) - key is string, value is f64
+                            let mut args = Vec::new();
+                            if !arg_vals.is_empty() {
+                                let str_f64 = ensure_f64(builder, arg_vals[0]);
+                                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                let call = builder.ins().call(get_str_ref, &[str_f64]);
+                                args.push(builder.inst_results(call)[0]);
+                            }
+                            if arg_vals.len() >= 2 {
+                                args.push(ensure_f64(builder, arg_vals[1]));
+                            }
+                            args
+                        }
+                        "isDarkMode" => vec![],
+                        _ => arg_vals.clone()
                     }
                 } else {
                     // Default: convert any i64 arguments to f64 by NaN-boxing
@@ -34115,10 +34673,17 @@ fn compile_expr(
                     match method.as_str() {
                         // State.get returns f64 value directly
                         "value" => Ok(result),
-                        // State.set returns void
-                        "set" => {
+                        // Void methods
+                        "set" | "setValue" | "setSize" | "setTint" | "addItem" |
+                        "setSelected" | "push" | "pop" | "setEnabled" | "setTooltip" |
+                        "setControlSize" | "setOnHover" | "setOnDoubleClick" |
+                        "animateOpacity" | "animatePosition" | "onChange" | "setFontFamily" => {
                             const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                             Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)))
+                        }
+                        // getSelected returns i64 - convert to f64
+                        "getSelected" => {
+                            Ok(builder.ins().fcvt_from_sint(types::F64, result))
                         }
                         // Widget constructors and State.create return i64 handles - NaN-box with POINTER_TAG
                         _ => {
@@ -34127,6 +34692,23 @@ fn compile_expr(
                             let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
                             let call = builder.ins().call(nanbox_ref, &[result]);
                             Ok(builder.inst_results(call)[0])
+                        }
+                    }
+                } else if native_module == "perry/system" {
+                    // perry/system result handling
+                    match method.as_str() {
+                        "isDarkMode" => {
+                            // Returns i64, convert to f64
+                            Ok(builder.ins().fcvt_from_sint(types::F64, result))
+                        }
+                        "preferencesGet" => {
+                            // Returns f64 directly (number value from UserDefaults)
+                            Ok(result)
+                        }
+                        _ => {
+                            // Void functions (openURL, preferencesSet) - return undefined
+                            const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                            Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)))
                         }
                     }
                 } else {
