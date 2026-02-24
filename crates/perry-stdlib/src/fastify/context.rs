@@ -498,7 +498,10 @@ unsafe fn jsvalue_to_json_string(value: f64) -> String {
 
     // For objects/arrays, use JSON.stringify
     if jsv.is_pointer() {
-        let str_ptr = crate::framework::json::js_json_stringify(value, 0);
+        extern "C" {
+            fn js_json_stringify(value: f64, type_hint: u32) -> *mut perry_runtime::StringHeader;
+        }
+        let str_ptr = js_json_stringify(value, 0);
         if !str_ptr.is_null() {
             if let Some(s) = string_from_header(str_ptr) {
                 return s;

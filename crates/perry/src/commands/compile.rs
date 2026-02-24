@@ -45,6 +45,12 @@ pub struct CompileArgs {
     /// Output type: executable (default) or dylib (shared library plugin)
     #[arg(long, default_value = "executable")]
     pub output_type: String,
+
+    /// Bundle TypeScript extensions from directory.
+    /// Scans subdirectories for package.json with openclaw.extensions entries
+    /// and compiles them into the binary as static plugins.
+    #[arg(long)]
+    pub bundle_extensions: Option<PathBuf>,
 }
 
 /// Information about a JavaScript module that will be interpreted at runtime
@@ -73,6 +79,8 @@ pub struct CompilationContext {
     pub needs_ui: bool,
     /// Whether perry/plugin module is imported (needs -rdynamic for symbol export)
     pub needs_plugins: bool,
+    /// Whether perry-stdlib is needed (heavy native modules like fastify, mysql2, etc.)
+    pub needs_stdlib: bool,
     /// Project root (where we start looking for node_modules)
     pub project_root: PathBuf,
 }
@@ -86,6 +94,7 @@ impl CompilationContext {
             needs_js_runtime: false,
             needs_ui: false,
             needs_plugins: false,
+            needs_stdlib: false,
             project_root,
         }
     }
@@ -473,6 +482,70 @@ fn resolve_import(
     None
 }
 
+/// Discover extension entry points from a directory of plugins.
+/// Each subdirectory is checked for a package.json with an `openclaw.extensions` array.
+/// Returns Vec<(entry_path, plugin_id)> — e.g., ("extensions/telegram/index.ts", "telegram").
+fn discover_extension_entries(dir: &Path) -> Result<Vec<(PathBuf, String)>> {
+    let mut entries = Vec::new();
+
+    if !dir.is_dir() {
+        return Err(anyhow!("--bundle-extensions path is not a directory: {}", dir.display()));
+    }
+
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let subdir = entry.path();
+        if !subdir.is_dir() {
+            continue;
+        }
+
+        let plugin_id = subdir.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        let pkg_json_path = subdir.join("package.json");
+        if pkg_json_path.exists() {
+            // Read package.json and look for openclaw.extensions
+            let pkg_contents = fs::read_to_string(&pkg_json_path)
+                .map_err(|e| anyhow!("Failed to read {}: {}", pkg_json_path.display(), e))?;
+            let pkg: serde_json::Value = serde_json::from_str(&pkg_contents)
+                .map_err(|e| anyhow!("Failed to parse {}: {}", pkg_json_path.display(), e))?;
+
+            let extensions = pkg.get("openclaw")
+                .and_then(|oc| oc.get("extensions"))
+                .and_then(|ext| ext.as_array());
+
+            if let Some(ext_array) = extensions {
+                for ext_entry in ext_array {
+                    if let Some(rel_path) = ext_entry.as_str() {
+                        let entry_path = subdir.join(rel_path.trim_start_matches("./"));
+                        if entry_path.exists() {
+                            entries.push((entry_path, plugin_id.clone()));
+                        }
+                    }
+                }
+            } else {
+                // Fallback: look for index.ts
+                let index_path = subdir.join("index.ts");
+                if index_path.exists() {
+                    entries.push((index_path, plugin_id));
+                }
+            }
+        } else {
+            // No package.json — try index.ts directly
+            let index_path = subdir.join("index.ts");
+            if index_path.exists() {
+                entries.push((index_path, plugin_id));
+            }
+        }
+    }
+
+    // Sort for deterministic ordering
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(entries)
+}
+
 /// Compute a sanitized module prefix from a resolved path for scoped cross-module symbols
 fn compute_module_prefix(resolved_path: &str, project_root: &Path) -> String {
     let source_path = PathBuf::from(resolved_path);
@@ -577,6 +650,9 @@ fn collect_modules(
             if import.source == "perry/plugin" {
                 ctx.needs_plugins = true;
             }
+            if perry_hir::requires_stdlib(&import.source) {
+                ctx.needs_stdlib = true;
+            }
             continue;
         }
 
@@ -655,6 +731,24 @@ fn collect_modules(
         }
     }
 
+    // Detect ioredis usage (detected by class name, not import path)
+    if !ctx.needs_stdlib {
+        for (_, module_name, _) in &hir_module.exported_native_instances {
+            if module_name == "ioredis" {
+                ctx.needs_stdlib = true;
+                break;
+            }
+        }
+        if !ctx.needs_stdlib {
+            for (_, module_name, _) in &hir_module.exported_func_return_native_instances {
+                if module_name == "ioredis" {
+                    ctx.needs_stdlib = true;
+                    break;
+                }
+            }
+        }
+    }
+
     ctx.native_modules.insert(canonical, hir_module);
     Ok(())
 }
@@ -703,6 +797,25 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     let mut next_class_id: perry_hir::ClassId = 1; // Start at 1, 0 is reserved for "no parent"
 
     collect_modules(&args.input, &mut ctx, &mut visited, args.enable_js_runtime, format, &mut next_class_id)?;
+
+    // Bundle extensions if --bundle-extensions specified
+    let mut bundled_extensions: Vec<(PathBuf, String)> = Vec::new();
+    if let Some(ext_dir) = &args.bundle_extensions {
+        let ext_entries = discover_extension_entries(ext_dir)?;
+        match format {
+            OutputFormat::Text => println!("Bundling {} extension(s)...", ext_entries.len()),
+            OutputFormat::Json => {}
+        }
+        for (entry_path, plugin_id) in &ext_entries {
+            match format {
+                OutputFormat::Text => println!("  Extension: {} ({})", plugin_id, entry_path.display()),
+                OutputFormat::Json => {}
+            }
+            collect_modules(entry_path, &mut ctx, &mut visited,
+                           args.enable_js_runtime, format, &mut next_class_id)?;
+            bundled_extensions.push((entry_path.canonicalize()?, plugin_id.clone()));
+        }
+    }
 
     // Recompute project_root as the common ancestor of all module paths.
     // The initial project_root is the parent of the entry file, but modules may be in sibling
@@ -1314,7 +1427,24 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             for module_name in &non_entry_module_names {
                 compiler.add_native_module_init(module_name.clone());
             }
+
+            // Register bundled extensions for static plugin registration in init
+            if !bundled_extensions.is_empty() {
+                for (ext_path, _plugin_id) in &bundled_extensions {
+                    let ext_prefix = compute_module_prefix(
+                        &ext_path.to_string_lossy(),
+                        &ctx.project_root,
+                    );
+                    compiler.add_bundled_extension(
+                        ext_path.to_string_lossy().to_string(),
+                        ext_prefix,
+                    );
+                }
+            }
         }
+
+        // Tell codegen whether stdlib functions are available
+        compiler.set_needs_stdlib(ctx.needs_stdlib);
 
         // If we need JS runtime, tell the compiler to generate init code
         if ctx.needs_js_runtime {
@@ -1500,7 +1630,9 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         };
         let mut all_scan_paths: Vec<PathBuf> = obj_paths.clone();
         if let Some(ref p) = runtime_lib_path { all_scan_paths.push(p.clone()); }
-        if let Some(ref p) = stdlib_lib_path { all_scan_paths.push(p.clone()); }
+        if ctx.needs_stdlib {
+            if let Some(ref p) = stdlib_lib_path { all_scan_paths.push(p.clone()); }
+        }
         if let Some(ref p) = jsruntime_lib_path { all_scan_paths.push(p.clone()); }
         for scan_path in &all_scan_paths {
             if let Ok(output) = std::process::Command::new("nm").arg("-g").arg(scan_path).output() {
@@ -1593,7 +1725,13 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     }
 
     match format {
-        OutputFormat::Text => println!("Linking..."),
+        OutputFormat::Text => {
+            if ctx.needs_stdlib {
+                println!("Linking (with stdlib)...");
+            } else {
+                println!("Linking (runtime-only)...");
+            }
+        }
         OutputFormat::Json => {}
     }
 
@@ -1730,6 +1868,17 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         cmd.arg(obj_path);
     }
 
+    // Dead code stripping — remove unused functions from the linked binary
+    if !is_windows {
+        if is_ios || is_android || is_linux {
+            // ELF targets
+            cmd.arg("-Wl,--gc-sections");
+        } else {
+            // macOS
+            cmd.arg("-Wl,-dead_strip");
+        }
+    }
+
     // Link libraries - avoid duplicates by linking only one library with runtime symbols.
     // jsruntime now includes stdlib, which includes runtime.
     // So we only need to link ONE of: jsruntime, stdlib, or runtime.
@@ -1740,9 +1889,15 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     if !skip_runtime {
         if let Some(ref jsruntime) = jsruntime_lib {
             cmd.arg(jsruntime);
-        } else if let Some(ref stdlib) = stdlib_lib {
-            cmd.arg(stdlib);
+        } else if ctx.needs_stdlib {
+            if let Some(ref stdlib) = stdlib_lib {
+                cmd.arg(stdlib);
+            } else {
+                eprintln!("Warning: stdlib required but libperry_stdlib.a not found, using runtime-only");
+                cmd.arg(&runtime_lib);
+            }
         } else {
+            // Runtime-only linking — no stdlib needed
             cmd.arg(&runtime_lib);
         }
     }
@@ -1789,7 +1944,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
            .arg("-lpthread")
            .arg("-ldl");
 
-        if stdlib_lib.is_some() || jsruntime_lib.is_some() {
+        if ctx.needs_stdlib || jsruntime_lib.is_some() {
             cmd.arg("-lssl")
                .arg("-lcrypto");
         }
@@ -1830,7 +1985,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                .arg("-lpthread")
                .arg("-ldl");
 
-            if stdlib_lib.is_some() || jsruntime_lib.is_some() {
+            if ctx.needs_stdlib || jsruntime_lib.is_some() {
                 cmd.arg("-lssl")
                    .arg("-lcrypto");
             }
@@ -1989,6 +2144,19 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 });
                 println!("{}", serde_json::to_string(&result)?);
             }
+        }
+    }
+
+    // Strip debug symbols from the final binary (reduces size significantly)
+    if !is_dylib && !is_ios {
+        let _ = std::process::Command::new("strip").arg(&exe_path).status();
+    }
+
+    // Print binary size
+    if let OutputFormat::Text = format {
+        if let Ok(meta) = fs::metadata(&exe_path) {
+            let size_mb = meta.len() as f64 / 1_048_576.0;
+            println!("Binary size: {:.1}MB", size_mb);
         }
     }
 

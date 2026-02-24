@@ -1,10 +1,11 @@
 use objc2::rc::Retained;
-use objc2::runtime::{AnyClass, AnyObject};
-use objc2::{define_class, msg_send, ClassType, DefinedClass, MainThreadOnly};
+use objc2::runtime::{AnyClass, AnyObject, Sel};
+use objc2::{define_class, msg_send, AnyThread, ClassType, DefinedClass, MainThreadOnly};
 use objc2_foundation::{MainThreadMarker, NSObject, NSString};
 use objc2_ui_kit::{UIView, UIViewController, UIWindow};
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::CStr;
 
 use crate::widgets;

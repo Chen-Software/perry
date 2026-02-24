@@ -64,6 +64,23 @@ pub fn is_native_module(path: &str) -> bool {
     NATIVE_MODULES.contains(&normalized)
 }
 
+/// Modules that are handled by perry-runtime alone (no stdlib needed).
+/// These are Node.js builtins and perry-specific modules implemented in the runtime crate.
+const RUNTIME_ONLY_MODULES: &[&str] = &[
+    "fs", "path", "os", "buffer", "child_process", "net", "stream", "url", "util",
+    "perry/ui",
+];
+
+/// Check if a native module import requires linking perry-stdlib.
+/// Returns false for modules that are handled entirely by perry-runtime.
+pub fn requires_stdlib(module: &str) -> bool {
+    let normalized = module.strip_prefix("node:").unwrap_or(module);
+    if !is_native_module(normalized) {
+        return false;
+    }
+    !RUNTIME_ONLY_MODULES.contains(&normalized)
+}
+
 /// The kind of module being imported, determining how it's executed
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModuleKind {
@@ -1063,6 +1080,11 @@ pub enum Expr {
     /// isFinite(value) -> boolean
     /// Check if value is finite
     IsFinite(Box<Expr>),
+
+    /// perryResolveStaticPlugin(path) -> value
+    /// Look up a pre-compiled plugin by source path in the static plugin registry.
+    /// Returns the plugin's default export or undefined if not found.
+    StaticPluginResolve(Box<Expr>),
 
     // V8 JavaScript Runtime interop
     // These expressions are used for modules loaded via the V8 interpreter

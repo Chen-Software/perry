@@ -5030,6 +5030,13 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                     return Err(anyhow!("isFinite requires one argument"));
                                 }
                             }
+                            "perryResolveStaticPlugin" => {
+                                if args.len() >= 1 {
+                                    return Ok(Expr::StaticPluginResolve(Box::new(args.remove(0))));
+                                } else {
+                                    return Err(anyhow!("perryResolveStaticPlugin requires one argument"));
+                                }
+                            }
                             "fetch" => {
                                 // Handle fetch(url) and fetch(url, options)
                                 // Extract URL (first argument)
@@ -8482,6 +8489,9 @@ fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>) {
         Expr::IsFinite(value) => {
             collect_local_refs_expr(value, refs);
         }
+        Expr::StaticPluginResolve(value) => {
+            collect_local_refs_expr(value, refs);
+        }
         // JS runtime expressions
         Expr::JsLoadModule { .. } => {}
         Expr::JsGetExport { module_handle, .. } => {
@@ -9184,6 +9194,9 @@ fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<LocalId>) {
             collect_assigned_locals_expr(value, assigned);
         }
         Expr::IsFinite(value) => {
+            collect_assigned_locals_expr(value, assigned);
+        }
+        Expr::StaticPluginResolve(value) => {
             collect_assigned_locals_expr(value, assigned);
         }
         // JS runtime expressions

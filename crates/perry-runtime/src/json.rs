@@ -1,10 +1,8 @@
-//! JSON handling — provides js_json_stringify_with_replacer
+//! JSON handling — JSON.parse(), JSON.stringify(), and specialized variants
 //!
-//! Most JSON functions (parse, stringify, etc.) are in perry-stdlib/src/framework/json.rs.
-//! This module only provides the replacer variant and its helper functions.
-
-#[allow(dead_code)]
-const _: () = ();
+//! Provides all core JSON functions used by compiled TypeScript programs.
+//! These live in perry-runtime (not perry-stdlib) so that programs that
+//! only use JSON don't need to link the full stdlib.
 
 use crate::{
     js_array_alloc, js_array_push, js_object_alloc, js_object_set_field,
@@ -292,8 +290,12 @@ impl<'a> DirectParser<'a> {
 
 // ─── JSON.parse ───────────────────────────────────────────────────────────────
 
-// Note: js_json_parse is provided by perry-stdlib. This version is used only internally.
-unsafe fn js_json_parse_internal(text_ptr: *const StringHeader) -> JSValue {
+/// JSON.parse(text) -> any
+///
+/// Uses a direct recursive-descent parser that constructs Perry JSValues
+/// without any intermediate representation.
+#[no_mangle]
+pub unsafe extern "C" fn js_json_parse(text_ptr: *const StringHeader) -> JSValue {
     if text_ptr.is_null() {
         return JSValue::null();
     }
@@ -369,8 +371,6 @@ unsafe fn write_number(buf: &mut String, value: f64) {
         use std::fmt::Write;
         let _ = write!(buf, "{}", value as i64);
     } else {
-        use std::fmt::Write;
-        // Format like JS: use enough precision to roundtrip
         let s = format!("{}", value);
         buf.push_str(&s);
     }
@@ -594,12 +594,153 @@ unsafe fn estimate_json_size(value: f64, type_hint: u32) -> usize {
     4096
 }
 
-// Note: the #[no_mangle] extern version is in perry-stdlib. This is the internal implementation.
-unsafe fn js_json_stringify(value: f64, type_hint: u32) -> *mut StringHeader {
+/// Generic JSON.stringify that handles any JSValue
+/// Takes a f64 (NaN-boxed JSValue) and a type_hint (0=unknown, 1=object, 2=array)
+/// Returns a string pointer
+#[no_mangle]
+pub unsafe extern "C" fn js_json_stringify(value: f64, type_hint: u32) -> *mut StringHeader {
     let estimated = estimate_json_size(value, type_hint);
     let mut buf = String::with_capacity(estimated);
     stringify_value(value, type_hint, &mut buf);
     js_string_from_bytes(buf.as_ptr(), buf.len() as u32)
+}
+
+// ─── Specialized stringify functions ──────────────────────────────────────────
+
+#[no_mangle]
+pub unsafe extern "C" fn js_json_stringify_string(
+    str_ptr: *const StringHeader,
+) -> *mut StringHeader {
+    let s = match str_from_header(str_ptr) {
+        Some(s) => s,
+        None => return std::ptr::null_mut(),
+    };
+    let mut buf = String::with_capacity(s.len() + 16);
+    write_escaped_string(&mut buf, s);
+    js_string_from_bytes(buf.as_ptr(), buf.len() as u32)
+}
+
+/// Stringify a number
+#[no_mangle]
+pub unsafe extern "C" fn js_json_stringify_number(value: f64) -> *mut StringHeader {
+    if value.is_nan() || value.is_infinite() {
+        return js_string_from_bytes(b"null".as_ptr(), 4);
+    }
+    if value.fract() == 0.0 && value.abs() < (i64::MAX as f64) {
+        let mut itoa_buf = itoa::Buffer::new();
+        let s = itoa_buf.format(value as i64);
+        return js_string_from_bytes(s.as_ptr(), s.len() as u32);
+    }
+    let mut ryu_buf = ryu::Buffer::new();
+    let s = ryu_buf.format(value);
+    js_string_from_bytes(s.as_ptr(), s.len() as u32)
+}
+
+/// Stringify a boolean
+#[no_mangle]
+pub unsafe extern "C" fn js_json_stringify_bool(value: bool) -> *mut StringHeader {
+    let s = if value { "true" } else { "false" };
+    js_string_from_bytes(s.as_ptr(), s.len() as u32)
+}
+
+/// Stringify null
+#[no_mangle]
+pub unsafe extern "C" fn js_json_stringify_null() -> *mut StringHeader {
+    js_string_from_bytes(b"null".as_ptr(), 4)
+}
+
+/// Check if a string is valid JSON
+#[no_mangle]
+pub unsafe extern "C" fn js_json_is_valid(text_ptr: *const StringHeader) -> bool {
+    if text_ptr.is_null() {
+        return false;
+    }
+    let len = (*text_ptr).length as usize;
+    let data_ptr = (text_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+    let bytes = std::slice::from_raw_parts(data_ptr, len);
+    serde_json::from_slice::<serde_json::Value>(bytes).is_ok()
+}
+
+// ─── Utility functions ────────────────────────────────────────────────────────
+
+/// Legacy wrapper that allocates a String from a StringHeader
+unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
+    str_from_header(ptr).map(|s| s.to_string())
+}
+
+/// Get a value from parsed JSON by key (for object access)
+#[no_mangle]
+pub unsafe extern "C" fn js_json_get_string(
+    json_ptr: *const StringHeader,
+    key_ptr: *const StringHeader,
+) -> *mut StringHeader {
+    let json_str = match string_from_header(json_ptr) {
+        Some(j) => j,
+        None => return std::ptr::null_mut(),
+    };
+    let key = match string_from_header(key_ptr) {
+        Some(k) => k,
+        None => return std::ptr::null_mut(),
+    };
+    match serde_json::from_str::<serde_json::Value>(&json_str) {
+        Ok(serde_json::Value::Object(obj)) => {
+            if let Some(serde_json::Value::String(s)) = obj.get(&key) {
+                return js_string_from_bytes(s.as_ptr(), s.len() as u32);
+            }
+        }
+        _ => {}
+    }
+    std::ptr::null_mut()
+}
+
+/// Get a number from parsed JSON by key
+#[no_mangle]
+pub unsafe extern "C" fn js_json_get_number(
+    json_ptr: *const StringHeader,
+    key_ptr: *const StringHeader,
+) -> f64 {
+    let json_str = match string_from_header(json_ptr) {
+        Some(j) => j,
+        None => return f64::NAN,
+    };
+    let key = match string_from_header(key_ptr) {
+        Some(k) => k,
+        None => return f64::NAN,
+    };
+    match serde_json::from_str::<serde_json::Value>(&json_str) {
+        Ok(serde_json::Value::Object(obj)) => {
+            if let Some(serde_json::Value::Number(n)) = obj.get(&key) {
+                return n.as_f64().unwrap_or(f64::NAN);
+            }
+        }
+        _ => {}
+    }
+    f64::NAN
+}
+
+/// Get a boolean from parsed JSON by key
+#[no_mangle]
+pub unsafe extern "C" fn js_json_get_bool(
+    json_ptr: *const StringHeader,
+    key_ptr: *const StringHeader,
+) -> bool {
+    let json_str = match string_from_header(json_ptr) {
+        Some(j) => j,
+        None => return false,
+    };
+    let key = match string_from_header(key_ptr) {
+        Some(k) => k,
+        None => return false,
+    };
+    match serde_json::from_str::<serde_json::Value>(&json_str) {
+        Ok(serde_json::Value::Object(obj)) => {
+            if let Some(serde_json::Value::Bool(b)) = obj.get(&key) {
+                return *b;
+            }
+        }
+        _ => {}
+    }
+    false
 }
 
 // ─── JSON.stringify with replacer ────────────────────────────────────────────
@@ -1003,6 +1144,3 @@ pub unsafe extern "C" fn js_json_stringify_with_replacer(
     js_string_from_bytes(buf.as_ptr(), buf.len() as u32)
 }
 
-// Note: js_json_stringify_string, js_json_stringify_number, js_json_stringify_bool,
-// js_json_stringify_null, js_json_is_valid are all provided by perry-stdlib/src/framework/json.rs.
-// Only js_json_stringify_with_replacer (above) is unique to this module.

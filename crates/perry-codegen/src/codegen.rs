@@ -559,6 +559,8 @@ pub struct Compiler {
     func_union_params: BTreeMap<u32, Vec<bool>>,
     /// Whether the JS runtime is needed for this module
     needs_js_runtime: bool,
+    /// Whether perry-stdlib is needed (controls stdlib function declarations)
+    needs_stdlib: bool,
     /// Whether dotenv/config was imported (needs auto-init call)
     needs_dotenv_init: bool,
     /// Whether this is the entry module (should generate main)
@@ -602,6 +604,8 @@ pub struct Compiler {
     static_field_runtime_inits: Vec<(cranelift_module::DataId, Expr)>,
     /// Output type: "executable" (default) or "dylib" (shared library plugin)
     output_type: String,
+    /// Bundled extensions: (canonical_source_path, module_prefix) for static plugin registration
+    bundled_extensions: Vec<(String, String)>,
 }
 
 impl Compiler {
@@ -692,6 +696,7 @@ impl Compiler {
             func_rest_param_index: BTreeMap::new(),
             func_union_params: BTreeMap::new(),
             needs_js_runtime: false,
+            needs_stdlib: true,  // Default to true for backwards compatibility
             needs_dotenv_init: false,
             is_entry_module: true,  // Default to true for single-module compilation
             native_module_inits: Vec::new(),
@@ -709,12 +714,18 @@ impl Compiler {
             namespace_imports: std::collections::BTreeSet::new(),
             static_field_runtime_inits: Vec::new(),
             output_type: "executable".to_string(),
+            bundled_extensions: Vec::new(),
         })
     }
 
     /// Set whether the JS runtime is needed for this module
     pub fn set_needs_js_runtime(&mut self, needs: bool) {
         self.needs_js_runtime = needs;
+    }
+
+    /// Set whether perry-stdlib is needed
+    pub fn set_needs_stdlib(&mut self, needs: bool) {
+        self.needs_stdlib = needs;
     }
 
     /// Set whether this is the entry module (generates main function)
@@ -738,6 +749,13 @@ impl Compiler {
     /// Add a JavaScript module that should be loaded at runtime
     pub fn add_js_module(&mut self, specifier: String) {
         self.js_modules.push(specifier);
+    }
+
+    /// Register a bundled extension for static plugin registration in the entry module init.
+    /// `source_path` is the canonical absolute path to the extension entry file.
+    /// `module_prefix` is the sanitized module prefix for resolving the extension's default export.
+    pub fn add_bundled_extension(&mut self, source_path: String, module_prefix: String) {
+        self.bundled_extensions.push((source_path, module_prefix));
     }
 
     /// Register an imported function's parameter count.
@@ -6132,7 +6150,7 @@ impl Compiler {
         }
 
         // js_stdlib_process_pending() -> i32 (number of resolutions processed)
-        {
+        if self.needs_stdlib {
             let mut sig = self.module.make_signature();
             sig.returns.push(AbiParam::new(types::I32));
             let func_id = self.module.declare_function(
@@ -6144,7 +6162,7 @@ impl Compiler {
         }
 
         // js_stdlib_init_dispatch() - registers handle method dispatch for native modules
-        {
+        if self.needs_stdlib {
             let sig = self.module.make_signature();
             let func_id = self.module.declare_function(
                 "js_stdlib_init_dispatch",
@@ -11172,6 +11190,24 @@ impl Compiler {
             self.extern_funcs.insert("js_gc_init".to_string(), func_id);
         }
 
+        // perry_register_static_plugin(path: *StringHeader, value: f64) -> void
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_register_static_plugin", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_register_static_plugin".to_string(), func_id);
+        }
+
+        // perry_resolve_static_plugin(path: *StringHeader) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_resolve_static_plugin", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_resolve_static_plugin".to_string(), func_id);
+        }
+
         Ok(())
     }
 
@@ -12746,7 +12782,7 @@ impl Compiler {
             }
             // Global functions
             Expr::ParseFloat(s) | Expr::NumberCoerce(s) | Expr::BigIntCoerce(s) | Expr::StringCoerce(s) |
-            Expr::IsNaN(s) | Expr::IsFinite(s) => {
+            Expr::IsNaN(s) | Expr::IsFinite(s) | Expr::StaticPluginResolve(s) => {
                 self.collect_closures_from_expr(s, closures, enclosing_class);
             }
             // Expressions with no inner expressions to traverse
@@ -14046,6 +14082,49 @@ impl Compiler {
                         builder.ins().call(init_func_ref, &[]);
                     }
                 }
+
+                // Register bundled extensions as static plugins.
+                // After all module inits have run, each extension's default export global
+                // is populated. We read it and register it in the runtime lookup table
+                // so perryResolveStaticPlugin() can find it by source path.
+                let bundled_extensions = std::mem::take(&mut self.bundled_extensions);
+                if !bundled_extensions.is_empty() {
+                    let register_func_id = *self.extern_funcs.get("perry_register_static_plugin")
+                        .expect("perry_register_static_plugin not declared");
+                    let register_func_ref = self.module.declare_func_in_func(register_func_id, builder.func);
+
+                    let string_alloc_id = *self.extern_funcs.get("js_string_from_bytes")
+                        .expect("js_string_from_bytes not declared");
+                    let string_alloc_ref = self.module.declare_func_in_func(string_alloc_id, builder.func);
+
+                    for (ext_source_path, ext_module_prefix) in &bundled_extensions {
+                        // Load the extension's default export from __export_<prefix>__default
+                        let export_global_name = format!("__export_{}__default", ext_module_prefix);
+                        let data_id = match self.module.declare_data(&export_global_name, Linkage::Import, true, false) {
+                            Ok(id) => id,
+                            Err(_) => continue,
+                        };
+                        let gv = self.module.declare_data_in_func(data_id, builder.func);
+                        let addr = builder.ins().global_value(types::I64, gv);
+                        let export_val = builder.ins().load(types::F64, MemFlags::new(), addr, 0);
+
+                        // Create string from the source path bytes
+                        let path_bytes = ext_source_path.as_bytes();
+                        let path_data_id = self.module.declare_anonymous_data(false, false)?;
+                        let mut path_data_desc = cranelift_module::DataDescription::new();
+                        path_data_desc.define(path_bytes.to_vec().into_boxed_slice());
+                        self.module.define_data(path_data_id, &path_data_desc)?;
+                        let path_data_val = self.module.declare_data_in_func(path_data_id, builder.func);
+                        let path_ptr = builder.ins().global_value(types::I64, path_data_val);
+                        let path_len = builder.ins().iconst(types::I32, path_bytes.len() as i64);
+                        let call_inst = builder.ins().call(string_alloc_ref, &[path_ptr, path_len]);
+                        let string_ptr = builder.inst_results(call_inst)[0];
+
+                        // Call perry_register_static_plugin(string_ptr, export_val)
+                        builder.ins().call(register_func_ref, &[string_ptr, export_val]);
+                    }
+                }
+                self.bundled_extensions = bundled_extensions;
             }
 
             // Auto-call dotenv.config() if dotenv/config was imported (side-effect import)
@@ -34639,6 +34718,25 @@ fn compile_expr(
                 .ok_or_else(|| anyhow!("js_is_finite not declared"))?;
             let isfinite_ref = module.declare_func_in_func(*isfinite_func, builder.func);
             let call = builder.ins().call(isfinite_ref, &[val_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+
+        // ============================================
+        // Static plugin resolution
+        // ============================================
+
+        Expr::StaticPluginResolve(path_expr) => {
+            // Compile the path argument (string)
+            let path_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, path_expr, this_ctx)?;
+
+            // Get raw string pointer (handle both I64 raw pointer and F64 NaN-boxed)
+            let str_ptr = get_raw_string_ptr(builder, path_val);
+
+            // Call perry_resolve_static_plugin(str_ptr) -> f64
+            let resolve_func = extern_funcs.get("perry_resolve_static_plugin")
+                .ok_or_else(|| anyhow!("perry_resolve_static_plugin not declared"))?;
+            let resolve_ref = module.declare_func_in_func(*resolve_func, builder.func);
+            let call = builder.ins().call(resolve_ref, &[str_ptr]);
             Ok(builder.inst_results(call)[0])
         }
 
