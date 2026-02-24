@@ -41,6 +41,10 @@ pub struct CompileArgs {
     /// Target platform: ios-simulator, ios, android (default: native host)
     #[arg(long)]
     pub target: Option<String>,
+
+    /// Output type: executable (default) or dylib (shared library plugin)
+    #[arg(long, default_value = "executable")]
+    pub output_type: String,
 }
 
 /// Information about a JavaScript module that will be interpreted at runtime
@@ -67,6 +71,8 @@ pub struct CompilationContext {
     pub needs_js_runtime: bool,
     /// Whether perry/ui module is imported (needs UI library linking)
     pub needs_ui: bool,
+    /// Whether perry/plugin module is imported (needs -rdynamic for symbol export)
+    pub needs_plugins: bool,
     /// Project root (where we start looking for node_modules)
     pub project_root: PathBuf,
 }
@@ -79,6 +85,7 @@ impl CompilationContext {
             import_map: BTreeMap::new(),
             needs_js_runtime: false,
             needs_ui: false,
+            needs_plugins: false,
             project_root,
         }
     }
@@ -566,6 +573,9 @@ fn collect_modules(
             import.module_kind = ModuleKind::NativeRust;
             if import.source == "perry/ui" {
                 ctx.needs_ui = true;
+            }
+            if import.source == "perry/plugin" {
+                ctx.needs_plugins = true;
             }
             continue;
         }
@@ -1296,6 +1306,9 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         let is_entry = path == &entry_path;
         compiler.set_is_entry_module(is_entry);
 
+        // Set output type for dylib support
+        compiler.set_output_type(args.output_type.clone());
+
         // For entry module, add init function calls for all other native modules
         if is_entry {
             for module_name in &non_entry_module_names {
@@ -1542,7 +1555,17 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("output");
-    let exe_path = args.output.unwrap_or_else(|| PathBuf::from(stem));
+    let is_dylib = args.output_type == "dylib";
+    let exe_path = args.output.unwrap_or_else(|| {
+        if is_dylib {
+            #[cfg(target_os = "macos")]
+            { PathBuf::from(format!("{}.dylib", stem)) }
+            #[cfg(not(target_os = "macos"))]
+            { PathBuf::from(format!("{}.so", stem)) }
+        } else {
+            PathBuf::from(stem)
+        }
+    });
 
     if !failed_modules.is_empty() {
         eprintln!("\n{} module(s) failed to compile:", failed_modules.len());
@@ -1578,6 +1601,48 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     let is_android = matches!(target.as_deref(), Some("android"));
     let is_linux = matches!(target.as_deref(), Some("linux"));
     let is_windows = matches!(target.as_deref(), Some("windows"));
+
+    // For dylib output, skip runtime/stdlib linking — symbols resolve from host at dlopen time
+    if is_dylib {
+        let mut cmd = if is_linux {
+            let mut c = Command::new("cc");
+            c.arg("-shared");
+            c
+        } else {
+            // macOS
+            let mut c = Command::new("cc");
+            c.arg("-dynamiclib")
+             .arg("-undefined").arg("dynamic_lookup");
+            c
+        };
+
+        for obj_path in &obj_paths {
+            cmd.arg(obj_path);
+        }
+
+        cmd.arg("-o").arg(&exe_path);
+
+        let status = cmd.status()?;
+        if !status.success() {
+            return Err(anyhow!("Linking dylib failed"));
+        }
+
+        match format {
+            OutputFormat::Text => println!("Wrote shared library: {}", exe_path.display()),
+            OutputFormat::Json => {
+                println!("{{\"output\": \"{}\"}}", exe_path.display());
+            }
+        }
+
+        // Clean up intermediate files
+        if !args.keep_intermediates {
+            for obj_path in &obj_paths {
+                let _ = fs::remove_file(obj_path);
+            }
+        }
+
+        return Ok(());
+    }
 
     let runtime_lib = find_runtime_library(target.as_deref())?;
     let stdlib_lib = find_stdlib_library(target.as_deref());
@@ -1690,6 +1755,18 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             .arg("-lc");
     }
 
+    // For plugin hosts, export symbols so dlopen'd plugins can resolve them
+    if ctx.needs_plugins && !is_windows {
+        #[cfg(target_os = "macos")]
+        {
+            cmd.arg("-Wl,-export_dynamic");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            cmd.arg("-rdynamic");
+        }
+        cmd.arg("-ldl"); // needed for dlopen/dlsym/dlclose
+    }
 
     if is_ios {
         // iOS frameworks
@@ -1797,6 +1874,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 #[cfg(target_os = "macos")]
                 {
                     cmd.arg("-framework").arg("AppKit");
+                    cmd.arg("-framework").arg("QuartzCore"); // CAGradientLayer, CALayer
                 }
             }
 

@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.148
+**Current Version:** 0.2.152
 
 ## Workflow Requirements
 
@@ -134,6 +134,28 @@ Declarative TypeScript compiles to AppKit/UIKit calls. 47 `perry_ui_*` FFI funct
 - `CGPoint`/`CGSize`/`CGRect` in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.151
+- Generic plugin system v2: hook priority (lower=first), 3 hook modes (filter/action/waterfall), ABI v2
+- Plugin metadata: `setMetadata(name, version, description)`, displayed on load and in `listPlugins()`
+- Event bus: `api.on(event, handler)` / `api.emit(event, data)` / `emitEvent(event, data)` for plugin communication
+- Tool invocation: `invokeTool(name, args)` calls plugin-registered tools from host
+- Introspection: `listPlugins()`, `listHooks()`, `listTools()` return arrays of registered items
+- Config system: `setConfig(key, value)` (host) / `api.getConfig(key)` (plugin)
+- Fix: `plugin_activate` now calls user's `activate(api)`, `plugin_deactivate` calls `deactivate()`
+
+### v0.2.150
+- Native plugin system: `--output-type dylib` compiles plugins to .dylib/.so shared libraries
+- Plugin runtime: `perry/plugin` module with PluginRegistry, dlopen/dlclose, hook dispatch, tool/service/route registration
+- Plugin entry points: `plugin_activate(api_handle)` / `plugin_deactivate()` / `perry_plugin_abi_version()` codegen
+- Host support: `loadPlugin()`, `discoverPlugins()`, `emitHook()` host-side functions, `-rdynamic` for symbol export
+
+### v0.2.149
+- `string.match()` support: add HIR lowering for `.match(regex)` calls, fix NaN-boxing of string elements in match result arrays
+- `regex.test()` verified end-to-end with inline and variable regex patterns
+- Object destructuring verified: shorthand, rename, defaults, rest patterns all working
+- Method chaining verified: `arr.filter().map()`, `arr.map().reduce()` work correctly
+- Utility type erasure verified: Partial, Pick, Record, Omit, ReturnType, Readonly all erased at compile time
 
 ### v0.2.148
 - `Array.from()` support: new `ArrayFrom` HIR node, `js_array_clone` + `js_set_to_array` runtime functions

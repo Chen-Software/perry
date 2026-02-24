@@ -36,9 +36,9 @@ fn str_from_header(ptr: *const u8) -> &'static str {
         return "";
     }
     unsafe {
-        let header = ptr as *const perry_runtime::string::StringHeader;
+        let header = ptr as *const crate::string_header::StringHeader;
         let len = (*header).length as usize;
-        let data = ptr.add(std::mem::size_of::<perry_runtime::string::StringHeader>());
+        let data = ptr.add(std::mem::size_of::<crate::string_header::StringHeader>());
         std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
     }
 }
@@ -313,4 +313,89 @@ fn flush_pending_shortcuts(mtm: MainThreadMarker) {
             install_keyboard_shortcut(shortcut.key_ptr, shortcut.modifiers, shortcut.callback, mtm);
         }
     });
+}
+
+// ============================================
+// Timer
+// ============================================
+
+thread_local! {
+    static TIMER_CALLBACKS: RefCell<HashMap<usize, f64>> = RefCell::new(HashMap::new());
+}
+
+extern "C" {
+    fn js_stdlib_process_pending();
+    fn js_promise_run_microtasks() -> i32;
+}
+
+pub struct PerryTimerTargetIvars {
+    callback_key: std::cell::Cell<usize>,
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "PerryTimerTarget"]
+    #[ivars = PerryTimerTargetIvars]
+    pub struct PerryTimerTarget;
+
+    impl PerryTimerTarget {
+        #[unsafe(method(timerFired:))]
+        fn timer_fired(&self, _sender: &AnyObject) {
+            // Drain resolved promises, then run microtasks (.then callbacks)
+            unsafe {
+                js_stdlib_process_pending();
+                js_promise_run_microtasks();
+            }
+
+            let key = self.ivars().callback_key.get();
+            let closure_f64 = TIMER_CALLBACKS.with(|cbs| {
+                cbs.borrow().get(&key).copied()
+            });
+            if let Some(closure_f64) = closure_f64 {
+                let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
+                unsafe {
+                    js_closure_call0(closure_ptr as *const u8);
+                }
+            }
+        }
+    }
+);
+
+impl PerryTimerTarget {
+    fn new() -> Retained<Self> {
+        let this = Self::alloc().set_ivars(PerryTimerTargetIvars {
+            callback_key: std::cell::Cell::new(0),
+        });
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// Set a recurring timer. interval_ms is in milliseconds.
+/// The timer calls js_stdlib_process_pending() then invokes the callback.
+pub fn set_timer(interval_ms: f64, callback: f64) {
+    let interval_secs = interval_ms / 1000.0;
+
+    unsafe {
+        let target = PerryTimerTarget::new();
+        let target_addr = Retained::as_ptr(&target) as usize;
+        target.ivars().callback_key.set(target_addr);
+
+        TIMER_CALLBACKS.with(|cbs| {
+            cbs.borrow_mut().insert(target_addr, callback);
+        });
+
+        // NSTimer.scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:
+        let sel = Sel::register(c"timerFired:");
+        let _: Retained<AnyObject> = msg_send![
+            objc2::class!(NSTimer),
+            scheduledTimerWithTimeInterval: interval_secs,
+            target: &*target,
+            selector: sel,
+            userInfo: std::ptr::null::<AnyObject>(),
+            repeats: true
+        ];
+
+        // Keep the target alive
+        std::mem::forget(target);
+    }
 }

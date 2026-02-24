@@ -9,6 +9,7 @@ use std::ptr;
 
 use crate::array::ArrayHeader;
 use crate::string::StringHeader;
+use crate::value::js_nanbox_string;
 
 /// Header for heap-allocated RegExp objects
 #[repr(C)]
@@ -139,9 +140,8 @@ pub extern "C" fn js_string_match(s: *const StringHeader, re: *const RegExpHeade
 
             for (i, m) in matches.iter().enumerate() {
                 let str_ptr = js_string_from_str(m);
-                let ptr_as_u64 = str_ptr as u64;
-                let ptr_as_f64 = f64::from_bits(ptr_as_u64);
-                std::ptr::write(elements_ptr.add(i), ptr_as_f64);
+                let nanboxed = js_nanbox_string(str_ptr as i64);
+                std::ptr::write(elements_ptr.add(i), nanboxed);
             }
 
             arr
@@ -157,12 +157,11 @@ pub extern "C" fn js_string_match(s: *const StringHeader, re: *const RegExpHeade
                     for (i, cap) in caps.iter().enumerate() {
                         if let Some(m) = cap {
                             let str_ptr = js_string_from_str(m.as_str());
-                            let ptr_as_u64 = str_ptr as u64;
-                            let ptr_as_f64 = f64::from_bits(ptr_as_u64);
-                            std::ptr::write(elements_ptr.add(i), ptr_as_f64);
+                            let nanboxed = js_nanbox_string(str_ptr as i64);
+                            std::ptr::write(elements_ptr.add(i), nanboxed);
                         } else {
-                            // Undefined capture group - store as 0 (null ptr as f64)
-                            std::ptr::write(elements_ptr.add(i), 0.0);
+                            // Undefined capture group - store as undefined (TAG_UNDEFINED = 0x7FFC_0000_0000_0001)
+                            std::ptr::write(elements_ptr.add(i), f64::from_bits(0x7FFC_0000_0000_0001));
                         }
                     }
 

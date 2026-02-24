@@ -37,6 +37,8 @@ pub mod child_process;
 pub mod net;
 #[cfg(feature = "full")]
 pub mod redis_client;
+#[cfg(feature = "full")]
+pub mod plugin;
 
 pub use value::JSValue;
 pub use promise::Promise;

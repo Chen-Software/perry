@@ -2,7 +2,7 @@
 
 **Date:** January 2026
 **Version:** Current development state
-**Test Status:** 59/59 tests passing
+**Test Status:** 62/62 tests passing
 
 ## Overview
 
@@ -172,16 +172,18 @@ Run `./run_tests.sh` to execute the full test suite.
 | JSON | ✅ Full | - | JSON.parse and JSON.stringify |
 | Math | ✅ Full | - | floor, ceil, round, abs, sqrt, pow, min, max, random |
 | Map/Set | ✅ Full | - | Map and Set collection types |
-| RegExp | ✅ Partial | - | string.replace() with regex patterns; regex.test() not yet supported |
+| RegExp | ✅ Full | - | string.replace(), regex.test(), string.match() (global and non-global) |
 
 ### Other
 
 | Feature | Status | Priority | Notes |
 |---------|--------|----------|-------|
-| Destructuring | ✅ Full | - | Array destructuring (let [a,b] = arr), including nested and rest patterns |
+| Destructuring | ✅ Full | - | Array and object destructuring (shorthand, rename, defaults, rest), including nested and rest patterns |
 | Spread operator | ✅ Full | - | [...arr, x] array spread syntax |
 | Optional chaining | ✅ Full | - | obj?.prop, obj?.[index] |
 | Nullish coalescing | ✅ Full | - | ?? operator |
+| Method chaining | ✅ Full | - | Array/string method chains (e.g. arr.filter().map(), str.toLowerCase()) |
+| Utility types | ✅ Full | - | Partial, Pick, Record, Omit, ReturnType, Readonly erased at compile time |
 | Decorators | ⚠️ Partial | - | @log method decorator (compile-time transformation) |
 
 ---
@@ -213,6 +215,9 @@ The following test files are available in `test-files/`:
 | test_date.ts | Date functions (Date.now, new Date, getTime, toISOString, getFullYear, etc.) |
 | test_bitwise.ts | Bitwise operators (&, |, ^, ~, <<, >>, >>>, and compound assignments) |
 | test_regex.ts | RegExp support (test(), string.match(), string.replace()) |
+| test_object_destructuring.ts | Object destructuring (shorthand, rename, defaults, rest) |
+| test_method_chaining.ts | Method chaining (arr.filter().map(), string chains) |
+| test_utility_types.ts | TypeScript utility type erasure (Partial, Pick, Record, Omit, etc.) |
 | test_rest_params.ts | Rest parameters (...args syntax) |
 | test_getters_setters.ts | Class getters and setters |
 | test_private_fields.ts | Private class fields (#field syntax) |

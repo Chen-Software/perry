@@ -8,7 +8,6 @@ crate-type = ["rlib", "staticlib"]
 
 [dependencies]
 perry-ui = { path = "../perry-ui" }
-perry-runtime = { path = "../perry-runtime" }
 libc = "0.2"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = [

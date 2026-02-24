@@ -1,7 +1,7 @@
 use objc2::rc::Retained;
 use objc2_app_kit::{NSTextField, NSView};
 use objc2_foundation::{NSString, MainThreadMarker};
-use perry_runtime::string::StringHeader;
+use crate::string_header::StringHeader;
 
 use super::register_widget;
 

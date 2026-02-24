@@ -150,6 +150,33 @@ struct LocalInfo {
     module_var_data_id: Option<cranelift_module::DataId>,
 }
 
+/// Resolve class_name from a type annotation by checking if the type refers to a known class
+fn resolve_class_name_from_type(ty: &perry_types::Type, classes: &BTreeMap<String, ClassMeta>) -> Option<String> {
+    match ty {
+        perry_types::Type::Named(name) => {
+            if classes.contains_key(name) {
+                Some(name.clone())
+            } else {
+                None
+            }
+        }
+        perry_types::Type::Union(types) => {
+            types.iter().find_map(|t| {
+                if let perry_types::Type::Named(name) = t {
+                    if classes.contains_key(name) {
+                        Some(name.clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+        }
+        _ => None,
+    }
+}
+
 /// Check if a block has been filled with a terminating instruction
 fn is_block_filled(builder: &FunctionBuilder, block: Block) -> bool {
     if let Some(inst) = builder.func.layout.last_inst(block) {
@@ -573,6 +600,8 @@ pub struct Compiler {
     /// Static fields that need runtime initialization (strings, expressions)
     /// Collected during compile_static_field, processed in compile_init
     static_field_runtime_inits: Vec<(cranelift_module::DataId, Expr)>,
+    /// Output type: "executable" (default) or "dylib" (shared library plugin)
+    output_type: String,
 }
 
 impl Compiler {
@@ -679,6 +708,7 @@ impl Compiler {
             pre_declared_import_wrappers: BTreeMap::new(),
             namespace_imports: std::collections::BTreeSet::new(),
             static_field_runtime_inits: Vec::new(),
+            output_type: "executable".to_string(),
         })
     }
 
@@ -690,6 +720,11 @@ impl Compiler {
     /// Set whether this is the entry module (generates main function)
     pub fn set_is_entry_module(&mut self, is_entry: bool) {
         self.is_entry_module = is_entry;
+    }
+
+    /// Set the output type ("executable" or "dylib")
+    pub fn set_output_type(&mut self, output_type: String) {
+        self.output_type = output_type;
     }
 
     /// Add a native module init function to call from main (for entry module)
@@ -1193,10 +1228,17 @@ impl Compiler {
                 let is_set_from_type = matches!(ty, HirType::Generic { base, .. } if base == "Set");
 
                 // Store the type info
+                let class_name = resolve_class_name_from_type(ty, &self.classes).or_else(|| {
+                    if let Some(Expr::New { class_name, .. }) = init {
+                        Some(class_name.clone())
+                    } else {
+                        None
+                    }
+                });
                 let info = LocalInfo {
                     var: Variable::new(0), // Will be overwritten in compile_function
                     name: Some(name.clone()),
-                    class_name: None,
+                    class_name,
                     type_args,
                     is_pointer: is_pointer || is_pointer_from_init,
                     is_array,
@@ -1498,7 +1540,7 @@ impl Compiler {
                     self.module_level_locals.insert(param.id, LocalInfo {
                         var: Variable::new(0),
                         name: Some(param.name.clone()),
-                        class_name: None,
+                        class_name: resolve_class_name_from_type(&param.ty, &self.classes),
                         type_args: Vec::new(),
                         is_pointer,
                         is_array,
@@ -1703,7 +1745,8 @@ impl Compiler {
             || !self.is_entry_module
             || !self.native_module_inits.is_empty()
             || self.needs_js_runtime
-            || self.needs_dotenv_init;
+            || self.needs_dotenv_init
+            || self.output_type == "dylib";
 
         if should_compile_init {
             self.compile_init(&hir.name, &hir.init, &hir.exported_native_instances, &hir.exported_objects, &hir.exported_functions)?;
@@ -1998,7 +2041,7 @@ impl Compiler {
                 locals.insert(param.id, LocalInfo {
                     var,
                     name: Some(param.name.clone()),
-                    class_name: None,
+                    class_name: resolve_class_name_from_type(&param.ty, &self.classes),
                     type_args: Vec::new(),
                     is_pointer,
                     is_array,
@@ -2439,7 +2482,7 @@ impl Compiler {
                 locals.insert(param.id, LocalInfo {
                     var,
                     name: Some(param.name.clone()),
-                    class_name: None,
+                    class_name: resolve_class_name_from_type(&param.ty, &self.classes),
                     type_args: Vec::new(),
                     is_pointer,
                     is_array,
@@ -2633,7 +2676,7 @@ impl Compiler {
                 locals.insert(param.id, LocalInfo {
                     var,
                     name: Some(param.name.clone()),
-                    class_name: None,
+                    class_name: resolve_class_name_from_type(&param.ty, &self.classes),
                     type_args: Vec::new(),
                     is_pointer,
                     is_array,
@@ -2864,7 +2907,7 @@ impl Compiler {
                 locals.insert(param.id, LocalInfo {
                     var,
                     name: Some(param.name.clone()),
-                    class_name: None,
+                    class_name: resolve_class_name_from_type(&param.ty, &self.classes),
                     type_args: Vec::new(),
                     is_pointer: false,  // NaN-boxed F64, not raw I64 pointer
                     is_array,
@@ -10596,6 +10639,356 @@ impl Compiler {
         }
 
         // ============================================
+        // Perry UI — Weather App Extensions
+        // ============================================
+
+        // perry_ui_app_set_timer(interval_ms: f64, callback: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // interval_ms
+            sig.params.push(AbiParam::new(types::F64)); // callback closure (NaN-boxed)
+            let func_id = self.module.declare_function("perry_ui_app_set_timer", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_app_set_timer".to_string(), func_id);
+        }
+
+        // perry_ui_widget_set_background_gradient(handle: i64, r1-a1, r2-a2, direction: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // widget handle
+            sig.params.push(AbiParam::new(types::F64)); // r1
+            sig.params.push(AbiParam::new(types::F64)); // g1
+            sig.params.push(AbiParam::new(types::F64)); // b1
+            sig.params.push(AbiParam::new(types::F64)); // a1
+            sig.params.push(AbiParam::new(types::F64)); // r2
+            sig.params.push(AbiParam::new(types::F64)); // g2
+            sig.params.push(AbiParam::new(types::F64)); // b2
+            sig.params.push(AbiParam::new(types::F64)); // a2
+            sig.params.push(AbiParam::new(types::F64)); // direction (0=vertical, 1=horizontal)
+            let func_id = self.module.declare_function("perry_ui_widget_set_background_gradient", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_widget_set_background_gradient".to_string(), func_id);
+        }
+
+        // perry_ui_widget_set_background_color(handle: i64, r: f64, g: f64, b: f64, a: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // widget handle
+            sig.params.push(AbiParam::new(types::F64)); // r
+            sig.params.push(AbiParam::new(types::F64)); // g
+            sig.params.push(AbiParam::new(types::F64)); // b
+            sig.params.push(AbiParam::new(types::F64)); // a
+            let func_id = self.module.declare_function("perry_ui_widget_set_background_color", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_widget_set_background_color".to_string(), func_id);
+        }
+
+        // perry_ui_widget_set_corner_radius(handle: i64, radius: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // widget handle
+            sig.params.push(AbiParam::new(types::F64)); // radius
+            let func_id = self.module.declare_function("perry_ui_widget_set_corner_radius", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_widget_set_corner_radius".to_string(), func_id);
+        }
+
+        // perry_ui_canvas_create(width: f64, height: f64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // width
+            sig.params.push(AbiParam::new(types::F64)); // height
+            sig.returns.push(AbiParam::new(types::I64)); // widget handle
+            let func_id = self.module.declare_function("perry_ui_canvas_create", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_canvas_create".to_string(), func_id);
+        }
+
+        // perry_ui_canvas_clear(handle: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // canvas handle
+            let func_id = self.module.declare_function("perry_ui_canvas_clear", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_canvas_clear".to_string(), func_id);
+        }
+
+        // perry_ui_canvas_begin_path(handle: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // canvas handle
+            let func_id = self.module.declare_function("perry_ui_canvas_begin_path", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_canvas_begin_path".to_string(), func_id);
+        }
+
+        // perry_ui_canvas_move_to(handle: i64, x: f64, y: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // canvas handle
+            sig.params.push(AbiParam::new(types::F64)); // x
+            sig.params.push(AbiParam::new(types::F64)); // y
+            let func_id = self.module.declare_function("perry_ui_canvas_move_to", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_canvas_move_to".to_string(), func_id);
+        }
+
+        // perry_ui_canvas_line_to(handle: i64, x: f64, y: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // canvas handle
+            sig.params.push(AbiParam::new(types::F64)); // x
+            sig.params.push(AbiParam::new(types::F64)); // y
+            let func_id = self.module.declare_function("perry_ui_canvas_line_to", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_canvas_line_to".to_string(), func_id);
+        }
+
+        // perry_ui_canvas_stroke(handle: i64, r: f64, g: f64, b: f64, a: f64, lineWidth: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // canvas handle
+            sig.params.push(AbiParam::new(types::F64)); // r
+            sig.params.push(AbiParam::new(types::F64)); // g
+            sig.params.push(AbiParam::new(types::F64)); // b
+            sig.params.push(AbiParam::new(types::F64)); // a
+            sig.params.push(AbiParam::new(types::F64)); // lineWidth
+            let func_id = self.module.declare_function("perry_ui_canvas_stroke", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_canvas_stroke".to_string(), func_id);
+        }
+
+        // perry_ui_canvas_fill_gradient(handle: i64, r1-a1, r2-a2, direction: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // canvas handle
+            sig.params.push(AbiParam::new(types::F64)); // r1
+            sig.params.push(AbiParam::new(types::F64)); // g1
+            sig.params.push(AbiParam::new(types::F64)); // b1
+            sig.params.push(AbiParam::new(types::F64)); // a1
+            sig.params.push(AbiParam::new(types::F64)); // r2
+            sig.params.push(AbiParam::new(types::F64)); // g2
+            sig.params.push(AbiParam::new(types::F64)); // b2
+            sig.params.push(AbiParam::new(types::F64)); // a2
+            sig.params.push(AbiParam::new(types::F64)); // direction
+            let func_id = self.module.declare_function("perry_ui_canvas_fill_gradient", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_canvas_fill_gradient".to_string(), func_id);
+        }
+
+        // ============================================
+        // Perry Plugin System FFI functions
+        // ============================================
+
+        // perry_plugin_register_hook(api_handle: i64, hook_name: f64, handler: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // api handle
+            sig.params.push(AbiParam::new(types::F64)); // hook name (NaN-boxed string)
+            sig.params.push(AbiParam::new(types::F64)); // handler closure (NaN-boxed)
+            sig.returns.push(AbiParam::new(types::F64)); // undefined
+            let func_id = self.module.declare_function("perry_plugin_register_hook", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_plugin_register_hook".to_string(), func_id);
+        }
+
+        // perry_plugin_register_tool(api_handle: i64, name: f64, desc: f64, handler: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // api handle
+            sig.params.push(AbiParam::new(types::F64)); // tool name
+            sig.params.push(AbiParam::new(types::F64)); // description
+            sig.params.push(AbiParam::new(types::F64)); // handler closure
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_plugin_register_tool", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_plugin_register_tool".to_string(), func_id);
+        }
+
+        // perry_plugin_register_service(api_handle: i64, name: f64, start_fn: f64, stop_fn: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // api handle
+            sig.params.push(AbiParam::new(types::F64)); // service name
+            sig.params.push(AbiParam::new(types::F64)); // start function
+            sig.params.push(AbiParam::new(types::F64)); // stop function
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_plugin_register_service", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_plugin_register_service".to_string(), func_id);
+        }
+
+        // perry_plugin_register_route(api_handle: i64, path: f64, handler: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // api handle
+            sig.params.push(AbiParam::new(types::F64)); // route path
+            sig.params.push(AbiParam::new(types::F64)); // handler closure
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_plugin_register_route", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_plugin_register_route".to_string(), func_id);
+        }
+
+        // perry_plugin_get_config(api_handle: i64, key: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // api handle
+            sig.params.push(AbiParam::new(types::F64)); // config key
+            sig.returns.push(AbiParam::new(types::F64)); // config value
+            let func_id = self.module.declare_function("perry_plugin_get_config", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_plugin_get_config".to_string(), func_id);
+        }
+
+        // perry_plugin_log(api_handle: i64, level: i64, message: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // api handle
+            sig.params.push(AbiParam::new(types::I64)); // log level
+            sig.params.push(AbiParam::new(types::F64)); // message
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_plugin_log", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_plugin_log".to_string(), func_id);
+        }
+
+        // perry_plugin_load(path: f64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // path (NaN-boxed string)
+            sig.returns.push(AbiParam::new(types::I64)); // plugin id
+            let func_id = self.module.declare_function("perry_plugin_load", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_plugin_load".to_string(), func_id);
+        }
+
+        // perry_plugin_unload(plugin_id: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // plugin id
+            let func_id = self.module.declare_function("perry_plugin_unload", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_plugin_unload".to_string(), func_id);
+        }
+
+        // perry_plugin_emit_hook(hook_name: f64, context: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // hook name
+            sig.params.push(AbiParam::new(types::F64)); // context
+            sig.returns.push(AbiParam::new(types::F64)); // result
+            let func_id = self.module.declare_function("perry_plugin_emit_hook", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_plugin_emit_hook".to_string(), func_id);
+        }
+
+        // perry_plugin_discover(dir_path: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // directory path
+            sig.returns.push(AbiParam::new(types::F64)); // array of paths (NaN-boxed)
+            let func_id = self.module.declare_function("perry_plugin_discover", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_plugin_discover".to_string(), func_id);
+        }
+
+        // perry_plugin_init()
+        {
+            let sig = self.module.make_signature();
+            let func_id = self.module.declare_function("perry_plugin_init", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_plugin_init".to_string(), func_id);
+        }
+
+        // perry_plugin_count() -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_plugin_count", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_plugin_count".to_string(), func_id);
+        }
+
+        // perry_plugin_register_hook_ex(api_handle: i64, hook_name: f64, handler: f64, priority: i64, mode: i64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // api handle
+            sig.params.push(AbiParam::new(types::F64)); // hook name
+            sig.params.push(AbiParam::new(types::F64)); // handler closure
+            sig.params.push(AbiParam::new(types::I64)); // priority
+            sig.params.push(AbiParam::new(types::I64)); // mode
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_plugin_register_hook_ex", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_plugin_register_hook_ex".to_string(), func_id);
+        }
+
+        // perry_plugin_set_metadata(api_handle: i64, name: f64, version: f64, description: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // api handle
+            sig.params.push(AbiParam::new(types::F64)); // name
+            sig.params.push(AbiParam::new(types::F64)); // version
+            sig.params.push(AbiParam::new(types::F64)); // description
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_plugin_set_metadata", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_plugin_set_metadata".to_string(), func_id);
+        }
+
+        // perry_plugin_on(api_handle: i64, event: f64, handler: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // api handle
+            sig.params.push(AbiParam::new(types::F64)); // event name
+            sig.params.push(AbiParam::new(types::F64)); // handler closure
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_plugin_on", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_plugin_on".to_string(), func_id);
+        }
+
+        // perry_plugin_emit(api_handle: i64, event: f64, data: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // api handle
+            sig.params.push(AbiParam::new(types::F64)); // event name
+            sig.params.push(AbiParam::new(types::F64)); // data
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_plugin_emit", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_plugin_emit".to_string(), func_id);
+        }
+
+        // perry_plugin_emit_event(event: f64, data: f64) -> f64 (host-side)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // event name
+            sig.params.push(AbiParam::new(types::F64)); // data
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_plugin_emit_event", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_plugin_emit_event".to_string(), func_id);
+        }
+
+        // perry_plugin_invoke_tool(name: f64, args: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // tool name
+            sig.params.push(AbiParam::new(types::F64)); // args
+            sig.returns.push(AbiParam::new(types::F64)); // result
+            let func_id = self.module.declare_function("perry_plugin_invoke_tool", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_plugin_invoke_tool".to_string(), func_id);
+        }
+
+        // perry_plugin_set_config(key: f64, value: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // key
+            sig.params.push(AbiParam::new(types::F64)); // value
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_plugin_set_config", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_plugin_set_config".to_string(), func_id);
+        }
+
+        // perry_plugin_list_plugins() -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::F64)); // array of plugin objects
+            let func_id = self.module.declare_function("perry_plugin_list_plugins", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_plugin_list_plugins".to_string(), func_id);
+        }
+
+        // perry_plugin_list_hooks() -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::F64)); // array of hook name strings
+            let func_id = self.module.declare_function("perry_plugin_list_hooks", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_plugin_list_hooks".to_string(), func_id);
+        }
+
+        // perry_plugin_list_tools() -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::F64)); // array of tool objects
+            let func_id = self.module.declare_function("perry_plugin_list_tools", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_plugin_list_tools".to_string(), func_id);
+        }
+
+        // ============================================
         // V8 JavaScript Runtime FFI functions
         // ============================================
 
@@ -11010,7 +11403,7 @@ impl Compiler {
                 locals.insert(param.id, LocalInfo {
                     var,
                     name: Some(param.name.clone()),
-                    class_name: None,
+                    class_name: resolve_class_name_from_type(&param.ty, &self.classes),
                     type_args: Vec::new(),
                     is_pointer,
                     is_array,
@@ -12875,7 +13268,7 @@ impl Compiler {
                 locals.insert(param.id, LocalInfo {
                     var,
                     name: Some(param.name.clone()),
-                    class_name: None,
+                    class_name: resolve_class_name_from_type(&param.ty, &self.classes),
                     type_args: Vec::new(),
                     is_pointer: is_pointer && !is_union_type,
                     is_array,
@@ -13523,11 +13916,22 @@ impl Compiler {
     }
 
     fn compile_init(&mut self, module_name: &str, stmts: &[Stmt], exported_native_instances: &[(String, String, String)], exported_objects: &[String], exported_functions: &[(String, u32)]) -> Result<()> {
+        let is_dylib = self.output_type == "dylib";
+
         // Create main function for init statements (entry module) or module init function (non-entry)
         let mut sig = self.module.make_signature();
-        sig.returns.push(AbiParam::new(types::I32)); // returns i32
+        if is_dylib && self.is_entry_module {
+            // plugin_activate(api_handle: i64) -> i64
+            sig.params.push(AbiParam::new(types::I64)); // api_handle
+            sig.returns.push(AbiParam::new(types::I64)); // success (1) or failure (0)
+        } else {
+            sig.returns.push(AbiParam::new(types::I32)); // returns i32
+        }
 
-        let func_id = if self.is_entry_module {
+        let func_id = if self.is_entry_module && is_dylib {
+            // Dylib: generate "plugin_activate" as the entry point
+            self.module.declare_function("plugin_activate", Linkage::Export, &sig)?
+        } else if self.is_entry_module {
             // Entry module: generate "main"
             match self.module.declare_function("main", Linkage::Export, &sig) {
                 Ok(id) => id,
@@ -13603,12 +14007,16 @@ impl Compiler {
             let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut init_func_ctx);
 
             let entry_block = builder.create_block();
+            if is_dylib && self.is_entry_module {
+                // plugin_activate receives api_handle parameter
+                builder.append_block_params_for_function_params(entry_block);
+            }
             builder.switch_to_block(entry_block);
             builder.seal_block(entry_block);
 
-            // Initialize handle method dispatch (must be before any module inits)
-            // This allows js_native_call_method to handle Fastify/ioredis handles
-            if self.is_entry_module {
+            // For dylib plugins, skip GC/dispatch init — the host handles those.
+            // For executables, initialize handle method dispatch and GC.
+            if self.is_entry_module && !is_dylib {
                 if let Some(init_dispatch_id) = self.extern_funcs.get("js_stdlib_init_dispatch") {
                     let init_dispatch_ref = self.module.declare_func_in_func(*init_dispatch_id, builder.func);
                     builder.ins().call(init_dispatch_ref, &[]);
@@ -13817,18 +14225,66 @@ impl Compiler {
                 }
             }
 
-            // Return 0 from main (if not already terminated)
-            let current_block = builder.current_block().unwrap();
-            if !is_block_filled(&builder, current_block) {
-                let zero = builder.ins().iconst(types::I32, 0);
-                builder.ins().return_(&[zero]);
+            // For dylib plugins, call the user's exported activate(api) function
+            // Use direct func_ids (not wrappers, which have an extra closure_ptr param)
+            if is_dylib && self.is_entry_module {
+                let current_block = builder.current_block().unwrap();
+                if !is_block_filled(&builder, current_block) {
+                    // Find the "activate" function's direct (non-wrapper) Cranelift func ID
+                    let activate_func_id = exported_functions.iter()
+                        .find(|(name, _)| name == "activate")
+                        .and_then(|(_, hir_id)| self.func_ids.get(hir_id).copied());
+                    if let Some(func_id) = activate_func_id {
+                        let api_handle = builder.block_params(entry_block)[0]; // i64
+                        // NaN-box api_handle with POINTER_TAG: 0x7FFD << 48 | (handle & 0x0000_FFFF_FFFF_FFFF)
+                        let tag = builder.ins().iconst(types::I64, 0x7FFD_0000_0000_0000u64 as i64);
+                        let mask = builder.ins().iconst(types::I64, 0x0000_FFFF_FFFF_FFFFu64 as i64);
+                        let masked = builder.ins().band(api_handle, mask);
+                        let nanboxed = builder.ins().bor(tag, masked);
+                        // Check the activate function's parameter type and pass accordingly
+                        let activate_ref = self.module.declare_func_in_func(func_id, builder.func);
+                        let sig = builder.func.dfg.ext_funcs[activate_ref].signature;
+                        let param_type = builder.func.dfg.signatures[sig].params[0].value_type;
+                        let arg = if param_type == types::F64 {
+                            builder.ins().bitcast(types::F64, MemFlags::new(), nanboxed)
+                        } else {
+                            nanboxed // i64
+                        };
+                        builder.ins().call(activate_ref, &[arg]);
+                    }
+                }
             }
 
-            let fn_name = if self.is_entry_module { "main" } else { module_name };
+            // Return from init function (if not already terminated)
+            let current_block = builder.current_block().unwrap();
+            if !is_block_filled(&builder, current_block) {
+                if is_dylib && self.is_entry_module {
+                    // plugin_activate returns 1 (success) as i64
+                    let one = builder.ins().iconst(types::I64, 1);
+                    builder.ins().return_(&[one]);
+                } else {
+                    let zero = builder.ins().iconst(types::I32, 0);
+                    builder.ins().return_(&[zero]);
+                }
+            }
+
+            let fn_name = if self.is_entry_module && is_dylib {
+                "plugin_activate"
+            } else if self.is_entry_module {
+                "main"
+            } else {
+                module_name
+            };
             builder.finalize();
         }
 
-        let func_name = if self.is_entry_module { "main" } else { module_name };
+        let func_name = if self.is_entry_module && is_dylib {
+            "plugin_activate"
+        } else if self.is_entry_module {
+            "main"
+        } else {
+            module_name
+        };
         if let Err(e) = self.module.define_function(func_id, &mut self.ctx) {
             eprintln!("=== VERIFIER ERROR in init/main '{}' ===", func_name);
             eprintln!("Error: {}", e);
@@ -13839,6 +14295,52 @@ impl Compiler {
             return Err(anyhow!("Error compiling init/main '{}': {}", func_name, e));
         }
         self.module.clear_context(&mut self.ctx);
+
+        // For dylib entry module, also generate plugin_deactivate and perry_plugin_abi_version
+        if is_dylib && self.is_entry_module {
+            // Generate plugin_deactivate() -> void
+            // Calls the user's deactivate() function if exported, then returns
+            {
+                let sig = self.module.make_signature();
+                let deactivate_id = self.module.declare_function("plugin_deactivate", Linkage::Export, &sig)?;
+                self.ctx.func.signature = sig;
+                let mut deactivate_ctx = FunctionBuilderContext::new();
+                let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut deactivate_ctx);
+                let block = builder.create_block();
+                builder.switch_to_block(block);
+                builder.seal_block(block);
+                // Call user's deactivate() if exported (use direct func, not wrapper)
+                let deactivate_func_id = exported_functions.iter()
+                    .find(|(name, _)| name == "deactivate")
+                    .and_then(|(_, hir_id)| self.func_ids.get(hir_id).copied());
+                if let Some(func_id) = deactivate_func_id {
+                    let deactivate_ref = self.module.declare_func_in_func(func_id, builder.func);
+                    builder.ins().call(deactivate_ref, &[]);
+                }
+                builder.ins().return_(&[]);
+                builder.finalize();
+                self.module.define_function(deactivate_id, &mut self.ctx)?;
+                self.module.clear_context(&mut self.ctx);
+            }
+
+            // Generate perry_plugin_abi_version() -> u64
+            {
+                let mut sig = self.module.make_signature();
+                sig.returns.push(AbiParam::new(types::I64));
+                let version_id = self.module.declare_function("perry_plugin_abi_version", Linkage::Export, &sig)?;
+                self.ctx.func.signature = sig;
+                let mut version_ctx = FunctionBuilderContext::new();
+                let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut version_ctx);
+                let block = builder.create_block();
+                builder.switch_to_block(block);
+                builder.seal_block(block);
+                let version = builder.ins().iconst(types::I64, 2); // ABI version 2
+                builder.ins().return_(&[version]);
+                builder.finalize();
+                self.module.define_function(version_id, &mut self.ctx)?;
+                self.module.clear_context(&mut self.ctx);
+            }
+        }
 
         Ok(())
     }
@@ -31303,6 +31805,185 @@ fn compile_expr(
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
                     }
+                    "appSetTimer" => {
+                        // (interval_ms, callback) — both passed as raw f64
+                        let interval = ensure_f64(builder, arg_vals[0]);
+                        let callback = ensure_f64(builder, arg_vals[1]);
+
+                        let func = extern_funcs.get("perry_ui_app_set_timer")
+                            .ok_or_else(|| anyhow!("perry_ui_app_set_timer not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[interval, callback]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "widgetSetBackgroundGradient" => {
+                        // (handle, r1, g1, b1, a1, r2, g2, b2, a2, direction)
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let handle_f64 = ensure_f64(builder, arg_vals[0]);
+                        let ptr_call = builder.ins().call(get_ptr_ref, &[handle_f64]);
+                        let handle = builder.inst_results(ptr_call)[0];
+
+                        let r1 = ensure_f64(builder, arg_vals[1]);
+                        let g1 = ensure_f64(builder, arg_vals[2]);
+                        let b1 = ensure_f64(builder, arg_vals[3]);
+                        let a1 = ensure_f64(builder, arg_vals[4]);
+                        let r2 = ensure_f64(builder, arg_vals[5]);
+                        let g2 = ensure_f64(builder, arg_vals[6]);
+                        let b2 = ensure_f64(builder, arg_vals[7]);
+                        let a2 = ensure_f64(builder, arg_vals[8]);
+                        let direction = ensure_f64(builder, arg_vals[9]);
+
+                        let func = extern_funcs.get("perry_ui_widget_set_background_gradient")
+                            .ok_or_else(|| anyhow!("perry_ui_widget_set_background_gradient not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[handle, r1, g1, b1, a1, r2, g2, b2, a2, direction]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "widgetSetBackgroundColor" => {
+                        // (handle, r, g, b, a) — extract handle, pass 4 f64 args
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let handle_f64 = ensure_f64(builder, arg_vals[0]);
+                        let ptr_call = builder.ins().call(get_ptr_ref, &[handle_f64]);
+                        let handle = builder.inst_results(ptr_call)[0];
+
+                        let r = ensure_f64(builder, arg_vals[1]);
+                        let g = ensure_f64(builder, arg_vals[2]);
+                        let b = ensure_f64(builder, arg_vals[3]);
+                        let a = ensure_f64(builder, arg_vals[4]);
+
+                        let func = extern_funcs.get("perry_ui_widget_set_background_color")
+                            .ok_or_else(|| anyhow!("perry_ui_widget_set_background_color not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[handle, r, g, b, a]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "widgetSetCornerRadius" => {
+                        // (handle, radius)
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let handle_f64 = ensure_f64(builder, arg_vals[0]);
+                        let ptr_call = builder.ins().call(get_ptr_ref, &[handle_f64]);
+                        let handle = builder.inst_results(ptr_call)[0];
+
+                        let radius = ensure_f64(builder, arg_vals[1]);
+                        let func = extern_funcs.get("perry_ui_widget_set_corner_radius")
+                            .ok_or_else(|| anyhow!("perry_ui_widget_set_corner_radius not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[handle, radius]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "Canvas" => {
+                        // Canvas(width, height) -> handle
+                        let w = ensure_f64(builder, arg_vals[0]);
+                        let h = ensure_f64(builder, arg_vals[1]);
+
+                        let func = extern_funcs.get("perry_ui_canvas_create")
+                            .ok_or_else(|| anyhow!("perry_ui_canvas_create not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        let call = builder.ins().call(func_ref, &[w, h]);
+                        let handle_i64 = builder.inst_results(call)[0];
+
+                        // NaN-box the handle
+                        return Ok(inline_nanbox_pointer(builder, handle_i64));
+                    }
+                    "canvasClear" | "canvasBeginPath" => {
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let handle_f64 = ensure_f64(builder, arg_vals[0]);
+                        let ptr_call = builder.ins().call(get_ptr_ref, &[handle_f64]);
+                        let handle = builder.inst_results(ptr_call)[0];
+
+                        let ffi_name = match method.as_str() {
+                            "canvasClear" => "perry_ui_canvas_clear",
+                            "canvasBeginPath" => "perry_ui_canvas_begin_path",
+                            _ => unreachable!(),
+                        };
+                        let func = extern_funcs.get(ffi_name)
+                            .ok_or_else(|| anyhow!("{} not declared", ffi_name))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[handle]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "canvasMoveTo" | "canvasLineTo" => {
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let handle_f64 = ensure_f64(builder, arg_vals[0]);
+                        let ptr_call = builder.ins().call(get_ptr_ref, &[handle_f64]);
+                        let handle = builder.inst_results(ptr_call)[0];
+
+                        let x = ensure_f64(builder, arg_vals[1]);
+                        let y = ensure_f64(builder, arg_vals[2]);
+
+                        let ffi_name = match method.as_str() {
+                            "canvasMoveTo" => "perry_ui_canvas_move_to",
+                            "canvasLineTo" => "perry_ui_canvas_line_to",
+                            _ => unreachable!(),
+                        };
+                        let func = extern_funcs.get(ffi_name)
+                            .ok_or_else(|| anyhow!("{} not declared", ffi_name))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[handle, x, y]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "canvasStroke" => {
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let handle_f64 = ensure_f64(builder, arg_vals[0]);
+                        let ptr_call = builder.ins().call(get_ptr_ref, &[handle_f64]);
+                        let handle = builder.inst_results(ptr_call)[0];
+
+                        let r = ensure_f64(builder, arg_vals[1]);
+                        let g = ensure_f64(builder, arg_vals[2]);
+                        let b = ensure_f64(builder, arg_vals[3]);
+                        let a = ensure_f64(builder, arg_vals[4]);
+                        let line_width = ensure_f64(builder, arg_vals[5]);
+
+                        let func = extern_funcs.get("perry_ui_canvas_stroke")
+                            .ok_or_else(|| anyhow!("perry_ui_canvas_stroke not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[handle, r, g, b, a, line_width]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "canvasFillGradient" => {
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let handle_f64 = ensure_f64(builder, arg_vals[0]);
+                        let ptr_call = builder.ins().call(get_ptr_ref, &[handle_f64]);
+                        let handle = builder.inst_results(ptr_call)[0];
+
+                        let r1 = ensure_f64(builder, arg_vals[1]);
+                        let g1 = ensure_f64(builder, arg_vals[2]);
+                        let b1 = ensure_f64(builder, arg_vals[3]);
+                        let a1 = ensure_f64(builder, arg_vals[4]);
+                        let r2 = ensure_f64(builder, arg_vals[5]);
+                        let g2 = ensure_f64(builder, arg_vals[6]);
+                        let b2 = ensure_f64(builder, arg_vals[7]);
+                        let a2 = ensure_f64(builder, arg_vals[8]);
+                        let direction = ensure_f64(builder, arg_vals[9]);
+
+                        let func = extern_funcs.get("perry_ui_canvas_fill_gradient")
+                            .ok_or_else(|| anyhow!("perry_ui_canvas_fill_gradient not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[handle, r1, g1, b1, a1, r2, g2, b2, a2, direction]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
                     _ => {} // Fall through to generic dispatch
                 }
             }
@@ -31863,6 +32544,33 @@ fn compile_expr(
                 ("perry/ui", true, "value") => "perry_ui_state_get",
                 ("perry/ui", true, "set") => "perry_ui_state_set",
 
+                // ========================================================================
+                // Perry Plugin System
+                // ========================================================================
+                // PluginApi instance methods (called by plugin code)
+                ("perry/plugin", true, "registerHook") => "perry_plugin_register_hook",
+                ("perry/plugin", true, "registerHookEx") => "perry_plugin_register_hook_ex",
+                ("perry/plugin", true, "registerTool") => "perry_plugin_register_tool",
+                ("perry/plugin", true, "registerService") => "perry_plugin_register_service",
+                ("perry/plugin", true, "registerRoute") => "perry_plugin_register_route",
+                ("perry/plugin", true, "getConfig") => "perry_plugin_get_config",
+                ("perry/plugin", true, "log") => "perry_plugin_log",
+                ("perry/plugin", true, "setMetadata") => "perry_plugin_set_metadata",
+                ("perry/plugin", true, "on") => "perry_plugin_on",
+                ("perry/plugin", true, "emit") => "perry_plugin_emit",
+                // Host-side functions (called by host application)
+                ("perry/plugin", false, "loadPlugin") => "perry_plugin_load",
+                ("perry/plugin", false, "unloadPlugin") => "perry_plugin_unload",
+                ("perry/plugin", false, "emitHook") => "perry_plugin_emit_hook",
+                ("perry/plugin", false, "emitEvent") => "perry_plugin_emit_event",
+                ("perry/plugin", false, "invokeTool") => "perry_plugin_invoke_tool",
+                ("perry/plugin", false, "setConfig") => "perry_plugin_set_config",
+                ("perry/plugin", false, "discoverPlugins") => "perry_plugin_discover",
+                ("perry/plugin", false, "pluginCount") => "perry_plugin_count",
+                ("perry/plugin", false, "listPlugins") => "perry_plugin_list_plugins",
+                ("perry/plugin", false, "listHooks") => "perry_plugin_list_hooks",
+                ("perry/plugin", false, "listTools") => "perry_plugin_list_tools",
+
                 _ => {
                     // If JS runtime is enabled, fall back to JS runtime for unsupported native methods
                     // For module-level calls (object is None), use js_call_function
@@ -32074,7 +32782,8 @@ fn compile_expr(
                           native_module == "fastify" ||
                           native_module == "async_hooks" ||
                           native_module == "worker_threads" ||
-                          native_module == "perry/ui" {
+                          native_module == "perry/ui" ||
+                          native_module == "perry/plugin" {
                     // These modules return NaN-boxed pointers, extract the raw pointer
                     let obj_f64 = ensure_f64(builder, obj_val);
                     let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
@@ -32642,6 +33351,38 @@ fn compile_expr(
                             // State.get() - no additional args
                         }
                         _ => {}
+                    }
+                } else if native_module == "perry/plugin" {
+                    // Plugin API instance methods
+                    match method.as_str() {
+                        "registerHookEx" => {
+                            // (hook_name: f64, handler: f64, priority: i64, mode: i64)
+                            if arg_vals.len() >= 2 {
+                                call_args.push(ensure_f64(builder, arg_vals[0])); // hook_name
+                                call_args.push(ensure_f64(builder, arg_vals[1])); // handler
+                            }
+                            if arg_vals.len() >= 3 {
+                                call_args.push(ensure_i64(builder, arg_vals[2])); // priority
+                            }
+                            if arg_vals.len() >= 4 {
+                                call_args.push(ensure_i64(builder, arg_vals[3])); // mode
+                            }
+                        }
+                        "log" => {
+                            // (level: i64, message: f64)
+                            if !arg_vals.is_empty() {
+                                call_args.push(ensure_i64(builder, arg_vals[0])); // level
+                            }
+                            if arg_vals.len() >= 2 {
+                                call_args.push(ensure_f64(builder, arg_vals[1])); // message
+                            }
+                        }
+                        _ => {
+                            // Default: all args as NaN-boxed f64
+                            for &arg_val in &arg_vals {
+                                call_args.push(ensure_f64(builder, arg_val));
+                            }
+                        }
                     }
                 }
 
@@ -33793,7 +34534,17 @@ fn compile_expr(
         }
         Expr::BigIntCoerce(value) => {
             // BigInt(value) -> bigint
-            // js_bigint_from_f64 already handles strings, numbers, and other NaN-boxed types at runtime
+            // If the argument is already known to be a bigint, return as-is (identity conversion)
+            let is_known_bigint = if let Expr::LocalGet(id) = value.as_ref() {
+                locals.get(id).map(|info| info.is_bigint).unwrap_or(false)
+            } else {
+                matches!(value.as_ref(), Expr::BigInt(_) | Expr::BigIntCoerce(_))
+            };
+            if is_known_bigint {
+                return compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx);
+            }
+
+            // js_bigint_from_f64 handles strings, numbers, and other NaN-boxed types at runtime
             let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
             let val_f64 = ensure_f64(builder, val);
 

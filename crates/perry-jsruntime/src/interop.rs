@@ -121,9 +121,13 @@ pub unsafe extern "C" fn js_load_module(
                 return Ok(module_id as u64);
             }
 
-            // Use block_in_place to allow async operations
+            // Use a dedicated current-thread Tokio runtime to avoid thread pool starvation deadlock.
             tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
+                let local_rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Failed to create local Tokio runtime for module loading");
+                local_rt.block_on(async {
                     // Load the module (use load_side_es_module since native code is the main module)
                     let module_id = match state.runtime.load_side_es_module(&specifier).await {
                         Ok(id) => id,
@@ -1005,9 +1009,16 @@ pub extern "C" fn js_await_js_promise(value: f64) -> f64 {
             }
 
             // Promise is pending - run the event loop to settle it
+            // Use a dedicated current-thread Tokio runtime to avoid thread pool starvation deadlock.
+            // The outer block_on holds a worker thread; using Handle::current().block_on() would
+            // create a nested block_on on the same runtime, deadlocking if the V8 event loop
+            // spawns Tokio tasks (e.g., ethers.js HTTP calls).
             tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    // Run event loop (processes all pending async operations)
+                let local_rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Failed to create local Tokio runtime for V8 event loop");
+                local_rt.block_on(async {
                     let _ = state.runtime.run_event_loop(Default::default()).await;
                 })
             });

@@ -1969,6 +1969,15 @@ fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) -> Result<Fun
         });
     }
 
+    // Register parameters with PluginApi type as native instances
+    for param in &params {
+        if let Type::Named(type_name) = &param.ty {
+            if type_name == "PluginApi" {
+                ctx.register_native_instance(param.name.clone(), "perry/plugin".to_string(), "PluginApi".to_string());
+            }
+        }
+    }
+
     // Extract return type from function's type annotation (with context)
     let return_type = fn_decl.function.return_type.as_ref()
         .map(|rt| extract_ts_type_with_ctx(&rt.type_ann, Some(ctx)))
@@ -4921,6 +4930,36 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                             return Ok(Expr::RegExpTest {
                                                 regex: Box::new(regex_expr),
                                                 string: Box::new(string_expr),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Check for string .match(regex) method call
+                    if let ast::Callee::Expr(callee_expr) = &call.callee {
+                        if let ast::Expr::Member(member) = callee_expr.as_ref() {
+                            if let ast::MemberProp::Ident(method_ident) = &member.prop {
+                                if method_ident.sym.as_ref() == "match" && args.len() == 1 {
+                                    // Check if the argument is a regex literal or a local holding a regex
+                                    let arg_is_regex = match call.args.first().map(|a| a.expr.as_ref()) {
+                                        Some(ast::Expr::Lit(ast::Lit::Regex(_))) => true,
+                                        Some(ast::Expr::Ident(ident)) => {
+                                            ctx.lookup_local_type(&ident.sym.to_string())
+                                                .map(|ty| matches!(ty, Type::Any | Type::Unknown))
+                                                .unwrap_or(true)
+                                        }
+                                        _ => false,
+                                    };
+                                    if arg_is_regex {
+                                        let string_expr = lower_expr(ctx, &member.obj)?;
+                                        let regex_expr = args.remove(0);
+                                        if matches!(&regex_expr, Expr::RegExp { .. }) || matches!(&regex_expr, Expr::LocalGet(_)) {
+                                            return Ok(Expr::StringMatch {
+                                                string: Box::new(string_expr),
+                                                regex: Box::new(regex_expr),
                                             });
                                         }
                                     }

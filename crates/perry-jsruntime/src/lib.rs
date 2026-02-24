@@ -116,10 +116,16 @@ where
         JS_RUNTIME.with(|cell| {
             let mut opt = cell.borrow_mut();
             let state = opt.as_mut().expect("Runtime should be initialized");
-            // Note: This is not truly async-safe, but works for simple cases
-            // For proper async support, we'd need a different architecture
+            // Use a dedicated current-thread Tokio runtime to avoid thread pool starvation deadlock.
+            // The outer block_on holds a worker thread; using Handle::current().block_on() would
+            // create a nested block_on on the same runtime, deadlocking if async JS operations
+            // spawn Tokio tasks (e.g., ethers.js HTTP calls).
             tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(f(state))
+                let local_rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Failed to create local Tokio runtime");
+                local_rt.block_on(f(state))
             })
         })
     })

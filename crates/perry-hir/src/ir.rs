@@ -52,6 +52,8 @@ pub const NATIVE_MODULES: &[&str] = &[
     "async_hooks",
     // Perry native UI
     "perry/ui",
+    // Perry plugin system
+    "perry/plugin",
     // Node.js worker threads
     "worker_threads",
 ];

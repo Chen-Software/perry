@@ -3,6 +3,7 @@ pub mod clipboard;
 pub mod file_dialog;
 pub mod menu;
 pub mod state;
+pub mod string_header;
 pub mod widgets;
 
 // =============================================================================
@@ -342,4 +343,86 @@ pub extern "C" fn perry_ui_textfield_set_string(handle: i64, text_ptr: i64) {
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_add_child_at(parent_handle: i64, child_handle: i64, index: f64) {
     widgets::add_child_at(parent_handle, child_handle, index as i64);
+}
+
+// =============================================================================
+// Weather App Extensions
+// =============================================================================
+
+/// Set a recurring timer on the UI event loop.
+/// Calls js_stdlib_process_pending() before each callback invocation.
+#[no_mangle]
+pub extern "C" fn perry_ui_app_set_timer(interval_ms: f64, callback: f64) {
+    app::set_timer(interval_ms, callback);
+}
+
+/// Set a linear gradient background on any widget.
+/// direction: 0=vertical (top→bottom), 1=horizontal (left→right)
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_background_gradient(
+    handle: i64, r1: f64, g1: f64, b1: f64, a1: f64,
+    r2: f64, g2: f64, b2: f64, a2: f64, direction: f64,
+) {
+    widgets::set_background_gradient(handle, r1, g1, b1, a1, r2, g2, b2, a2, direction);
+}
+
+/// Set a solid background color on any widget.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_background_color(
+    handle: i64, r: f64, g: f64, b: f64, a: f64,
+) {
+    widgets::set_background_color(handle, r, g, b, a);
+}
+
+/// Set corner radius on any widget.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_corner_radius(handle: i64, radius: f64) {
+    widgets::set_corner_radius(handle, radius);
+}
+
+/// Create a Canvas widget for custom drawing.
+#[no_mangle]
+pub extern "C" fn perry_ui_canvas_create(width: f64, height: f64) -> i64 {
+    widgets::canvas::create(width, height)
+}
+
+/// Clear all drawing commands from a Canvas.
+#[no_mangle]
+pub extern "C" fn perry_ui_canvas_clear(handle: i64) {
+    widgets::canvas::clear(handle);
+}
+
+/// Begin a new path on a Canvas.
+#[no_mangle]
+pub extern "C" fn perry_ui_canvas_begin_path(handle: i64) {
+    widgets::canvas::begin_path(handle);
+}
+
+/// Move the pen to (x, y) on a Canvas.
+#[no_mangle]
+pub extern "C" fn perry_ui_canvas_move_to(handle: i64, x: f64, y: f64) {
+    widgets::canvas::move_to(handle, x, y);
+}
+
+/// Add a line segment to (x, y) on a Canvas.
+#[no_mangle]
+pub extern "C" fn perry_ui_canvas_line_to(handle: i64, x: f64, y: f64) {
+    widgets::canvas::line_to(handle, x, y);
+}
+
+/// Stroke the current path with color and line width.
+#[no_mangle]
+pub extern "C" fn perry_ui_canvas_stroke(
+    handle: i64, r: f64, g: f64, b: f64, a: f64, line_width: f64,
+) {
+    widgets::canvas::stroke(handle, r, g, b, a, line_width);
+}
+
+/// Fill the current path with a linear gradient.
+#[no_mangle]
+pub extern "C" fn perry_ui_canvas_fill_gradient(
+    handle: i64, r1: f64, g1: f64, b1: f64, a1: f64,
+    r2: f64, g2: f64, b2: f64, a2: f64, direction: f64,
+) {
+    widgets::canvas::fill_gradient(handle, r1, g1, b1, a1, r2, g2, b2, a2, direction);
 }
