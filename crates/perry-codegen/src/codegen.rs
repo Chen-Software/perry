@@ -1585,38 +1585,31 @@ impl Compiler {
 
         // Now compile closures (after wrappers are created and module vars are registered)
         for (func_id, params, body, captures, mutable_captures, captures_this, enclosing_class, is_async) in deduped_closures {
-            eprintln!("  DEBUG [{}] compile_closure func_id={}", hir.name, func_id);
             self.compile_closure(func_id, &params, &body, &captures, &mutable_captures, captures_this, enclosing_class.as_deref(), is_async)?;
         }
 
         // Compile class constructors and methods
         for class in &hir.classes {
             if let Some(ref ctor) = class.constructor {
-                eprintln!("  DEBUG [{}] compile_class_constructor class={}", hir.name, class.name);
                 self.compile_class_constructor(class, ctor)?;
             }
             for method in &class.methods {
-                eprintln!("  DEBUG [{}] compile_class_method class={} method={}", hir.name, class.name, method.name);
                 self.compile_class_method(class, method)?;
             }
             // Compile getters
             for (prop_name, getter) in &class.getters {
-                eprintln!("  DEBUG [{}] compile_class_getter class={} prop={}", hir.name, class.name, prop_name);
                 self.compile_class_getter(class, prop_name, getter)?;
             }
             // Compile setters
             for (prop_name, setter) in &class.setters {
-                eprintln!("  DEBUG [{}] compile_class_setter class={} prop={}", hir.name, class.name, prop_name);
                 self.compile_class_setter(class, prop_name, setter)?;
             }
             // Compile static methods
             for method in &class.static_methods {
-                eprintln!("  DEBUG [{}] compile_static_method class={} method={}", hir.name, class.name, method.name);
                 self.compile_static_method(class, method)?;
             }
             // Compile static fields
             for field in &class.static_fields {
-                eprintln!("  DEBUG [{}] compile_static_field class={} field={}", hir.name, class.name, field.name);
                 self.compile_static_field(class, field)?;
             }
         }
@@ -2923,7 +2916,6 @@ impl Compiler {
     }
 
     fn compile_class_constructor(&mut self, class: &Class, ctor: &Function) -> Result<()> {
-        eprintln!("  DEBUG ctor body for {}:\n{:#?}", class.name, ctor.body);
         let func_name = format!("{}_constructor", class.name);
         let func_id = self.classes.get(&class.name)
             .and_then(|m| m.constructor_id)
@@ -14561,7 +14553,6 @@ impl Compiler {
     }
 
     fn compile_init(&mut self, module_name: &str, stmts: &[Stmt], exported_native_instances: &[(String, String, String)], exported_objects: &[String], exported_functions: &[(String, u32)]) -> Result<()> {
-        eprintln!("  DEBUG compile_init: module={} stmts={} static_field_inits={}", module_name, stmts.len(), self.static_field_runtime_inits.len());
         let is_dylib = self.output_type == "dylib";
 
         // Create main function for init statements (entry module) or module init function (non-entry)
@@ -14747,7 +14738,6 @@ impl Compiler {
 
             // Runtime-initialize static fields that need heap allocation (strings, etc.)
             for (data_id, init_expr) in std::mem::take(&mut self.static_field_runtime_inits) {
-                eprintln!("  DEBUG [{}] static_field_runtime_init expr: {:?}", module_name, init_expr);
                 let empty_locals: BTreeMap<LocalId, LocalInfo> = BTreeMap::new();
                 let val = compile_expr(
                     &mut builder, &mut self.module,
@@ -22644,8 +22634,7 @@ fn compile_expr(
                 Some(info) => info,
                 None => {
                     // Uncaptured or out-of-scope local — return undefined instead of failing
-                    eprintln!("WARNING: Undefined local variable {} (LocalGet), returning undefined. Known locals: {:?}", id, locals.keys().collect::<Vec<_>>());
-                    eprintln!("  DEBUG: current_func_hir_id = {:?}", CURRENT_FUNC_HIR_ID.with(|c| c.get()));
+                    eprintln!("WARNING: Undefined local variable {} (LocalGet), returning undefined", id);
                     const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                     return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
                 }
