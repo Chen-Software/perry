@@ -8,6 +8,10 @@ use windows::Win32::Foundation::*;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::*;
 #[cfg(target_os = "windows")]
+use windows::Win32::UI::Controls::SetScrollInfo;
+#[cfg(target_os = "windows")]
+use windows::Win32::Graphics::Gdi::HBRUSH;
+#[cfg(target_os = "windows")]
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 
 use super::{WidgetKind, register_widget_with_layout};
@@ -41,7 +45,7 @@ fn ensure_class_registered() {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
                 style: CS_HREDRAW | CS_VREDRAW,
                 lpfnWndProc: Some(scroll_wnd_proc),
-                hInstance: hinstance.into(),
+                hInstance: HINSTANCE::from(hinstance),
                 hbrBackground: HBRUSH(std::ptr::null_mut()),
                 lpszClassName: windows::core::PCWSTR(class_name.as_ptr()),
                 ..Default::default()
@@ -70,6 +74,12 @@ unsafe extern "system" fn scroll_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, 
             }
             LRESULT(0)
         }
+        WM_COMMAND | WM_CTLCOLORSTATIC | WM_CONTEXTMENU => {
+            if let Ok(parent) = GetParent(hwnd) {
+                return SendMessageW(parent, msg, wparam, lparam);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }
@@ -88,9 +98,9 @@ pub fn create() -> i64 {
                 windows::core::PCWSTR(to_wide("").as_ptr()),
                 WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPCHILDREN,
                 0, 0, 100, 100,
+                super::get_parking_hwnd(),
                 None,
-                None,
-                Some(hinstance.into()),
+                HINSTANCE::from(hinstance),
                 None,
             ).unwrap();
 
@@ -278,7 +288,8 @@ fn handle_vscroll(handle: i64, hwnd: HWND, wparam: WPARAM) {
         let line_size = 20;
         let page_size = viewport_height;
 
-        let new_offset = match action as u32 {
+        let action = SCROLLBAR_COMMAND(action as i32);
+        let new_offset = match action {
             SB_LINEUP => (current_offset - line_size).max(0),
             SB_LINEDOWN => (current_offset + line_size).min(max_offset),
             SB_PAGEUP => (current_offset - page_size).max(0),

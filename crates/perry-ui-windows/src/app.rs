@@ -103,7 +103,7 @@ pub fn app_create(title_ptr: *const u8, width: f64, height: f64) -> i64 {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
                 style: CS_HREDRAW | CS_VREDRAW,
                 lpfnWndProc: Some(wnd_proc),
-                hInstance: hinstance.into(),
+                hInstance: HINSTANCE::from(hinstance),
                 hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
                 hbrBackground: HBRUSH((COLOR_WINDOW.0 + 1) as *mut _),
                 lpszClassName: windows::core::PCWSTR(class_name.as_ptr()),
@@ -121,7 +121,7 @@ pub fn app_create(title_ptr: *const u8, width: f64, height: f64) -> i64 {
                 w, h,
                 None,
                 None,
-                Some(hinstance.into()),
+                HINSTANCE::from(hinstance),
                 None,
             ).unwrap();
 
@@ -168,7 +168,7 @@ pub fn app_set_body(app_handle: i64, root_handle: i64) {
                 // Set the root widget's HWND as a child of the main window
                 if let Some(child_hwnd) = crate::widgets::get_hwnd(root_handle) {
                     unsafe {
-                        let _ = SetParent(child_hwnd, Some(hwnd));
+                        let _ = SetParent(child_hwnd, hwnd);
                         let style = GetWindowLongW(child_hwnd, GWL_STYLE) as u32;
                         SetWindowLongW(child_hwnd, GWL_STYLE, (style | WS_CHILD.0) as i32);
                         // Trigger initial layout
@@ -363,6 +363,54 @@ pub fn get_root_widget(app_handle: i64) -> Option<i64> {
     })
 }
 
+/// Custom message ID for deferred layout requests.
+#[cfg(target_os = "windows")]
+const WM_PERRY_LAYOUT: u32 = WM_USER + 100;
+
+/// Request a deferred layout pass on the main window's root widget.
+/// Uses PostMessage so multiple rapid calls (e.g., during tree rebuild)
+/// are coalesced into a single layout pass in the message loop.
+pub fn request_layout() {
+    #[cfg(target_os = "windows")]
+    {
+        APPS.with(|apps| {
+            let apps = apps.borrow();
+            if let Some(app) = apps.first() {
+                if app.root_widget.is_some() {
+                    unsafe {
+                        let _ = PostMessageW(app.hwnd, WM_PERRY_LAYOUT, WPARAM(0), LPARAM(0));
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// Perform an immediate layout pass on the main window's root widget.
+fn do_layout() {
+    #[cfg(target_os = "windows")]
+    {
+        APPS.with(|apps| {
+            let apps = apps.borrow();
+            if let Some(app) = apps.first() {
+                if let Some(root) = app.root_widget {
+                    unsafe {
+                        let mut rect = RECT::default();
+                        let _ = GetClientRect(app.hwnd, &mut rect);
+                        if rect.right > 0 && rect.bottom > 0 {
+                            if let Some(child_hwnd) = crate::widgets::get_hwnd(root) {
+                                let _ = MoveWindow(child_hwnd, 0, 0, rect.right, rect.bottom, true);
+                                crate::layout::layout_widget(root, rect.right, rect.bottom);
+                            }
+                            let _ = InvalidateRect(app.hwnd, None, true);
+                        }
+                    }
+                }
+            }
+        });
+    }
+}
+
 // =============================================================================
 // WndProc — Win32 message handler
 // =============================================================================
@@ -420,6 +468,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         }
         WM_DESTROY => {
             PostQuitMessage(0);
+            LRESULT(0)
+        }
+        x if x == WM_PERRY_LAYOUT => {
+            do_layout();
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),

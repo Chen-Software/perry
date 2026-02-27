@@ -6,6 +6,8 @@ use windows::Win32::Foundation::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 #[cfg(target_os = "windows")]
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+#[cfg(target_os = "windows")]
+use windows::Win32::System::SystemServices::SS_ETCHEDHORZ;
 
 use super::{WidgetKind, alloc_control_id, register_widget};
 
@@ -26,11 +28,11 @@ pub fn create() -> i64 {
                 WINDOW_EX_STYLE::default(),
                 windows::core::PCWSTR(to_wide("STATIC").as_ptr()),
                 windows::core::PCWSTR(to_wide("").as_ptr()),
-                WINDOW_STYLE(SS_ETCHEDHORZ as u32 | WS_CHILD.0 | WS_VISIBLE.0),
+                WINDOW_STYLE(SS_ETCHEDHORZ.0 | WS_CHILD.0 | WS_VISIBLE.0),
                 0, 0, 100, 2,
-                None,
+                super::get_parking_hwnd(),
                 HMENU(control_id as *mut _),
-                Some(hinstance.into()),
+                HINSTANCE::from(hinstance),
                 None,
             ).unwrap();
 

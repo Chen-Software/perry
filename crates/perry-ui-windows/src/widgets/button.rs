@@ -8,6 +8,8 @@ use windows::Win32::Foundation::*;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::*;
 #[cfg(target_os = "windows")]
+use windows::Win32::Graphics::Gdi::InvalidateRect;
+#[cfg(target_os = "windows")]
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 
 use super::{WidgetKind, alloc_control_id, register_widget};
@@ -56,9 +58,9 @@ pub fn create(label_ptr: *const u8, on_press: f64) -> i64 {
                 windows::core::PCWSTR(wide.as_ptr()),
                 WINDOW_STYLE(BS_PUSHBUTTON as u32 | WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0),
                 0, 0, 80, 30,
-                None,
+                super::get_parking_hwnd(),
                 HMENU(control_id as *mut _),
-                Some(hinstance.into()),
+                HINSTANCE::from(hinstance),
                 None,
             ).unwrap();
 
@@ -83,12 +85,15 @@ pub fn create(label_ptr: *const u8, on_press: f64) -> i64 {
 
 /// Handle button click (BN_CLICKED).
 pub fn handle_click(handle: i64) {
-    BUTTON_CALLBACKS.with(|cb| {
+    // Extract the callback pointer first, then drop the borrow before calling it.
+    // The closure may create new buttons (borrowing BUTTON_CALLBACKS mutably).
+    let ptr = BUTTON_CALLBACKS.with(|cb| {
         let callbacks = cb.borrow();
-        if let Some(&ptr) = callbacks.get(&handle) {
-            unsafe { js_closure_call0(ptr) };
-        }
+        callbacks.get(&handle).copied()
     });
+    if let Some(ptr) = ptr {
+        unsafe { js_closure_call0(ptr) };
+    }
 }
 
 /// Set whether a Button has a visible border.
@@ -105,7 +110,7 @@ pub fn set_bordered(handle: i64, bordered: bool) {
                     (style & !(BS_PUSHBUTTON as u32)) | BS_FLAT as u32
                 };
                 SetWindowLongW(hwnd, GWL_STYLE, new_style as i32);
-                let _ = InvalidateRect(Some(hwnd), None, true);
+                let _ = InvalidateRect(hwnd, None, true);
             }
         }
     }

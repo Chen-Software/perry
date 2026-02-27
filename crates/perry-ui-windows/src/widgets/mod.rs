@@ -59,6 +59,42 @@ pub struct WidgetInfo {
 thread_local! {
     static WIDGETS: RefCell<Vec<WidgetEntry>> = RefCell::new(Vec::new());
     static NEXT_CONTROL_ID: RefCell<u16> = RefCell::new(1000);
+    /// Hidden parking window used as a temporary parent for WS_CHILD widgets
+    /// before they are reparented into the real window hierarchy.
+    #[cfg(target_os = "windows")]
+    static PARKING_HWND: RefCell<Option<HWND>> = RefCell::new(None);
+}
+
+/// Get (or lazily create) the hidden parking window for orphan child widgets.
+#[cfg(target_os = "windows")]
+pub fn get_parking_hwnd() -> HWND {
+    fn to_wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+    PARKING_HWND.with(|cell| {
+        let mut opt = cell.borrow_mut();
+        if let Some(hwnd) = *opt {
+            return hwnd;
+        }
+        unsafe {
+            let hinstance = windows::Win32::System::LibraryLoader::GetModuleHandleW(None).unwrap();
+            // HWND_MESSAGE creates a message-only window (invisible, no UI)
+            let class = to_wide("STATIC");
+            let hwnd = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                windows::core::PCWSTR(class.as_ptr()),
+                windows::core::PCWSTR(std::ptr::null()),
+                WINDOW_STYLE::default(),
+                0, 0, 0, 0,
+                HWND_MESSAGE,
+                None,
+                HINSTANCE::from(hinstance),
+                None,
+            ).unwrap();
+            *opt = Some(hwnd);
+            hwnd
+        }
+    })
 }
 
 /// Allocate a new control ID.
@@ -226,7 +262,7 @@ pub fn add_child(parent_handle: i64, child_handle: i64) {
         // Re-parent the child HWND
         if let (Some(parent_hwnd), Some(child_hwnd)) = (get_hwnd(parent_handle), get_hwnd(child_handle)) {
             unsafe {
-                let _ = SetParent(child_hwnd, Some(parent_hwnd));
+                let _ = SetParent(child_hwnd, parent_hwnd);
                 let style = GetWindowLongW(child_hwnd, GWL_STYLE) as u32;
                 SetWindowLongW(child_hwnd, GWL_STYLE, (style | WS_CHILD.0 | WS_VISIBLE.0) as i32);
             }
@@ -248,7 +284,7 @@ pub fn add_child_at(parent_handle: i64, child_handle: i64, index: i64) {
     {
         if let (Some(parent_hwnd), Some(child_hwnd)) = (get_hwnd(parent_handle), get_hwnd(child_handle)) {
             unsafe {
-                let _ = SetParent(child_hwnd, Some(parent_hwnd));
+                let _ = SetParent(child_hwnd, parent_hwnd);
                 let style = GetWindowLongW(child_hwnd, GWL_STYLE) as u32;
                 SetWindowLongW(child_hwnd, GWL_STYLE, (style | WS_CHILD.0 | WS_VISIBLE.0) as i32);
             }
@@ -279,11 +315,12 @@ pub fn clear_children(handle: i64) {
 
     #[cfg(target_os = "windows")]
     {
+        let parking = get_parking_hwnd();
         for child in &children {
             if let Some(child_hwnd) = get_hwnd(*child) {
                 unsafe {
                     let _ = ShowWindow(child_hwnd, SW_HIDE);
-                    let _ = SetParent(child_hwnd, None);
+                    let _ = SetParent(child_hwnd, parking);
                 }
             }
         }

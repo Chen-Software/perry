@@ -5,6 +5,8 @@ use windows::Win32::Foundation::*;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::*;
 #[cfg(target_os = "windows")]
+use windows::Win32::Graphics::Gdi::HBRUSH;
+#[cfg(target_os = "windows")]
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 
 use super::{WidgetKind, register_widget_with_layout};
@@ -27,7 +29,7 @@ fn ensure_class_registered() {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
                 style: CS_HREDRAW | CS_VREDRAW,
                 lpfnWndProc: Some(container_wnd_proc),
-                hInstance: hinstance.into(),
+                hInstance: HINSTANCE::from(hinstance),
                 hbrBackground: HBRUSH(std::ptr::null_mut()),
                 lpszClassName: windows::core::PCWSTR(class_name.as_ptr()),
                 ..Default::default()
@@ -39,7 +41,15 @@ fn ensure_class_registered() {
 
 #[cfg(target_os = "windows")]
 unsafe extern "system" fn container_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    DefWindowProcW(hwnd, msg, wparam, lparam)
+    match msg {
+        WM_COMMAND | WM_CTLCOLORSTATIC | WM_CONTEXTMENU => {
+            if let Ok(parent) = GetParent(hwnd) {
+                return SendMessageW(parent, msg, wparam, lparam);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
 }
 
 /// Create an HStack. Returns widget handle.
@@ -61,9 +71,9 @@ pub fn create_with_insets(spacing: f64, top: f64, left: f64, bottom: f64, right:
                 windows::core::PCWSTR(to_wide("").as_ptr()),
                 WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
                 0, 0, 100, 100,
+                super::get_parking_hwnd(),
                 None,
-                None,
-                Some(hinstance.into()),
+                HINSTANCE::from(hinstance),
                 None,
             ).unwrap();
 

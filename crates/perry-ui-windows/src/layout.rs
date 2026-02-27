@@ -267,14 +267,14 @@ fn measure_stack_intrinsic(handle: i64, kind: &WidgetKind, vertical: bool, cross
 #[cfg(target_os = "windows")]
 fn measure_text_height(hwnd: HWND, width: i32, vertical: bool) -> i32 {
     unsafe {
-        let hdc = GetDC(Some(hwnd));
+        let hdc = GetDC(hwnd);
         if hdc.is_invalid() {
             return if vertical { 20 } else { 100 };
         }
 
         let text_len = GetWindowTextLengthW(hwnd);
         if text_len == 0 {
-            let _ = ReleaseDC(Some(hwnd), hdc);
+            let _ = ReleaseDC(hwnd, hdc);
             return if vertical { 20 } else { 100 };
         }
 
@@ -301,7 +301,7 @@ fn measure_text_height(hwnd: HWND, width: i32, vertical: bool) -> i32 {
             if !old_font.is_invalid() {
                 SelectObject(hdc, old_font);
             }
-            let _ = ReleaseDC(Some(hwnd), hdc);
+            let _ = ReleaseDC(hwnd, hdc);
 
             (rect.bottom - rect.top).max(16)
         } else {
@@ -311,7 +311,7 @@ fn measure_text_height(hwnd: HWND, width: i32, vertical: bool) -> i32 {
             if !old_font.is_invalid() {
                 SelectObject(hdc, old_font);
             }
-            let _ = ReleaseDC(Some(hwnd), hdc);
+            let _ = ReleaseDC(hwnd, hdc);
 
             size.cx.max(20)
         }

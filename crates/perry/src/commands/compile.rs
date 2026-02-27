@@ -112,6 +112,113 @@ fn rust_target_triple(target: Option<&str>) -> Option<&'static str> {
     }
 }
 
+/// Find MSVC link.exe by searching Visual Studio installation directories.
+/// On Windows, the PATH may contain a GNU `link` utility (e.g. from Git Bash/MSYS2)
+/// which is not the MSVC linker. This function searches for the real MSVC link.exe.
+#[cfg(target_os = "windows")]
+fn find_msvc_link_exe() -> Option<PathBuf> {
+    // Try vswhere.exe first (most reliable)
+    let vswhere_paths = [
+        PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"),
+        PathBuf::from(r"C:\Program Files\Microsoft Visual Studio\Installer\vswhere.exe"),
+    ];
+    for vswhere in &vswhere_paths {
+        if vswhere.exists() {
+            if let Ok(output) = Command::new(vswhere)
+                .args(["-products", "*", "-latest", "-property", "installationPath", "-nologo"])
+                .output()
+            {
+                let install_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !install_path.is_empty() {
+                    // Search for link.exe under VC/Tools/MSVC/*/bin/Hostx64/x64/
+                    let msvc_dir = PathBuf::from(&install_path).join(r"VC\Tools\MSVC");
+                    if let Ok(entries) = std::fs::read_dir(&msvc_dir) {
+                        let mut versions: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+                        versions.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+                        for entry in versions {
+                            let link = entry.path().join(r"bin\Hostx64\x64\link.exe");
+                            if link.exists() {
+                                return Some(link);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+fn find_msvc_link_exe() -> Option<PathBuf> {
+    None
+}
+
+/// Find MSVC library search paths (MSVC CRT, Windows SDK um, Windows SDK ucrt).
+/// Returns a semicolon-separated string suitable for the LIB environment variable.
+#[cfg(target_os = "windows")]
+fn find_msvc_lib_paths() -> Option<String> {
+    let mut paths = Vec::new();
+
+    // Find MSVC CRT lib path via vswhere
+    let vswhere_paths = [
+        PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"),
+        PathBuf::from(r"C:\Program Files\Microsoft Visual Studio\Installer\vswhere.exe"),
+    ];
+    for vswhere in &vswhere_paths {
+        if vswhere.exists() {
+            if let Ok(output) = Command::new(vswhere)
+                .args(["-products", "*", "-latest", "-property", "installationPath", "-nologo"])
+                .output()
+            {
+                let install_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !install_path.is_empty() {
+                    let msvc_dir = PathBuf::from(&install_path).join(r"VC\Tools\MSVC");
+                    if let Ok(entries) = std::fs::read_dir(&msvc_dir) {
+                        let mut versions: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+                        versions.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+                        if let Some(entry) = versions.first() {
+                            let lib_path = entry.path().join(r"lib\x64");
+                            if lib_path.exists() {
+                                paths.push(lib_path.to_string_lossy().to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            break;
+        }
+    }
+
+    // Find Windows SDK lib paths
+    let sdk_root = PathBuf::from(r"C:\Program Files (x86)\Windows Kits\10\Lib");
+    if let Ok(entries) = std::fs::read_dir(&sdk_root) {
+        let mut versions: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+        versions.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+        if let Some(entry) = versions.first() {
+            let um_path = entry.path().join(r"um\x64");
+            let ucrt_path = entry.path().join(r"ucrt\x64");
+            if um_path.exists() {
+                paths.push(um_path.to_string_lossy().to_string());
+            }
+            if ucrt_path.exists() {
+                paths.push(ucrt_path.to_string_lossy().to_string());
+            }
+        }
+    }
+
+    if paths.is_empty() {
+        None
+    } else {
+        Some(paths.join(";"))
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn find_msvc_lib_paths() -> Option<String> {
+    None
+}
+
 /// Find a library by name, optionally searching cross-compilation target directories
 fn find_library(name: &str, target: Option<&str>) -> Option<PathBuf> {
     let mut candidates = Vec::new();
@@ -121,6 +228,14 @@ fn find_library(name: &str, target: Option<&str>) -> Option<PathBuf> {
     if let Some(triple) = rust_target_triple(target) {
         candidates.push(PathBuf::from(format!("target/{}/release/{}", triple, name)));
         candidates.push(PathBuf::from(format!("target/{}/debug/{}", triple, name)));
+        // When targeting the host platform (e.g. --target windows on Windows),
+        // also check the default target/release/ directory since native builds
+        // put libraries there without the triple subdirectory.
+        #[cfg(target_os = "windows")]
+        if matches!(target, Some("windows")) {
+            candidates.push(PathBuf::from(format!("target/release/{}", name)));
+            candidates.push(PathBuf::from(format!("target/debug/{}", name)));
+        }
     } else {
         // Host build: search host directories
         candidates.push(PathBuf::from(format!("target/release/{}", name)));
@@ -143,14 +258,19 @@ fn find_library(name: &str, target: Option<&str>) -> Option<PathBuf> {
 
 /// Find the runtime library for linking
 fn find_runtime_library(target: Option<&str>) -> Result<PathBuf> {
-    find_library("libperry_runtime.a", target).ok_or_else(|| {
+    let lib_name = match target {
+        Some("windows") => "perry_runtime.lib",
+        _ => "libperry_runtime.a",
+    };
+    find_library(lib_name, target).ok_or_else(|| {
         let extra = if target.is_some() {
             format!(" (for target {:?})", target.unwrap())
         } else {
             String::new()
         };
         anyhow!(
-            "Could not find libperry_runtime.a{}. Build it with: cargo build --release -p perry-runtime{}",
+            "Could not find {}{}. Build it with: cargo build --release -p perry-runtime{}",
+            lib_name,
             extra,
             rust_target_triple(target).map(|t| format!(" --target {}", t)).unwrap_or_default()
         )
@@ -1974,10 +2094,18 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         c
     } else if is_windows {
         // Windows target — use MSVC link.exe (native) or lld-link (cross)
-        let mut c = Command::new("link.exe");
+        let linker = find_msvc_link_exe().unwrap_or_else(|| PathBuf::from("link.exe"));
+        let mut c = Command::new(linker);
         c.arg("/SUBSYSTEM:WINDOWS")
          .arg("/ENTRY:mainCRTStartup")
-         .arg("/NOLOGO");
+         .arg("/NOLOGO")
+         .arg("/FORCE:UNRESOLVED");
+        // Set up MSVC library search paths if LIB env isn't already configured
+        if std::env::var("LIB").is_err() {
+            if let Some(lib_paths) = find_msvc_lib_paths() {
+                c.env("LIB", lib_paths);
+            }
+        }
         c
     } else {
         Command::new("cc")
@@ -2002,9 +2130,9 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     // jsruntime now includes stdlib, which includes runtime.
     // So we only need to link ONE of: jsruntime, stdlib, or runtime.
     // When UI lib is also linked, it bundles its own copy of perry-runtime.
-    // For Android (ELF), ld.lld errors on duplicate symbols, so skip the standalone
-    // runtime when the UI library will provide it.
-    let skip_runtime = is_android && ctx.needs_ui && find_ui_library(target.as_deref()).is_some();
+    // For Android (ELF) and Windows (MSVC), the linker errors on duplicate symbols,
+    // so skip the standalone runtime when the UI library will provide it.
+    let skip_runtime = (is_android || is_windows) && ctx.needs_ui && find_ui_library(target.as_deref()).is_some();
     if !skip_runtime {
         if let Some(ref jsruntime) = jsruntime_lib {
             cmd.arg(jsruntime);
@@ -2082,6 +2210,16 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
            .arg("advapi32.lib")
            .arg("comdlg32.lib")
            .arg("ws2_32.lib");
+        // MSVC CRT (dynamic) and additional Windows API libraries needed by the Rust runtime
+        cmd.arg("msvcrt.lib")
+           .arg("vcruntime.lib")
+           .arg("ucrt.lib")
+           .arg("bcrypt.lib")
+           .arg("ntdll.lib")
+           .arg("userenv.lib")
+           .arg("oleaut32.lib")
+           .arg("propsys.lib")
+           .arg("runtimeobject.lib");
     } else {
         // On macOS, we need additional frameworks for the runtime (sysinfo, etc.) and V8
         #[cfg(target_os = "macos")]

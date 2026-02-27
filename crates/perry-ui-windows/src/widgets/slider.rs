@@ -34,6 +34,11 @@ thread_local! {
     static SLIDER_INFO: RefCell<HashMap<i64, SliderInfo>> = RefCell::new(HashMap::new());
 }
 
+/// TBM_GETPOS is not exported by the windows crate 0.58 — define it manually.
+/// WM_USER (0x0400) + 0 = 1024
+#[cfg(target_os = "windows")]
+const TBM_GETPOS: u32 = 1024;
+
 /// The trackbar uses integer positions. We map [min, max] to [0, 1000] internally.
 const TRACKBAR_RANGE: i32 = 1000;
 
@@ -59,13 +64,13 @@ pub fn create(min: f64, max: f64, initial: f64, on_change: f64) -> i64 {
             let hinstance = GetModuleHandleW(None).unwrap();
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
-                windows::core::PCWSTR(to_wide(TRACKBAR_CLASSW).as_ptr()),
+                TRACKBAR_CLASSW,
                 windows::core::PCWSTR(to_wide("").as_ptr()),
                 WINDOW_STYLE(TBS_HORZ as u32 | TBS_AUTOTICKS as u32 | WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0),
                 0, 0, 200, 24,
-                None,
+                super::get_parking_hwnd(),
                 HMENU(control_id as *mut _),
-                Some(hinstance.into()),
+                HINSTANCE::from(hinstance),
                 None,
             ).unwrap();
 

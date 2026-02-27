@@ -8,6 +8,8 @@ use windows::Win32::Foundation::*;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::*;
 #[cfg(target_os = "windows")]
+use windows::Win32::UI::Controls::{BST_CHECKED, BST_UNCHECKED};
+#[cfg(target_os = "windows")]
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 
 use super::{WidgetKind, alloc_control_id, register_widget};
@@ -55,9 +57,9 @@ pub fn create(label_ptr: *const u8, on_change: f64) -> i64 {
                 windows::core::PCWSTR(wide.as_ptr()),
                 WINDOW_STYLE(BS_AUTOCHECKBOX as u32 | WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0),
                 0, 0, 100, 24,
-                None,
+                super::get_parking_hwnd(),
                 HMENU(control_id as *mut _),
-                Some(hinstance.into()),
+                HINSTANCE::from(hinstance),
                 None,
             ).unwrap();
 
@@ -90,12 +92,13 @@ pub fn handle_click(handle: i64) {
             };
             let value = if checked { 1.0 } else { 0.0 };
 
-            TOGGLE_CALLBACKS.with(|cb| {
+            let ptr = TOGGLE_CALLBACKS.with(|cb| {
                 let callbacks = cb.borrow();
-                if let Some(&ptr) = callbacks.get(&handle) {
-                    unsafe { js_closure_call1(ptr, value) };
-                }
+                callbacks.get(&handle).copied()
             });
+            if let Some(ptr) = ptr {
+                unsafe { js_closure_call1(ptr, value) };
+            }
         }
     }
 

@@ -58,6 +58,7 @@ pub extern "C" fn perry_ui_hstack_create(spacing: f64) -> i64 {
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_add_child(parent_handle: i64, child_handle: i64) {
     widgets::add_child(parent_handle, child_handle);
+    app::request_layout();
 }
 
 /// Create a reactive state cell. initial = f64 value. Returns state handle.
@@ -167,6 +168,7 @@ pub extern "C" fn perry_ui_for_each_init(container_handle: i64, state_handle: i6
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_clear_children(handle: i64) {
     widgets::clear_children(handle);
+    app::request_layout();
 }
 
 // =============================================================================
@@ -343,4 +345,5 @@ pub extern "C" fn perry_ui_textfield_set_string(handle: i64, text_ptr: i64) {
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_add_child_at(parent_handle: i64, child_handle: i64, index: f64) {
     widgets::add_child_at(parent_handle, child_handle, index as i64);
+    app::request_layout();
 }

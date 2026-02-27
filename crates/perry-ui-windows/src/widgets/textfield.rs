@@ -10,6 +10,8 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Controls::*;
 #[cfg(target_os = "windows")]
+use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+#[cfg(target_os = "windows")]
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 
 use super::{WidgetKind, alloc_control_id, register_widget};
@@ -59,9 +61,9 @@ pub fn create(placeholder_ptr: *const u8, on_change: f64) -> i64 {
                 windows::core::PCWSTR(to_wide("").as_ptr()),
                 WINDOW_STYLE(ES_AUTOHSCROLL as u32 | ES_LEFT as u32 | WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | WS_BORDER.0),
                 0, 0, 200, 24,
-                None,
+                super::get_parking_hwnd(),
                 HMENU(control_id as *mut _),
-                Some(hinstance.into()),
+                HINSTANCE::from(hinstance),
                 None,
             ).unwrap();
 
@@ -111,15 +113,16 @@ pub fn handle_change(handle: i64) {
                 }
             };
 
-            TEXTFIELD_CALLBACKS.with(|cb| {
+            let ptr = TEXTFIELD_CALLBACKS.with(|cb| {
                 let callbacks = cb.borrow();
-                if let Some(&ptr) = callbacks.get(&handle) {
-                    let bytes = text.as_bytes();
-                    let str_ptr = perry_runtime::string::js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32);
-                    let nanboxed = unsafe { js_nanbox_string(str_ptr as i64) };
-                    unsafe { js_closure_call1(ptr, nanboxed) };
-                }
+                callbacks.get(&handle).copied()
             });
+            if let Some(ptr) = ptr {
+                let bytes = text.as_bytes();
+                let str_ptr = perry_runtime::string::js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32);
+                let nanboxed = unsafe { js_nanbox_string(str_ptr as i64) };
+                unsafe { js_closure_call1(ptr, nanboxed) };
+            }
         }
     }
 }
@@ -130,7 +133,7 @@ pub fn focus(handle: i64) {
     {
         if let Some(hwnd) = super::get_hwnd(handle) {
             unsafe {
-                let _ = SetFocus(Some(hwnd));
+                let _ = SetFocus(hwnd);
             }
         }
     }

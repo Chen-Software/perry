@@ -31,7 +31,7 @@ pub fn read() -> f64 {
     #[cfg(target_os = "windows")]
     {
         unsafe {
-            if !OpenClipboard(None).as_bool() {
+            if OpenClipboard(None).is_err() {
                 return f64::from_bits(0x7FFC_0000_0000_0001); // TAG_UNDEFINED
             }
 
@@ -82,7 +82,7 @@ pub fn write(text_ptr: *const u8) {
         let byte_count = wide.len() * 2;
 
         unsafe {
-            if !OpenClipboard(None).as_bool() {
+            if OpenClipboard(None).is_err() {
                 return;
             }
             let _ = EmptyClipboard();
