@@ -1429,10 +1429,22 @@ impl Compiler {
         // When a TypeScript file has `declare function hone_editor_create(...)`, the lowering
         // produces a Function with empty body. If the function name matches an extern FFI
         // function from a native library manifest, remap the func_id to the extern function.
+        // Also override func_param_types with the manifest's declared types so that
+        // call-site argument coercion (f64→i64 for string pointers) works correctly.
+        let native_lib_param_types: BTreeMap<String, Vec<types::Type>> = self.native_library_functions.iter()
+            .map(|(name, params, _)| {
+                let types: Vec<types::Type> = params.iter().map(|p| Self::parse_cranelift_type(p)).collect();
+                (name.clone(), types)
+            })
+            .collect();
         for func in &hir.functions {
             if func.body.is_empty() {
                 if let Some(extern_id) = self.extern_funcs.get(&func.name) {
                     self.func_ids.insert(func.id, *extern_id);
+                    // Override param types from the native library manifest
+                    if let Some(manifest_types) = native_lib_param_types.get(&func.name) {
+                        self.func_param_types.insert(func.id, manifest_types.clone());
+                    }
                 }
             }
         }
