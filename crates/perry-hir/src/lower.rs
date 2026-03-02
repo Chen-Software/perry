@@ -775,6 +775,25 @@ pub fn lower_module_with_class_id(ast_module: &ast::Module, name: &str, source_f
     let mut ctx = LoweringContext::with_class_id_start(source_file_path, start_class_id);
     let mut module = Module::new(name);
 
+    // For .tsx files, pre-register JSX runtime symbols so JSX expressions can be lowered.
+    // This injects an automatic import of { jsx, jsxs } from "react/jsx-runtime"
+    // (remapped to perry-react via the user's packageAliases).
+    // Fragment is NOT imported — it's inlined as the string "__Fragment" directly in JSX lowering.
+    if source_file_path.ends_with(".tsx") {
+        ctx.register_imported_func("__jsx".to_string(), "jsx".to_string());
+        ctx.register_imported_func("__jsxs".to_string(), "jsxs".to_string());
+        module.imports.push(Import {
+            source: "react/jsx-runtime".to_string(),
+            specifiers: vec![
+                ImportSpecifier::Named { local: "__jsx".to_string(), imported: "jsx".to_string() },
+                ImportSpecifier::Named { local: "__jsxs".to_string(), imported: "jsxs".to_string() },
+            ],
+            is_native: false,
+            module_kind: ModuleKind::NativeCompiled,
+            resolved_path: None,
+        });
+    }
+
     // Pre-scan: Find all function names that have implementations (bodies)
     // This is needed to properly handle TypeScript function overloads where
     // multiple signature-only declarations precede a single implementation
@@ -3963,6 +3982,16 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                                 return Ok(Expr::FsUnlinkSync(Box::new(args.into_iter().next().unwrap())));
                                             }
                                         }
+                                        "readFileBuffer" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::FsReadFileBinary(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        "rmRecursive" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::FsRmRecursive(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
                                         _ => {} // Fall through to generic handling
                                     }
                                 }
@@ -4309,6 +4338,35 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                                     options,
                                                     callback,
                                                 });
+                                            }
+                                        }
+                                        "spawnBackground" => {
+                                            if args.len() >= 3 {
+                                                let mut args_iter = args.into_iter();
+                                                let command = args_iter.next().unwrap();
+                                                let spawn_args = args_iter.next().map(Box::new);
+                                                let log_file = args_iter.next().unwrap();
+                                                let env_json = args_iter.next().map(Box::new);
+                                                return Ok(Expr::ChildProcessSpawnBackground {
+                                                    command: Box::new(command),
+                                                    args: spawn_args,
+                                                    log_file: Box::new(log_file),
+                                                    env_json,
+                                                });
+                                            }
+                                        }
+                                        "getProcessStatus" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::ChildProcessGetProcessStatus(
+                                                    Box::new(args.into_iter().next().unwrap())
+                                                ));
+                                            }
+                                        }
+                                        "killProcess" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::ChildProcessKillProcess(
+                                                    Box::new(args.into_iter().next().unwrap())
+                                                ));
                                             }
                                         }
                                         _ => {} // Fall through to generic handling
@@ -5429,6 +5487,35 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                             });
                                         }
                                     }
+                                    "spawnBackground" => {
+                                        if args.len() >= 3 {
+                                            let mut args_iter = args.into_iter();
+                                            let command = args_iter.next().unwrap();
+                                            let spawn_args = args_iter.next().map(Box::new);
+                                            let log_file = args_iter.next().unwrap();
+                                            let env_json = args_iter.next().map(Box::new);
+                                            return Ok(Expr::ChildProcessSpawnBackground {
+                                                command: Box::new(command),
+                                                args: spawn_args,
+                                                log_file: Box::new(log_file),
+                                                env_json,
+                                            });
+                                        }
+                                    }
+                                    "getProcessStatus" => {
+                                        if args.len() >= 1 {
+                                            return Ok(Expr::ChildProcessGetProcessStatus(
+                                                Box::new(args.into_iter().next().unwrap())
+                                            ));
+                                        }
+                                    }
+                                    "killProcess" => {
+                                        if args.len() >= 1 {
+                                            return Ok(Expr::ChildProcessKillProcess(
+                                                Box::new(args.into_iter().next().unwrap())
+                                            ));
+                                        }
+                                    }
                                     _ => {} // Fall through
                                 }
                             }
@@ -5530,6 +5617,16 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                             let path = iter.next().unwrap();
                                             let content = iter.next().unwrap();
                                             return Ok(Expr::FsAppendFileSync(Box::new(path), Box::new(content)));
+                                        }
+                                    }
+                                    "readFileBuffer" => {
+                                        if args.len() >= 1 {
+                                            return Ok(Expr::FsReadFileBinary(Box::new(args.into_iter().next().unwrap())));
+                                        }
+                                    }
+                                    "rmRecursive" => {
+                                        if args.len() >= 1 {
+                                            return Ok(Expr::FsRmRecursive(Box::new(args.into_iter().next().unwrap())));
                                         }
                                     }
                                     _ => {} // Fall through
@@ -6844,6 +6941,12 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
             ctx.pending_classes.push(class);
             // Return as a New expression with no args (creates the class object reference)
             Ok(Expr::New { class_name: synthetic_name, args: vec![], type_args: vec![] })
+        }
+        ast::Expr::JSXElement(jsx) => {
+            lower_jsx_element(ctx, jsx)
+        }
+        ast::Expr::JSXFragment(jsx) => {
+            lower_jsx_fragment(ctx, jsx)
         }
         _ => Err(anyhow!("Unsupported expression type: {:?}", expr)),
     }
@@ -8578,12 +8681,22 @@ fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>) {
             collect_local_refs_expr(path, refs);
             collect_local_refs_expr(content, refs);
         }
-        Expr::FsExistsSync(path) | Expr::FsMkdirSync(path) | Expr::FsUnlinkSync(path) => {
+        Expr::FsExistsSync(path) | Expr::FsMkdirSync(path) | Expr::FsUnlinkSync(path)
+        | Expr::FsReadFileBinary(path) | Expr::FsRmRecursive(path) => {
             collect_local_refs_expr(path, refs);
         }
         Expr::FsAppendFileSync(path, content) => {
             collect_local_refs_expr(path, refs);
             collect_local_refs_expr(content, refs);
+        }
+        Expr::ChildProcessSpawnBackground { command, args, log_file, env_json } => {
+            collect_local_refs_expr(command, refs);
+            if let Some(a) = args { collect_local_refs_expr(a, refs); }
+            collect_local_refs_expr(log_file, refs);
+            if let Some(e) = env_json { collect_local_refs_expr(e, refs); }
+        }
+        Expr::ChildProcessGetProcessStatus(h) | Expr::ChildProcessKillProcess(h) => {
+            collect_local_refs_expr(h, refs);
         }
         // Path operations
         Expr::PathJoin(a, b) => {
@@ -9326,12 +9439,22 @@ fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<LocalId>) {
             collect_assigned_locals_expr(path, assigned);
             collect_assigned_locals_expr(content, assigned);
         }
-        Expr::FsExistsSync(path) | Expr::FsMkdirSync(path) | Expr::FsUnlinkSync(path) => {
+        Expr::FsExistsSync(path) | Expr::FsMkdirSync(path) | Expr::FsUnlinkSync(path)
+        | Expr::FsReadFileBinary(path) | Expr::FsRmRecursive(path) => {
             collect_assigned_locals_expr(path, assigned);
         }
         Expr::FsAppendFileSync(path, content) => {
             collect_assigned_locals_expr(path, assigned);
             collect_assigned_locals_expr(content, assigned);
+        }
+        Expr::ChildProcessSpawnBackground { command, args, log_file, env_json } => {
+            collect_assigned_locals_expr(command, assigned);
+            if let Some(a) = args { collect_assigned_locals_expr(a, assigned); }
+            collect_assigned_locals_expr(log_file, assigned);
+            if let Some(e) = env_json { collect_assigned_locals_expr(e, assigned); }
+        }
+        Expr::ChildProcessGetProcessStatus(h) | Expr::ChildProcessKillProcess(h) => {
+            collect_assigned_locals_expr(h, assigned);
         }
         // Path operations
         Expr::PathJoin(a, b) => {
@@ -10079,6 +10202,260 @@ fn fix_imported_enums_in_expr(expr: &mut Expr, enums: &BTreeMap<String, Vec<(Str
         }
         _ => {}
     }
+}
+
+// ─── JSX Lowering ────────────────────────────────────────────────────────────
+
+/// Lower a JSX element to a `__jsx(type, props)` call (new JSX transform).
+///
+/// `<div foo="bar">Hello</div>`  →  `__jsx("div", { foo: "bar", children: "Hello" })`
+/// `<MyComp>a b</MyComp>`       →  `__jsxs(MyComp, { children: ["a", "b"] })`
+fn lower_jsx_element(ctx: &mut LoweringContext, jsx: &ast::JSXElement) -> Result<Expr> {
+    let type_expr = lower_jsx_element_name(ctx, &jsx.opening.name)?;
+
+    let mut props_fields: Vec<(String, Expr)> = Vec::new();
+    for attr in &jsx.opening.attrs {
+        match attr {
+            ast::JSXAttrOrSpread::JSXAttr(jsx_attr) => {
+                let attr_name = match &jsx_attr.name {
+                    ast::JSXAttrName::Ident(id) => id.sym.to_string(),
+                    ast::JSXAttrName::JSXNamespacedName(ns) => {
+                        format!("{}:{}", ns.ns.sym, ns.name.sym)
+                    }
+                };
+                // 'key' is handled by React internally, not passed as a prop
+                if attr_name == "key" {
+                    continue;
+                }
+                let attr_val = match &jsx_attr.value {
+                    None => Expr::Bool(true), // Boolean attribute: <input disabled />
+                    Some(val) => lower_jsx_attr_value(ctx, val)?,
+                };
+                props_fields.push((attr_name, attr_val));
+            }
+            ast::JSXAttrOrSpread::SpreadElement(spread) => {
+                // Spread attributes ({...obj}) are not yet representable in HIR Object.
+                // Evaluate for side effects but don't propagate into props.
+                let _ = lower_expr(ctx, &spread.expr);
+            }
+        }
+    }
+
+    let mut children: Vec<Expr> = Vec::new();
+    for child in &jsx.children {
+        if let Some(child_expr) = lower_jsx_child(ctx, child)? {
+            children.push(child_expr);
+        }
+    }
+
+    // Use the original exported names (not the local __jsx/__jsxs aliases) so Perry
+    // generates the correct wrapper symbol names: __wrapper_jsx / __wrapper_jsxs.
+    let func_name = if children.len() > 1 { "jsxs" } else { "jsx" };
+    match children.len() {
+        0 => {}
+        1 => {
+            props_fields.push(("children".to_string(), children.remove(0)));
+        }
+        _ => {
+            props_fields.push(("children".to_string(), Expr::Array(children)));
+        }
+    }
+
+    let props_expr = if props_fields.is_empty() {
+        Expr::Null
+    } else {
+        Expr::Object(props_fields)
+    };
+
+    Ok(Expr::Call {
+        callee: Box::new(Expr::ExternFuncRef {
+            name: func_name.to_string(),
+            param_types: Vec::new(),
+            return_type: Type::Any,
+        }),
+        args: vec![type_expr, props_expr],
+        type_args: Vec::new(),
+    })
+}
+
+/// Lower a JSX fragment (`<>…</>`) to a `jsx(Fragment, { children })` call.
+fn lower_jsx_fragment(ctx: &mut LoweringContext, jsx: &ast::JSXFragment) -> Result<Expr> {
+    let mut children: Vec<Expr> = Vec::new();
+    for child in &jsx.children {
+        if let Some(child_expr) = lower_jsx_child(ctx, child)? {
+            children.push(child_expr);
+        }
+    }
+
+    // Use original exported names for correct wrapper symbol generation.
+    let func_name = if children.len() > 1 { "jsxs" } else { "jsx" };
+    let mut props_fields: Vec<(String, Expr)> = Vec::new();
+    match children.len() {
+        0 => {}
+        1 => {
+            props_fields.push(("children".to_string(), children.remove(0)));
+        }
+        _ => {
+            props_fields.push(("children".to_string(), Expr::Array(children)));
+        }
+    }
+
+    let props_expr = if props_fields.is_empty() {
+        Expr::Null
+    } else {
+        Expr::Object(props_fields)
+    };
+
+    Ok(Expr::Call {
+        callee: Box::new(Expr::ExternFuncRef {
+            name: func_name.to_string(),
+            param_types: Vec::new(),
+            return_type: Type::Any,
+        }),
+        // Fragment marker: inline "__Fragment" string. perry-react's jsx() checks
+        // `type === "__Fragment"` to detect fragment elements.
+        args: vec![Expr::String("__Fragment".to_string()), props_expr],
+        type_args: Vec::new(),
+    })
+}
+
+/// Lower a JSX element name to an HIR expression.
+/// Lowercase tag names (HTML intrinsics) become string literals.
+/// Uppercase tag names (components) are looked up as identifiers.
+fn lower_jsx_element_name(ctx: &mut LoweringContext, name: &ast::JSXElementName) -> Result<Expr> {
+    match name {
+        ast::JSXElementName::Ident(ident) => {
+            let sym = ident.sym.as_ref();
+            // Convention: lowercase first char = HTML intrinsic element
+            let first_char = sym.chars().next().unwrap_or('a');
+            if first_char.is_lowercase() || first_char == '_' {
+                Ok(Expr::String(sym.to_string()))
+            } else {
+                // Component reference - resolve identifier in scope
+                let n = sym.to_string();
+                if let Some(id) = ctx.lookup_local(&n) {
+                    Ok(Expr::LocalGet(id))
+                } else if let Some(id) = ctx.lookup_func(&n) {
+                    Ok(Expr::FuncRef(id))
+                } else if let Some(orig) = ctx.lookup_imported_func(&n) {
+                    Ok(Expr::ExternFuncRef {
+                        name: orig.to_string(),
+                        param_types: Vec::new(),
+                        return_type: Type::Any,
+                    })
+                } else {
+                    // Unknown identifier – treat as an extern reference
+                    Ok(Expr::ExternFuncRef {
+                        name: n,
+                        param_types: Vec::new(),
+                        return_type: Type::Any,
+                    })
+                }
+            }
+        }
+        ast::JSXElementName::JSXMemberExpr(member) => {
+            // e.g. React.Fragment → PropertyGet on the namespace
+            let obj_expr = lower_jsx_object(ctx, &member.obj)?;
+            Ok(Expr::PropertyGet {
+                object: Box::new(obj_expr),
+                property: member.prop.sym.to_string(),
+            })
+        }
+        ast::JSXElementName::JSXNamespacedName(ns) => {
+            // e.g. svg:circle → treated as a plain string for now
+            Ok(Expr::String(format!("{}:{}", ns.ns.sym, ns.name.sym)))
+        }
+    }
+}
+
+/// Lower a JSX member-expression object (the left-hand side of `Foo.Bar.Baz`).
+fn lower_jsx_object(ctx: &mut LoweringContext, obj: &ast::JSXObject) -> Result<Expr> {
+    match obj {
+        ast::JSXObject::Ident(ident) => {
+            let n = ident.sym.to_string();
+            if let Some(id) = ctx.lookup_local(&n) {
+                Ok(Expr::LocalGet(id))
+            } else if let Some(id) = ctx.lookup_func(&n) {
+                Ok(Expr::FuncRef(id))
+            } else if let Some(orig) = ctx.lookup_imported_func(&n) {
+                Ok(Expr::ExternFuncRef {
+                    name: orig.to_string(),
+                    param_types: Vec::new(),
+                    return_type: Type::Any,
+                })
+            } else {
+                Ok(Expr::ExternFuncRef {
+                    name: n,
+                    param_types: Vec::new(),
+                    return_type: Type::Any,
+                })
+            }
+        }
+        ast::JSXObject::JSXMemberExpr(member) => {
+            let obj_expr = lower_jsx_object(ctx, &member.obj)?;
+            Ok(Expr::PropertyGet {
+                object: Box::new(obj_expr),
+                property: member.prop.sym.to_string(),
+            })
+        }
+    }
+}
+
+/// Lower a JSX attribute value to an HIR expression.
+fn lower_jsx_attr_value(ctx: &mut LoweringContext, value: &ast::JSXAttrValue) -> Result<Expr> {
+    match value {
+        ast::JSXAttrValue::Str(s) => {
+            Ok(Expr::String(s.value.as_str().unwrap_or("").to_string()))
+        }
+        ast::JSXAttrValue::JSXExprContainer(container) => match &container.expr {
+            ast::JSXExpr::JSXEmptyExpr(_) => Ok(Expr::Undefined),
+            ast::JSXExpr::Expr(expr) => lower_expr(ctx, expr),
+        },
+        ast::JSXAttrValue::JSXElement(elem) => lower_jsx_element(ctx, elem),
+        ast::JSXAttrValue::JSXFragment(frag) => lower_jsx_fragment(ctx, frag),
+    }
+}
+
+/// Lower a JSX child node to an optional HIR expression.
+/// Returns `None` for whitespace-only text nodes (they are elided, matching React's behaviour).
+fn lower_jsx_child(ctx: &mut LoweringContext, child: &ast::JSXElementChild) -> Result<Option<Expr>> {
+    match child {
+        ast::JSXElementChild::JSXText(text) => {
+            let normalized = normalize_jsx_text(&text.value.to_string());
+            if normalized.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(Expr::String(normalized)))
+            }
+        }
+        ast::JSXElementChild::JSXExprContainer(container) => match &container.expr {
+            ast::JSXExpr::JSXEmptyExpr(_) => Ok(None),
+            ast::JSXExpr::Expr(expr) => lower_expr(ctx, expr).map(Some),
+        },
+        ast::JSXElementChild::JSXSpreadChild(spread) => {
+            lower_expr(ctx, &spread.expr).map(Some)
+        }
+        ast::JSXElementChild::JSXElement(elem) => {
+            lower_jsx_element(ctx, elem).map(Some)
+        }
+        ast::JSXElementChild::JSXFragment(frag) => {
+            lower_jsx_fragment(ctx, frag).map(Some)
+        }
+    }
+}
+
+/// Normalize JSX text content following React's whitespace rules:
+/// - Split by newlines, trim each line, filter empty lines, join with a space.
+fn normalize_jsx_text(text: &str) -> String {
+    let lines: Vec<&str> = text.split('\n').collect();
+    if lines.len() == 1 {
+        return text.trim().to_string();
+    }
+    lines.iter()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 use std::collections::{BTreeMap, HashMap};

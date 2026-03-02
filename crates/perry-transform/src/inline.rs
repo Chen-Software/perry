@@ -1041,9 +1041,15 @@ fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_l
         Expr::StringFromCharCode(code) | Expr::StringCoerce(code) => {
             substitute_locals(code, param_map, next_local_id);
         }
-        // Type coercions
-        Expr::BigIntCoerce(inner) | Expr::NumberCoerce(inner) => {
+        // Type coercions and parsing
+        Expr::BigIntCoerce(inner) | Expr::NumberCoerce(inner) | Expr::ParseFloat(inner) => {
             substitute_locals(inner, param_map, next_local_id);
+        }
+        Expr::ParseInt { string, radix } => {
+            substitute_locals(string, param_map, next_local_id);
+            if let Some(r) = radix {
+                substitute_locals(r, param_map, next_local_id);
+            }
         }
         // Global set
         Expr::GlobalSet(_, value) => {
@@ -1103,12 +1109,22 @@ fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_l
         }
         // FS operations
         Expr::FsReadFileSync(inner) | Expr::FsExistsSync(inner) |
-        Expr::FsMkdirSync(inner) | Expr::FsUnlinkSync(inner) => {
+        Expr::FsMkdirSync(inner) | Expr::FsUnlinkSync(inner) |
+        Expr::FsReadFileBinary(inner) | Expr::FsRmRecursive(inner) => {
             substitute_locals(inner, param_map, next_local_id);
         }
         Expr::FsWriteFileSync(a, b) | Expr::FsAppendFileSync(a, b) => {
             substitute_locals(a, param_map, next_local_id);
             substitute_locals(b, param_map, next_local_id);
+        }
+        Expr::ChildProcessSpawnBackground { command, args, log_file, env_json } => {
+            substitute_locals(command, param_map, next_local_id);
+            if let Some(a) = args { substitute_locals(a, param_map, next_local_id); }
+            substitute_locals(log_file, param_map, next_local_id);
+            if let Some(e) = env_json { substitute_locals(e, param_map, next_local_id); }
+        }
+        Expr::ChildProcessGetProcessStatus(h) | Expr::ChildProcessKillProcess(h) => {
+            substitute_locals(h, param_map, next_local_id);
         }
         // Buffer operations
         Expr::BufferFrom { data, encoding } => {

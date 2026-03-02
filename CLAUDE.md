@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.164
+**Current Version:** 0.2.167
 
 ## Workflow Requirements
 
@@ -76,6 +76,24 @@ Declarative TypeScript compiles to AppKit/UIKit calls. 47 `perry_ui_*` FFI funct
 3. Codegen: `crates/perry-codegen/src/codegen.rs` — declare extern + NativeMethodCall dispatch
 4. HIR: `crates/perry-hir/src/lower.rs` — only if widget has instance methods
 
+## Compiling npm Packages Natively (`perry.compilePackages`)
+
+Projects can list npm packages to compile natively instead of routing to V8. Configured in `package.json`:
+
+```json
+{ "perry": { "compilePackages": ["@noble/curves", "@noble/hashes"] } }
+```
+
+**Implementation** (`crates/perry/src/commands/compile.rs`):
+- `CompilationContext.compile_packages: HashSet<String>` — packages to compile natively
+- `CompilationContext.compile_package_dirs: HashMap<String, PathBuf>` — dedup cache (first-found dir per package)
+- `resolve_package_source_entry()` — prefers `src/index.ts` over `lib/index.js`
+- `is_in_compile_package()` — checks if a file path is inside a listed package
+- `resolve_import()` — redirects compile packages to first-found dir for dedup, marks as `NativeCompiled`
+- `collect_modules()` — `.js` files inside compile packages bypass JS runtime routing
+
+**Dedup logic**: When `@noble/hashes` appears in both `@noble/curves/node_modules/` and `@solana/web3.js/node_modules/`, the first-resolved directory is cached in `compile_package_dirs`. Subsequent imports redirect to the same copy, preventing duplicate linker symbols.
+
 ## Known Limitations
 
 - **No runtime type checking**: Types erased at compile time. `typeof` via NaN-boxing tags. `instanceof` via class ID chain.
@@ -134,6 +152,19 @@ Declarative TypeScript compiles to AppKit/UIKit calls. 47 `perry_ui_*` FFI funct
 - `CGPoint`/`CGSize`/`CGRect` in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.167
+- `perry.compilePackages`: compile pure TS/JS npm packages natively instead of V8 — configured in package.json, prefers TS source over compiled JS, deduplicates across nested node_modules to prevent duplicate linker symbols
+
+### v0.2.166
+- `packages/perry-styling`: first-party design system bridge — token codegen CLI (`perry-styling generate --tokens tokens.json --out theme.ts`), typed `PerryTheme`/`ResolvedTheme`, ergonomic flat-primitive styling helpers (`applyBg`, `applyRadius`, `applyBorderColor`, `applyGradient`, etc.), compile-time platform constants (`isMac`, `isMobile`, etc. via `__platform__`)
+- New FFI: `perry_ui_widget_set_border_color`, `perry_ui_widget_set_border_width`, `perry_ui_widget_set_edge_insets`, `perry_ui_widget_set_opacity` (macOS; stubs needed on other platforms)
+
+### v0.2.165
+- Background process management: `child_process.spawnBackground(cmd, args, logFile, envJson?)` → `{pid, handleId}`, `getProcessStatus(handleId)` → `{alive, exitCode}`, `killProcess(handleId)` — non-blocking process spawning with global registry
+- Binary file read: `fs.readFileBuffer(path)` → Buffer (binary-safe, uses `fs::read()` not `read_to_string`)
+- Recursive directory removal: `fs.rmRecursive(path)` → boolean (uses `fs::remove_dir_all`)
+- `__platform__` compile-time constant: `declare const __platform__: number` in any module emits an i64 constant (0=macOS,1=iOS,2=Android,3=Windows,4=Linux) determined at compile time; Cranelift constant-folds comparisons and eliminates dead branches — enables zero-cost platform branching
 
 ### v0.2.164
 - `perry publish`: auto-register free license on first use (no `--register`/`--github-token` flags needed); sends empty JSON to `/api/v1/license/register`

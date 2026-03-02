@@ -46,15 +46,18 @@ pub unsafe extern "C" fn js_jwt_sign(
     payload_ptr: *const StringHeader,
     secret_ptr: *const StringHeader,
     expires_in_secs: f64,
-) -> *mut StringHeader {
+) -> i64 {
+    const STRING_TAG: u64 = 0x7FFF_0000_0000_0000;
+    const POINTER_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
+
     let payload_json = match string_from_header(payload_ptr) {
         Some(p) => p,
-        None => return std::ptr::null_mut(),
+        None => return 0,
     };
 
     let secret = match string_from_header(secret_ptr) {
         Some(s) => s,
-        None => return std::ptr::null_mut(),
+        None => return 0,
     };
 
     // Parse the payload JSON
@@ -91,8 +94,11 @@ pub unsafe extern "C" fn js_jwt_sign(
     let key = EncodingKey::from_secret(secret.as_bytes());
 
     match encode(&header, &claims, &key) {
-        Ok(token) => js_string_from_bytes(token.as_ptr(), token.len() as u32),
-        Err(_) => std::ptr::null_mut(),
+        Ok(token) => {
+            let ptr = js_string_from_bytes(token.as_ptr(), token.len() as u32);
+            (STRING_TAG | (ptr as u64 & POINTER_MASK)) as i64
+        }
+        Err(_) => 0,
     }
 }
 
@@ -105,24 +111,39 @@ pub unsafe extern "C" fn js_jwt_verify(
 ) -> *mut StringHeader {
     let token = match string_from_header(token_ptr) {
         Some(t) => t,
-        None => return std::ptr::null_mut(),
+        None => {
+            eprintln!("[jwt-verify] token_ptr is null or invalid");
+            return std::ptr::null_mut();
+        }
     };
 
     let secret = match string_from_header(secret_ptr) {
         Some(s) => s,
-        None => return std::ptr::null_mut(),
+        None => {
+            eprintln!("[jwt-verify] secret_ptr is null or invalid");
+            return std::ptr::null_mut();
+        }
     };
 
+    eprintln!("[jwt-verify] token_len={} secret_len={}", token.len(), secret.len());
+
     let key = DecodingKey::from_secret(secret.as_bytes());
-    let validation = Validation::new(Algorithm::HS256);
+    let mut validation = Validation::new(Algorithm::HS256);
+    // Don't require exp claim - tokens may not have expiry set
+    validation.required_spec_claims = std::collections::HashSet::new();
+    validation.validate_exp = false;
 
     match decode::<Claims>(&token, &key, &validation) {
         Ok(token_data) => {
             // Return the claims as JSON
             let json = serde_json::to_string(&token_data.claims).unwrap_or_else(|_| "{}".to_string());
+            eprintln!("[jwt-verify] success, claims={}", &json[..json.len().min(80)]);
             js_string_from_bytes(json.as_ptr(), json.len() as u32)
         }
-        Err(_) => std::ptr::null_mut(), // Invalid token
+        Err(e) => {
+            eprintln!("[jwt-verify] error: {}", e);
+            std::ptr::null_mut()
+        }
     }
 }
 

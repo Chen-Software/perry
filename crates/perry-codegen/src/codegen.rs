@@ -34,6 +34,9 @@ thread_local! {
     /// Track try-catch nesting depth during codegen, so return/break/continue
     /// can emit the right number of js_try_end() calls before jumping out.
     static TRY_CATCH_DEPTH: Cell<usize> = Cell::new(0);
+    /// Compile-time platform target for the `__platform__` built-in constant.
+    /// 0 = macOS, 1 = iOS, 2 = Android, 3 = Windows, 4 = Linux.
+    static COMPILE_TARGET: Cell<i64> = Cell::new(0);
 }
 
 /// Global counter for generating unique temporary variable IDs
@@ -614,6 +617,9 @@ pub struct Compiler {
     bundled_extensions: Vec<(String, String)>,
     /// External native library FFI function declarations: function_name -> (params, returns)
     native_library_functions: Vec<(String, Vec<String>, String)>,
+    /// Compile-time platform ID injected as `__platform__` constant:
+    /// 0 = macOS, 1 = iOS, 2 = Android, 3 = Windows, 4 = Linux
+    compile_target: i64,
 }
 
 impl Compiler {
@@ -684,6 +690,24 @@ impl Compiler {
         let module = ObjectModule::new(builder);
         let ctx = module.make_context();
 
+        // Determine the compile-time platform constant for __platform__:
+        // 0 = macOS, 1 = iOS, 2 = Android, 3 = Windows, 4 = Linux
+        let compile_target: i64 = match target {
+            Some("ios") | Some("ios-simulator") => 1,
+            Some("android") => 2,
+            Some("windows") => 3,
+            Some("linux") => 4,
+            _ => {
+                // Native host target: detect the host OS at Rust compile time via cfg!()
+                if cfg!(target_os = "ios")     { 1 }
+                else if cfg!(target_os = "linux")   { 4 }
+                else if cfg!(target_os = "windows") { 3 }
+                else                                { 0 }  // macOS or other → treat as macOS
+            }
+        };
+        // Publish to thread-local so free functions (compile_stmt) can read it
+        COMPILE_TARGET.with(|c| c.set(compile_target));
+
         Ok(Self {
             module,
             ctx,
@@ -724,6 +748,7 @@ impl Compiler {
             output_type: "executable".to_string(),
             bundled_extensions: Vec::new(),
             native_library_functions: Vec::new(),
+            compile_target,
         })
     }
 
@@ -1237,12 +1262,18 @@ impl Compiler {
                     Some(Expr::BufferAllocUnsafe(_)) | Some(Expr::BufferConcat(_)) |
                     Some(Expr::BufferSlice { .. }) | Some(Expr::ChildProcessExecSync { .. }));
 
-                // Track compile-time constant values for const module-level variables
+                // Track compile-time constant values for const module-level variables.
+                // Special case: `declare const __platform__: number` is injected with
+                // the compile-time platform ID (0=macOS,1=iOS,2=Android,3=Windows,4=Linux).
                 let const_value = if !mutable && !is_pointer && !is_string {
-                    match init {
-                        Some(Expr::Integer(n)) => Some(*n as f64),
-                        Some(Expr::Number(f)) => Some(*f),
-                        _ => None,
+                    if name == "__platform__" {
+                        Some(self.compile_target as f64)
+                    } else {
+                        match init {
+                            Some(Expr::Integer(n)) => Some(*n as f64),
+                            Some(Expr::Number(f)) => Some(*f),
+                            _ => None,
+                        }
                     }
                 } else {
                     None
@@ -5015,6 +5046,32 @@ impl Compiler {
             self.extern_funcs.insert("js_fs_is_directory".to_string(), func_id);
         }
 
+        // js_fs_read_file_binary(path_value: f64) -> i64 (BufferHeader ptr or null)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // NaN-boxed path string
+            sig.returns.push(AbiParam::new(types::I64)); // buffer pointer (or null)
+            let func_id = self.module.declare_function(
+                "js_fs_read_file_binary",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_fs_read_file_binary".to_string(), func_id);
+        }
+
+        // js_fs_rm_recursive(path_value: f64) -> i32
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // NaN-boxed path string
+            sig.returns.push(AbiParam::new(types::I32)); // 1 on success, 0 on failure
+            let func_id = self.module.declare_function(
+                "js_fs_rm_recursive",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_fs_rm_recursive".to_string(), func_id);
+        }
+
         // Path runtime functions
         // js_path_join(a: *const StringHeader, b: *const StringHeader) -> *mut StringHeader
         {
@@ -7060,6 +7117,36 @@ impl Compiler {
             sig.returns.push(AbiParam::new(types::I64)); // result object ptr
             let func_id = self.module.declare_function("js_child_process_spawn_sync", Linkage::Import, &sig)?;
             self.extern_funcs.insert("js_child_process_spawn_sync".to_string(), func_id);
+        }
+
+        // js_child_process_spawn_background(cmd_val: f64, args_ptr: i64, log_file_val: f64, env_json_val: f64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // NaN-boxed cmd string
+            sig.params.push(AbiParam::new(types::I64)); // args array ptr (raw)
+            sig.params.push(AbiParam::new(types::F64)); // NaN-boxed log file path
+            sig.params.push(AbiParam::new(types::F64)); // NaN-boxed env JSON string
+            sig.returns.push(AbiParam::new(types::I64)); // result object ptr {pid, handleId}
+            let func_id = self.module.declare_function("js_child_process_spawn_background", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_child_process_spawn_background".to_string(), func_id);
+        }
+
+        // js_child_process_get_process_status(handle_id: f64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // handle ID
+            sig.returns.push(AbiParam::new(types::I64)); // result object ptr {alive, exitCode}
+            let func_id = self.module.declare_function("js_child_process_get_process_status", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_child_process_get_process_status".to_string(), func_id);
+        }
+
+        // js_child_process_kill_process(handle_id: f64) -> i32
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // handle ID
+            sig.returns.push(AbiParam::new(types::I32)); // 1=success, 0=failure
+            let func_id = self.module.declare_function("js_child_process_kill_process", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_child_process_kill_process".to_string(), func_id);
         }
 
         // ========================================================================
@@ -10280,7 +10367,7 @@ impl Compiler {
             self.extern_funcs.insert("js_fastify_req_json".to_string(), func_id);
         }
 
-        // js_fastify_req_headers(ctx: Handle) -> i64 (string pointer - JSON)
+        // js_fastify_req_headers(ctx: Handle) -> i64 (NaN-boxed JS object with all headers)
         {
             let mut sig = self.module.make_signature();
             sig.params.push(AbiParam::new(types::I64));
@@ -10297,6 +10384,24 @@ impl Compiler {
             sig.returns.push(AbiParam::new(types::I64));
             let func_id = self.module.declare_function("js_fastify_req_header", Linkage::Import, &sig)?;
             self.extern_funcs.insert("js_fastify_req_header".to_string(), func_id);
+        }
+
+        // js_fastify_req_get_user_data(ctx: Handle) -> f64 (NaN-boxed JSValue)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // ctx handle
+            sig.returns.push(AbiParam::new(types::F64)); // JSValue
+            let func_id = self.module.declare_function("js_fastify_req_get_user_data", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_req_get_user_data".to_string(), func_id);
+        }
+
+        // js_fastify_req_set_user_data(ctx: Handle, data: f64) -> void
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // ctx handle
+            sig.params.push(AbiParam::new(types::F64)); // JSValue data
+            let func_id = self.module.declare_function("js_fastify_req_set_user_data", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_fastify_req_set_user_data".to_string(), func_id);
         }
 
         // js_fastify_reply_status(ctx: Handle, code: f64) -> i64 (handle - chainable)
@@ -13480,7 +13585,8 @@ impl Compiler {
                 self.collect_closures_from_expr(value, closures, enclosing_class);
             }
             // File system operations
-            Expr::FsReadFileSync(path) | Expr::FsExistsSync(path) | Expr::FsMkdirSync(path) | Expr::FsUnlinkSync(path) => {
+            Expr::FsReadFileSync(path) | Expr::FsExistsSync(path) | Expr::FsMkdirSync(path) | Expr::FsUnlinkSync(path)
+            | Expr::FsReadFileBinary(path) | Expr::FsRmRecursive(path) => {
                 self.collect_closures_from_expr(path, closures, enclosing_class);
             }
             // Dynamic environment variable access
@@ -13490,6 +13596,15 @@ impl Compiler {
             Expr::FsWriteFileSync(path, content) | Expr::FsAppendFileSync(path, content) => {
                 self.collect_closures_from_expr(path, closures, enclosing_class);
                 self.collect_closures_from_expr(content, closures, enclosing_class);
+            }
+            Expr::ChildProcessSpawnBackground { command, args, log_file, env_json } => {
+                self.collect_closures_from_expr(command, closures, enclosing_class);
+                if let Some(a) = args { self.collect_closures_from_expr(a, closures, enclosing_class); }
+                self.collect_closures_from_expr(log_file, closures, enclosing_class);
+                if let Some(e) = env_json { self.collect_closures_from_expr(e, closures, enclosing_class); }
+            }
+            Expr::ChildProcessGetProcessStatus(h) | Expr::ChildProcessKillProcess(h) => {
+                self.collect_closures_from_expr(h, closures, enclosing_class);
             }
             // Path operations
             Expr::PathJoin(a, b) => {
@@ -16480,7 +16595,11 @@ fn compile_stmt(
                         // Union types use NaN-boxed f64 values - keep as f64
                         let val_type = builder.func.dfg.value_type(val);
                         if val_type == types::I64 {
-                            builder.ins().bitcast(types::F64, MemFlags::new(), val)
+                            // I64 pointer (Named type, object, closure, etc.) being stored into
+                            // an any/union-typed F64 variable.  Must NaN-box with POINTER_TAG so
+                            // that runtime typeof checks (js_value_typeof) return "object"/"function"
+                            // instead of "number".  Raw bitcast would produce a subnormal float.
+                            inline_nanbox_pointer(builder, val)
                         } else if val_type == types::I32 {
                             builder.ins().fcvt_from_sint(types::F64, val)
                         } else {
@@ -16506,8 +16625,13 @@ fn compile_stmt(
                     builder.def_var(var, val);
                 }
             } else {
-                // Initialize to undefined/null/0 depending on the type
-                if is_pointer && !is_union {
+                // Initialize to undefined/null/0 depending on the type.
+                // Special: `declare const __platform__: number` gets the compile-time platform ID.
+                if var_name == "__platform__" {
+                    let platform_val = COMPILE_TARGET.with(|c| c.get()) as f64;
+                    let platform_const = builder.ins().f64const(platform_val);
+                    builder.def_var(var, platform_const);
+                } else if is_pointer && !is_union {
                     // Raw pointer type - use null pointer (0)
                     let zero = builder.ins().iconst(types::I64, 0);
                     builder.def_var(var, zero);
@@ -16529,11 +16653,18 @@ fn compile_stmt(
             let i32_shadow: Option<Variable> = None;
 
             // Track compile-time constant values for const variables with literal initializers
+            // Track compile-time constant values for const variables with literal initializers.
+            // Special case: `declare const __platform__: number` gets the compile-time platform ID
+            // (0=macOS, 1=iOS, 2=Android, 3=Windows, 4=Linux) injected via COMPILE_TARGET thread-local.
             let const_value = if !mutable && !is_pointer && !is_string && !is_bigint {
-                match init {
-                    Some(Expr::Integer(n)) => Some(*n as f64),
-                    Some(Expr::Number(f)) => Some(*f),
-                    _ => None,
+                if var_name == "__platform__" {
+                    Some(COMPILE_TARGET.with(|c| c.get()) as f64)
+                } else {
+                    match init {
+                        Some(Expr::Integer(n)) => Some(*n as f64),
+                        Some(Expr::Number(f)) => Some(*f),
+                        _ => None,
+                    }
                 }
             } else {
                 None
@@ -20025,6 +20156,80 @@ fn compile_expr(
 
             // Return as f64 (1.0 = success, 0.0 = failure)
             Ok(builder.ins().fcvt_from_sint(types::F64, result_i32))
+        }
+        Expr::FsReadFileBinary(path_expr) => {
+            let path_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, path_expr, this_ctx)?;
+            let path_f64 = { let t = builder.func.dfg.value_type(path_val); if t == types::I64 { inline_nanbox_string(builder, path_val) } else { path_val } };
+
+            let func = extern_funcs.get("js_fs_read_file_binary")
+                .ok_or_else(|| anyhow!("js_fs_read_file_binary not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[path_f64]);
+            let result_ptr = builder.inst_results(call)[0];
+            // Return as NaN-boxed pointer (Buffer)
+            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr))
+        }
+        Expr::FsRmRecursive(path_expr) => {
+            let path_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, path_expr, this_ctx)?;
+            let path_f64 = { let t = builder.func.dfg.value_type(path_val); if t == types::I64 { inline_nanbox_string(builder, path_val) } else { path_val } };
+
+            let func = extern_funcs.get("js_fs_rm_recursive")
+                .ok_or_else(|| anyhow!("js_fs_rm_recursive not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[path_f64]);
+            let result_i32 = builder.inst_results(call)[0];
+            Ok(builder.ins().fcvt_from_sint(types::F64, result_i32))
+        }
+        Expr::ChildProcessSpawnBackground { command, args, log_file, env_json } => {
+            let cmd_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, command, this_ctx)?;
+            let cmd_f64 = ensure_f64(builder, cmd_val);
+
+            let args_i64 = if let Some(a) = args {
+                let av = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, a, this_ctx)?;
+                ensure_i64(builder, av)
+            } else {
+                builder.ins().iconst(types::I64, 0)
+            };
+
+            let log_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, log_file, this_ctx)?;
+            let log_f64 = ensure_f64(builder, log_val);
+
+            let env_f64 = if let Some(e) = env_json {
+                let ev = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, e, this_ctx)?;
+                ensure_f64(builder, ev)
+            } else {
+                // Pass NaN-boxed null
+                builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0002u64))
+            };
+
+            let func = extern_funcs.get("js_child_process_spawn_background")
+                .ok_or_else(|| anyhow!("js_child_process_spawn_background not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[cmd_f64, args_i64, log_f64, env_f64]);
+            let result_ptr = builder.inst_results(call)[0];
+            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr))
+        }
+        Expr::ChildProcessGetProcessStatus(handle_expr) => {
+            let handle_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, handle_expr, this_ctx)?;
+            let handle_f64 = ensure_f64(builder, handle_val);
+
+            let func = extern_funcs.get("js_child_process_get_process_status")
+                .ok_or_else(|| anyhow!("js_child_process_get_process_status not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[handle_f64]);
+            let result_ptr = builder.inst_results(call)[0];
+            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr))
+        }
+        Expr::ChildProcessKillProcess(handle_expr) => {
+            let handle_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, handle_expr, this_ctx)?;
+            let handle_f64 = ensure_f64(builder, handle_val);
+
+            let func = extern_funcs.get("js_child_process_kill_process")
+                .ok_or_else(|| anyhow!("js_child_process_kill_process not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[handle_f64]);
+            builder.inst_results(call); // discard return value
+            Ok(builder.ins().f64const(f64::NAN))
         }
         Expr::PathJoin(a_expr, b_expr) => {
             // Compile both path expressions
@@ -24725,7 +24930,16 @@ fn compile_expr(
                                 }
                             } else if i < param_types.len() && param_types[i] == types::F64 {
                                 // Parameter expects f64 - ensure we have f64
-                                ensure_f64(builder, val)
+                                let val_type = builder.func.dfg.value_type(val);
+                                if is_union_param && val_type == types::I64 {
+                                    // Pointer (object/array/closure) being passed to a union/any
+                                    // typed F64 parameter. NaN-box with POINTER_TAG so that
+                                    // runtime typeof checks (js_value_typeof) work correctly.
+                                    // String pointers are handled above by is_string_arg_expr.
+                                    inline_nanbox_pointer(builder, val)
+                                } else {
+                                    ensure_f64(builder, val)
+                                }
                             } else {
                                 // Default to f64 for user-defined functions
                                 ensure_f64(builder, val)
@@ -28008,10 +28222,13 @@ fn compile_expr(
                     if extern_funcs.contains_key("js_native_call_method") {
                         // Compile object expression
                         let obj_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
-                        // js_native_call_method expects f64 for object, ensure we have the right type
+                        // js_native_call_method expects f64 (NaN-boxed) for object.
+                        // If the object is an i64 pointer, NaN-box it with POINTER_TAG.
+                        // Raw bitcast would produce a subnormal float (no tag), causing
+                        // js_native_call_method to fail the jsval.is_pointer() check.
                         let obj_val_type = builder.func.dfg.value_type(obj_val_raw);
                         let obj_val = if obj_val_type == types::I64 {
-                            builder.ins().bitcast(types::F64, MemFlags::new(), obj_val_raw)
+                            inline_nanbox_pointer(builder, obj_val_raw)
                         } else {
                             obj_val_raw
                         };
@@ -28045,10 +28262,14 @@ fn compile_expr(
                             let args_ptr = builder.ins().stack_addr(types::I64, stack_slot, 0);
 
                             for (i, &arg_val_raw) in arg_vals.iter().enumerate() {
-                                // Ensure argument is f64 for JS interop
+                                // Ensure argument is f64 (NaN-boxed) for js_native_call_method.
+                                // If the arg is an i64 pointer (e.g. ReactElement, any named struct),
+                                // NaN-box it with POINTER_TAG so the closure receives a properly
+                                // tagged value. Raw bitcast would produce a tiny subnormal float
+                                // that js_value_typeof sees as "number" instead of "object".
                                 let arg_val_type = builder.func.dfg.value_type(arg_val_raw);
                                 let arg_val = if arg_val_type == types::I64 {
-                                    builder.ins().bitcast(types::F64, MemFlags::new(), arg_val_raw)
+                                    inline_nanbox_pointer(builder, arg_val_raw)
                                 } else {
                                     arg_val_raw
                                 };
@@ -30040,6 +30261,19 @@ fn compile_expr(
             if let Expr::LocalGet(id) = object.as_ref() {
                 if let Some(info) = locals.get(id) {
                     if let Some(ref class_name) = info.class_name {
+                        // Handle Fastify context user_data assignment: request.user = value
+                        if class_name == "fastify" && property == "user" {
+                            let raw_handle = builder.use_var(info.var);
+                            let handle = ensure_i64(builder, raw_handle);
+                            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
+                            let val_f64 = ensure_f64(builder, val);
+                            let set_user_func = extern_funcs.get("js_fastify_req_set_user_data")
+                                .ok_or_else(|| anyhow!("js_fastify_req_set_user_data not declared"))?;
+                            let set_user_ref = module.declare_func_in_func(*set_user_func, builder.func);
+                            builder.ins().call(set_user_ref, &[handle, val_f64]);
+                            return Ok(val_f64);
+                        }
+
                         if let Some(class_meta) = classes.get(class_name) {
                             // Check if there's a setter for this property
                             if let Some(&setter_id) = class_meta.setter_ids.get(property) {
@@ -31067,7 +31301,8 @@ fn compile_expr(
                 let zero_count = builder.ins().iconst(types::I32, 0);
                 let call = builder.ins().call(alloc_ref, &[null_ptr, zero_count]);
                 let arr_ptr = builder.inst_results(call)[0];
-                return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), arr_ptr));
+                // NaN-box with POINTER_TAG so typeof returns "object" instead of "number"
+                return Ok(inline_nanbox_pointer(builder, arr_ptr));
             }
 
             // Check if array contains string elements (need NaN-boxing)
@@ -31138,8 +31373,8 @@ fn compile_expr(
                 let call = builder.ins().call(alloc_ref, &[slot_addr, count_val]);
                 let arr_ptr = builder.inst_results(call)[0];
 
-                // Return as f64-bitcasted pointer
-                Ok(builder.ins().bitcast(types::F64, MemFlags::new(), arr_ptr))
+                // NaN-box with POINTER_TAG so typeof returns "object" instead of "number"
+                Ok(inline_nanbox_pointer(builder, arr_ptr))
             } else {
                 // Homogeneous array: use js_array_from_f64
                 let slot = builder.create_sized_stack_slot(StackSlotData::new(
@@ -31165,8 +31400,8 @@ fn compile_expr(
                 let call = builder.ins().call(alloc_ref, &[slot_addr, count_val]);
                 let arr_ptr = builder.inst_results(call)[0];
 
-                // Return as f64-bitcasted pointer
-                Ok(builder.ins().bitcast(types::F64, MemFlags::new(), arr_ptr))
+                // NaN-box with POINTER_TAG so typeof returns "object" instead of "number"
+                Ok(inline_nanbox_pointer(builder, arr_ptr))
             }
         }
         Expr::ArraySpread(elements) => {
@@ -34174,6 +34409,7 @@ fn compile_expr(
                 ("fastify", true, "json") => "js_fastify_req_json",
                 ("fastify", true, "headers") => "js_fastify_req_headers",
                 ("fastify", true, "header") => "js_fastify_req_header",
+                ("fastify", true, "user") => "js_fastify_req_get_user_data",
                 // Reply methods (on context.reply or context)
                 ("fastify", true, "status") => "js_fastify_reply_status",
                 ("fastify", true, "send") => "js_fastify_reply_send",
@@ -35540,14 +35776,21 @@ fn compile_expr(
                     match method.as_str() {
                         "sign" => {
                             // sign(payload, secret, options?)
-                            // js_jwt_sign(payload: i64, secret: i64, expiry: f64) -> i64
+                            // js_jwt_sign(payload_json: i64, secret: i64, expiry: f64) -> i64
                             let mut args = Vec::new();
                             if !arg_vals.is_empty() {
-                                // payload (object) - needs to be i64
-                                args.push(ensure_i64(builder, arg_vals[0]));
+                                // payload (object) - JSON-stringify it so the Rust side gets a JSON string
+                                let payload_f64 = ensure_f64(builder, arg_vals[0]);
+                                let type_hint = builder.ins().iconst(types::I32, 1); // 1 = object
+                                let stringify_func = extern_funcs.get("js_json_stringify")
+                                    .ok_or_else(|| anyhow!("js_json_stringify not declared"))?;
+                                let stringify_ref = module.declare_func_in_func(*stringify_func, builder.func);
+                                let stringify_call = builder.ins().call(stringify_ref, &[payload_f64, type_hint]);
+                                let payload_json_ptr = builder.inst_results(stringify_call)[0];
+                                args.push(payload_json_ptr);
                             }
                             if arg_vals.len() > 1 {
-                                // secret (string) - needs to be i64
+                                // secret (string) - needs to be i64 (raw ptr)
                                 args.push(ensure_i64(builder, arg_vals[1]));
                             }
                             // expiry - if options provided, try to extract expiresIn
@@ -35957,6 +36200,22 @@ fn compile_expr(
                     Ok(result)
                 } else if native_module == "uuid" && (method == "v4" || method == "v1" || method == "v7") {
                     // uuid.v4/v1/v7 return string pointers - NaN-box with STRING_TAG
+                    let nanbox_func = extern_funcs.get("js_nanbox_string")
+                        .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                    let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                    let call = builder.ins().call(nanbox_ref, &[result]);
+                    Ok(builder.inst_results(call)[0])
+                } else if native_module == "jsonwebtoken" && (method == "verify" || method == "decode") {
+                    // verify/decode return a raw StringHeader pointer (JSON of claims)
+                    // JSON.parse it to get a JS object (or null if invalid token)
+                    let json_parse_func = extern_funcs.get("js_json_parse")
+                        .ok_or_else(|| anyhow!("js_json_parse not declared"))?;
+                    let json_parse_ref = module.declare_func_in_func(*json_parse_func, builder.func);
+                    let call = builder.ins().call(json_parse_ref, &[result]);
+                    let jsvalue_bits = builder.inst_results(call)[0];
+                    Ok(builder.ins().bitcast(types::F64, MemFlags::new(), jsvalue_bits))
+                } else if native_module == "bcrypt" && method == "hashSync" {
+                    // hashSync returns string pointer - NaN-box with STRING_TAG
                     let nanbox_func = extern_funcs.get("js_nanbox_string")
                         .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
                     let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);

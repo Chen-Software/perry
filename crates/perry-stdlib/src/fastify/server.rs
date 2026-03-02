@@ -297,71 +297,116 @@ fn event_loop(app_handle: Handle, request_rx: &mut mpsc::Receiver<FastifyPending
             // NaN-box the context handle with POINTER_TAG for hook calls
             let nanboxed_ctx_for_hooks = f64::from_bits(0x7FFD_0000_0000_0000 | (ctx_handle as u64 & 0x0000_FFFF_FFFF_FFFF));
 
-            // Run preHandler hooks
-            for hook in &app.hooks.pre_handler {
-                unsafe {
-                    // Call hook(request, reply) - both are the context for simplicity
-                    let closure_ptr = *hook as *const perry_runtime::ClosureHeader;
-                    perry_runtime::js_closure_call2(closure_ptr, nanboxed_ctx_for_hooks, nanboxed_ctx_for_hooks);
+            // Collect hook ptrs (copy i64 values to avoid holding borrow on app during hook execution)
+            let on_request_hooks: Vec<ClosurePtr> = app.hooks.on_request.iter().copied().collect();
+            let pre_handler_hooks: Vec<ClosurePtr> = app.hooks.pre_handler.iter().copied().collect();
+
+            // Run onRequest hooks (e.g., auth middleware, rate limiting, CORS)
+            for hook in &on_request_hooks {
+                if unsafe { call_hook_awaiting(*hook, nanboxed_ctx_for_hooks, ctx_handle) } {
+                    response_sent = true;
+                    break;
                 }
             }
 
-            // Call route handler
-            if let Some((route, _)) = app.match_route(&pending.method, &pending.path) {
-                let handler = route.handler;
-
-                // NaN-box the context handle with POINTER_TAG so it can be dispatched
-                // by js_native_call_method when the handler calls request/reply methods
-                let nanboxed_ctx = f64::from_bits(0x7FFD_0000_0000_0000 | (ctx_handle as u64 & 0x0000_FFFF_FFFF_FFFF));
-
-                // Call handler(request, reply) - both are the context handle
-                let result = unsafe {
-                    let closure_ptr = handler as *const perry_runtime::ClosureHeader;
-                    perry_runtime::js_closure_call2(closure_ptr, nanboxed_ctx, nanboxed_ctx)
-                };
-
-                // Process any async operations
-                unsafe { crate::common::js_stdlib_process_pending() };
-                perry_runtime::js_promise_run_microtasks();
-
-                // Check if handler returned a promise (NaN-boxed pointer to a Promise)
-                let mut final_result = result;
-                let jsv = JSValue::from_bits(result.to_bits());
-                if jsv.is_pointer() {
-                    let ptr = jsv.as_pointer::<perry_runtime::Promise>();
-                    // Try to treat it as a promise and wait for it
-                    if unsafe { perry_runtime::js_is_promise(ptr as *mut perry_runtime::Promise) } != 0 {
-                        wait_for_promise(ptr as *mut perry_runtime::Promise);
-                        // Extract the resolved value from the promise
-                        final_result = unsafe { perry_runtime::js_promise_value(ptr as *mut perry_runtime::Promise) };
+            // Run preHandler hooks (if no response sent yet)
+            if !response_sent {
+                for hook in &pre_handler_hooks {
+                    if unsafe { call_hook_awaiting(*hook, nanboxed_ctx_for_hooks, ctx_handle) } {
+                        response_sent = true;
+                        break;
                     }
                 }
+            }
 
-                // Get response from context
-                if let Some(ctx) = unsafe { get_handle::<FastifyContext>(ctx_handle) } {
-                    let response = FastifyResponse {
-                        status: ctx.status_code,
-                        headers: ctx.response_headers.clone(),
-                        body: ctx.response_body.clone().unwrap_or_else(|| {
-                            // If no explicit body, use handler return value
-                            build_response_body(final_result)
-                        }),
+            // Call route handler (if no hook sent a response)
+            // undefined NaN-box value: tag 0x7FFC, payload 1
+            let undefined_bits: u64 = 0x7FFC_0000_0000_0001;
+            let mut final_result: f64 = f64::from_bits(undefined_bits);
+
+            if !response_sent {
+                if let Some((route, _)) = app.match_route(&pending.method, &pending.path) {
+                    let handler = route.handler;
+
+                    // NaN-box the context handle with POINTER_TAG so it can be dispatched
+                    // by js_native_call_method when the handler calls request/reply methods
+                    let nanboxed_ctx = nanboxed_ctx_for_hooks; // same value, different name for clarity
+
+                    // Call handler(request, reply) - both are the context handle
+                    let result = unsafe {
+                        let closure_ptr = handler as *const perry_runtime::ClosureHeader;
+                        perry_runtime::js_closure_call2(closure_ptr, nanboxed_ctx, nanboxed_ctx)
                     };
 
-                    // Ensure content-type is set
-                    let mut final_response = response;
-                    if !final_response.headers.iter().any(|(k, _)| k.to_lowercase() == "content-type") {
-                        final_response.headers.push(("content-type".to_string(), "application/json".to_string()));
-                    }
+                    // Process any async operations
+                    unsafe { crate::common::js_stdlib_process_pending() };
+                    perry_runtime::js_promise_run_microtasks();
 
-                    let _ = pending.response_tx.send(final_response);
-                    response_sent = true;
+                    // Check if handler returned a promise (NaN-boxed pointer to a Promise)
+                    final_result = result;
+                    let jsv = JSValue::from_bits(result.to_bits());
+                    if jsv.is_pointer() {
+                        let ptr = jsv.as_pointer::<perry_runtime::Promise>();
+                        // Try to treat it as a promise and wait for it
+                        if unsafe { perry_runtime::js_is_promise(ptr as *mut perry_runtime::Promise) } != 0 {
+                            wait_for_promise(ptr as *mut perry_runtime::Promise);
+                            // Extract the resolved value from the promise
+                            final_result = unsafe { perry_runtime::js_promise_value(ptr as *mut perry_runtime::Promise) };
+                        }
+                    }
                 }
             }
 
-            // The response was sent inside the handler block above, no need to send 404 here
-            // since we already checked route matching in handle_request
+            // Always send a response (from hook or route handler)
+            if let Some(ctx) = unsafe { get_handle::<FastifyContext>(ctx_handle) } {
+                let response = FastifyResponse {
+                    status: ctx.status_code,
+                    headers: ctx.response_headers.clone(),
+                    body: ctx.response_body.clone().unwrap_or_else(|| {
+                        // If no explicit body, use handler return value
+                        build_response_body(final_result)
+                    }),
+                };
+
+                // Ensure content-type is set
+                let mut final_response = response;
+                if !final_response.headers.iter().any(|(k, _)| k.to_lowercase() == "content-type") {
+                    final_response.headers.push(("content-type".to_string(), "application/json".to_string()));
+                }
+
+                let _ = pending.response_tx.send(final_response);
+                response_sent = true;
+            }
+
+            let _ = response_sent; // suppress unused warning
         }
+    }
+}
+
+/// Call a hook closure, await any returned Promise, and return whether ctx.sent is true.
+/// Returns true if the hook sent a response (e.g., 401 from auth middleware).
+unsafe fn call_hook_awaiting(hook: ClosurePtr, ctx_f64: f64, ctx_handle: Handle) -> bool {
+    let closure_ptr = hook as *const perry_runtime::ClosureHeader;
+    let result = perry_runtime::js_closure_call2(closure_ptr, ctx_f64, ctx_f64);
+
+    // Process pending async operations
+    crate::common::js_stdlib_process_pending();
+    perry_runtime::js_promise_run_microtasks();
+
+    // If hook returned a Promise, wait for it to resolve/reject
+    let jsv = JSValue::from_bits(result.to_bits());
+    if jsv.is_pointer() {
+        let ptr = jsv.as_pointer::<perry_runtime::Promise>();
+        if perry_runtime::js_is_promise(ptr as *mut perry_runtime::Promise) != 0 {
+            wait_for_promise(ptr as *mut perry_runtime::Promise);
+        }
+    }
+
+    // Return whether the hook sent a response (e.g., auth middleware sent 401)
+    if let Some(ctx) = get_handle::<FastifyContext>(ctx_handle) {
+        ctx.sent
+    } else {
+        false
     }
 }
 

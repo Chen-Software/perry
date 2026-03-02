@@ -9,6 +9,11 @@ use perry_runtime::{js_string_from_bytes, StringHeader, JSValue};
 
 use crate::common::{get_handle, get_handle_mut, register_handle, Handle};
 
+// Declare perry-runtime's JSON parser (defined in perry-runtime with #[no_mangle])
+extern "C" {
+    fn js_json_parse(text_ptr: *const StringHeader) -> u64; // returns NaN-boxed JSValue bits
+}
+
 /// Context ID counter
 static CONTEXT_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -60,6 +65,8 @@ pub struct FastifyContext {
     pub sent: bool,
     /// Response body (if built incrementally)
     pub response_body: Option<Vec<u8>>,
+    /// User data attached by auth middleware (NaN-boxed JSValue bits)
+    pub user_data: u64,
 }
 
 impl FastifyContext {
@@ -78,6 +85,7 @@ impl FastifyContext {
             None => (url.clone(), String::new()),
         };
 
+        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
         Self {
             id: CONTEXT_ID_COUNTER.fetch_add(1, Ordering::SeqCst),
             request_id,
@@ -91,6 +99,7 @@ impl FastifyContext {
             response_headers: Vec::new(),
             sent: false,
             response_body: None,
+            user_data: TAG_UNDEFINED,
         }
     }
 
@@ -200,6 +209,36 @@ pub unsafe extern "C" fn js_fastify_req_params(ctx_handle: Handle) -> *mut Strin
     std::ptr::null_mut()
 }
 
+/// Get all route params as a JavaScript object (NaN-boxed pointer)
+#[no_mangle]
+pub unsafe extern "C" fn js_fastify_req_params_object(ctx_handle: Handle) -> f64 {
+    use perry_runtime::{js_object_alloc, js_object_set_keys, js_object_set_field_f64, js_array_alloc, js_array_push_f64, js_nanbox_string};
+
+    if let Some(ctx) = get_handle::<FastifyContext>(ctx_handle) {
+        let field_count = ctx.params.len() as u32;
+        let obj = js_object_alloc(0, field_count);
+        if obj.is_null() {
+            return f64::from_bits(0x7FFC_0000_0000_0001);
+        }
+        let keys_arr = js_array_alloc(field_count);
+        if keys_arr.is_null() {
+            return f64::from_bits(0x7FFC_0000_0000_0001);
+        }
+        for (i, (key, value)) in ctx.params.iter().enumerate() {
+            let key_ptr = js_string_from_bytes(key.as_ptr(), key.len() as u32);
+            let value_ptr = js_string_from_bytes(value.as_ptr(), value.len() as u32);
+            let key_nanboxed = js_nanbox_string(key_ptr as i64);
+            js_array_push_f64(keys_arr, key_nanboxed);
+            let value_nanboxed = js_nanbox_string(value_ptr as i64);
+            js_object_set_field_f64(obj, i as u32, value_nanboxed);
+        }
+        js_object_set_keys(obj, keys_arr);
+        let ptr = obj as u64;
+        return f64::from_bits(0x7FFD_0000_0000_0000 | (ptr & 0x0000_FFFF_FFFF_FFFF));
+    }
+    f64::from_bits(0x7FFC_0000_0000_0001)
+}
+
 /// Get a single route param (Hono style)
 #[no_mangle]
 pub unsafe extern "C" fn js_fastify_req_param(ctx_handle: Handle, name: i64) -> *mut StringHeader {
@@ -292,7 +331,6 @@ pub unsafe extern "C" fn js_fastify_req_body(ctx_handle: Handle) -> *mut StringH
 pub unsafe extern "C" fn js_fastify_req_json(ctx_handle: Handle) -> f64 {
     if let Some(ctx) = get_handle::<FastifyContext>(ctx_handle) {
         if let Some(body) = ctx.body_string() {
-            // Parse JSON and create object
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
                 return json_value_to_jsvalue(&value);
             }
@@ -302,14 +340,22 @@ pub unsafe extern "C" fn js_fastify_req_json(ctx_handle: Handle) -> f64 {
 }
 
 /// Get all headers as JSON object
+/// Get all request headers as a JS object (so request.headers.authorization works)
 #[no_mangle]
-pub unsafe extern "C" fn js_fastify_req_headers(ctx_handle: Handle) -> *mut StringHeader {
+pub unsafe extern "C" fn js_fastify_req_headers(ctx_handle: Handle) -> i64 {
     if let Some(ctx) = get_handle::<FastifyContext>(ctx_handle) {
         if let Ok(json) = serde_json::to_string(&ctx.headers) {
-            return js_string_from_bytes(json.as_ptr(), json.len() as u32);
+            // Create a Perry string for the JSON
+            let json_ptr = js_string_from_bytes(json.as_ptr(), json.len() as u32);
+            if !json_ptr.is_null() {
+                // Parse the JSON string into a JS object using Perry's JSON parser
+                let jsval_bits = js_json_parse(json_ptr as *const StringHeader);
+                return jsval_bits as i64;
+            }
         }
     }
-    std::ptr::null_mut()
+    // Return undefined
+    0x7FFC_0000_0000_0001u64 as i64
 }
 
 /// Get a single header value
@@ -326,6 +372,24 @@ pub unsafe extern "C" fn js_fastify_req_header(ctx_handle: Handle, name: i64) ->
         }
     }
     std::ptr::null_mut()
+}
+
+/// Get user data attached by auth middleware
+#[no_mangle]
+pub unsafe extern "C" fn js_fastify_req_get_user_data(ctx_handle: Handle) -> f64 {
+    if let Some(ctx) = get_handle::<FastifyContext>(ctx_handle) {
+        return f64::from_bits(ctx.user_data);
+    }
+    const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+    f64::from_bits(TAG_UNDEFINED)
+}
+
+/// Set user data from auth middleware
+#[no_mangle]
+pub unsafe extern "C" fn js_fastify_req_set_user_data(ctx_handle: Handle, data: f64) {
+    if let Some(ctx) = get_handle_mut::<FastifyContext>(ctx_handle) {
+        ctx.user_data = data.to_bits();
+    }
 }
 
 // ============================================================================

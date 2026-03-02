@@ -121,6 +121,16 @@ type HandlePropertyDispatchFn = unsafe extern "C" fn(
 
 pub static mut HANDLE_PROPERTY_DISPATCH: Option<HandlePropertyDispatchFn> = None;
 
+/// Function pointer type for dispatching property set on handle-based objects.
+type HandlePropertySetDispatchFn = unsafe extern "C" fn(
+    handle: i64,
+    property_name_ptr: *const u8,
+    property_name_len: usize,
+    value: f64,
+);
+
+pub static mut HANDLE_PROPERTY_SET_DISPATCH: Option<HandlePropertySetDispatchFn> = None;
+
 /// Register a function to handle method calls on handle-based objects
 #[no_mangle]
 pub unsafe extern "C" fn js_register_handle_method_dispatch(f: HandleMethodDispatchFn) {
@@ -131,6 +141,12 @@ pub unsafe extern "C" fn js_register_handle_method_dispatch(f: HandleMethodDispa
 #[no_mangle]
 pub unsafe extern "C" fn js_register_handle_property_dispatch(f: HandlePropertyDispatchFn) {
     HANDLE_PROPERTY_DISPATCH = Some(f);
+}
+
+/// Register a function to handle property set on handle-based objects
+#[no_mangle]
+pub unsafe extern "C" fn js_register_handle_property_set_dispatch(f: HandlePropertySetDispatchFn) {
+    HANDLE_PROPERTY_SET_DISPATCH = Some(f);
 }
 
 /// Register a class method in the vtable registry.
@@ -680,7 +696,7 @@ pub extern "C" fn js_object_has_property(obj: f64, key: f64) -> f64 {
         return 0.0;
     }
 
-    let key_str = key_val.as_pointer::<crate::StringHeader>();
+    let key_str = key_val.as_string_ptr();
 
     unsafe {
         let keys = (*obj_ptr).keys_array;
@@ -692,7 +708,7 @@ pub extern "C" fn js_object_has_property(obj: f64, key: f64) -> f64 {
         for i in 0..key_count {
             let stored_key_val = crate::array::js_array_get(keys, i as u32);
             if stored_key_val.is_string() {
-                let stored_key = stored_key_val.as_pointer::<crate::StringHeader>();
+                let stored_key = stored_key_val.as_string_ptr();
                 if crate::string::js_string_equals(key_str, stored_key) {
                     // Check if the field was deleted (set to undefined by delete operator)
                     let field_val = js_object_get_field(obj_ptr, i as u32);
@@ -745,7 +761,7 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
             let key_val = crate::array::js_array_get(keys, i as u32);
             // Keys are stored as string pointers (NaN-boxed)
             if key_val.is_string() {
-                let stored_key = key_val.as_pointer::<crate::StringHeader>();
+                let stored_key = key_val.as_string_ptr();
 
                 if crate::string::js_string_equals(key, stored_key) {
                     // Found it - return the field at this index
@@ -779,8 +795,20 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
         if top16 >= 0x7FF8 {
             // NaN-boxed value — extract lower 48 bits as pointer
             let raw = (bits & 0x0000_FFFF_FFFF_FFFF) as *mut ObjectHeader;
-            if raw.is_null() || top16 == 0x7FFC || (raw as usize) < 0x10000 {
-                // undefined/null tag, null pointer, or small handle — silently ignore
+            if raw.is_null() || top16 == 0x7FFC {
+                return;
+            }
+            if (raw as usize) < 0x10000 {
+                // Small handle — dispatch to handle property set if registered
+                unsafe {
+                    if let Some(dispatch) = HANDLE_PROPERTY_SET_DISPATCH {
+                        if !key.is_null() {
+                            let name_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+                            let name_len = (*key).length as usize;
+                            dispatch(raw as i64, name_ptr, name_len, value);
+                        }
+                    }
+                }
                 return;
             }
             raw
@@ -789,8 +817,21 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
         }
     };
     if obj.is_null() || (obj as usize) < 0x10000 {
+        // Small non-null value — could be a stripped handle (after ensure_i64 stripped NaN-box tag)
+        if !obj.is_null() && (obj as usize) > 0 {
+            unsafe {
+                if let Some(dispatch) = HANDLE_PROPERTY_SET_DISPATCH {
+                    if !key.is_null() {
+                        let name_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+                        let name_len = (*key).length as usize;
+                        dispatch(obj as i64, name_ptr, name_len, value);
+                    }
+                }
+            }
+        }
         return;
     }
+    // Safety: obj is a valid heap pointer (> 0x10000) at this point
     unsafe {
         let keys = (*obj).keys_array;
 
@@ -813,7 +854,7 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
             let key_val = crate::array::js_array_get(keys, i as u32);
             // Keys are stored as string pointers (NaN-boxed)
             if key_val.is_string() {
-                let stored_key = key_val.as_pointer::<crate::StringHeader>();
+                let stored_key = key_val.as_string_ptr();
                 if crate::string::js_string_equals(key, stored_key) {
                     // Found it - update the field
                     js_object_set_field(obj, i as u32, JSValue::from_bits(value.to_bits()));
@@ -853,7 +894,7 @@ pub extern "C" fn js_object_delete_field(obj: *mut ObjectHeader, key: *const cra
             let key_val = crate::array::js_array_get(keys, i as u32);
             // Keys are stored as string pointers (NaN-boxed)
             if key_val.is_string() {
-                let stored_key = key_val.as_pointer::<crate::StringHeader>();
+                let stored_key = key_val.as_string_ptr();
                 if crate::string::js_string_equals(key, stored_key) {
                     // Found it - set the field to undefined
                     js_object_set_field(obj, i as u32, JSValue::undefined());
@@ -876,7 +917,7 @@ pub extern "C" fn js_object_delete_dynamic(obj: *mut ObjectHeader, key: f64) -> 
 
     // If the key is a string, use js_object_delete_field
     if key_val.is_string() {
-        let key_str = key_val.as_pointer::<crate::StringHeader>();
+        let key_str = key_val.as_string_ptr();
         return js_object_delete_field(obj, key_str);
     }
 
@@ -920,7 +961,7 @@ pub extern "C" fn js_object_rest(src: *const ObjectHeader, exclude_keys: *const 
         for i in 0..key_count {
             let key_val = crate::array::js_array_get(keys, i as u32);
             if !key_val.is_string() { continue; }
-            let key_str = key_val.as_pointer::<crate::StringHeader>();
+            let key_str = key_val.as_string_ptr();
 
             // Check if field was deleted
             let field_val = js_object_get_field(src, i as u32);
@@ -931,7 +972,7 @@ pub extern "C" fn js_object_rest(src: *const ObjectHeader, exclude_keys: *const 
             for j in 0..exclude_count {
                 let ex_val = crate::array::js_array_get(exclude_keys, j as u32);
                 if ex_val.is_string() {
-                    let ex_str = ex_val.as_pointer::<crate::StringHeader>();
+                    let ex_str = ex_val.as_string_ptr();
                     if crate::string::js_string_equals(key_str, ex_str) {
                         excluded = true;
                         break;
@@ -1053,11 +1094,27 @@ pub unsafe extern "C" fn js_native_call_method(
             let result = func(object, method_name_ptr, method_name_len, args_ptr, args_len);
             return result;
         }
-        eprintln!("[js_native_call_method] JS handle callback not set!");
         return f64::from_bits(0x7FF8_0000_0000_0001); // undefined
     }
 
     let jsval = JSValue::from_bits(object.to_bits());
+
+    // Check for raw handle integer: Perry may bit-cast an i64 handle directly to f64,
+    // producing a subnormal float (bits == handle_id, no NaN-box tag). Values 0 < bits < 0x100000
+    // with no tag are raw handle IDs from Perry's integer-typed handle parameters.
+    let raw_bits = object.to_bits();
+    if raw_bits > 0 && raw_bits < 0x100000 {
+        if let Some(dispatch) = HANDLE_METHOD_DISPATCH {
+            return dispatch(
+                raw_bits as i64,
+                method_name.as_ptr(),
+                method_name.len(),
+                args_ptr,
+                args_len,
+            );
+        }
+        return f64::from_bits(0x7FF8_0000_0000_0001); // undefined
+    }
 
     // Check if this is a handle-based object (small integer, not a real heap pointer)
     // Handles are used by Fastify, ioredis, and other native modules that store
@@ -1166,7 +1223,7 @@ pub unsafe extern "C" fn js_native_call_method(
             for i in 0..key_count {
                 let key_val = crate::array::js_array_get(keys, i as u32);
                 if key_val.is_string() {
-                    let stored_key = key_val.as_pointer::<crate::StringHeader>();
+                    let stored_key = key_val.as_string_ptr();
                     if crate::string::js_string_equals(method_key, stored_key) {
                         // Found the method - get it and call it if it's a closure
                         let field_val = js_object_get_field(obj as *mut _, i as u32);
@@ -1222,7 +1279,7 @@ unsafe fn dispatch_native_module_method(
     // Extract the module name from field 0 of the namespace object
     let module_field = js_object_get_field(obj as *mut _, 0);
     let module_name = if module_field.is_string() {
-        let str_ptr = module_field.as_pointer::<crate::StringHeader>();
+        let str_ptr = module_field.as_string_ptr();
         let len = (*str_ptr).length as usize;
         let data = (str_ptr as *const u8).add(std::mem::size_of::<crate::StringHeader>());
         std::str::from_utf8(std::slice::from_raw_parts(data, len)).unwrap_or("")
@@ -1240,7 +1297,7 @@ unsafe fn dispatch_native_module_method(
         let v = arg(n);
         let jsv = JSValue::from_bits(v.to_bits());
         if jsv.is_string() {
-            jsv.as_pointer::<crate::StringHeader>()
+            jsv.as_string_ptr()
         } else {
             std::ptr::null()
         }
@@ -1381,7 +1438,7 @@ unsafe fn get_module_name_from_namespace(namespace_obj: f64) -> &'static str {
     }
     let module_field = js_object_get_field(obj as *mut _, 0);
     if module_field.is_string() {
-        let str_ptr = module_field.as_pointer::<crate::StringHeader>();
+        let str_ptr = module_field.as_string_ptr();
         let len = (*str_ptr).length as usize;
         let data = (str_ptr as *const u8).add(std::mem::size_of::<crate::StringHeader>());
         std::str::from_utf8(std::slice::from_raw_parts(data, len)).unwrap_or("")

@@ -711,6 +711,8 @@ pub enum Expr {
     FsMkdirSync(Box<Expr>),              // fs.mkdirSync(path) -> void
     FsUnlinkSync(Box<Expr>),             // fs.unlinkSync(path) -> void
     FsAppendFileSync(Box<Expr>, Box<Expr>), // fs.appendFileSync(path, content) -> void
+    FsReadFileBinary(Box<Expr>),         // fs.readFileBuffer(path) -> Buffer (binary-safe)
+    FsRmRecursive(Box<Expr>),            // fs.rmRecursive(path) -> boolean
 
     // Path operations
     PathJoin(Box<Expr>, Box<Expr>),      // path.join(a, b) -> string
@@ -847,6 +849,14 @@ pub enum Expr {
         options: Option<Box<Expr>>,
         callback: Option<Box<Expr>>,
     },
+    ChildProcessSpawnBackground {        // child_process.spawnBackground(cmd, args, logFile, envJson?) -> {pid, handleId}
+        command: Box<Expr>,
+        args: Option<Box<Expr>>,
+        log_file: Box<Expr>,
+        env_json: Option<Box<Expr>>,
+    },
+    ChildProcessGetProcessStatus(Box<Expr>), // child_process.getProcessStatus(handleId) -> {alive, exitCode}
+    ChildProcessKillProcess(Box<Expr>),  // child_process.killProcess(handleId) -> void
 
     // Fetch operations
     FetchWithOptions {                   // fetch(url, {method, body, headers}) -> Promise<Response>

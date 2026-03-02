@@ -193,17 +193,35 @@ pub unsafe extern "C" fn js_bcrypt_gen_salt(
 pub unsafe extern "C" fn js_bcrypt_hash_sync(
     password_ptr: *const StringHeader,
     salt_rounds: f64,
-) -> *mut StringHeader {
+) -> i64 {
+    eprintln!("[bcrypt-sync] hash_sync called, password_ptr={:?} salt_rounds={}", password_ptr, salt_rounds);
     let password = match string_from_header(password_ptr) {
         Some(s) => s,
-        None => return std::ptr::null_mut(),
+        None => {
+            eprintln!("[bcrypt-sync] password_ptr is null or invalid UTF-8");
+            return 0;
+        }
     };
+    eprintln!("[bcrypt-sync] password len={} cost={}", password.len(), salt_rounds as u32);
 
     let cost = salt_rounds as u32;
 
     match bcrypt::hash(password, cost) {
-        Ok(hash) => js_string_from_bytes(hash.as_ptr(), hash.len() as u32),
-        Err(_) => std::ptr::null_mut(),
+        Ok(hash) => {
+            eprintln!("[bcrypt-sync] hash success, hash_len={}", hash.len());
+            let ptr = js_string_from_bytes(hash.as_ptr(), hash.len() as u32);
+            // Pre-NaN-box the string pointer so that even if the codegen falls through
+            // to bitcast(F64, i64), the result is a correctly tagged string value.
+            // js_nanbox_string is idempotent, so this is also safe if the codegen
+            // applies it again.
+            const STRING_TAG: u64 = 0x7FFF_0000_0000_0000;
+            const POINTER_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
+            (STRING_TAG | (ptr as u64 & POINTER_MASK)) as i64
+        }
+        Err(e) => {
+            eprintln!("[bcrypt-sync] hash error: {}", e);
+            0
+        }
     }
 }
 
@@ -214,18 +232,36 @@ pub unsafe extern "C" fn js_bcrypt_compare_sync(
     password_ptr: *const StringHeader,
     hash_ptr: *const StringHeader,
 ) -> f64 {
+    eprintln!("[bcrypt-cmp] compare_sync called, password_ptr={:?} hash_ptr={:?}", password_ptr, hash_ptr);
     let password = match string_from_header(password_ptr) {
         Some(s) => s,
-        None => return 0.0,
+        None => {
+            eprintln!("[bcrypt-cmp] password_ptr is null or invalid");
+            return 0.0;
+        }
     };
 
     let hash = match string_from_header(hash_ptr) {
         Some(s) => s,
-        None => return 0.0,
+        None => {
+            eprintln!("[bcrypt-cmp] hash_ptr is null or invalid");
+            return 0.0;
+        }
     };
 
-    match bcrypt::verify(password, &hash) {
-        Ok(true) => 1.0,
-        _ => 0.0,
+    eprintln!("[bcrypt-cmp] password len={} hash_prefix={}", password.len(), &hash[..hash.len().min(15)]);
+    match bcrypt::verify(&password, &hash) {
+        Ok(true) => {
+            eprintln!("[bcrypt-cmp] match=true");
+            1.0
+        }
+        Ok(false) => {
+            eprintln!("[bcrypt-cmp] match=false");
+            0.0
+        }
+        Err(e) => {
+            eprintln!("[bcrypt-cmp] verify error: {}", e);
+            0.0
+        }
     }
 }

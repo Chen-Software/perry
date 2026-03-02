@@ -31,8 +31,12 @@ pub struct PublishArgs {
     #[arg(long)]
     pub android: bool,
 
+    /// Build for Linux
+    #[arg(long)]
+    pub linux: bool,
+
     /// Build server URL
-    #[arg(long, default_value = "http://localhost:3456")]
+    #[arg(long, default_value = "https://hub.perryts.com")]
     pub server: Option<String>,
 
     /// License key (or set PERRY_LICENSE_KEY env)
@@ -106,6 +110,7 @@ struct PerryToml {
     macos: Option<MacosConfig>,
     ios: Option<IosConfig>,
     android: Option<AndroidConfig>,
+    linux: Option<LinuxConfig>,
     build: Option<BuildConfig>,
     publish: Option<PublishConfig>,
 }
@@ -157,6 +162,13 @@ struct AndroidConfig {
     permissions: Option<Vec<String>>,
     distribute: Option<String>,
     entry: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinuxConfig {
+    format: Option<String>,
+    category: Option<String>,
+    description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -270,6 +282,12 @@ struct BuildManifest {
     android_permissions: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     android_distribute: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    linux_format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    linux_category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    linux_description: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -350,22 +368,26 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         "ios".to_string()
     } else if args.android {
         "android".to_string()
+    } else if args.linux {
+        "linux".to_string()
     } else if let Some(ref t) = saved.default_target {
         // Have a saved default — use it (user can change via prompt below)
         t.clone()
     } else if interactive {
         prompt_target(saved.default_target.as_deref())
     } else {
-        bail!("No target specified. Use --macos, --ios, or --android.");
+        bail!("No target specified. Use --macos, --ios, --android, or --linux.");
     };
 
     let target_display = match target_name.as_str() {
         "ios" => "iOS",
         "android" => "Android",
+        "linux" => "Linux",
         _ => "macOS",
     };
     let is_ios = target_name == "ios";
     let is_android = target_name == "android";
+    let is_linux = target_name == "linux";
 
     // --- Resolve server URL ---
     let server_url = args
@@ -373,7 +395,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         .clone()
         .or_else(|| saved.server.clone())
         .or_else(|| config.publish.as_ref().and_then(|p| p.server.clone()))
-        .unwrap_or_else(|| "http://localhost:3456".into());
+        .unwrap_or_else(|| "https://hub.perryts.com".into());
 
     // --- Resolve entry point ---
     let entry = if is_android {
@@ -695,7 +717,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     // --- Save non-sensitive config ---
     saved.license_key = Some(license_key.clone());
     saved.default_target = Some(target_name.clone());
-    if server_url != "http://localhost:3456" {
+    if server_url != "https://hub.perryts.com" {
         saved.server = Some(server_url.clone());
     }
     if !is_android {
@@ -746,6 +768,12 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         android_target_sdk: if is_android { android_target_sdk } else { None },
         android_permissions: if is_android { android_permissions } else { None },
         android_distribute: if is_android { android_distribute } else { None },
+        linux_format: if is_linux { config.linux.as_ref().and_then(|l| l.format.clone()) } else { None },
+        linux_category: if is_linux { config.linux.as_ref().and_then(|l| l.category.clone()) } else { None },
+        linux_description: if is_linux {
+            config.linux.as_ref().and_then(|l| l.description.clone())
+                .or_else(|| config.app.as_ref().and_then(|a| a.description.clone()))
+        } else { None },
     };
 
     let credentials = CredentialsPayload {
@@ -786,27 +814,17 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         std::io::stdout().flush().ok();
     }
 
-    // Write tarball to temp file and send path (avoids binary corruption in hub's text-based body parsing)
-    let upload_id = format!(
-        "{:x}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    );
-    let tarball_tmp_dir = std::env::temp_dir().join("perry-uploads");
-    std::fs::create_dir_all(&tarball_tmp_dir)
-        .context("Failed to create upload temp directory")?;
-    let tarball_tmp_path = tarball_tmp_dir.join(format!("{upload_id}.tar.gz"));
-    std::fs::write(&tarball_tmp_path, &tarball)
-        .context("Failed to write tarball to temp file")?;
+    // Base64-encode tarball for safe transmission (perry hub uses text-based multipart parsing,
+    // which corrupts raw binary. Base64 is pure ASCII and round-trips safely.)
+    use base64::Engine;
+    let tarball_b64 = base64::engine::general_purpose::STANDARD.encode(&tarball);
 
     let client = reqwest::Client::new();
     let form = multipart::Form::new()
         .text("license_key", license_key)
         .text("manifest", serde_json::to_string(&manifest)?)
         .text("credentials", serde_json::to_string(&credentials)?)
-        .text("project_path", tarball_tmp_path.to_string_lossy().to_string());
+        .text("tarball_b64", tarball_b64);
 
     let resp = client
         .post(format!("{server_url}/api/v1/build"))
@@ -1271,12 +1289,13 @@ fn prompt_input(prompt: &str, default: Option<&str>) -> Option<String> {
     }
 }
 
-/// Prompt for target platform selection. Returns "macos", "ios", or "android".
+/// Prompt for target platform selection. Returns "macos", "ios", "android", or "linux".
 fn prompt_target(default: Option<&str>) -> String {
-    let options = &["macOS", "iOS", "Android"];
+    let options = &["macOS", "iOS", "Android", "Linux"];
     let default_idx = match default {
         Some("ios") => 1,
         Some("android") => 2,
+        Some("linux") => 3,
         _ => 0,
     };
     let selection = Select::new()
@@ -1288,6 +1307,7 @@ fn prompt_target(default: Option<&str>) -> String {
     match selection {
         1 => "ios".into(),
         2 => "android".into(),
+        3 => "linux".into(),
         _ => "macos".into(),
     }
 }

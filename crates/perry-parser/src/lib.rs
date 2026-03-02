@@ -55,9 +55,12 @@ pub fn parse_typescript_with_cache(
         source.to_string(),
     );
 
+    // Enable TSX parsing for .tsx files
+    let is_tsx = filename.ends_with(".tsx");
+
     let lexer = Lexer::new(
         Syntax::Typescript(TsSyntax {
-            tsx: false,
+            tsx: is_tsx,
             decorators: true,
             dts: false,
             no_early_errors: false,
@@ -109,9 +112,11 @@ pub fn parse_typescript(source: &str, filename: &str) -> Result<Module> {
         source.to_string(),
     );
 
+    let is_tsx = filename.ends_with(".tsx");
+
     let lexer = Lexer::new(
         Syntax::Typescript(TsSyntax {
-            tsx: false,
+            tsx: is_tsx,
             decorators: true,
             dts: false,
             no_early_errors: false,

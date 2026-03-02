@@ -2,20 +2,9 @@
 
 use perry_runtime::{js_string_from_bytes, StringHeader, JSValue};
 
-use crate::common::{get_handle, get_handle_mut, register_handle, Handle};
-use super::{FastifyApp, FastifyConfig, ClosurePtr};
+use crate::common::{get_handle_mut, register_handle, Handle};
+use super::{FastifyApp, FastifyConfig};
 use super::context::string_from_nanboxed;
-
-/// Helper to extract string from StringHeader pointer
-unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
-    if ptr.is_null() {
-        return None;
-    }
-    let len = (*ptr).length as usize;
-    let data_ptr = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
-    let bytes = std::slice::from_raw_parts(data_ptr, len);
-    Some(String::from_utf8_lossy(bytes).to_string())
-}
 
 // ============================================================================
 // App Creation
@@ -148,9 +137,12 @@ unsafe fn register_route(app_handle: Handle, method: &str, path: i64, handler: i
     };
 
     if let Some(app) = get_handle_mut::<FastifyApp>(app_handle) {
+        let full = if app.prefix.is_empty() { path_str.clone() } else { format!("{}{}", app.prefix, path_str) };
+        eprintln!("[ROUTE] {} {} (handle={})", method, full, app_handle);
         app.add_route(method, &path_str, handler);
         return true;
     }
+    eprintln!("[ROUTE] handle {} not found", app_handle);
     false
 }
 
@@ -197,52 +189,58 @@ pub unsafe extern "C" fn js_fastify_set_error_handler(app_handle: Handle, handle
 #[no_mangle]
 pub unsafe extern "C" fn js_fastify_register(app_handle: Handle, plugin: i64, opts: f64) -> bool {
     // Extract prefix from opts if present
-    let mut prefix = String::new();
+    let mut plugin_prefix = String::new();
     let jsv = JSValue::from_bits(opts.to_bits());
     if jsv.is_pointer() {
         let ptr = jsv.as_pointer::<perry_runtime::ObjectHeader>();
         let prefix_key = js_string_from_bytes(b"prefix".as_ptr(), 6);
         let prefix_val = perry_runtime::js_object_get_field_by_name_f64(ptr, prefix_key);
         if let Some(p) = extract_jsvalue_string(prefix_val) {
-            prefix = p;
+            plugin_prefix = p;
         }
     }
 
-    if let Some(app) = get_handle_mut::<FastifyApp>(app_handle) {
-        // Create a scoped app instance for the plugin
-        let scoped_prefix = if app.prefix.is_empty() {
-            prefix.clone()
-        } else if prefix.is_empty() {
-            app.prefix.clone()
+    // Save old prefix and set the combined prefix on the MAIN app.
+    // Plugin routes will register directly on the main app handle (handle=1)
+    // using the temporarily-set prefix, which add_route() prepends automatically.
+    let old_prefix = {
+        if let Some(app) = get_handle_mut::<FastifyApp>(app_handle) {
+            let old = app.prefix.clone();
+            app.prefix = if old.is_empty() {
+                plugin_prefix.clone()
+            } else if plugin_prefix.is_empty() {
+                old.clone()
+            } else {
+                format!("{}{}", old, plugin_prefix)
+            };
+            old
         } else {
-            format!("{}{}", app.prefix, prefix)
-        };
-
-        let scoped_app = FastifyApp::with_prefix(scoped_prefix);
-        let scoped_handle = register_handle(scoped_app);
-
-        // Call the plugin function with the scoped app
-        let closure_ptr = plugin as *const perry_runtime::ClosureHeader;
-        perry_runtime::js_closure_call2(closure_ptr, scoped_handle as f64, opts);
-
-        // Merge routes from scoped app back into main app
-        if let Some(scoped) = get_handle::<FastifyApp>(scoped_handle) {
-            for route in &scoped.routes {
-                app.routes.push(route.clone());
-            }
-            // Merge hooks
-            for hook in &scoped.hooks.on_request {
-                app.hooks.on_request.push(*hook);
-            }
-            for hook in &scoped.hooks.pre_handler {
-                app.hooks.pre_handler.push(*hook);
-            }
-            // ... merge other hooks as needed
+            return false;
         }
+    };
 
-        return true;
+    // NaN-box the MAIN app handle so Perry's runtime dispatches method calls on it
+    let nanboxed_main = f64::from_bits(0x7FFD_0000_0000_0000 | (app_handle as u64 & 0x0000_FFFF_FFFF_FFFF));
+
+    // Strip NaN-box tag from plugin closure pointer if needed
+    let raw_closure_ptr = if (plugin as u64 & 0xFFFF_0000_0000_0000) == 0x7FFD_0000_0000_0000 {
+        (plugin as u64 & 0x0000_FFFF_FFFF_FFFF) as *const perry_runtime::ClosureHeader
+    } else {
+        plugin as *const perry_runtime::ClosureHeader
+    };
+
+    // Call the plugin — async functions run the body synchronously and return a Promise
+    perry_runtime::js_closure_call2(raw_closure_ptr, nanboxed_main, opts);
+
+    // Flush the microtask queue (in case any async work was deferred)
+    perry_runtime::js_promise_run_microtasks();
+
+    // Restore the old prefix
+    if let Some(app) = get_handle_mut::<FastifyApp>(app_handle) {
+        app.prefix = old_prefix;
     }
-    false
+
+    true
 }
 
 /// Helper to extract string from JSValue

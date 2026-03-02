@@ -25,6 +25,21 @@ pub extern "C" fn perry_ui_app_run(app_handle: i64) {
     app::app_run(app_handle);
 }
 
+/// Register an external UIView (from a native library) as a Perry widget.
+/// Alias of perry_ui_embed_nsview so cross-platform Perry code works unchanged on iOS.
+#[no_mangle]
+pub extern "C" fn perry_ui_embed_nsview(uiview_ptr: i64) -> i64 {
+    use objc2::rc::Retained;
+    use objc2_ui_kit::UIView;
+    if uiview_ptr == 0 {
+        return 0;
+    }
+    match unsafe { Retained::retain(uiview_ptr as *mut UIView) } {
+        Some(view) => widgets::register_widget(view),
+        None => 0,
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn perry_ui_text_create(text_ptr: i64) -> i64 {
     widgets::text::create(text_ptr as *const u8)

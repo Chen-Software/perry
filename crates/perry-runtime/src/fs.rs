@@ -286,3 +286,75 @@ pub extern "C" fn js_fs_unlink_sync(path_value: f64) -> i32 {
         }
     }
 }
+
+/// Read a file synchronously as binary and return a Buffer (binary-safe, works for PNG etc.)
+/// Returns a *mut BufferHeader on success, null on error
+/// Accepts NaN-boxed string path
+#[no_mangle]
+pub extern "C" fn js_fs_read_file_binary(path_value: f64) -> *mut crate::buffer::BufferHeader {
+    unsafe {
+        let path_ptr = extract_string_ptr(path_value);
+        if path_ptr.is_null() {
+            return std::ptr::null_mut();
+        }
+
+        let len = (*path_ptr).length as usize;
+        let data_ptr = (path_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+        let path_bytes = std::slice::from_raw_parts(data_ptr, len);
+
+        let path_str = match std::str::from_utf8(path_bytes) {
+            Ok(s) => s,
+            Err(_) => return std::ptr::null_mut(),
+        };
+
+        match fs::read(path_str) {
+            Ok(bytes) => {
+                let buf = crate::buffer::js_buffer_alloc(bytes.len() as i32, 0);
+                if !buf.is_null() {
+                    let buf_data = (buf as *mut u8).add(std::mem::size_of::<crate::buffer::BufferHeader>());
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf_data, bytes.len());
+                    (*buf).length = bytes.len() as u32;
+                }
+                buf
+            }
+            Err(_) => std::ptr::null_mut(),
+        }
+    }
+}
+
+/// Recursively remove a directory or file.
+/// Returns 1 on success, 0 on failure.
+/// Accepts NaN-boxed string path.
+#[no_mangle]
+pub extern "C" fn js_fs_rm_recursive(path_value: f64) -> i32 {
+    use std::path::Path;
+
+    unsafe {
+        let path_ptr = extract_string_ptr(path_value);
+        if path_ptr.is_null() {
+            return 0;
+        }
+
+        let len = (*path_ptr).length as usize;
+        let data_ptr = (path_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+        let path_bytes = std::slice::from_raw_parts(data_ptr, len);
+
+        let path_str = match std::str::from_utf8(path_bytes) {
+            Ok(s) => s,
+            Err(_) => return 0,
+        };
+
+        let p = Path::new(path_str);
+        if p.is_dir() {
+            match fs::remove_dir_all(path_str) {
+                Ok(_) => 1,
+                Err(_) => 0,
+            }
+        } else {
+            match fs::remove_file(path_str) {
+                Ok(_) => 1,
+                Err(_) => 0,
+            }
+        }
+    }
+}

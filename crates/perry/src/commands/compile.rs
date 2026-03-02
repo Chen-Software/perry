@@ -87,6 +87,10 @@ pub struct CompilationContext {
     pub native_libraries: Vec<NativeLibraryManifest>,
     /// Package aliases: maps npm package name → replacement package name (from perry.packageAliases)
     pub package_aliases: HashMap<String, String>,
+    /// Packages to compile natively instead of routing to V8 (from perry.compilePackages)
+    pub compile_packages: HashSet<String>,
+    /// First-resolved directory for each compile package (deduplication across nested node_modules)
+    pub compile_package_dirs: HashMap<String, PathBuf>,
 }
 
 impl CompilationContext {
@@ -102,6 +106,8 @@ impl CompilationContext {
             project_root,
             native_libraries: Vec::new(),
             package_aliases: HashMap::new(),
+            compile_packages: HashSet::new(),
+            compile_package_dirs: HashMap::new(),
         }
     }
 }
@@ -360,6 +366,25 @@ fn has_perry_native_library(package_dir: &Path) -> bool {
     false
 }
 
+/// Check if a package directory has `perry.nativeModule: true` in its package.json.
+///
+/// Packages that set this flag contain Perry-compatible TypeScript source code
+/// and should be compiled natively (NativeCompiled) rather than interpreted via V8.
+/// This is the mechanism used by `perry-react`, `perry-react-dom`, and similar
+/// first-party TypeScript packages that rely on `perry/ui` or other native modules.
+fn has_perry_native_module(package_dir: &Path) -> bool {
+    let package_json = package_dir.join("package.json");
+    if let Ok(content) = fs::read_to_string(&package_json) {
+        if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&content) {
+            return pkg.get("perry")
+                .and_then(|p| p.get("nativeModule"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+        }
+    }
+    false
+}
+
 /// Parse a native library manifest from a package's package.json
 fn parse_native_library_manifest(
     package_dir: &Path,
@@ -446,6 +471,32 @@ fn is_in_perry_native_package(path: &Path) -> bool {
             break;
         }
         current = dir.parent();
+    }
+    false
+}
+
+/// Extract the package directory from a resolved path for a given package name.
+/// E.g., for path "/project/node_modules/@noble/curves/node_modules/@noble/hashes/src/sha256.ts"
+/// and package_name "@noble/hashes", returns "/project/node_modules/@noble/curves/node_modules/@noble/hashes"
+fn extract_compile_package_dir(resolved_path: &Path, package_name: &str) -> Option<PathBuf> {
+    let path_str = resolved_path.to_string_lossy();
+    let needle = format!("node_modules/{}", package_name);
+    // Use rfind to handle deeply nested node_modules
+    if let Some(idx) = path_str.rfind(&needle) {
+        Some(PathBuf::from(&path_str[..idx + needle.len()]))
+    } else {
+        None
+    }
+}
+
+/// Check if a file path is inside a package listed in compile_packages
+fn is_in_compile_package(path: &Path, compile_packages: &HashSet<String>) -> bool {
+    let path_str = path.to_string_lossy();
+    for pkg_name in compile_packages {
+        let pattern = format!("node_modules/{}/", pkg_name);
+        if path_str.contains(&pattern) {
+            return true;
+        }
     }
     false
 }
@@ -640,6 +691,57 @@ fn resolve_package_entry(package_dir: &Path, subpath: Option<&str>) -> Option<Pa
     resolve_with_extensions(&package_dir.join("index"))
 }
 
+/// Resolve package entry preferring TypeScript source over compiled JS output.
+/// Used for compile_packages where we want to compile from TS source, not bundled JS.
+fn resolve_package_source_entry(package_dir: &Path, subpath: Option<&str>) -> Option<PathBuf> {
+    // For subpaths, try src/<subpath>.ts
+    if let Some(sub) = subpath {
+        let src_path = package_dir.join("src").join(sub);
+        if let Some(resolved) = resolve_with_extensions(&src_path) {
+            if !is_js_file(&resolved) {
+                return Some(resolved);
+            }
+        }
+    }
+
+    // Try src/index.ts (most common TS source entry)
+    let src_index = package_dir.join("src").join("index");
+    if let Some(resolved) = resolve_with_extensions(&src_index) {
+        if !is_js_file(&resolved) {
+            return Some(resolved);
+        }
+    }
+
+    // Try using normal entry resolution but prefer TS over JS
+    let normal_entry = resolve_package_entry(package_dir, subpath)?;
+    if is_js_file(&normal_entry) {
+        // Try .ts equivalent of the .js entry
+        let ts_path = normal_entry.with_extension("ts");
+        if ts_path.exists() {
+            return Some(ts_path);
+        }
+        // Check src/ directory mirror of lib/ or dist/ path
+        if let Ok(rel) = normal_entry.strip_prefix(package_dir) {
+            let rel_str = rel.to_string_lossy();
+            if rel_str.starts_with("lib") || rel_str.starts_with("dist") {
+                let stripped = if rel_str.starts_with("lib") {
+                    rel.strip_prefix("lib")
+                } else {
+                    rel.strip_prefix("dist")
+                };
+                if let Some(rest) = stripped.ok() {
+                    let src_equiv = package_dir.join("src").join(rest).with_extension("ts");
+                    if src_equiv.exists() {
+                        return Some(src_equiv);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Resolve exports field from package.json
 fn resolve_exports(exports: &serde_json::Value, subpath: &str) -> Option<String> {
     match exports {
@@ -695,6 +797,8 @@ fn resolve_import(
     import_source: &str,
     importer_path: &Path,
     project_root: &Path,
+    compile_packages: &HashSet<String>,
+    compile_package_dirs: &HashMap<String, PathBuf>,
 ) -> Option<(PathBuf, ModuleKind)> {
     // Check if it's a native Rust stdlib module
     if perry_hir::is_native_module(import_source) {
@@ -706,7 +810,7 @@ fn resolve_import(
         let parent = importer_path.parent()?;
         let resolved = parent.join(import_source);
         if let Some(path) = resolve_with_extensions(&resolved) {
-            let kind = if is_js_file(&path) {
+            let kind = if is_js_file(&path) && !is_in_compile_package(&path, compile_packages) {
                 ModuleKind::Interpreted
             } else {
                 ModuleKind::NativeCompiled
@@ -741,8 +845,32 @@ fn resolve_import(
             let package_dir = node_modules.join(&package_name);
             if package_dir.is_dir() {
                 if let Some(entry) = resolve_package_entry(&package_dir, subpath.as_deref()) {
-                    // Packages with perry.nativeLibrary are compiled natively
+                    // Packages with perry.nativeLibrary are compiled natively (Rust FFI)
                     if has_perry_native_library(&package_dir) {
+                        return Some((entry.canonicalize().ok()?, ModuleKind::NativeCompiled));
+                    }
+                    // Packages with perry.nativeModule: true contain Perry-compatible
+                    // TypeScript that must be compiled natively (e.g. perry-react).
+                    if has_perry_native_module(&package_dir) {
+                        return Some((entry.canonicalize().ok()?, ModuleKind::NativeCompiled));
+                    }
+                    // Packages listed in perry.compilePackages are compiled natively
+                    if compile_packages.contains(&package_name) {
+                        // Deduplicate: if we've already resolved this package from a
+                        // different node_modules location, use the first-found directory
+                        // to avoid duplicate symbols from identical package copies
+                        let effective_dir = compile_package_dirs
+                            .get(&package_name)
+                            .unwrap_or(&package_dir);
+                        // Prefer TypeScript source over compiled JS
+                        if let Some(src_entry) = resolve_package_source_entry(effective_dir, subpath.as_deref()) {
+                            return Some((src_entry.canonicalize().ok()?, ModuleKind::NativeCompiled));
+                        }
+                        // Fall back to normal resolution but still mark as NativeCompiled
+                        if let Some(fallback_entry) = resolve_package_entry(effective_dir, subpath.as_deref()) {
+                            return Some((fallback_entry.canonicalize().ok()?, ModuleKind::NativeCompiled));
+                        }
+                        // If effective_dir failed (shouldn't happen), try the local dir
                         return Some((entry.canonicalize().ok()?, ModuleKind::NativeCompiled));
                     }
                     // For other node_modules packages, treat as Interpreted
@@ -861,10 +989,11 @@ fn collect_modules(
     let is_json = canonical.extension().and_then(|e| e.to_str()) == Some("json");
     let is_in_node_modules = canonical.to_string_lossy().contains("node_modules");
     let is_perry_native = is_in_node_modules && is_in_perry_native_package(&canonical);
-    let should_use_js_runtime = is_js_file(&canonical)
+    let is_in_compiled_pkg = is_in_node_modules && is_in_compile_package(&canonical, &ctx.compile_packages);
+    let should_use_js_runtime = (is_js_file(&canonical) && !is_in_compiled_pkg)
         || is_declaration_file(&canonical)
         || is_json
-        || (enable_js_runtime && is_in_node_modules && !is_perry_native);
+        || (enable_js_runtime && is_in_node_modules && !is_perry_native && !is_in_compiled_pkg);
 
     // Skip JSON files — they're data, not code (imported via `with { type: "json" }`)
     if is_json {
@@ -953,15 +1082,26 @@ fn collect_modules(
             continue;
         }
 
-        if let Some((resolved_path, kind)) = resolve_import(&import.source, &canonical, &ctx.project_root) {
+        if let Some((resolved_path, kind)) = resolve_import(&import.source, &canonical, &ctx.project_root, &ctx.compile_packages, &ctx.compile_package_dirs) {
             import.resolved_path = Some(resolved_path.to_string_lossy().to_string());
             import.module_kind = kind;
 
             match kind {
                 ModuleKind::NativeCompiled => {
+                    // Record compile package directory for dedup (first-found wins).
+                    // When the same package exists in multiple nested node_modules/,
+                    // we always resolve to the first-found copy to avoid duplicate symbols.
+                    let module_name = &import.source;
+                    if !module_name.starts_with('.') && !module_name.starts_with('/') {
+                        let (pkg_name, _) = parse_package_specifier(module_name);
+                        if ctx.compile_packages.contains(&pkg_name) && !ctx.compile_package_dirs.contains_key(&pkg_name) {
+                            if let Some(pkg_dir) = extract_compile_package_dir(&resolved_path, &pkg_name) {
+                                ctx.compile_package_dirs.insert(pkg_name, pkg_dir);
+                            }
+                        }
+                    }
                     // Collect native library manifest (FFI functions, build config)
                     // Only for package imports (not relative imports within the same package)
-                    let module_name = &import.source;
                     if !module_name.starts_with('.') && !module_name.starts_with('/') {
                         if !ctx.native_libraries.iter().any(|nl| nl.module == *module_name) {
                             // Walk up to find the package directory with perry.nativeLibrary
@@ -1059,7 +1199,7 @@ fn collect_modules(
             perry_hir::Export::Named { .. } => None,
         };
         if let Some(src) = source {
-            if let Some((resolved_path, kind)) = resolve_import(src, &canonical, &ctx.project_root) {
+            if let Some((resolved_path, kind)) = resolve_import(src, &canonical, &ctx.project_root, &ctx.compile_packages, &ctx.compile_package_dirs) {
                 match kind {
                     ModuleKind::NativeCompiled => {
                         collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, target, next_class_id, skip_transforms)?;
@@ -1272,6 +1412,17 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                                 OutputFormat::Json => {}
                             }
                             ctx.package_aliases.insert(from.clone(), to_str.to_string());
+                        }
+                    }
+                }
+                if let Some(compile_pkgs) = pkg.get("perry").and_then(|p| p.get("compilePackages")).and_then(|a| a.as_array()) {
+                    for pkg_name in compile_pkgs {
+                        if let Some(name) = pkg_name.as_str() {
+                            match format {
+                                OutputFormat::Text => println!("  Compile package: {}", name),
+                                OutputFormat::Json => {}
+                            }
+                            ctx.compile_packages.insert(name.to_string());
                         }
                     }
                 }
@@ -1509,7 +1660,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                     perry_hir::Export::Named { .. } => None,
                 };
                 if let Some(src) = source {
-                    if let Some((resolved_path, _)) = resolve_import(src, path, &ctx.project_root) {
+                    if let Some((resolved_path, _)) = resolve_import(src, path, &ctx.project_root, &ctx.compile_packages, &ctx.compile_package_dirs) {
                         if resolved_path != entry_path && ctx.native_modules.contains_key(&resolved_path) {
                             module_deps.push(resolved_path);
                         }
@@ -1605,7 +1756,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                     _ => None,
                 };
                 if let Some((source, re_export_names)) = source_str {
-                    if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root) {
+                    if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root, &ctx.compile_packages, &ctx.compile_package_dirs) {
                         let source_path_str = resolved_source.to_string_lossy().to_string();
                         for ((src_path, enum_name), members) in &exported_enums {
                             if src_path == &source_path_str {
@@ -1751,7 +1902,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             for export in &hir_module.exports {
                 match export {
                     perry_hir::Export::ExportAll { source } => {
-                        if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root) {
+                        if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root, &ctx.compile_packages, &ctx.compile_package_dirs) {
                             let source_path_str = resolved_source.to_string_lossy().to_string();
                             if let Some(source_exports) = all_module_exports.get(&source_path_str) {
                                 let current_exports = all_module_exports.get(&path_str);
@@ -1767,7 +1918,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                         }
                     }
                     perry_hir::Export::ReExport { source, imported, exported } => {
-                        if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root) {
+                        if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root, &ctx.compile_packages, &ctx.compile_package_dirs) {
                             let source_path_str = resolved_source.to_string_lossy().to_string();
                             if let Some(source_exports) = all_module_exports.get(&source_path_str) {
                                 if let Some(origin) = source_exports.get(imported) {
@@ -1795,7 +1946,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                                     _ => (false, String::new()),
                                 };
                                 if matches {
-                                    if let Some((resolved_source, _)) = resolve_import(&import.source, path, &ctx.project_root) {
+                                    if let Some((resolved_source, _)) = resolve_import(&import.source, path, &ctx.project_root, &ctx.compile_packages, &ctx.compile_package_dirs) {
                                         let source_path_str = resolved_source.to_string_lossy().to_string();
                                         if let Some(source_exports) = all_module_exports.get(&source_path_str) {
                                             if let Some(origin) = source_exports.get(&imported_name) {
@@ -1832,7 +1983,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             for export in &hir_module.exports {
                 match export {
                     perry_hir::Export::ExportAll { source } => {
-                        if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root) {
+                        if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root, &ctx.compile_packages, &ctx.compile_package_dirs) {
                             let source_path_str = resolved_source.to_string_lossy().to_string();
                             for ((src_path, func_name), &param_count) in &exported_func_param_counts {
                                 if src_path == &source_path_str {
@@ -1845,7 +1996,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                         }
                     }
                     perry_hir::Export::ReExport { source, imported, exported } => {
-                        if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root) {
+                        if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root, &ctx.compile_packages, &ctx.compile_package_dirs) {
                             let source_path_str = resolved_source.to_string_lossy().to_string();
                             for ((src_path, func_name), &param_count) in &exported_func_param_counts {
                                 if src_path == &source_path_str && func_name == imported {
@@ -1868,7 +2019,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                                     _ => (false, String::new()),
                                 };
                                 if matches {
-                                    if let Some((resolved_source, _)) = resolve_import(&import.source, path, &ctx.project_root) {
+                                    if let Some((resolved_source, _)) = resolve_import(&import.source, path, &ctx.project_root, &ctx.compile_packages, &ctx.compile_package_dirs) {
                                         let source_path_str = resolved_source.to_string_lossy().to_string();
                                         let key_src = (source_path_str, imported_name);
                                         if let Some(&param_count) = exported_func_param_counts.get(&key_src) {
@@ -1900,7 +2051,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             for export in &hir_module.exports {
                 match export {
                     perry_hir::Export::ExportAll { source } => {
-                        if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root) {
+                        if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root, &ctx.compile_packages, &ctx.compile_package_dirs) {
                             let source_path_str = resolved_source.to_string_lossy().to_string();
                             for ((src_path, func_name), return_type) in &exported_func_return_types {
                                 if src_path == &source_path_str {
@@ -1913,7 +2064,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                         }
                     }
                     perry_hir::Export::ReExport { source, imported, exported } => {
-                        if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root) {
+                        if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root, &ctx.compile_packages, &ctx.compile_package_dirs) {
                             let source_path_str = resolved_source.to_string_lossy().to_string();
                             for ((src_path, func_name), return_type) in &exported_func_return_types {
                                 if src_path == &source_path_str && func_name == imported {
@@ -1936,7 +2087,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                                     _ => (false, String::new()),
                                 };
                                 if matches {
-                                    if let Some((resolved_source, _)) = resolve_import(&import.source, path, &ctx.project_root) {
+                                    if let Some((resolved_source, _)) = resolve_import(&import.source, path, &ctx.project_root, &ctx.compile_packages, &ctx.compile_package_dirs) {
                                         let source_path_str = resolved_source.to_string_lossy().to_string();
                                         let key_src = (source_path_str, imported_name);
                                         if let Some(return_type) = exported_func_return_types.get(&key_src) {
@@ -1968,7 +2119,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             for export in &hir_module.exports {
                 match export {
                     perry_hir::Export::ExportAll { source } => {
-                        if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root) {
+                        if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root, &ctx.compile_packages, &ctx.compile_package_dirs) {
                             let source_path_str = resolved_source.to_string_lossy().to_string();
                             for ((src_path, class_name), class) in &exported_classes {
                                 if src_path == &source_path_str {
@@ -1981,7 +2132,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                         }
                     }
                     perry_hir::Export::ReExport { source, imported, exported } => {
-                        if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root) {
+                        if let Some((resolved_source, _)) = resolve_import(source, path, &ctx.project_root, &ctx.compile_packages, &ctx.compile_package_dirs) {
                             let source_path_str = resolved_source.to_string_lossy().to_string();
                             for ((src_path, class_name), class) in &exported_classes {
                                 if src_path == &source_path_str && class_name == imported {
@@ -2004,7 +2155,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                                     _ => (false, String::new()),
                                 };
                                 if matches {
-                                    if let Some((resolved_source, _)) = resolve_import(&import.source, path, &ctx.project_root) {
+                                    if let Some((resolved_source, _)) = resolve_import(&import.source, path, &ctx.project_root, &ctx.compile_packages, &ctx.compile_package_dirs) {
                                         let source_path_str = resolved_source.to_string_lossy().to_string();
                                         let key_src = (source_path_str, imported_name);
                                         if let Some(class) = exported_classes.get(&key_src) {
