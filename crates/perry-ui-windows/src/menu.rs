@@ -266,7 +266,7 @@ pub fn menubar_attach(bar_handle: i64) {
             {
                 if let Some(hwnd) = crate::app::get_main_hwnd() {
                     unsafe {
-                        let _ = SetMenu(hwnd, Some(bars[bar_idx].hmenu));
+                        let _ = SetMenu(hwnd, bars[bar_idx].hmenu);
                         let _ = DrawMenuBar(hwnd);
                     }
                 }

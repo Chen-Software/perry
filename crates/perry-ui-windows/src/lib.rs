@@ -780,6 +780,19 @@ pub extern "C" fn perry_ui_toolbar_attach(toolbar_handle: i64) {
 }
 
 // =============================================================================
+// TabBar stubs (not yet implemented on Windows)
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_tabbar_create(_on_change: f64) -> i64 { 0 }
+
+#[no_mangle]
+pub extern "C" fn perry_ui_tabbar_add_tab(_handle: i64, _label_ptr: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_tabbar_set_selected(_handle: i64, _index: i64) {}
+
+// =============================================================================
 // System API
 // =============================================================================
 
