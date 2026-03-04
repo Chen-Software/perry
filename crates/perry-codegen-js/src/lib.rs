@@ -6,7 +6,7 @@
 pub mod emit;
 
 use anyhow::Result;
-use perry_hir::ir::Module;
+use perry_hir::ir::{Module, Stmt};
 use std::collections::BTreeSet;
 
 /// Embedded web runtime JavaScript
@@ -17,12 +17,34 @@ const WEB_RUNTIME_JS: &str = include_str!("web_runtime.js");
 pub fn compile_module_to_js(module: &Module) -> (String, BTreeSet<String>) {
     let emitter = emit::JsEmitter::new(&module.name);
 
-    // Collect exported names before emitting
+    // Collect names that have runtime values (not type-only exports)
+    let mut runtime_names = BTreeSet::new();
+    for func in &module.functions {
+        runtime_names.insert(func.name.clone());
+    }
+    for class in &module.classes {
+        runtime_names.insert(class.name.clone());
+    }
+    for en in &module.enums {
+        runtime_names.insert(en.name.clone());
+    }
+    for global in &module.globals {
+        runtime_names.insert(global.name.clone());
+    }
+    for stmt in &module.init {
+        if let Stmt::Let { name, .. } = stmt {
+            runtime_names.insert(name.clone());
+        }
+    }
+
+    // Collect exported names, filtering out type-only exports
     let mut exported_names = BTreeSet::new();
     for export in &module.exports {
         match export {
             perry_hir::ir::Export::Named { exported, .. } => {
-                exported_names.insert(exported.clone());
+                if runtime_names.contains(exported) {
+                    exported_names.insert(exported.clone());
+                }
             }
             _ => {}
         }
@@ -41,6 +63,7 @@ pub fn compile_modules_to_html(
     title: &str,
 ) -> Result<String> {
     let mut all_js = String::with_capacity(32768);
+    let mut declared_names = BTreeSet::new();
 
     // Emit non-entry modules as IIFE-wrapped sections that export their values
     let entry_idx = modules.len().saturating_sub(1);
@@ -67,14 +90,20 @@ pub fn compile_modules_to_html(
             }
             all_js.push_str("};\n})();\n");
 
-            // Destructure exports into local scope
-            all_js.push_str("const {");
-            for (j, name) in exported_names.iter().enumerate() {
-                if j > 0 { all_js.push_str(", "); }
-                all_js.push_str(name);
+            // Destructure exports into local scope (skip already-declared names)
+            let new_names: Vec<&String> = exported_names.iter()
+                .filter(|n| !declared_names.contains(n.as_str()))
+                .collect();
+            if !new_names.is_empty() {
+                all_js.push_str("const {");
+                for (j, name) in new_names.iter().enumerate() {
+                    if j > 0 { all_js.push_str(", "); }
+                    all_js.push_str(name);
+                    declared_names.insert(name.to_string());
+                }
+                let _ = std::fmt::Write::write_fmt(&mut all_js,
+                    format_args!("}} = __mod_{};\n", safe_name));
             }
-            let _ = std::fmt::Write::write_fmt(&mut all_js,
-                format_args!("}} = __mod_{};\n", safe_name));
         } else {
             // Non-entry module without exports: still wrap in IIFE for scope isolation
             all_js.push_str("(() => {\n");
@@ -93,6 +122,11 @@ pub fn compile_modules_to_html(
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{title}</title>
+  <style>
+    * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+    html, body {{ width: 100vw; height: 100vh; overflow: hidden; }}
+    #perry-root {{ width: 100%; flex: 1 1 0%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }}
+  </style>
 </head>
 <body>
   <div id="perry-root"></div>

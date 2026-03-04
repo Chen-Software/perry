@@ -123,11 +123,12 @@ function stateSubscribe(h, fn) {
 const style = document.createElement("style");
 style.textContent = `
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
-#perry-root { display: flex; flex-direction: column; min-height: 100vh; }
-button { cursor: pointer; padding: 6px 16px; border: 1px solid #ccc; border-radius: 6px; background: #fff; font: inherit; }
-button:hover { background: #f0f0f0; }
-button:active { background: #e0e0e0; }
+html, body { width: 100vw; height: 100vh; overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+#perry-root { display: flex; flex-direction: column; width: 100%; flex: 1 1 0%; min-height: 0; overflow: hidden; }
+button { cursor: pointer; padding: 6px 16px; border: 1px solid #ccc; border-radius: 6px; background: transparent; font: inherit; color: inherit; }
+button:hover { opacity: 0.85; }
+button:active { opacity: 0.7; }
 input[type="text"], input[type="password"], select, textarea { padding: 6px 10px; border: 1px solid #ccc; border-radius: 6px; font: inherit; }
 input[type="range"] { width: 100%; }
 hr { border: none; border-top: 1px solid #ddd; margin: 4px 0; }
@@ -152,37 +153,71 @@ function getRoot() {
 }
 
 // --- Widget Creation ---
-function perry_ui_app_create(title, width, height) {
+function perry_ui_app_create(titleOrOpts, width, height) {
+    let title, bodyHandle;
+    if (typeof titleOrOpts === "object" && titleOrOpts !== null) {
+        // Called as App({title, width, height, body})
+        title = titleOrOpts.title || "Perry App";
+        bodyHandle = titleOrOpts.body;
+    } else {
+        title = titleOrOpts;
+    }
     document.title = title;
     const root = getRoot();
-    root.style.maxWidth = width + "px";
-    root.style.margin = "0 auto";
-    root.style.padding = "16px";
-    root.style.minHeight = height + "px";
+    root.style.width = "100%";
+    root.style.minHeight = "0";
+    root.style.display = "flex";
+    root.style.flexDirection = "column";
+    root.style.overflow = "hidden";
+    // Append body widget to root if provided
+    if (bodyHandle != null) {
+        const h = (typeof bodyHandle === "object" && bodyHandle._perryHandle) ? bodyHandle._perryHandle : bodyHandle;
+        const bodyEl = handles.get(h);
+        if (bodyEl) {
+            bodyEl.style.flex = "1 1 0%";
+            root.appendChild(bodyEl);
+        }
+    }
     return wrapWidget(allocHandle(root));
 }
 
-function perry_ui_vstack_create(spacing) {
+function _appendChildren(el, children) {
+    if (!children || !Array.isArray(children)) return;
+    for (const child of children) {
+        const ch = (typeof child === "object" && child !== null && child._perryHandle)
+            ? child._perryHandle : child;
+        const childEl = handles.get(ch);
+        if (childEl) el.appendChild(childEl);
+    }
+}
+
+function perry_ui_vstack_create(spacing, children) {
     const el = document.createElement("div");
     el.style.display = "flex";
     el.style.flexDirection = "column";
     el.style.gap = spacing + "px";
-    return wrapWidget(allocHandle(el));
+    const h = allocHandle(el);
+    _appendChildren(el, children);
+    return wrapWidget(h);
 }
 
-function perry_ui_hstack_create(spacing) {
+function perry_ui_hstack_create(spacing, children) {
     const el = document.createElement("div");
     el.style.display = "flex";
     el.style.flexDirection = "row";
     el.style.gap = spacing + "px";
-    el.style.alignItems = "center";
-    return wrapWidget(allocHandle(el));
+    el.style.alignItems = "stretch";
+    const h = allocHandle(el);
+    _appendChildren(el, children);
+    return wrapWidget(h);
 }
 
-function perry_ui_zstack_create() {
+function perry_ui_zstack_create(children) {
     const el = document.createElement("div");
     el.style.position = "relative";
-    return wrapWidget(allocHandle(el));
+    const h = allocHandle(el);
+    _appendChildren(el, children);
+    return wrapWidget(h);
 }
 
 function perry_ui_text_create(text) {
@@ -828,6 +863,157 @@ function perry_ui_button_set_title(h, title) {
     if (el) el.textContent = title;
 }
 
+function perry_ui_button_set_text_color(h, r, g, b, a) {
+    const el = getHandle(h);
+    if (el) el.style.color = `rgba(${Math.round(r*255)},${Math.round(g*255)},${Math.round(b*255)},${a})`;
+}
+
+function perry_ui_button_set_image(h, name) {
+    const el = getHandle(h);
+    if (!el) return;
+    // Map SF Symbol names to Unicode icons
+    const iconMap = {
+        "folder.fill": "\uD83D\uDCC1", "folder": "\uD83D\uDCC2",
+        "doc.text": "\uD83D\uDCC4", "doc.on.doc": "\uD83D\uDDC2\uFE0F",
+        "magnifyingglass": "\uD83D\uDD0D", "gearshape": "\u2699\uFE0F",
+        "arrow.triangle.branch": "\uD83D\uDD00", "ladybug": "\uD83D\uDC1E",
+        "puzzlepiece.extension": "\uD83E\uDDE9", "sparkles": "\u2728",
+        "terminal": "\u25B6", "xmark": "\u2715", "plus": "+",
+        "chevron.right": "\u203A", "chevron.down": "\u2304",
+        "square.and.arrow.up": "\u2B06\uFE0F", "trash": "\uD83D\uDDD1\uFE0F",
+    };
+    const icon = iconMap[name] || name;
+    // Prepend icon to existing text or set as content
+    const existingText = el.textContent || "";
+    if (existingText.trim()) {
+        el.textContent = icon + " " + existingText;
+    } else {
+        el.textContent = icon;
+    }
+}
+
+function perry_ui_button_set_content_tint_color(h, r, g, b, a) {
+    const el = getHandle(h);
+    if (el) el.style.color = `rgba(${Math.round(r*255)},${Math.round(g*255)},${Math.round(b*255)},${a})`;
+}
+
+function perry_ui_widget_set_width(h, w) {
+    const el = getHandle(h);
+    if (el) { el.style.width = w + "px"; el.style.minWidth = w + "px"; }
+}
+
+function perry_ui_widget_set_hugging(h, priority) {
+    const el = getHandle(h);
+    if (!el) return;
+    if (priority <= 250) {
+        el.style.flex = "1 1 0%";
+    } else {
+        el.style.flex = "0 0 auto";
+    }
+}
+
+function perry_ui_open_folder_dialog(callback) {
+    if (window.showDirectoryPicker) {
+        window.showDirectoryPicker().then(function(dirHandle) {
+            window.__perryDirHandle = dirHandle;
+            window.__perryFileCache = {};
+            _buildFileCacheAsync(dirHandle, "/" + dirHandle.name).then(function() {
+                return _prefetchAllFiles();
+            }).then(function() {
+                if (typeof callback === "function") callback("/" + dirHandle.name);
+            });
+        }).catch(function() { /* user cancelled */ });
+    } else {
+        // Fallback: input with webkitdirectory
+        const input = document.createElement("input");
+        input.type = "file";
+        input.webkitdirectory = true;
+        input.addEventListener("change", function() {
+            if (input.files.length > 0 && typeof callback === "function") {
+                const rootName = input.files[0].webkitRelativePath.split("/")[0];
+                window.__perryFileCache = {};
+                _buildFileCacheFromFileList(input.files, rootName);
+                _prefetchAllFilesFromFileList(input.files).then(function() {
+                    callback("/" + rootName);
+                });
+            }
+        });
+        input.click();
+    }
+}
+
+// Eagerly cache directory structure from File System Access API
+async function _buildFileCacheAsync(dirHandle, path) {
+    if (!window.__perryFileCache) window.__perryFileCache = {};
+    const children = [];
+    for await (const [name, handle] of dirHandle.entries()) {
+        const childPath = path + "/" + name;
+        const isDir = handle.kind === "directory";
+        children.push(name);
+        window.__perryFileCache[childPath] = { isDir: isDir, handle: handle, content: null, children: isDir ? [] : null };
+        if (isDir) {
+            await _buildFileCacheAsync(handle, childPath);
+        }
+    }
+    if (window.__perryFileCache[path]) {
+        window.__perryFileCache[path].children = children;
+    } else {
+        window.__perryFileCache[path] = { isDir: true, handle: dirHandle, content: null, children: children };
+    }
+}
+
+// Fallback: build cache from FileList (webkitdirectory)
+function _buildFileCacheFromFileList(files, rootName) {
+    const dirs = {};
+    for (let i = 0; i < files.length; i++) {
+        const rel = "/" + files[i].webkitRelativePath;
+        const parts = rel.split("/");
+        // Register all parent directories
+        for (let j = 2; j < parts.length; j++) {
+            const dirPath = parts.slice(0, j).join("/");
+            if (!dirs[dirPath]) {
+                dirs[dirPath] = [];
+            }
+            const childName = parts[j];
+            if (dirs[dirPath].indexOf(childName) < 0) dirs[dirPath].push(childName);
+        }
+        // Register the file
+        window.__perryFileCache[rel] = { isDir: false, handle: files[i], content: null, children: null };
+    }
+    // Register directories
+    for (const dirPath in dirs) {
+        if (!window.__perryFileCache[dirPath]) {
+            window.__perryFileCache[dirPath] = { isDir: true, handle: null, content: null, children: dirs[dirPath] };
+        }
+    }
+}
+
+// Read all files from a FileList (webkitdirectory fallback)
+async function _prefetchAllFilesFromFileList(files) {
+    for (var i = 0; i < files.length; i++) {
+        var file = files[i];
+        var path = "/" + file.webkitRelativePath;
+        try {
+            var text = await file.text();
+            if (window.__perryFileCache[path]) {
+                window.__perryFileCache[path].content = text;
+            }
+        } catch(e) {}
+    }
+}
+
+function perry_ui_embed_ns_view(handleId) {
+    // On web, handleId is an editor handle ID. Look up the DOM element and wrap it.
+    const el = getHandle(handleId);
+    if (!el) return wrapWidget(allocHandle(document.createElement("div")));
+    const container = document.createElement("div");
+    container.style.flex = "1 1 0%";
+    container.style.display = "flex";
+    container.style.overflow = "hidden";
+    container.appendChild(el);
+    return wrapWidget(allocHandle(container));
+}
+
 // --- TextField Operations ---
 function perry_ui_textfield_focus(h) {
     const el = getHandle(h);
@@ -1117,7 +1303,12 @@ function perry_ui_menubar_attach(bar_h) {
         barEl.querySelectorAll(":scope > div").forEach(d => d.style.background = "");
     });
 
-    // Insert at top of body
+    // Insert at top of body, make body a flex column so menubar + root share viewport
+    document.body.style.display = "flex";
+    document.body.style.flexDirection = "column";
+    barEl.style.flex = "0 0 auto";
+    const root = document.getElementById("perry-root");
+    if (root) root.style.flex = "1 1 0%";
     document.body.insertBefore(barEl, document.body.firstChild);
 }
 
@@ -1319,6 +1510,535 @@ const __path = {
     }
 };
 
+// ==========================================================================
+// Hone Editor FFI — DOM-based implementations of the 28 native FFI functions
+// ==========================================================================
+
+const _honeEditors = new Map(); // handle → editor state
+let _honeEditorNextHandle = 1;
+let _honeEditorCSSInjected = false;
+
+function _injectEditorCSS() {
+    if (_honeEditorCSSInjected) return;
+    _honeEditorCSSInjected = true;
+    const s = document.createElement("style");
+    s.textContent = `
+.hone-editor { position: relative; overflow: hidden; contain: strict; outline: none;
+  font-variant-ligatures: contextual; -webkit-font-smoothing: antialiased;
+  cursor: text; }
+.hone-editor-lines { position: absolute; top: 0; left: 0; right: 0; bottom: 0; }
+.hone-editor-line { position: absolute; left: 0; right: 0; white-space: pre;
+  pointer-events: none; }
+.hone-editor-cursor-el { position: absolute; width: 2px; pointer-events: none;
+  animation: hone-blink 1s step-end infinite; }
+.hone-editor-selection-rect { position: absolute; pointer-events: none; }
+.hone-editor-ghost { position: absolute; pointer-events: none; white-space: pre; }
+.hone-editor-decoration { position: absolute; pointer-events: none; }
+@keyframes hone-blink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
+`;
+    document.head.appendChild(s);
+}
+
+function hone_editor_create(width, height) {
+    _injectEditorCSS();
+    const h = _honeEditorNextHandle++;
+    const root = document.createElement("div");
+    root.className = "hone-editor";
+    root.tabIndex = 0;
+    root.style.width = width + "px";
+    root.style.height = height + "px";
+    root.style.flex = "1 1 0%";
+
+    const linesContainer = document.createElement("div");
+    linesContainer.className = "hone-editor-lines";
+    root.appendChild(linesContainer);
+
+    // Measurement canvas (hidden, for text metrics)
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+
+    // Cursor element
+    const cursorEl = document.createElement("div");
+    cursorEl.className = "hone-editor-cursor-el";
+    cursorEl.style.background = "#d4d4d4";
+    root.appendChild(cursorEl);
+
+    // Selection container
+    const selContainer = document.createElement("div");
+    selContainer.style.position = "absolute";
+    selContainer.style.top = "0";
+    selContainer.style.left = "0";
+    selContainer.style.right = "0";
+    selContainer.style.bottom = "0";
+    selContainer.style.pointerEvents = "none";
+    root.insertBefore(selContainer, linesContainer);
+
+    const editor = {
+        root: root,
+        linesContainer: linesContainer,
+        canvas: canvas,
+        ctx: ctx,
+        cursorEl: cursorEl,
+        selContainer: selContainer,
+        linePool: [],       // reusable line <div> elements
+        activeLines: {},    // lineNum → <div>
+        fontFamily: "JetBrains Mono, Menlo, Monaco, Courier New, monospace",
+        fontSize: 14,
+        charWidth: 8.4,
+        lineHeight: 21,
+        gutterWidth: 0,
+        scrollOffsetY: 0,
+        pendingEvents: [],
+        cursorEls: [cursorEl],
+        ghostEl: null,
+        batchMode: false,
+    };
+
+    // Set initial font on canvas for measurement
+    ctx.font = editor.fontSize + "px " + editor.fontFamily;
+    editor.charWidth = ctx.measureText("M").width;
+
+    // Set up event listeners
+    _setupEditorEvents(root, editor);
+
+    _honeEditors.set(h, editor);
+    // Also store in the handle system for embedNSView
+    handles.set(h + 100000, root);
+    return h;
+}
+
+function _setupEditorEvents(root, editor) {
+    root.addEventListener("keydown", function(e) {
+        if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
+            // Printable character → TEXT event
+            editor.pendingEvents.push({ type: 1, char: e.key.charCodeAt(0), action: 0, x: 0, y: 0 });
+        } else {
+            var actionId = _mapKeyToAction(e.key, e.ctrlKey, e.shiftKey, e.metaKey, e.altKey);
+            if (actionId > 0) {
+                editor.pendingEvents.push({ type: 2, char: 0, action: actionId, x: 0, y: 0 });
+            }
+        }
+        e.preventDefault();
+    });
+
+    root.addEventListener("wheel", function(e) {
+        editor.pendingEvents.push({ type: 3, char: 0, action: 0, x: e.deltaX, y: e.deltaY });
+        e.preventDefault();
+    }, { passive: false });
+
+    root.addEventListener("mousedown", function(e) {
+        var rect = root.getBoundingClientRect();
+        editor.pendingEvents.push({ type: 4, char: 0, action: 0, x: e.clientX - rect.left, y: e.clientY - rect.top });
+        root.focus();
+    });
+
+    // Handle paste
+    root.addEventListener("paste", function(e) {
+        var text = (e.clipboardData || window.clipboardData).getData("text");
+        for (var i = 0; i < text.length; i++) {
+            var ch = text.charCodeAt(i);
+            if (ch === 10) {
+                editor.pendingEvents.push({ type: 2, char: 0, action: 9, x: 0, y: 0 }); // Enter
+            } else if (ch !== 13) {
+                editor.pendingEvents.push({ type: 1, char: ch, action: 0, x: 0, y: 0 });
+            }
+        }
+        e.preventDefault();
+    });
+}
+
+function _mapKeyToAction(key, ctrl, shift, meta, alt) {
+    // cmd/ctrl key combos
+    var mod = meta || ctrl;
+    if (key === "ArrowLeft" && shift) return 15;
+    if (key === "ArrowRight" && shift) return 16;
+    if (key === "ArrowUp" && shift) return 17;
+    if (key === "ArrowDown" && shift) return 18;
+    if (key === "ArrowLeft" && alt) return 13;
+    if (key === "ArrowRight" && alt) return 14;
+    if (key === "ArrowLeft") return 1;
+    if (key === "ArrowRight") return 2;
+    if (key === "ArrowUp") return 3;
+    if (key === "ArrowDown") return 4;
+    if (key === "Home" && shift) return 19;
+    if (key === "End" && shift) return 20;
+    if (key === "Home") return 5;
+    if (key === "End") return 6;
+    if (key === "Backspace" && alt) return 27;
+    if (key === "Backspace") return 10;
+    if (key === "Delete") return 11;
+    if (key === "Enter") return 9;
+    if (key === "Tab") return 12;
+    if (key === "PageUp") return 28;
+    if (key === "PageDown") return 29;
+    if (mod && key === "a") return 21;
+    if (mod && key === "x") return 22;
+    if (mod && key === "c") return 23;
+    if (mod && key === "v") return 24;
+    if (mod && key === "z" && shift) return 26;
+    if (mod && key === "z") return 25;
+    return 0;
+}
+
+function hone_editor_destroy(h) {
+    var ed = _honeEditors.get(h);
+    if (ed && ed.root.parentNode) ed.root.parentNode.removeChild(ed.root);
+    _honeEditors.delete(h);
+    handles.delete(h + 100000);
+}
+
+function hone_editor_attach_to_view(h, parentId) {
+    var ed = _honeEditors.get(h);
+    var parent = getHandle(parentId);
+    if (ed && parent) parent.appendChild(ed.root);
+}
+
+function hone_editor_set_font(h, family, size) {
+    var ed = _honeEditors.get(h);
+    if (!ed) return;
+    if (typeof family === "string" && family.length > 0) {
+        ed.fontFamily = family + ", Menlo, Monaco, Courier New, monospace";
+    }
+    ed.fontSize = size;
+    ed.lineHeight = Math.round(size * 1.5);
+    ed.ctx.font = size + "px " + ed.fontFamily;
+    ed.charWidth = ed.ctx.measureText("M").width;
+    ed.root.style.fontFamily = ed.fontFamily;
+    ed.root.style.fontSize = size + "px";
+    ed.root.style.lineHeight = ed.lineHeight + "px";
+}
+
+function hone_editor_measure_text(h, text) {
+    var ed = _honeEditors.get(h);
+    if (!ed) return 0;
+    if (typeof text !== "string") return 0;
+    return ed.ctx.measureText(text).width;
+}
+
+function hone_editor_render_line(h, lineNumber, text, tokensJson, yOffset) {
+    var ed = _honeEditors.get(h);
+    if (!ed) return;
+
+    var lineEl = ed.activeLines[lineNumber];
+    if (!lineEl) {
+        lineEl = ed.linePool.length > 0 ? ed.linePool.pop() : document.createElement("div");
+        lineEl.className = "hone-editor-line";
+        lineEl.style.fontFamily = ed.fontFamily;
+        lineEl.style.fontSize = ed.fontSize + "px";
+        lineEl.style.lineHeight = ed.lineHeight + "px";
+        ed.linesContainer.appendChild(lineEl);
+        ed.activeLines[lineNumber] = lineEl;
+    }
+
+    lineEl.style.top = yOffset + "px";
+    lineEl.innerHTML = "";
+
+    // Parse tokens JSON and render spans
+    var tokens = null;
+    if (typeof tokensJson === "string" && tokensJson.length > 2) {
+        try { tokens = JSON.parse(tokensJson); } catch(e) {}
+    }
+
+    if (tokens && tokens.length > 0) {
+        for (var i = 0; i < tokens.length; i++) {
+            var tok = tokens[i];
+            var span = document.createElement("span");
+            if (tok.color) span.style.color = tok.color;
+            if (tok.italic) span.style.fontStyle = "italic";
+            if (tok.bold) span.style.fontWeight = "bold";
+            var startPos = tok.start || 0;
+            var endPos = tok.end || text.length;
+            span.textContent = text.substring(startPos, endPos);
+            lineEl.appendChild(span);
+        }
+    } else {
+        lineEl.textContent = text;
+    }
+}
+
+function hone_editor_set_cursor(h, x, y, cursorStyle) {
+    var ed = _honeEditors.get(h);
+    if (!ed) return;
+    var el = ed.cursorEl;
+    el.style.left = x + "px";
+    el.style.top = y + "px";
+    el.style.height = ed.lineHeight + "px";
+    if (cursorStyle === 1) {
+        // Block cursor
+        el.style.width = ed.charWidth + "px";
+        el.style.background = "rgba(212, 212, 212, 0.4)";
+    } else if (cursorStyle === 2) {
+        // Underline cursor
+        el.style.width = ed.charWidth + "px";
+        el.style.height = "2px";
+        el.style.top = (y + ed.lineHeight - 2) + "px";
+        el.style.background = "#d4d4d4";
+    } else {
+        // Line cursor (default)
+        el.style.width = "2px";
+        el.style.background = "#d4d4d4";
+    }
+}
+
+function hone_editor_set_cursors(h, cursorsJson) {
+    var ed = _honeEditors.get(h);
+    if (!ed) return;
+    var cursors = null;
+    try { cursors = JSON.parse(cursorsJson); } catch(e) { return; }
+    if (!cursors) return;
+
+    // Ensure we have enough cursor elements
+    while (ed.cursorEls.length < cursors.length) {
+        var cel = document.createElement("div");
+        cel.className = "hone-editor-cursor-el";
+        cel.style.background = "#d4d4d4";
+        ed.root.appendChild(cel);
+        ed.cursorEls.push(cel);
+    }
+    // Hide extra cursors
+    for (var i = cursors.length; i < ed.cursorEls.length; i++) {
+        ed.cursorEls[i].style.display = "none";
+    }
+    // Position visible cursors
+    for (var j = 0; j < cursors.length; j++) {
+        var c = cursors[j];
+        var el = ed.cursorEls[j];
+        el.style.display = "";
+        el.style.left = c.x + "px";
+        el.style.top = c.y + "px";
+        el.style.height = ed.lineHeight + "px";
+        el.style.width = "2px";
+    }
+}
+
+function hone_editor_set_selection(h, regionsJson) {
+    var ed = _honeEditors.get(h);
+    if (!ed) return;
+    var regions = null;
+    if (typeof regionsJson === "string" && regionsJson.length > 2) {
+        try { regions = JSON.parse(regionsJson); } catch(e) {}
+    }
+
+    ed.selContainer.innerHTML = "";
+    if (!regions || regions.length === 0) return;
+
+    for (var i = 0; i < regions.length; i++) {
+        var r = regions[i];
+        var rect = document.createElement("div");
+        rect.className = "hone-editor-selection-rect";
+        rect.style.left = r.x + "px";
+        rect.style.top = r.y + "px";
+        rect.style.width = r.w + "px";
+        rect.style.height = r.h + "px";
+        rect.style.background = "rgba(38, 79, 122, 0.3)";
+        ed.selContainer.appendChild(rect);
+    }
+}
+
+function hone_editor_scroll(h, offsetY) {
+    var ed = _honeEditors.get(h);
+    if (!ed) return;
+    ed.scrollOffsetY = offsetY;
+    ed.linesContainer.style.transform = "translateY(" + (-offsetY) + "px)";
+}
+
+function hone_editor_begin_frame(h) {
+    var ed = _honeEditors.get(h);
+    if (!ed) return;
+    ed.batchMode = true;
+    // Clear stale lines at the start of a new frame
+    for (var ln in ed.activeLines) {
+        var lineEl = ed.activeLines[ln];
+        lineEl.style.display = "none";
+        ed.linePool.push(lineEl);
+    }
+    ed.activeLines = {};
+}
+
+function hone_editor_end_frame(h) {
+    var ed = _honeEditors.get(h);
+    if (!ed) return;
+    ed.batchMode = false;
+    // Show all active lines
+    for (var ln in ed.activeLines) {
+        ed.activeLines[ln].style.display = "";
+    }
+}
+
+function hone_editor_invalidate(h) {
+    // No-op on web — rendering is immediate via DOM manipulation
+}
+
+function hone_editor_render_ghost_text(h, text, x, y, color) {
+    var ed = _honeEditors.get(h);
+    if (!ed) return;
+    if (!ed.ghostEl) {
+        ed.ghostEl = document.createElement("div");
+        ed.ghostEl.className = "hone-editor-ghost";
+        ed.root.appendChild(ed.ghostEl);
+    }
+    ed.ghostEl.style.left = x + "px";
+    ed.ghostEl.style.top = y + "px";
+    ed.ghostEl.style.color = typeof color === "string" ? color : "rgba(128,128,128,0.5)";
+    ed.ghostEl.style.fontFamily = ed.fontFamily;
+    ed.ghostEl.style.fontSize = ed.fontSize + "px";
+    ed.ghostEl.textContent = text;
+    ed.ghostEl.style.display = "";
+}
+
+function hone_editor_render_decorations(h, decorationsJson) {
+    var ed = _honeEditors.get(h);
+    if (!ed) return;
+    // Remove existing decorations
+    var existing = ed.root.querySelectorAll(".hone-editor-decoration");
+    for (var i = 0; i < existing.length; i++) existing[i].remove();
+
+    var decorations = null;
+    try { decorations = JSON.parse(decorationsJson); } catch(e) { return; }
+    if (!decorations) return;
+
+    for (var j = 0; j < decorations.length; j++) {
+        var d = decorations[j];
+        var el = document.createElement("div");
+        el.className = "hone-editor-decoration";
+        el.style.left = d.x + "px";
+        el.style.top = d.y + "px";
+        el.style.width = d.w + "px";
+        el.style.height = d.h + "px";
+        if (d.background) el.style.background = d.background;
+        if (d.borderBottom) el.style.borderBottom = d.borderBottom;
+        ed.root.appendChild(el);
+    }
+}
+
+function hone_editor_set_gutter_width(h, width) {
+    var ed = _honeEditors.get(h);
+    if (!ed) return;
+    ed.gutterWidth = width;
+    ed.linesContainer.style.paddingLeft = width + "px";
+}
+
+function hone_editor_set_ts_mode(h, mode) {
+    // On web, TypeScript always handles all state — this is a no-op
+}
+
+function hone_editor_set_event_callback(h, cb) {
+    // Not used in Perry poll mode — no-op on web
+}
+
+function hone_editor_nsview(h) {
+    // On web, return a handle ID that embed_ns_view can look up
+    return h + 100000;
+}
+
+function hone_editor_pending_event_count(h) {
+    var ed = _honeEditors.get(h);
+    return ed ? ed.pendingEvents.length : 0;
+}
+
+function hone_editor_get_event_type(h, i) {
+    var ed = _honeEditors.get(h);
+    return (ed && i < ed.pendingEvents.length) ? ed.pendingEvents[i].type : 0;
+}
+
+function hone_editor_get_event_char(h, i) {
+    var ed = _honeEditors.get(h);
+    return (ed && i < ed.pendingEvents.length) ? ed.pendingEvents[i].char : 0;
+}
+
+function hone_editor_get_event_action(h, i) {
+    var ed = _honeEditors.get(h);
+    return (ed && i < ed.pendingEvents.length) ? ed.pendingEvents[i].action : 0;
+}
+
+function hone_editor_get_event_x(h, i) {
+    var ed = _honeEditors.get(h);
+    return (ed && i < ed.pendingEvents.length) ? ed.pendingEvents[i].x : 0;
+}
+
+function hone_editor_get_event_y(h, i) {
+    var ed = _honeEditors.get(h);
+    return (ed && i < ed.pendingEvents.length) ? ed.pendingEvents[i].y : 0;
+}
+
+function hone_editor_clear_events(h) {
+    var ed = _honeEditors.get(h);
+    if (ed) ed.pendingEvents.length = 0;
+}
+
+// --- Platform FFI stubs (web implementations) ---
+function perry_get_screen_width()  { return window.innerWidth; }
+function perry_get_screen_height() { return window.innerHeight; }
+function perry_get_scale_factor()  { return window.devicePixelRatio || 1; }
+function perry_has_hardware_keyboard() { return true; }
+function perry_get_platform() { return "web"; }
+function perry_get_orientation() { return window.innerWidth > window.innerHeight ? "landscape" : "portrait"; }
+function perry_on_resize(cb) {
+    window.addEventListener("resize", function() { cb(window.innerWidth, window.innerHeight); });
+}
+function perry_on_orientation_change(cb) {
+    if (window.matchMedia) {
+        window.matchMedia("(orientation: portrait)").addEventListener("change", function(e) {
+            cb(e.matches ? "portrait" : "landscape");
+        });
+    }
+}
+
+// --- File System Web Cache ---
+// Files are cached when a folder is opened via perry_ui_open_folder_dialog.
+// readFileSync/readdirSync/isDirectory serve from this cache.
+if (!window.__perryFileCache) window.__perryFileCache = {};
+
+function fs_readFileSync(path) {
+    const entry = window.__perryFileCache[path];
+    if (entry && entry.content !== null) return entry.content;
+    if (entry && entry.handle && entry.handle.getFile) {
+        // Async read - but we need sync. Return empty and prefetch.
+        _prefetchFile(path, entry.handle);
+        return entry.content || "";
+    }
+    return "";
+}
+
+function fs_readdirSync(path) {
+    const entry = window.__perryFileCache[path];
+    if (entry && entry.children) return entry.children;
+    return [];
+}
+
+function fs_isDirectory(path) {
+    const entry = window.__perryFileCache[path];
+    if (entry) return entry.isDir ? 1 : 0;
+    return 0;
+}
+
+function fs_existsSync(path) {
+    return window.__perryFileCache[path] ? true : false;
+}
+
+// Pre-fetch file content asynchronously and cache it
+async function _prefetchFile(path, handle) {
+    try {
+        const file = await handle.getFile();
+        const text = await file.text();
+        if (window.__perryFileCache[path]) {
+            window.__perryFileCache[path].content = text;
+        }
+    } catch(e) {
+        console.warn("Failed to read file:", path, e);
+    }
+}
+
+// Pre-fetch all files in the cache that haven't been loaded yet
+async function _prefetchAllFiles() {
+    for (const path in window.__perryFileCache) {
+        const entry = window.__perryFileCache[path];
+        if (!entry.isDir && entry.content === null && entry.handle) {
+            await _prefetchFile(path, entry.handle);
+        }
+    }
+}
+
 // --- Expose API ---
 window.__perry = {
     // Handle system
@@ -1400,6 +2120,9 @@ window.__perry = {
     perry_ui_text_set_selectable,
     perry_ui_button_set_bordered,
     perry_ui_button_set_title,
+    perry_ui_button_set_text_color,
+    perry_ui_button_set_image,
+    perry_ui_button_set_content_tint_color,
     perry_ui_textfield_focus,
     perry_ui_textfield_set_string,
     // ScrollView
@@ -1463,6 +2186,7 @@ window.__perry = {
     perry_ui_clipboard_write,
     // Dialogs
     perry_ui_open_file_dialog,
+    perry_ui_open_folder_dialog,
     perry_ui_save_file_dialog,
     perry_ui_alert,
     // Keyboard
@@ -1488,6 +2212,10 @@ window.__perry = {
     perry_ui_app_on_activate,
     perry_ui_app_on_terminate,
     perry_ui_app_set_timer,
+    // Widget layout
+    perry_ui_widget_set_width,
+    perry_ui_widget_set_hugging,
+    perry_ui_embed_ns_view,
     // Timers
     perry_set_timeout,
     perry_set_interval,
@@ -1495,6 +2223,58 @@ window.__perry = {
     perry_clear_interval,
     // Path
     path: __path,
+    // Platform FFI
+    perry_get_screen_width,
+    perry_get_screen_height,
+    perry_get_scale_factor,
+    perry_has_hardware_keyboard,
+    perry_get_platform,
+    perry_get_orientation,
+    perry_on_resize,
+    perry_on_orientation_change,
+    // File System (web cache)
+    fs_readFileSync,
+    fs_readdirSync,
+    fs_isDirectory,
+    fs_existsSync,
 };
+
+// Expose platform FFI functions as globals (compiled code calls them as bare function names)
+window.perry_get_screen_width = perry_get_screen_width;
+window.perry_get_screen_height = perry_get_screen_height;
+window.perry_get_scale_factor = perry_get_scale_factor;
+window.perry_has_hardware_keyboard = perry_has_hardware_keyboard;
+window.perry_get_platform = perry_get_platform;
+window.perry_get_orientation = perry_get_orientation;
+window.perry_on_resize = perry_on_resize;
+window.perry_on_orientation_change = perry_on_orientation_change;
+
+// Expose editor FFI functions as globals
+window.hone_editor_create = hone_editor_create;
+window.hone_editor_destroy = hone_editor_destroy;
+window.hone_editor_attach_to_view = hone_editor_attach_to_view;
+window.hone_editor_set_font = hone_editor_set_font;
+window.hone_editor_measure_text = hone_editor_measure_text;
+window.hone_editor_render_line = hone_editor_render_line;
+window.hone_editor_set_cursor = hone_editor_set_cursor;
+window.hone_editor_set_cursors = hone_editor_set_cursors;
+window.hone_editor_set_selection = hone_editor_set_selection;
+window.hone_editor_scroll = hone_editor_scroll;
+window.hone_editor_begin_frame = hone_editor_begin_frame;
+window.hone_editor_end_frame = hone_editor_end_frame;
+window.hone_editor_invalidate = hone_editor_invalidate;
+window.hone_editor_render_ghost_text = hone_editor_render_ghost_text;
+window.hone_editor_render_decorations = hone_editor_render_decorations;
+window.hone_editor_set_gutter_width = hone_editor_set_gutter_width;
+window.hone_editor_set_ts_mode = hone_editor_set_ts_mode;
+window.hone_editor_set_event_callback = hone_editor_set_event_callback;
+window.hone_editor_nsview = hone_editor_nsview;
+window.hone_editor_pending_event_count = hone_editor_pending_event_count;
+window.hone_editor_get_event_type = hone_editor_get_event_type;
+window.hone_editor_get_event_char = hone_editor_get_event_char;
+window.hone_editor_get_event_action = hone_editor_get_event_action;
+window.hone_editor_get_event_x = hone_editor_get_event_x;
+window.hone_editor_get_event_y = hone_editor_get_event_y;
+window.hone_editor_clear_events = hone_editor_clear_events;
 
 })();

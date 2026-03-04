@@ -90,6 +90,15 @@ impl JsEmitter {
             self.emit_global(global);
         }
 
+        // Pre-register module-level init local names so functions can reference them
+        // (functions are emitted before init statements, so without this,
+        //  get_local_name falls back to _l{id} instead of the actual variable name)
+        for stmt in &module.init {
+            if let Stmt::Let { id, name, .. } = stmt {
+                self.make_local_name(name, *id);
+            }
+        }
+
         // Emit classes
         for class in &module.classes {
             self.emit_class(class);
@@ -241,6 +250,10 @@ impl JsEmitter {
         if let Some(init) = &global.init {
             self.output.push_str(" = ");
             self.emit_expr(init);
+        } else if global.name == "__platform__" || name == "__platform__" {
+            // Inject web platform ID for --target web
+            // 0=macOS, 1=iOS, 2=Android, 3=Windows, 4=Linux, 5=Web
+            self.output.push_str(" = 5");
         }
         self.output.push_str(";\n");
     }
@@ -438,6 +451,10 @@ impl JsEmitter {
                 if let Some(init) = init {
                     self.output.push_str(" = ");
                     self.emit_expr(init);
+                } else if name == "__platform__" {
+                    // Inject web platform ID for --target web
+                    // 0=macOS, 1=iOS, 2=Android, 3=Windows, 4=Linux, 5=Web
+                    self.output.push_str(" = 5");
                 }
                 self.output.push_str(";\n");
             }
@@ -1067,16 +1084,24 @@ impl JsEmitter {
                 self.output.push_str("(typeof process !== 'undefined' ? process.memoryUsage() : {rss: 0, heapTotal: 0, heapUsed: 0, external: 0, arrayBuffers: 0})");
             }
 
-            // --- File System (stubs in browser) ---
-            Expr::FsReadFileSync(_) |
+            // --- File System (web-compatible stubs) ---
+            Expr::FsReadFileSync(path) => {
+                self.output.push_str("__perry.fs_readFileSync(");
+                self.emit_expr(path);
+                self.output.push(')');
+            }
             Expr::FsWriteFileSync(_, _) |
-            Expr::FsExistsSync(_) |
             Expr::FsMkdirSync(_) |
             Expr::FsUnlinkSync(_) |
             Expr::FsAppendFileSync(_, _) |
             Expr::FsReadFileBinary(_) |
             Expr::FsRmRecursive(_) => {
-                self.output.push_str("((() => { throw new Error('fs operations not available in browser'); })())");
+                self.output.push_str("((() => { throw new Error('fs write operations not available in browser'); })())");
+            }
+            Expr::FsExistsSync(path) => {
+                self.output.push_str("__perry.fs_existsSync(");
+                self.emit_expr(path);
+                self.output.push(')');
             }
 
             // --- Path operations ---
@@ -1955,6 +1980,38 @@ impl JsEmitter {
                 }
                 self.output.push(')');
             }
+            // --- File System (fs module — serve from web file cache) ---
+            "fs" => {
+                match method {
+                    "readFileSync" => {
+                        self.output.push_str("__perry.fs_readFileSync(");
+                        for (i, arg) in args.iter().enumerate() {
+                            if i > 0 { self.output.push_str(", "); }
+                            self.emit_expr(arg);
+                        }
+                        self.output.push(')');
+                    }
+                    "readdirSync" => {
+                        self.output.push_str("__perry.fs_readdirSync(");
+                        for (i, arg) in args.iter().enumerate() {
+                            if i > 0 { self.output.push_str(", "); }
+                            self.emit_expr(arg);
+                        }
+                        self.output.push(')');
+                    }
+                    "isDirectory" => {
+                        self.output.push_str("__perry.fs_isDirectory(");
+                        for (i, arg) in args.iter().enumerate() {
+                            if i > 0 { self.output.push_str(", "); }
+                            self.emit_expr(arg);
+                        }
+                        self.output.push(')');
+                    }
+                    _ => {
+                        let _ = write!(self.output, "((() => {{ throw new Error('fs.{} not available in browser'); }})())", method);
+                    }
+                }
+            }
             // --- Fastify/HTTP (throw in browser) ---
             "fastify" | "ws" | "mysql2" | "mysql2/promise" | "pg" | "net" | "worker_threads" => {
                 let _ = write!(self.output, "((() => {{ throw new Error('{} not available in browser'); }})())", normalized_module);
@@ -2137,6 +2194,28 @@ impl JsEmitter {
             "setLineWidth" | "canvas_set_line_width" => "perry_ui_canvas_set_line_width",
             "fillText" | "canvas_fill_text" => "perry_ui_canvas_fill_text",
             "setFont" | "canvas_set_font" => "perry_ui_canvas_set_font",
+            // Hone IDE camelCase free-function imports
+            "textSetColor" => "perry_ui_set_foreground",
+            "textSetFontSize" => "perry_ui_set_font_size",
+            "textSetFontWeight" => "perry_ui_set_font_weight",
+            "textSetFontFamily" => "perry_ui_set_font_family",
+            "textSetString" => "perry_ui_text_set_string",
+            "buttonSetBordered" => "perry_ui_button_set_bordered",
+            "buttonSetTextColor" => "perry_ui_button_set_text_color",
+            "buttonSetTitle" => "perry_ui_button_set_title",
+            "buttonSetImage" => "perry_ui_button_set_image",
+            "buttonSetContentTintColor" => "perry_ui_button_set_content_tint_color",
+            "widgetSetBackgroundColor" => "perry_ui_set_background",
+            "widgetAddChild" => "perry_ui_widget_add_child",
+            "widgetClearChildren" => "perry_ui_widget_remove_all_children",
+            "widgetSetWidth" => "perry_ui_widget_set_width",
+            "widgetSetHugging" => "perry_ui_widget_set_hugging",
+            "widgetSetHidden" => "perry_ui_set_widget_hidden",
+            "VStackWithInsets" => "perry_ui_vstack_create_with_insets",
+            "HStackWithInsets" => "perry_ui_hstack_create_with_insets",
+            "embedNSView" => "perry_ui_embed_ns_view",
+            "openFolderDialog" => "perry_ui_open_folder_dialog",
+            "openFileDialog" => "perry_ui_open_file_dialog",
             // App lifecycle
             "run" | "app_run" => "perry_ui_app_run",
             // Menu
