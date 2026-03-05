@@ -32,6 +32,10 @@ use std::cell::RefCell;
 thread_local! {
     /// Map from widget handle (1-based) to NSView
     static WIDGETS: RefCell<Vec<Retained<NSView>>> = RefCell::new(Vec::new());
+    /// Stored width constraints per widget handle, so set_width can update instead of duplicate.
+    static WIDTH_CONSTRAINTS: RefCell<std::collections::HashMap<i64, Retained<AnyObject>>> = RefCell::new(std::collections::HashMap::new());
+    /// Stored height constraints per widget handle, so set_height can update instead of duplicate.
+    static HEIGHT_CONSTRAINTS: RefCell<std::collections::HashMap<i64, Retained<AnyObject>>> = RefCell::new(std::collections::HashMap::new());
 }
 
 /// Store an NSView and return its handle (1-based i64).
@@ -73,6 +77,23 @@ pub fn set_hidden(handle: i64, hidden: bool) {
     if let Some(view) = get_widget(handle) {
         unsafe {
             let _: () = objc2::msg_send![&*view, setHidden: hidden];
+        }
+    }
+}
+
+/// Set detachesHiddenViews on an NSStackView.
+/// When false, hidden views still participate in layout (occupy space but are invisible).
+pub fn set_detaches_hidden_views(handle: i64, detaches: bool) {
+    if let Some(view) = get_widget(handle) {
+        let is_stack = if let Some(cls) = AnyClass::get(c"NSStackView") {
+            view.isKindOfClass(cls)
+        } else {
+            false
+        };
+        if is_stack {
+            unsafe {
+                let _: () = msg_send![&*view, setDetachesHiddenViews: detaches];
+            }
         }
     }
 }
@@ -367,14 +388,55 @@ pub fn set_corner_radius(handle: i64, radius: f64) {
 }
 
 /// Set a fixed width constraint on a widget.
+/// Idempotent: deactivates any previous width constraint before creating a new one.
 pub fn set_width(handle: i64, width: f64) {
     if let Some(view) = get_widget(handle) {
+        // Deactivate old width constraint if any
+        WIDTH_CONSTRAINTS.with(|wc| {
+            let mut map = wc.borrow_mut();
+            if let Some(old) = map.remove(&handle) {
+                unsafe {
+                    let _: () = msg_send![&*old, setActive: false];
+                }
+            }
+        });
         unsafe {
             let width_anchor: Retained<AnyObject> = msg_send![&*view, widthAnchor];
             let constraint: Retained<AnyObject> = msg_send![
                 &*width_anchor, constraintEqualToConstant: width
             ];
             let _: () = msg_send![&*constraint, setActive: true];
+            // Store for future updates
+            WIDTH_CONSTRAINTS.with(|wc| {
+                wc.borrow_mut().insert(handle, constraint);
+            });
+        }
+    }
+}
+
+/// Set a fixed height constraint on a widget.
+/// Idempotent: deactivates any previous height constraint before creating a new one.
+pub fn set_height(handle: i64, height: f64) {
+    if let Some(view) = get_widget(handle) {
+        // Deactivate old height constraint if any
+        HEIGHT_CONSTRAINTS.with(|hc| {
+            let mut map = hc.borrow_mut();
+            if let Some(old) = map.remove(&handle) {
+                unsafe {
+                    let _: () = msg_send![&*old, setActive: false];
+                }
+            }
+        });
+        unsafe {
+            let height_anchor: Retained<AnyObject> = msg_send![&*view, heightAnchor];
+            let constraint: Retained<AnyObject> = msg_send![
+                &*height_anchor, constraintEqualToConstant: height
+            ];
+            let _: () = msg_send![&*constraint, setActive: true];
+            // Store for future updates
+            HEIGHT_CONSTRAINTS.with(|hc| {
+                hc.borrow_mut().insert(handle, constraint);
+            });
         }
     }
 }

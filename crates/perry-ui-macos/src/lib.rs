@@ -194,6 +194,13 @@ pub extern "C" fn perry_ui_set_widget_hidden(handle: i64, hidden: i64) {
     widgets::set_hidden(handle, hidden != 0);
 }
 
+/// Set detachesHiddenViews on an NSStackView.
+/// When flag=0, hidden views still participate in layout.
+#[no_mangle]
+pub extern "C" fn perry_ui_stack_set_detaches_hidden(handle: i64, flag: i64) {
+    widgets::set_detaches_hidden_views(handle, flag != 0);
+}
+
 /// Initialize a ForEach dynamic list binding.
 #[no_mangle]
 pub extern "C" fn perry_ui_for_each_init(container_handle: i64, state_handle: i64, render_closure: f64) {
@@ -300,6 +307,12 @@ pub extern "C" fn perry_ui_button_set_text_color(handle: i64, r: f64, g: f64, b:
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_set_width(handle: i64, width: f64) {
     widgets::set_width(handle, width);
+}
+
+/// Set a fixed height constraint on a widget.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_height(handle: i64, height: f64) {
+    widgets::set_height(handle, height);
 }
 
 /// Set the content hugging priority on a widget (both axes).

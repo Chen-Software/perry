@@ -11274,6 +11274,15 @@ impl Compiler {
             self.extern_funcs.insert("perry_ui_set_widget_hidden".to_string(), func_id);
         }
 
+        // perry_ui_stack_set_detaches_hidden(handle: i64, flag: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // stack handle
+            sig.params.push(AbiParam::new(types::I64)); // flag (0 or 1)
+            let func_id = self.module.declare_function("perry_ui_stack_set_detaches_hidden", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_stack_set_detaches_hidden".to_string(), func_id);
+        }
+
         // perry_ui_for_each_init(container_handle: i64, state_handle: i64, render_closure: f64)
         {
             let mut sig = self.module.make_signature();
@@ -11442,6 +11451,15 @@ impl Compiler {
             sig.params.push(AbiParam::new(types::F64));
             let func_id = self.module.declare_function("perry_ui_widget_set_width", Linkage::Import, &sig)?;
             self.extern_funcs.insert("perry_ui_widget_set_width".to_string(), func_id);
+        }
+
+        // perry_ui_widget_set_height(handle: i64, height: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_ui_widget_set_height", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_widget_set_height".to_string(), func_id);
         }
 
         // perry_ui_widget_set_hugging(handle: i64, priority: f64)
@@ -35796,9 +35814,9 @@ fn compile_expr(
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
                     }
-                    "widgetSetHidden" | "textSetFontSize" | "textSetSelectable" |
+                    "widgetSetHidden" | "stackSetDetachesHidden" | "textSetFontSize" | "textSetSelectable" |
                     "buttonSetBordered" | "textfieldFocus" | "widgetClearChildren" |
-                    "widgetSetWidth" | "widgetSetHugging" | "buttonSetImagePosition" => {
+                    "widgetSetWidth" | "widgetSetHeight" | "widgetSetHugging" | "buttonSetImagePosition" => {
                         // (handle, ...) — extract handle, pass remaining args as f64
                         let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
                             .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
@@ -35809,12 +35827,14 @@ fn compile_expr(
 
                         let ffi_name = match method.as_str() {
                             "widgetSetHidden" => "perry_ui_set_widget_hidden",
+                            "stackSetDetachesHidden" => "perry_ui_stack_set_detaches_hidden",
                             "textSetFontSize" => "perry_ui_text_set_font_size",
                             "textSetSelectable" => "perry_ui_text_set_selectable",
                             "buttonSetBordered" => "perry_ui_button_set_bordered",
                             "textfieldFocus" => "perry_ui_textfield_focus",
                             "widgetClearChildren" => "perry_ui_widget_clear_children",
                             "widgetSetWidth" => "perry_ui_widget_set_width",
+                            "widgetSetHeight" => "perry_ui_widget_set_height",
                             "widgetSetHugging" => "perry_ui_widget_set_hugging",
                             "buttonSetImagePosition" => "perry_ui_button_set_image_position",
                             _ => unreachable!(),
@@ -35829,7 +35849,7 @@ fn compile_expr(
                             call_args.push(ensure_f64(builder, arg_vals[i]));
                         }
                         // widgetSetHidden and widgetClearChildren take i64 args — convert f64 → i64
-                        if method == "widgetSetHidden" {
+                        if method == "widgetSetHidden" || method == "stackSetDetachesHidden" {
                             let hidden_f64 = ensure_f64(builder, arg_vals[1]);
                             let hidden_i64 = builder.ins().fcvt_to_sint_sat(types::I64, hidden_f64);
                             builder.ins().call(func_ref, &[handle, hidden_i64]);
