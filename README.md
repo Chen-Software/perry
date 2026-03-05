@@ -68,6 +68,19 @@ cargo build --release
 # Binary at: target/release/perry
 ```
 
+This builds the compiler and all platform-independent crates. To also build the native UI crate for your platform:
+
+```bash
+# macOS
+cargo build --release -p perry-ui-macos
+
+# Linux (requires GTK4 dev libraries)
+cargo build --release -p perry-ui-gtk4
+
+# Windows
+cargo build --release -p perry-ui-windows
+```
+
 ## Quick Start
 
 ```bash
@@ -341,13 +354,14 @@ Perry's standard library covers the compiler and runtime. These separate package
 | Package | Description |
 |---------|-------------|
 | [perry-react](https://github.com/PerryTS/react) | React/JSX → native widgets. Write standard React components; compile to a native macOS/iOS/Android app. |
-| [perry-sqlite](https://github.com/PerryTS/perry-sqlite) | SQLite with a Prisma-compatible API (`findMany`, `create`, `upsert`, `$transaction`, etc.) |
-| [perry-postgres](https://github.com/PerryTS/perry-postgres) | PostgreSQL with the same Prisma-compatible API |
-| [perry-prisma](https://github.com/PerryTS/perry-prisma) | MySQL with the same Prisma-compatible API |
-| [perry-apn](https://github.com/PerryTS/perry-apn) | Apple Push Notifications (APNs) native library |
-| [perry-hub](https://github.com/PerryTS/perry-hub) | Cloud build server: receives `perry publish` uploads, manages licenses, dispatches builds |
-| [perry-pry](https://github.com/PerryTS/perry-pry) | Example app: native JSON viewer (macOS/Linux/Windows) built with `perry/ui` |
-| [perry-starter](https://github.com/PerryTS/perry-starter) | Minimal starter project with hello world and benchmarks |
+| [perry-sqlite](https://github.com/PerryTS/sqlite) | SQLite with a Prisma-compatible API (`findMany`, `create`, `upsert`, `$transaction`, etc.) |
+| [perry-postgres](https://github.com/PerryTS/postgres) | PostgreSQL with the same Prisma-compatible API |
+| [perry-prisma](https://github.com/PerryTS/prisma) | MySQL with the same Prisma-compatible API |
+| [perry-apn](https://github.com/PerryTS/push) | Apple Push Notifications (APNs) native library |
+| [perry-pry](https://github.com/PerryTS/pry) | Example app: native JSON viewer (macOS/Linux/Windows) built with `perry/ui` |
+| [perry-starter](https://github.com/PerryTS/starter) | Minimal starter project with hello world and benchmarks |
+| [perry-demo](https://github.com/PerryTS/demo) | Benchmark dashboard comparing Perry vs Node.js |
+| [perry-react-dom](https://github.com/PerryTS/react-dom) | Perry React DOM bridge |
 
 ### perry-react
 
