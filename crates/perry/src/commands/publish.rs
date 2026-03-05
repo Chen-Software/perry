@@ -63,6 +63,12 @@ pub struct PublishArgs {
     #[arg(long)]
     pub apple_issuer_id: Option<String>,
 
+    /// Path to Apple .p12 certificate bundle for code signing.
+    /// The worker imports it into a temporary keychain per build.
+    /// Saved path is remembered; password is never saved (use PERRY_APPLE_CERTIFICATE_PASSWORD).
+    #[arg(long)]
+    pub certificate: Option<PathBuf>,
+
     /// Path to iOS provisioning profile (.mobileprovision)
     #[arg(long)]
     pub provisioning_profile: Option<PathBuf>,
@@ -125,6 +131,7 @@ struct ProjectConfig {
 struct AppConfig {
     name: Option<String>,
     version: Option<String>,
+    build_number: Option<u64>,
     description: Option<String>,
     entry: Option<String>,
     icons: Option<IconsConfig>,
@@ -141,6 +148,8 @@ struct MacosConfig {
     category: Option<String>,
     minimum_os: Option<String>,
     entitlements: Option<Vec<String>>,
+    distribute: Option<String>,
+    signing_identity: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -275,6 +284,8 @@ struct BuildManifest {
     #[serde(skip_serializing_if = "Option::is_none")]
     ios_distribute: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    macos_distribute: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     android_min_sdk: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     android_target_sdk: Option<String>,
@@ -299,6 +310,10 @@ struct CredentialsPayload {
     apple_p8_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     provisioning_profile_base64: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    apple_certificate_p12_base64: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    apple_certificate_password: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     android_keystore_base64: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -350,6 +365,14 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         .as_ref()
         .and_then(|a| a.version.clone())
         .unwrap_or_else(|| "1.0.0".into());
+
+    // build_number is the monotonically increasing integer used as CFBundleVersion (iOS)
+    // and versionCode (Android). Auto-incremented on each publish.
+    let toml_build_number = config
+        .app
+        .as_ref()
+        .and_then(|a| a.build_number)
+        .unwrap_or(0);
 
     if let OutputFormat::Text = format {
         println!();
@@ -438,6 +461,29 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         }
     }
 
+    // Auto-increment build_number for iOS/Android (used as CFBundleVersion / versionCode)
+    let build_number = if is_ios || is_android {
+        let n = toml_build_number + 1;
+        if let Ok(content) = fs::read_to_string(&perry_toml_path) {
+            let updated = if content.contains("build_number =") {
+                content.replace(
+                    &format!("build_number = {}", toml_build_number),
+                    &format!("build_number = {}", n),
+                )
+            } else {
+                // Insert build_number after the version line
+                content.replace(
+                    &format!("version = \"{}\"", version),
+                    &format!("version = \"{}\"\nbuild_number = {}", version, n),
+                )
+            };
+            fs::write(&perry_toml_path, &updated).ok();
+        }
+        n
+    } else {
+        toml_build_number
+    };
+
     let bundle_id = if is_android {
         config.android.as_ref().and_then(|a| a.package_name.clone())
             .or_else(|| config.ios.as_ref().and_then(|i| i.bundle_id.clone()))
@@ -456,6 +502,8 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     let category = config.macos.as_ref().and_then(|m| m.category.clone());
     let minimum_os = config.macos.as_ref().and_then(|m| m.minimum_os.clone());
     let entitlements = config.macos.as_ref().and_then(|m| m.entitlements.clone());
+    let macos_distribute = config.macos.as_ref().and_then(|m| m.distribute.clone());
+    let macos_signing_identity = config.macos.as_ref().and_then(|m| m.signing_identity.clone());
 
     // iOS-specific config from perry.toml
     let ios_deployment_target = config.ios.as_ref().and_then(|i| i.deployment_target.clone());
@@ -513,7 +561,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         args.apple_team_id.clone()
     };
 
-    let apple_identity = if !is_android {
+    let apple_identity_base = if !is_android {
         resolve_credential(
             args.apple_identity.as_deref(),
             "PERRY_APPLE_IDENTITY",
@@ -524,6 +572,12 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         )
     } else {
         args.apple_identity.clone()
+    };
+    // For macOS, prefer a target-specific signing_identity from perry.toml [macos]
+    let apple_identity = if !is_ios && !is_android && !is_linux {
+        macos_signing_identity.clone().or_else(|| apple_identity_base.clone())
+    } else {
+        apple_identity_base.clone()
     };
 
     let apple_p8_key_path = if !is_android {
@@ -536,6 +590,37 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         )
     } else {
         args.apple_p8_key.as_ref().map(|p| p.to_string_lossy().to_string())
+    };
+
+    // .p12 certificate for code signing (path saved, password never saved)
+    let apple_certificate_path = if !is_android && !is_linux {
+        resolve_path_credential(
+            args.certificate.as_deref(),
+            "PERRY_APPLE_CERTIFICATE",
+            saved.apple.as_ref().and_then(|a| a.certificate_path.as_deref()),
+            "  Apple .p12 certificate path (or press Enter to skip)",
+            interactive,
+        )
+    } else {
+        None
+    };
+    let apple_certificate_password = if apple_certificate_path.is_some() {
+        std::env::var("PERRY_APPLE_CERTIFICATE_PASSWORD")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                if interactive {
+                    dialoguer::Password::new()
+                        .with_prompt("  Certificate password")
+                        .interact()
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                } else {
+                    None
+                }
+            })
+    } else {
+        None
     };
 
     let apple_key_id = if !is_android {
@@ -673,6 +758,20 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         None
     };
 
+    let apple_certificate_p12_b64 = if let Some(ref path_str) = apple_certificate_path {
+        let path = Path::new(path_str);
+        if path.exists() {
+            use base64::Engine;
+            let data = fs::read(path)
+                .with_context(|| format!("Failed to read .p12 certificate: {path_str}"))?;
+            Some(base64::engine::general_purpose::STANDARD.encode(&data))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let google_play_json = if let Some(ref path_str) = google_play_key_path {
         let path = Path::new(path_str);
         if path.exists() {
@@ -696,7 +795,9 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         }
         if android_distribute.as_deref() == Some("playstore") {
             println!("  Distribute: Google Play");
-        } else if ios_distribute.as_deref() == Some("appstore") || ios_distribute.as_deref() == Some("testflight") {
+        } else if ios_distribute.as_deref() == Some("appstore") || ios_distribute.as_deref() == Some("testflight")
+            || macos_distribute.as_deref() == Some("appstore")
+        {
             println!("  Distribute: App Store Connect");
         }
         println!();
@@ -723,10 +824,13 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     if !is_android {
         let apple = saved.apple.get_or_insert_with(AppleSavedConfig::default);
         if apple_team_id.is_some() { apple.team_id = apple_team_id.clone(); }
-        if apple_identity.is_some() { apple.signing_identity = apple_identity.clone(); }
+        // Save the base (non-macOS-overridden) identity so iOS still gets the right cert
+        if apple_identity_base.is_some() { apple.signing_identity = apple_identity_base.clone(); }
         if apple_p8_key_path.is_some() { apple.p8_key_path = apple_p8_key_path.clone(); }
         if apple_key_id.is_some() { apple.key_id = apple_key_id.clone(); }
         if apple_issuer_id.is_some() { apple.issuer_id = apple_issuer_id.clone(); }
+        // Save .p12 path only — never the cert data or password
+        if apple_certificate_path.is_some() { apple.certificate_path = apple_certificate_path.clone(); }
     }
     if is_ios {
         let ios_saved = saved.ios.get_or_insert_with(IosSavedConfig::default);
@@ -748,11 +852,18 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     }
 
     // Build manifest
+    // For iOS/Android: version = build_number (CFBundleVersion/versionCode), short_version = marketing version
+    // For macOS/Linux: version = marketing version string, short_version = None
+    let (manifest_version, manifest_short_version) = if is_ios || is_android {
+        (build_number.to_string(), Some(version.clone()))
+    } else {
+        (version.clone(), None)
+    };
     let manifest = BuildManifest {
         app_name: app_name.clone(),
         bundle_id,
-        version,
-        short_version: None,
+        version: manifest_version,
+        short_version: manifest_short_version,
         entry,
         icon: icon.clone(),
         targets: vec![target_name.clone()],
@@ -764,6 +875,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         ios_orientations: if is_ios { ios_orientations } else { None },
         ios_capabilities: if is_ios { ios_capabilities } else { None },
         ios_distribute: if is_ios { ios_distribute } else { None },
+        macos_distribute: if !is_ios && !is_android && !is_linux { macos_distribute } else { None },
         android_min_sdk: if is_android { android_min_sdk } else { None },
         android_target_sdk: if is_android { android_target_sdk } else { None },
         android_permissions: if is_android { android_permissions } else { None },
@@ -783,6 +895,8 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         apple_issuer_id,
         apple_p8_key: p8_key_content,
         provisioning_profile_base64: provisioning_profile_b64,
+        apple_certificate_p12_base64: apple_certificate_p12_b64,
+        apple_certificate_password,
         android_keystore_base64: android_keystore_b64,
         android_keystore_password,
         android_key_alias,
@@ -1036,6 +1150,16 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
                 }
                 break;
             }
+            ServerMessage::Published { platform, message, .. } => {
+                if let OutputFormat::Text = format {
+                    println!(
+                        "  {} Published to {} — {}",
+                        style("✓").green().bold(),
+                        style(&platform).cyan(),
+                        message
+                    );
+                }
+            }
             _ => {}
         }
     }
@@ -1223,6 +1347,9 @@ struct AppleSavedConfig {
     key_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     issuer_id: Option<String>,
+    /// Path to .p12 certificate bundle. Only the path is saved, never the cert data or password.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    certificate_path: Option<String>,
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
