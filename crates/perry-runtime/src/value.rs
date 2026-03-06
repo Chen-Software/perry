@@ -922,6 +922,27 @@ pub extern "C" fn js_jsvalue_compare(a: f64, b: f64) -> i32 {
         return crate::bigint::js_bigint_cmp(a_ptr, b_ptr);
     }
 
+    // String comparison (lexicographic)
+    if a_val.is_string() && b_val.is_string() {
+        let a_ptr = a_val.as_string_ptr();
+        let b_ptr = b_val.as_string_ptr();
+        if !a_ptr.is_null() && !b_ptr.is_null() {
+            unsafe {
+                let a_len = (*a_ptr).length as usize;
+                let b_len = (*b_ptr).length as usize;
+                let a_data = (a_ptr as *const u8).add(std::mem::size_of::<crate::string::StringHeader>());
+                let b_data = (b_ptr as *const u8).add(std::mem::size_of::<crate::string::StringHeader>());
+                let a_bytes = std::slice::from_raw_parts(a_data, a_len);
+                let b_bytes = std::slice::from_raw_parts(b_data, b_len);
+                return match a_bytes.cmp(b_bytes) {
+                    std::cmp::Ordering::Less => -1,
+                    std::cmp::Ordering::Equal => 0,
+                    std::cmp::Ordering::Greater => 1,
+                };
+            }
+        }
+    }
+
     // INT32 comparison
     if a_val.is_int32() && b_val.is_int32() {
         let ai = a_val.as_int32();
@@ -930,15 +951,15 @@ pub extern "C" fn js_jsvalue_compare(a: f64, b: f64) -> i32 {
     }
 
     // Convert to f64 for numeric comparison (handles Number, INT32 mixed with Number, etc.)
-    // Return 2 (sentinel) for undefined/null/string — makes all comparisons false
+    // Return 2 (sentinel) for undefined/null — makes all comparisons false
     let af = if a_val.is_int32() { a_val.as_int32() as f64 }
              else if a_val.is_bigint() { crate::bigint::js_bigint_to_f64(a_val.as_bigint_ptr()) }
              else if abits < 0x7FF8_0000_0000_0000 { a }
-             else { return 2; }; // undefined/null/string → incomparable sentinel
+             else { return 2; }; // undefined/null → incomparable sentinel
     let bf = if b_val.is_int32() { b_val.as_int32() as f64 }
              else if b_val.is_bigint() { crate::bigint::js_bigint_to_f64(b_val.as_bigint_ptr()) }
              else if bbits < 0x7FF8_0000_0000_0000 { b }
-             else { return 2; }; // undefined/null/string → incomparable sentinel
+             else { return 2; }; // undefined/null → incomparable sentinel
 
     if af < bf { -1 } else if af > bf { 1 } else { 0 }
 }

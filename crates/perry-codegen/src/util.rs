@@ -473,6 +473,30 @@ pub(crate) fn compile_condition_to_bool(
             Ok(builder.ins().bxor(inner, one_i8))
         }
         _ => {
+            // For string locals, check string length directly (raw i64 pointers lack STRING_TAG)
+            if let Expr::LocalGet(id) = expr {
+                if let Some(info) = locals.get(id) {
+                    if info.is_string && !info.is_union {
+                        let str_val = builder.use_var(info.var);
+                        let str_ptr = if info.is_pointer {
+                            str_val // already i64
+                        } else {
+                            ensure_i64(builder, str_val)
+                        };
+                        // Check non-null AND non-empty: ptr != 0 && string_length(ptr) > 0
+                        let zero_i64 = builder.ins().iconst(types::I64, 0);
+                        let is_non_null = builder.ins().icmp(IntCC::NotEqual, str_ptr, zero_i64);
+                        let strlen_func = extern_funcs.get("js_string_length")
+                            .expect("js_string_length not declared");
+                        let strlen_ref = module.declare_func_in_func(*strlen_func, builder.func);
+                        let call = builder.ins().call(strlen_ref, &[str_ptr]);
+                        let str_len = builder.inst_results(call)[0]; // i32
+                        let is_non_empty = builder.ins().icmp_imm(IntCC::SignedGreaterThan, str_len, 0);
+                        let is_truthy = builder.ins().band(is_non_null, is_non_empty);
+                        return Ok(is_truthy);
+                    }
+                }
+            }
             let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, expr, this_ctx)?;
             Ok(inline_truthiness_check(builder, module, extern_funcs, val))
         }

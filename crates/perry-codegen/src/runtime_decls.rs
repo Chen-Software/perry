@@ -3758,6 +3758,15 @@ impl Compiler {
             self.extern_funcs.insert("js_crypto_random_bytes_hex".to_string(), func_id);
         }
 
+        // js_crypto_random_bytes_buffer(size: f64) -> i64 (buffer ptr)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // size
+            sig.returns.push(AbiParam::new(types::I64)); // buffer ptr
+            let func_id = self.module.declare_function("js_crypto_random_bytes_buffer", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_crypto_random_bytes_buffer".to_string(), func_id);
+        }
+
         // js_crypto_random_uuid() -> i64
         {
             let mut sig = self.module.make_signature();
@@ -7087,6 +7096,17 @@ impl Compiler {
             self.extern_funcs.insert("js_string_equals".to_string(), func_id);
         }
 
+        // js_string_compare(a: *const StringHeader, b: *const StringHeader) -> i32
+        // Lexicographic comparison: -1 if a < b, 0 if a == b, 1 if a > b
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // a string pointer
+            sig.params.push(AbiParam::new(types::I64)); // b string pointer
+            sig.returns.push(AbiParam::new(types::I32)); // -1, 0, or 1
+            let func_id = self.module.declare_function("js_string_compare", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_string_compare".to_string(), func_id);
+        }
+
         // js_dynamic_string_equals(a: f64, b: f64) -> i32
         // Compares strings that may be NaN-boxed (from PropertyGet) or raw pointers (from literals)
         {
@@ -8504,6 +8524,25 @@ impl Compiler {
             sig.params.push(AbiParam::new(types::F64));
             let func_id = self.module.declare_function("perry_ui_image_set_tint", Linkage::Import, &sig)?;
             self.extern_funcs.insert("perry_ui_image_set_tint".to_string(), func_id);
+        }
+
+        // perry_ui_qrcode_create(data_ptr: i64, size: f64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_qrcode_create", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_qrcode_create".to_string(), func_id);
+        }
+
+        // perry_ui_qrcode_set_data(handle: i64, data_ptr: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_qrcode_set_data", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_qrcode_set_data".to_string(), func_id);
         }
 
         // perry_ui_picker_create(label_ptr: i64, on_change: f64, style: i64) -> i64

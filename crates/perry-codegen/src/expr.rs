@@ -1092,14 +1092,14 @@ pub(crate) fn compile_expr(
         Expr::CryptoRandomBytes(size_expr) => {
             // Compile size argument (number)
             let size_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, size_expr, this_ctx)?;
-            // Call js_crypto_random_bytes_hex runtime function
-            let func = extern_funcs.get("js_crypto_random_bytes_hex")
-                .ok_or_else(|| anyhow!("js_crypto_random_bytes_hex not declared"))?;
+            // Call js_crypto_random_bytes_buffer runtime function (returns Buffer)
+            let func = extern_funcs.get("js_crypto_random_bytes_buffer")
+                .ok_or_else(|| anyhow!("js_crypto_random_bytes_buffer not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
             let call = builder.ins().call(func_ref, &[size_val]);
             let result_ptr = builder.inst_results(call)[0];
-            // Convert i64 pointer to f64 (NaN-boxed string)
-            Ok(inline_nanbox_string(builder, result_ptr))
+            // Return raw buffer pointer (not NaN-boxed)
+            Ok(result_ptr)
         }
         Expr::CryptoRandomUUID => {
             // Call js_crypto_random_uuid runtime function
@@ -4525,12 +4525,12 @@ pub(crate) fn compile_expr(
                     BinaryOp::Div => Some(lhs_const / rhs_const),
                     BinaryOp::Mod => Some(lhs_const % rhs_const),
                     BinaryOp::Pow => Some(lhs_const.powf(rhs_const)),
-                    BinaryOp::BitAnd => Some(((lhs_const as i32) & (rhs_const as i32)) as f64),
-                    BinaryOp::BitOr => Some(((lhs_const as i32) | (rhs_const as i32)) as f64),
-                    BinaryOp::BitXor => Some(((lhs_const as i32) ^ (rhs_const as i32)) as f64),
-                    BinaryOp::Shl => Some(((lhs_const as i32) << ((rhs_const as i32) & 0x1f)) as f64),
-                    BinaryOp::Shr => Some(((lhs_const as i32) >> ((rhs_const as i32) & 0x1f)) as f64),
-                    BinaryOp::UShr => Some((((lhs_const as i32) as u32) >> ((rhs_const as i32) & 0x1f)) as f64),
+                    BinaryOp::BitAnd => Some(((lhs_const as i64 as i32) & (rhs_const as i64 as i32)) as f64),
+                    BinaryOp::BitOr => Some(((lhs_const as i64 as i32) | (rhs_const as i64 as i32)) as f64),
+                    BinaryOp::BitXor => Some(((lhs_const as i64 as i32) ^ (rhs_const as i64 as i32)) as f64),
+                    BinaryOp::Shl => Some(((lhs_const as i64 as i32) << ((rhs_const as i64 as i32) & 0x1f)) as f64),
+                    BinaryOp::Shr => Some(((lhs_const as i64 as i32) >> ((rhs_const as i64 as i32) & 0x1f)) as f64),
+                    BinaryOp::UShr => Some((((lhs_const as i64 as i32) as u32) >> ((rhs_const as i64 as i32) & 0x1f)) as f64),
                 };
                 if let Some(val) = result {
                     return Ok(builder.ins().f64const(val));
@@ -5116,26 +5116,35 @@ pub(crate) fn compile_expr(
                 // Bitwise operations - JavaScript works on 32-bit integers
                 // Convert f64 to i32, perform op, convert back to f64
                 BinaryOp::BitAnd => {
-                    let lhs_i32 = builder.ins().fcvt_to_sint_sat(types::I32, lhs);
-                    let rhs_i32 = builder.ins().fcvt_to_sint_sat(types::I32, rhs);
+                    // JS ToInt32: convert via i64 then truncate to i32 (wraps, not saturates)
+                    let lhs_i64 = builder.ins().fcvt_to_sint_sat(types::I64, lhs);
+                    let rhs_i64 = builder.ins().fcvt_to_sint_sat(types::I64, rhs);
+                    let lhs_i32 = builder.ins().ireduce(types::I32, lhs_i64);
+                    let rhs_i32 = builder.ins().ireduce(types::I32, rhs_i64);
                     let result = builder.ins().band(lhs_i32, rhs_i32);
                     builder.ins().fcvt_from_sint(types::F64, result)
                 }
                 BinaryOp::BitOr => {
-                    let lhs_i32 = builder.ins().fcvt_to_sint_sat(types::I32, lhs);
-                    let rhs_i32 = builder.ins().fcvt_to_sint_sat(types::I32, rhs);
+                    let lhs_i64 = builder.ins().fcvt_to_sint_sat(types::I64, lhs);
+                    let rhs_i64 = builder.ins().fcvt_to_sint_sat(types::I64, rhs);
+                    let lhs_i32 = builder.ins().ireduce(types::I32, lhs_i64);
+                    let rhs_i32 = builder.ins().ireduce(types::I32, rhs_i64);
                     let result = builder.ins().bor(lhs_i32, rhs_i32);
                     builder.ins().fcvt_from_sint(types::F64, result)
                 }
                 BinaryOp::BitXor => {
-                    let lhs_i32 = builder.ins().fcvt_to_sint_sat(types::I32, lhs);
-                    let rhs_i32 = builder.ins().fcvt_to_sint_sat(types::I32, rhs);
+                    let lhs_i64 = builder.ins().fcvt_to_sint_sat(types::I64, lhs);
+                    let rhs_i64 = builder.ins().fcvt_to_sint_sat(types::I64, rhs);
+                    let lhs_i32 = builder.ins().ireduce(types::I32, lhs_i64);
+                    let rhs_i32 = builder.ins().ireduce(types::I32, rhs_i64);
                     let result = builder.ins().bxor(lhs_i32, rhs_i32);
                     builder.ins().fcvt_from_sint(types::F64, result)
                 }
                 BinaryOp::Shl => {
-                    let lhs_i32 = builder.ins().fcvt_to_sint_sat(types::I32, lhs);
-                    let rhs_i32 = builder.ins().fcvt_to_sint_sat(types::I32, rhs);
+                    let lhs_i64 = builder.ins().fcvt_to_sint_sat(types::I64, lhs);
+                    let rhs_i64 = builder.ins().fcvt_to_sint_sat(types::I64, rhs);
+                    let lhs_i32 = builder.ins().ireduce(types::I32, lhs_i64);
+                    let rhs_i32 = builder.ins().ireduce(types::I32, rhs_i64);
                     // JavaScript only uses the low 5 bits of the shift amount
                     let shift_mask = builder.ins().iconst(types::I32, 0x1f);
                     let shift_amt = builder.ins().band(rhs_i32, shift_mask);
@@ -5144,8 +5153,10 @@ pub(crate) fn compile_expr(
                 }
                 BinaryOp::Shr => {
                     // Signed right shift
-                    let lhs_i32 = builder.ins().fcvt_to_sint_sat(types::I32, lhs);
-                    let rhs_i32 = builder.ins().fcvt_to_sint_sat(types::I32, rhs);
+                    let lhs_i64 = builder.ins().fcvt_to_sint_sat(types::I64, lhs);
+                    let rhs_i64 = builder.ins().fcvt_to_sint_sat(types::I64, rhs);
+                    let lhs_i32 = builder.ins().ireduce(types::I32, lhs_i64);
+                    let rhs_i32 = builder.ins().ireduce(types::I32, rhs_i64);
                     // JavaScript only uses the low 5 bits of the shift amount
                     let shift_mask = builder.ins().iconst(types::I32, 0x1f);
                     let shift_amt = builder.ins().band(rhs_i32, shift_mask);
@@ -5154,8 +5165,10 @@ pub(crate) fn compile_expr(
                 }
                 BinaryOp::UShr => {
                     // Unsigned right shift - returns unsigned result
-                    let lhs_i32 = builder.ins().fcvt_to_sint_sat(types::I32, lhs);
-                    let rhs_i32 = builder.ins().fcvt_to_sint_sat(types::I32, rhs);
+                    let lhs_i64 = builder.ins().fcvt_to_sint_sat(types::I64, lhs);
+                    let rhs_i64 = builder.ins().fcvt_to_sint_sat(types::I64, rhs);
+                    let lhs_i32 = builder.ins().ireduce(types::I32, lhs_i64);
+                    let rhs_i32 = builder.ins().ireduce(types::I32, rhs_i64);
                     // JavaScript only uses the low 5 bits of the shift amount
                     let shift_mask = builder.ins().iconst(types::I32, 0x1f);
                     let shift_amt = builder.ins().band(rhs_i32, shift_mask);
@@ -5249,11 +5262,27 @@ pub(crate) fn compile_expr(
             match op {
                 UnaryOp::Neg => Ok(builder.ins().fneg(val)),
                 UnaryOp::Not => {
-                    // Logical not: 0 -> 1, non-zero -> 0
+                    // Check if operand might be a string/pointer/NaN-boxed value
+                    // In those cases, use js_is_truthy for correct falsiness (e.g., "" is falsy)
+                    let needs_truthy_check = match operand.as_ref() {
+                        Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string || i.is_pointer || i.is_union).unwrap_or(false),
+                        Expr::Call { .. } | Expr::PropertyGet { .. } | Expr::IndexGet { .. } | Expr::StaticMethodCall { .. } => true,
+                        _ => false,
+                    };
                     let zero = builder.ins().f64const(0.0);
                     let one = builder.ins().f64const(1.0);
-                    let is_zero = builder.ins().fcmp(FloatCC::Equal, val, zero);
-                    Ok(builder.ins().select(is_zero, one, zero))
+                    if needs_truthy_check {
+                        let truthy_func = extern_funcs.get("js_is_truthy")
+                            .ok_or_else(|| anyhow!("js_is_truthy not declared"))?;
+                        let truthy_ref = module.declare_func_in_func(*truthy_func, builder.func);
+                        let call = builder.ins().call(truthy_ref, &[val]);
+                        let is_truthy = builder.inst_results(call)[0]; // i32
+                        let is_falsy = builder.ins().icmp_imm(IntCC::Equal, is_truthy, 0);
+                        Ok(builder.ins().select(is_falsy, one, zero))
+                    } else {
+                        let is_zero = builder.ins().fcmp(FloatCC::Equal, val, zero);
+                        Ok(builder.ins().select(is_zero, one, zero))
+                    }
                 }
                 UnaryOp::BitNot => {
                     // Bitwise NOT: ~x
@@ -5414,6 +5443,35 @@ pub(crate) fn compile_expr(
                     let cmp = builder.ins().icmp_imm(IntCC::Equal, result, 0);
                     Ok(builder.ins().select(cmp, one, zero))
                 }
+            } else if (is_static_string_compare || is_dynamic_string_compare) && matches!(op, CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge) {
+                // String relational comparison: use js_string_compare for lexicographic ordering
+                // Extract raw string pointers using js_get_string_pointer_unified
+                let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
+                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
+
+                let lhs_f64 = ensure_f64(builder, lhs);
+                let lhs_call = builder.ins().call(get_str_ptr_ref, &[lhs_f64]);
+                let lhs_ptr = builder.inst_results(lhs_call)[0];
+
+                let rhs_f64 = ensure_f64(builder, rhs);
+                let rhs_call = builder.ins().call(get_str_ptr_ref, &[rhs_f64]);
+                let rhs_ptr = builder.inst_results(rhs_call)[0];
+
+                let cmp_func = extern_funcs.get("js_string_compare")
+                    .ok_or_else(|| anyhow!("js_string_compare not declared"))?;
+                let cmp_ref = module.declare_func_in_func(*cmp_func, builder.func);
+                let cmp_call = builder.ins().call(cmp_ref, &[lhs_ptr, rhs_ptr]);
+                let cmp_result = builder.inst_results(cmp_call)[0]; // i32: -1, 0, 1
+
+                let result_bool = match op {
+                    CompareOp::Lt => builder.ins().icmp_imm(IntCC::SignedLessThan, cmp_result, 0),
+                    CompareOp::Le => builder.ins().icmp_imm(IntCC::SignedLessThanOrEqual, cmp_result, 0),
+                    CompareOp::Gt => builder.ins().icmp_imm(IntCC::SignedGreaterThan, cmp_result, 0),
+                    CompareOp::Ge => builder.ins().icmp_imm(IntCC::SignedGreaterThanOrEqual, cmp_result, 0),
+                    _ => unreachable!(),
+                };
+                Ok(builder.ins().select(result_bool, one, zero))
             } else if is_null_compare && (lhs_type == types::I64 || rhs_type == types::I64) {
                 // For null comparisons with objects (i64), check all nullish representations:
                 // 1. Raw null pointer (0)
@@ -5819,8 +5877,9 @@ pub(crate) fn compile_expr(
             match callee.as_ref() {
                 Expr::FuncRef(func_id) => {
                     let clif_func_id = func_ids.get(func_id)
+                        .copied()
                         .ok_or_else(|| anyhow!("Unknown function ID: {}", func_id))?;
-                    let func_ref = module.declare_func_in_func(*clif_func_id, builder.func);
+                    let func_ref = module.declare_func_in_func(clif_func_id, builder.func);
 
                     // Handle rest parameters: if the function has a rest parameter,
                     // collect all arguments from rest_idx onwards into an array
@@ -5874,7 +5933,7 @@ pub(crate) fn compile_expr(
                     // Self-recursive call fast path: skip conversion when types already match
                     let is_self_call = CURRENT_FUNC_HIR_ID.with(|c| c.get()) == Some(*func_id);
                     if is_self_call {
-                        let actual_sig = module.declarations().get_function_decl(*clif_func_id);
+                        let actual_sig = module.declarations().get_function_decl(clif_func_id);
                         let expected_param_count = actual_sig.signature.params.len();
 
                         let all_match = final_args.len() == expected_param_count
@@ -5958,7 +6017,7 @@ pub(crate) fn compile_expr(
                     // Get the expected parameter count from the actual function declaration
                     // This is important because the function might have been declared with a different
                     // signature due to optional parameters and module compilation order
-                    let actual_sig = module.declarations().get_function_decl(*clif_func_id);
+                    let actual_sig = module.declarations().get_function_decl(clif_func_id);
                     let expected_param_count = actual_sig.signature.params.len();
 
                     // First, ensure all existing arguments match the actual function signature types
@@ -6265,7 +6324,7 @@ pub(crate) fn compile_expr(
                                         Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) => true,
                                         Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
                                         Expr::PathExtname(_) | Expr::PathResolve(_) | Expr::JsonStringify(_) => true,
-                                        Expr::CryptoRandomBytes(_) | Expr::CryptoRandomUUID |
+                                        Expr::CryptoRandomUUID |
                                         Expr::CryptoSha256(_) | Expr::CryptoMd5(_) => true,
                                         Expr::DateToISOString(_) => true,
                                         Expr::TypeOf(_) => true,
@@ -6427,7 +6486,7 @@ pub(crate) fn compile_expr(
                                 Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
                                 Expr::PathExtname(_) | Expr::PathResolve(_) => true,
                                 // All crypto operations return strings (hex or UUID format)
-                                Expr::CryptoRandomBytes(_) | Expr::CryptoRandomUUID |
+                                Expr::CryptoRandomUUID |
                                 Expr::CryptoSha256(_) | Expr::CryptoMd5(_) => true,
                                 // Date.toISOString() returns a string
                                 Expr::DateToISOString(_) => true,
@@ -6444,7 +6503,7 @@ pub(crate) fn compile_expr(
                                 Expr::NativeMethodCall { module, method, .. } => {
                                     (module == "uuid" && (method == "v4" || method == "v1" || method == "v7"))
                                     || (module == "bcrypt" && method == "hashSync")
-                                    || (module == "crypto" && (method == "sha256" || method == "md5" || method == "randomBytes" || method == "randomUUID" || method == "hmacSha256"))
+                                    || (module == "crypto" && (method == "sha256" || method == "md5" || method == "randomUUID" || method == "hmacSha256"))
                                     || (module == "zlib" && (method == "gzipSync" || method == "gunzipSync" || method == "deflateSync" || method == "inflateSync"))
                                     || (module == "ws" && method == "receive")
                                     || ((module == "node-fetch" || module == "fetch" || module == "fetchWithAuth" || module == "fetchPostWithAuth") && method == "statusText")
@@ -6716,7 +6775,7 @@ pub(crate) fn compile_expr(
                                         Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) => true,
                                         Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
                                         Expr::PathExtname(_) | Expr::PathResolve(_) | Expr::JsonStringify(_) => true,
-                                        Expr::CryptoRandomBytes(_) | Expr::CryptoRandomUUID |
+                                        Expr::CryptoRandomUUID |
                                         Expr::CryptoSha256(_) | Expr::CryptoMd5(_) => true,
                                         Expr::DateToISOString(_) => true,
                                         Expr::TypeOf(_) => true,
@@ -6854,7 +6913,7 @@ pub(crate) fn compile_expr(
                                 Expr::JsonStringify(_) => true,
                                 Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
                                 Expr::PathExtname(_) | Expr::PathResolve(_) => true,
-                                Expr::CryptoRandomBytes(_) | Expr::CryptoRandomUUID |
+                                Expr::CryptoRandomUUID |
                                 Expr::CryptoSha256(_) | Expr::CryptoMd5(_) => true,
                                 Expr::DateToISOString(_) => true,
                                 Expr::OsPlatform | Expr::OsArch | Expr::OsHostname | Expr::OsHomedir |
@@ -6864,7 +6923,7 @@ pub(crate) fn compile_expr(
                                 Expr::NativeMethodCall { module, method, .. } => {
                                     (module == "uuid" && (method == "v4" || method == "v1" || method == "v7"))
                                     || (module == "bcrypt" && method == "hashSync")
-                                    || (module == "crypto" && (method == "sha256" || method == "md5" || method == "randomBytes" || method == "randomUUID" || method == "hmacSha256"))
+                                    || (module == "crypto" && (method == "sha256" || method == "md5" || method == "randomUUID" || method == "hmacSha256"))
                                     || (module == "zlib" && (method == "gzipSync" || method == "gunzipSync" || method == "deflateSync" || method == "inflateSync"))
                                     || (module == "ws" && method == "receive")
                                     || ((module == "node-fetch" || module == "fetch" || module == "fetchWithAuth" || module == "fetchPostWithAuth") && method == "statusText")
@@ -7034,7 +7093,7 @@ pub(crate) fn compile_expr(
                                 Expr::JsonStringify(_) => true,
                                 Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
                                 Expr::PathExtname(_) | Expr::PathResolve(_) => true,
-                                Expr::CryptoRandomBytes(_) | Expr::CryptoRandomUUID |
+                                Expr::CryptoRandomUUID |
                                 Expr::CryptoSha256(_) | Expr::CryptoMd5(_) => true,
                                 Expr::DateToISOString(_) => true,
                                 Expr::OsPlatform | Expr::OsArch | Expr::OsHostname | Expr::OsHomedir |
@@ -7044,7 +7103,7 @@ pub(crate) fn compile_expr(
                                 Expr::NativeMethodCall { module, method, .. } => {
                                     (module == "uuid" && (method == "v4" || method == "v1" || method == "v7"))
                                     || (module == "bcrypt" && method == "hashSync")
-                                    || (module == "crypto" && (method == "sha256" || method == "md5" || method == "randomBytes" || method == "randomUUID" || method == "hmacSha256"))
+                                    || (module == "crypto" && (method == "sha256" || method == "md5" || method == "randomUUID" || method == "hmacSha256"))
                                     || (module == "zlib" && (method == "gzipSync" || method == "gunzipSync" || method == "deflateSync" || method == "inflateSync"))
                                     || (module == "ws" && method == "receive")
                                     || ((module == "node-fetch" || module == "fetch" || module == "fetchWithAuth" || module == "fetchPostWithAuth") && method == "statusText")
@@ -7745,9 +7804,17 @@ pub(crate) fn compile_expr(
                                 match property.as_str() {
                                     "toString" => {
                                         // buf.toString(encoding?)
-                                        let encoding = if arg_vals.len() > 0 {
-                                            // TODO: Parse encoding string
-                                            builder.ins().iconst(types::I32, 0) // UTF-8
+                                        let encoding = if !args.is_empty() {
+                                            // Parse encoding string literal
+                                            let enc_val = match &args[0] {
+                                                Expr::String(s) => match s.as_str() {
+                                                    "hex" => 1i64,
+                                                    "base64" => 2i64,
+                                                    _ => 0i64, // utf8
+                                                },
+                                                _ => 0i64,
+                                            };
+                                            builder.ins().iconst(types::I32, enc_val)
                                         } else {
                                             builder.ins().iconst(types::I32, 0) // UTF-8 default
                                         };
@@ -10687,7 +10754,7 @@ pub(crate) fn compile_expr(
                                     Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) => true,
                                     Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
                                     Expr::PathExtname(_) | Expr::PathResolve(_) | Expr::JsonStringify(_) => true,
-                                    Expr::CryptoRandomBytes(_) | Expr::CryptoRandomUUID |
+                                    Expr::CryptoRandomUUID |
                                     Expr::CryptoSha256(_) | Expr::CryptoMd5(_) => true,
                                     Expr::DateToISOString(_) => true,
                                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
@@ -13091,7 +13158,7 @@ pub(crate) fn compile_expr(
                     Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) => true,
                     Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
                     Expr::PathExtname(_) | Expr::PathResolve(_) | Expr::FileURLToPath(_) | Expr::JsonStringify(_) => true,
-                    Expr::CryptoRandomBytes(_) | Expr::CryptoRandomUUID |
+                    Expr::CryptoRandomUUID |
                     Expr::CryptoSha256(_) | Expr::CryptoMd5(_) => true,
                     Expr::DateToISOString(_) => true,
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
@@ -15368,7 +15435,7 @@ pub(crate) fn compile_expr(
                     // ============================================================
                     // Phase A: Handle-extracting widget mutation functions
                     // ============================================================
-                    "textSetString" | "buttonSetTitle" | "buttonSetImage" | "textfieldSetString" | "textSetFontFamily" => {
+                    "textSetString" | "buttonSetTitle" | "buttonSetImage" | "textfieldSetString" | "textSetFontFamily" | "qrCodeSetData" => {
                         // (handle, text) — extract handle via js_nanbox_get_pointer, text via js_get_string_pointer_unified
                         let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
                             .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
@@ -15391,6 +15458,7 @@ pub(crate) fn compile_expr(
                             "textfieldSetString" => "perry_ui_textfield_set_string",
                             "textSetFontFamily" => "perry_ui_text_set_font_family",
                             "buttonSetImage" => "perry_ui_button_set_image",
+                            "qrCodeSetData" => "perry_ui_qrcode_set_data",
                             _ => unreachable!(),
                         };
                         let func = extern_funcs.get(ffi_name)
@@ -16342,7 +16410,7 @@ pub(crate) fn compile_expr(
                 // crypto module functions (no object)
                 ("crypto", false, "sha256") => "js_crypto_sha256",
                 ("crypto", false, "md5") => "js_crypto_md5",
-                ("crypto", false, "randomBytes") => "js_crypto_random_bytes_hex",
+                ("crypto", false, "randomBytes") => "js_crypto_random_bytes_buffer",
                 ("crypto", false, "randomUUID") => "js_crypto_random_uuid",
                 ("crypto", false, "hmacSha256") => "js_crypto_hmac_sha256",
 
@@ -16854,6 +16922,7 @@ pub(crate) fn compile_expr(
                 ("perry/ui", false, "ProgressView") => "perry_ui_progressview_create",
                 ("perry/ui", false, "Image") => "perry_ui_image_create_symbol",
                 ("perry/ui", false, "ImageFile") => "perry_ui_image_create_file",
+                ("perry/ui", false, "QRCode") => "perry_ui_qrcode_create",
                 ("perry/ui", false, "Picker") => "perry_ui_picker_create",
                 ("perry/ui", false, "Form") => "perry_ui_form_create",
                 ("perry/ui", false, "Section") => "perry_ui_section_create",
@@ -17186,18 +17255,15 @@ pub(crate) fn compile_expr(
                         let sql_ptr = builder.inst_results(str_call)[0];
                         call_args.push(sql_ptr);
                     }
-                    // For execute (or query with params routed to execute), add params array (as i64 pointer)
+                    // For execute (or query with params routed to execute), add params array as JSValue bits
                     // If no params provided, use null (0)
                     if method == "execute" || (method == "query" && arg_vals.len() > 1) {
                         if arg_vals.len() > 1 {
-                            // Params array is NaN-boxed, extract the raw pointer
+                            // Params array is NaN-boxed with POINTER_TAG - pass JSValue bits directly
+                            // (extract_params_from_jsvalue handles POINTER_TAG extraction)
                             let params_f64 = ensure_f64(builder, arg_vals[1]);
-                            let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
-                                .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
-                            let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
-                            let ptr_call = builder.ins().call(get_ptr_ref, &[params_f64]);
-                            let params_ptr = builder.inst_results(ptr_call)[0];
-                            call_args.push(params_ptr);
+                            let params_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), params_f64);
+                            call_args.push(params_i64);
                         } else {
                             // No params provided - pass null
                             call_args.push(builder.ins().iconst(types::I64, 0));

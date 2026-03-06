@@ -130,7 +130,7 @@ pub(crate) fn compile_async_stmt(
                         (module == "path" && matches!(method.as_str(), "dirname" | "basename" | "extname" | "join" | "resolve"))
                         || (module == "fs" && method == "readFileSync")
                         || (module == "uuid" && matches!(method.as_str(), "v4" | "v1" | "v7"))
-                        || (module == "crypto" && matches!(method.as_str(), "sha256" | "md5" | "randomUUID" | "hmacSha256" | "randomBytes"))
+                        || (module == "crypto" && matches!(method.as_str(), "sha256" | "md5" | "randomUUID" | "hmacSha256"))
                     }
                     // String concatenation (+ with string operand) returns string
                     Expr::Binary { op: BinaryOp::Add, left, right } => {
@@ -447,7 +447,7 @@ pub(crate) fn compile_stmt(
                         // uuid functions return strings
                         || (module == "uuid" && matches!(method.as_str(), "v4" | "v1" | "v7"))
                         // crypto functions return strings
-                        || (module == "crypto" && matches!(method.as_str(), "sha256" | "md5" | "randomUUID" | "hmacSha256" | "randomBytes"))
+                        || (module == "crypto" && matches!(method.as_str(), "sha256" | "md5" | "randomUUID" | "hmacSha256"))
                         // ethers formatUnits/formatEther/getAddress return strings
                         || (module == "ethers" && matches!(method.as_str(), "formatUnits" | "formatEther" | "getAddress"))
                     }
@@ -629,7 +629,9 @@ pub(crate) fn compile_stmt(
                 matches!(expr,
                     Expr::BufferFrom { .. } | Expr::BufferAlloc { .. } | Expr::BufferAllocUnsafe(_) |
                     Expr::BufferConcat(_) | Expr::BufferSlice { .. } |
-                    Expr::ChildProcessExecSync { .. }
+                    Expr::ChildProcessExecSync { .. } | Expr::CryptoRandomBytes(_)
+                ) || matches!(expr, Expr::NativeMethodCall { module, method, .. }
+                    if module == "crypto" && method == "randomBytes"
                 )
             }
 
@@ -1252,6 +1254,36 @@ pub(crate) fn compile_stmt(
             }
         }
         Stmt::Return(expr) => {
+            // Helper to detect if a return expression is a string value
+            fn is_string_return_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+                match expr {
+                    Expr::String(_) => true,
+                    Expr::StringFromCharCode(_) => true,
+                    Expr::ArrayJoin { .. } => true,
+                    Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
+                    Expr::Binary { op: BinaryOp::Add, left, right } => {
+                        is_string_return_expr(left, locals) || is_string_return_expr(right, locals)
+                    }
+                    Expr::Call { callee, .. } => {
+                        if let Expr::PropertyGet { object, property } = callee.as_ref() {
+                            if is_string_return_expr(object, locals) {
+                                return matches!(property.as_str(),
+                                    "substring" | "slice" | "toLowerCase" | "toUpperCase" |
+                                    "trim" | "trimStart" | "trimEnd" | "charAt" | "padStart" |
+                                    "padEnd" | "repeat" | "replace" | "replaceAll" | "concat" |
+                                    "toString" | "join"
+                                );
+                            }
+                        }
+                        false
+                    }
+                    Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) => true,
+                    Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
+                    Expr::PathExtname(_) | Expr::PathResolve(_) | Expr::FileURLToPath(_) => true,
+                    _ => false,
+                }
+            }
+
             // Emit js_try_end() for each enclosing try block before returning
             let try_depth = TRY_CATCH_DEPTH.with(|d| d.get());
             emit_try_end_cleanup(builder, module, extern_funcs, try_depth)?;
@@ -1321,8 +1353,17 @@ pub(crate) fn compile_stmt(
                         ensure_i64(builder, val)
                     } else if ret_type == types::F64 && val_type == types::I64 {
                         // Expression returned i64 (pointer), NaN-box it for function returning f64
-                        // This happens when closures return pointers (e.g., new Object())
-                        inline_nanbox_pointer(builder, val)
+                        // Use STRING_TAG for string values, POINTER_TAG for objects
+                        let is_string_return = if let Some(e) = expr {
+                            is_string_return_expr(e, locals)
+                        } else {
+                            false
+                        };
+                        if is_string_return {
+                            inline_nanbox_string(builder, val)
+                        } else {
+                            inline_nanbox_pointer(builder, val)
+                        }
                     } else if ret_type == types::I32 && val_type == types::F64 {
                         // Expression returned f64, need i32 - safe truncate via i64
                         let i64_val = builder.ins().fcvt_to_sint_sat(types::I64, val);

@@ -776,8 +776,12 @@ impl Compiler {
                     if (module == "path" && matches!(method.as_str(), "dirname" | "basename" | "extname" | "join" | "resolve"))
                        || (module == "fs" && method == "readFileSync")
                        || (module == "uuid" && matches!(method.as_str(), "v4" | "v1" | "v7"))
-                       || (module == "crypto" && matches!(method.as_str(), "sha256" | "md5" | "randomUUID" | "hmacSha256" | "randomBytes"))
+                       || (module == "crypto" && matches!(method.as_str(), "sha256" | "md5" | "randomUUID" | "hmacSha256"))
                 );
+                // Check if NativeMethodCall returns a buffer
+                let is_buffer_from_native = matches!(init, Some(Expr::NativeMethodCall { module, method, .. })
+                    if module == "crypto" && method == "randomBytes"
+                ) || matches!(init, Some(Expr::CryptoRandomBytes(_)));
                 // Check if Call expression returns a string (e.g., buffer.toString())
                 let is_string_from_call = if let Some(Expr::Call { callee, .. }) = init {
                     if let Expr::PropertyGet { object, property } = callee.as_ref() {
@@ -809,7 +813,8 @@ impl Compiler {
                 // Check for buffer expressions
                 let is_buffer = matches!(init, Some(Expr::BufferFrom { .. }) | Some(Expr::BufferAlloc { .. }) |
                     Some(Expr::BufferAllocUnsafe(_)) | Some(Expr::BufferConcat(_)) |
-                    Some(Expr::BufferSlice { .. }) | Some(Expr::ChildProcessExecSync { .. }));
+                    Some(Expr::BufferSlice { .. }) | Some(Expr::ChildProcessExecSync { .. }))
+                    || is_buffer_from_native;
 
                 // Track compile-time constant values for const module-level variables.
                 // Special case: `declare const __platform__: number` is injected with

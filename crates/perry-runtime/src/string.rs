@@ -337,6 +337,37 @@ pub extern "C" fn js_string_index_of_from(haystack: *const StringHeader, needle:
     }
 }
 
+/// Compare two strings lexicographically.
+/// Returns -1 if a < b, 0 if a == b, 1 if a > b.
+#[no_mangle]
+pub extern "C" fn js_string_compare(a: *const StringHeader, b: *const StringHeader) -> i32 {
+    let a_valid = is_valid_string_ptr(a);
+    let b_valid = is_valid_string_ptr(b);
+    if !a_valid && !b_valid {
+        return 0;
+    }
+    if !a_valid {
+        return -1;
+    }
+    if !b_valid {
+        return 1;
+    }
+
+    unsafe {
+        let len_a = (*a).length as usize;
+        let len_b = (*b).length as usize;
+        let data_a = string_data(a);
+        let data_b = string_data(b);
+        let a_bytes = std::slice::from_raw_parts(data_a, len_a);
+        let b_bytes = std::slice::from_raw_parts(data_b, len_b);
+        match a_bytes.cmp(b_bytes) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        }
+    }
+}
+
 /// Compare two strings for equality
 #[no_mangle]
 pub extern "C" fn js_string_equals(a: *const StringHeader, b: *const StringHeader) -> bool {

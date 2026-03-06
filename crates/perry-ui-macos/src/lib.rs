@@ -641,6 +641,18 @@ pub extern "C" fn perry_ui_image_set_tint(handle: i64, r: f64, g: f64, b: f64, a
     widgets::image::set_tint(handle, r, g, b, a);
 }
 
+/// Create a QR code image view. Returns widget handle.
+#[no_mangle]
+pub extern "C" fn perry_ui_qrcode_create(data_ptr: i64, size: f64) -> i64 {
+    widgets::qrcode::create(data_ptr as *const u8, size)
+}
+
+/// Update QR code content.
+#[no_mangle]
+pub extern "C" fn perry_ui_qrcode_set_data(handle: i64, data_ptr: i64) {
+    widgets::qrcode::set_data(handle, data_ptr as *const u8);
+}
+
 /// Create a Picker (dropdown). style: 0=dropdown, 1=segmented. Returns widget handle.
 #[no_mangle]
 pub extern "C" fn perry_ui_picker_create(label_ptr: i64, on_change: f64, style: i64) -> i64 {

@@ -47,7 +47,7 @@ pub fn is_registered_buffer(addr: usize) -> bool {
 }
 
 /// Allocate a buffer with the given capacity
-pub(crate) fn buffer_alloc(capacity: u32) -> *mut BufferHeader {
+pub fn buffer_alloc(capacity: u32) -> *mut BufferHeader {
     let layout = buffer_layout(capacity as usize);
     unsafe {
         let ptr = alloc(layout) as *mut BufferHeader;
@@ -69,7 +69,7 @@ fn buffer_data(buf: *const BufferHeader) -> *const u8 {
 }
 
 /// Get the mutable data pointer for a buffer
-pub(crate) fn buffer_data_mut(buf: *mut BufferHeader) -> *mut u8 {
+pub fn buffer_data_mut(buf: *mut BufferHeader) -> *mut u8 {
     unsafe {
         (buf as *mut u8).add(std::mem::size_of::<BufferHeader>())
     }

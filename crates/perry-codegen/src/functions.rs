@@ -547,8 +547,13 @@ impl crate::codegen::Compiler {
                             let zero = builder.ins().iconst(types::I64, 0);
                             builder.ins().icmp(IntCC::Equal, param_val, zero)
                         } else {
-                            // NaN check for F64 (TAG_UNDEFINED is NaN)
-                            builder.ins().fcmp(FloatCC::Unordered, param_val, param_val)
+                            // Compare against TAG_UNDEFINED (0x7FFC_0000_0000_0001) specifically.
+                            // NaN check (fcmp Unordered) is too broad — it catches NaN-boxed booleans
+                            // (TAG_TRUE = 0x7FFC_0000_0000_0004, TAG_FALSE = 0x7FFC_0000_0000_0003)
+                            // which are valid parameter values, not missing args.
+                            let raw_bits = builder.ins().bitcast(types::I64, MemFlags::new(), param_val);
+                            let tag_undefined = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0001u64 as i64);
+                            builder.ins().icmp(IntCC::Equal, raw_bits, tag_undefined)
                         };
 
                         let default_block = builder.create_block();

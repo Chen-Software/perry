@@ -331,6 +331,91 @@ impl crate::codegen::Compiler {
                 builder.ins().store(MemFlags::new(), val, ptr, 0);
             }
 
+            // Runtime-initialize exported enum objects so Object.values(EnumName) works
+            {
+                // Group enum members by enum name
+                let mut enum_groups: BTreeMap<String, Vec<(String, EnumMemberValue)>> = BTreeMap::new();
+                for ((enum_name, member_name), value) in &self.enums {
+                    enum_groups.entry(enum_name.clone())
+                        .or_default()
+                        .push((member_name.clone(), value.clone()));
+                }
+
+                for (enum_name, members) in &enum_groups {
+                    // Only initialize enums that have an export data slot
+                    let data_id = match self.exported_object_ids.get(enum_name) {
+                        Some(id) => *id,
+                        None => continue,
+                    };
+
+                    // Allocate object: js_object_alloc(class_id=0, field_count)
+                    let alloc_func_id = *self.extern_funcs.get("js_object_alloc").unwrap();
+                    let alloc_ref = self.module.declare_func_in_func(alloc_func_id, builder.func);
+                    let class_id = builder.ins().iconst(types::I32, 0);
+                    let field_count = builder.ins().iconst(types::I32, members.len() as i64);
+                    let alloc_call = builder.ins().call(alloc_ref, &[class_id, field_count]);
+                    let obj_ptr = builder.inst_results(alloc_call)[0]; // I64
+
+                    // Set each member: js_object_set_field_by_name(obj, key_str, value)
+                    let set_func_id = *self.extern_funcs.get("js_object_set_field_by_name").unwrap();
+                    let set_ref = self.module.declare_func_in_func(set_func_id, builder.func);
+                    let string_from_bytes_id = *self.extern_funcs.get("js_string_from_bytes").unwrap();
+                    let string_from_bytes_ref = self.module.declare_func_in_func(string_from_bytes_id, builder.func);
+                    let nanbox_string_id = *self.extern_funcs.get("js_nanbox_string").unwrap();
+                    let nanbox_string_ref = self.module.declare_func_in_func(nanbox_string_id, builder.func);
+
+                    for (member_name, member_value) in members {
+                        // Create key string from member name bytes
+                        let key_bytes = member_name.as_bytes();
+                        let key_data_id = self.module.declare_anonymous_data(false, false)?;
+                        let mut key_desc = cranelift_module::DataDescription::new();
+                        key_desc.define(key_bytes.to_vec().into_boxed_slice());
+                        self.module.define_data(key_data_id, &key_desc)?;
+                        let key_gv = self.module.declare_data_in_func(key_data_id, builder.func);
+                        let key_ptr = builder.ins().global_value(types::I64, key_gv);
+                        let key_len = builder.ins().iconst(types::I32, key_bytes.len() as i64);
+                        let key_call = builder.ins().call(string_from_bytes_ref, &[key_ptr, key_len]);
+                        let key_str_ptr = builder.inst_results(key_call)[0]; // I64
+
+                        // Create the value (F64)
+                        let value_f64 = match member_value {
+                            EnumMemberValue::Number(n) => {
+                                builder.ins().f64const(*n as f64)
+                            }
+                            EnumMemberValue::String(s) => {
+                                // Create string value
+                                let val_bytes = s.as_bytes();
+                                let val_data_id = self.module.declare_anonymous_data(false, false)?;
+                                let mut val_desc = cranelift_module::DataDescription::new();
+                                val_desc.define(val_bytes.to_vec().into_boxed_slice());
+                                self.module.define_data(val_data_id, &val_desc)?;
+                                let val_gv = self.module.declare_data_in_func(val_data_id, builder.func);
+                                let val_ptr = builder.ins().global_value(types::I64, val_gv);
+                                let val_len = builder.ins().iconst(types::I32, val_bytes.len() as i64);
+                                let val_call = builder.ins().call(string_from_bytes_ref, &[val_ptr, val_len]);
+                                let val_str_ptr = builder.inst_results(val_call)[0];
+                                // NaN-box the string value
+                                let nanbox_call = builder.ins().call(nanbox_string_ref, &[val_str_ptr]);
+                                builder.inst_results(nanbox_call)[0]
+                            }
+                        };
+
+                        // Set field: js_object_set_field_by_name(obj_ptr, key_str_ptr, value_f64)
+                        builder.ins().call(set_ref, &[obj_ptr, key_str_ptr, value_f64]);
+                    }
+
+                    // NaN-box the object pointer and store to export global
+                    let nanbox_ptr_id = *self.extern_funcs.get("js_nanbox_pointer").unwrap();
+                    let nanbox_ptr_ref = self.module.declare_func_in_func(nanbox_ptr_id, builder.func);
+                    let nanbox_call = builder.ins().call(nanbox_ptr_ref, &[obj_ptr]);
+                    let obj_val = builder.inst_results(nanbox_call)[0]; // F64
+
+                    let global_val = self.module.declare_data_in_func(data_id, builder.func);
+                    let ptr = builder.ins().global_value(types::I64, global_val);
+                    builder.ins().store(MemFlags::new(), obj_val, ptr, 0);
+                }
+            }
+
             // Emit vtable registration calls for every class method and getter.
             // Using func_addr creates linker roots that prevent dead_strip from
             // removing methods that are only reached via dynamic dispatch.

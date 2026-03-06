@@ -57,6 +57,25 @@ pub unsafe extern "C" fn js_crypto_md5(data_ptr: *const StringHeader) -> *mut St
     js_string_from_bytes(hex_str.as_ptr(), hex_str.len() as u32)
 }
 
+/// Generate random bytes and return as a Buffer
+/// crypto.randomBytes(size) -> Buffer
+#[no_mangle]
+pub extern "C" fn js_crypto_random_bytes_buffer(size: f64) -> *mut perry_runtime::buffer::BufferHeader {
+    let size = size as usize;
+    if size == 0 || size > 1024 * 1024 {
+        return perry_runtime::buffer::buffer_alloc(0);
+    }
+
+    let buf = perry_runtime::buffer::buffer_alloc(size as u32);
+    unsafe {
+        (*buf).length = size as u32;
+        let data = perry_runtime::buffer::buffer_data_mut(buf);
+        let mut bytes = std::slice::from_raw_parts_mut(data, size);
+        rand::thread_rng().fill_bytes(&mut bytes);
+    }
+    buf
+}
+
 /// Generate random bytes and return as hex string
 /// crypto.randomBytes(size).toString('hex') -> string
 #[no_mangle]

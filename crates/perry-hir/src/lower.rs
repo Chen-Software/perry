@@ -85,6 +85,11 @@ pub struct LoweringContext {
     /// Module-level variable names pre-registered in the forward-declaration pass.
     /// Used to avoid duplicate define_local calls when the actual declaration is lowered.
     pub(crate) pre_registered_module_vars: HashSet<String>,
+    /// Namespace exported variables: (namespace_name, member_name, local_id)
+    /// Used to resolve Namespace.member access to module-level LocalGet
+    pub(crate) namespace_vars: Vec<(String, String, LocalId)>,
+    /// Current namespace being lowered (for resolving internal function calls as StaticMethodCall)
+    pub(crate) current_namespace: Option<String>,
 }
 
 impl LoweringContext {
@@ -125,6 +130,8 @@ impl LoweringContext {
             func_return_types: Vec::new(),
             resolved_types: None,
             pre_registered_module_vars: HashSet::new(),
+            namespace_vars: Vec::new(),
+            current_namespace: None,
         }
     }
 
@@ -208,6 +215,12 @@ impl LoweringContext {
             .unwrap_or(false)
     }
 
+    pub(crate) fn lookup_namespace_var(&self, ns_name: &str, member_name: &str) -> Option<LocalId> {
+        self.namespace_vars.iter()
+            .find(|(ns, member, _)| ns == ns_name && member == member_name)
+            .map(|(_, _, id)| *id)
+    }
+
     pub(crate) fn define_enum(&mut self, name: String, id: EnumId, members: Vec<(String, EnumValue)>) {
         self.enums.push((name, id, members));
     }
@@ -245,6 +258,10 @@ impl LoweringContext {
     pub(crate) fn lookup_func(&self, name: &str) -> Option<FuncId> {
         // Reverse search so inner-scope functions shadow outer-scope same-name functions
         self.functions.iter().rev().find(|(n, _)| n == name).map(|(_, id)| *id)
+    }
+
+    pub(crate) fn lookup_func_name(&self, func_id: FuncId) -> Option<&str> {
+        self.functions.iter().find(|(_, id)| *id == func_id).map(|(name, _)| name.as_str())
     }
 
     pub(crate) fn lookup_func_defaults(&self, func_id: FuncId) -> Option<(&[Option<Expr>], &[LocalId])> {
@@ -971,6 +988,7 @@ fn lower_module_decl(
                     let en = lower_enum_decl(ctx, enum_decl, true)?;
                     let enum_name = en.name.clone();
                     module.enums.push(en);
+                    module.exported_objects.push(enum_name.clone());
                     module.exports.push(Export::Named {
                         local: enum_name.clone(),
                         exported: enum_name,
@@ -993,6 +1011,24 @@ fn lower_module_decl(
                         local: alias_name.clone(),
                         exported: alias_name,
                     });
+                }
+                ast::Decl::TsModule(ts_module) => {
+                    // export namespace X { ... } — lower as a synthetic class with static members
+                    if !ts_module.declare {
+                        if let Some(ref body) = ts_module.body {
+                            let ns_name = match &ts_module.id {
+                                ast::TsModuleName::Ident(ident) => ident.sym.to_string(),
+                                ast::TsModuleName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+                            };
+                            let class = lower_namespace_as_class(ctx, module, &ns_name, body, true)?;
+                            let class_name = class.name.clone();
+                            module.classes.push(class);
+                            module.exports.push(Export::Named {
+                                local: class_name.clone(),
+                                exported: class_name,
+                            });
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -1154,6 +1190,208 @@ fn lower_module_decl(
     Ok(())
 }
 
+/// Lower a TypeScript namespace declaration into a synthetic class with static methods.
+/// `export namespace Slug { export function create() { ... } }` becomes a class `Slug`
+/// with a static method `create`. Exported namespace variables are lowered as module-level
+/// locals (not static fields) and accessed via compile-time namespace resolution.
+/// Private namespace members (non-exported) are lowered as module-level variables.
+fn lower_namespace_as_class(
+    ctx: &mut LoweringContext,
+    module: &mut Module,
+    ns_name: &str,
+    body: &ast::TsNamespaceBody,
+    is_exported: bool,
+) -> Result<Class> {
+    let class_id = ctx.lookup_class(ns_name).unwrap_or_else(|| {
+        let id = ctx.fresh_class();
+        ctx.classes.push((ns_name.to_string(), id));
+        id
+    });
+
+    let items = match body {
+        ast::TsNamespaceBody::TsModuleBlock(block) => &block.body,
+        ast::TsNamespaceBody::TsNamespaceDecl(_) => {
+            // Nested namespace (namespace A.B { }) — not supported yet
+            return Ok(Class {
+                id: class_id,
+                name: ns_name.to_string(),
+                type_params: Vec::new(),
+                extends: None,
+                extends_name: None,
+                native_extends: None,
+                fields: Vec::new(),
+                constructor: None,
+                methods: Vec::new(),
+                getters: Vec::new(),
+                setters: Vec::new(),
+                static_fields: Vec::new(),
+                static_methods: Vec::new(),
+                is_exported,
+            });
+        }
+    };
+
+    let mut static_methods = Vec::new();
+    let mut static_method_names = Vec::new();
+
+    // First pass: collect exported function names, pre-register all functions and variables
+    // (so namespace members can reference each other regardless of declaration order)
+    for item in items {
+        match item {
+            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportDecl(export)) => {
+                match &export.decl {
+                    ast::Decl::Fn(fn_decl) => {
+                        if fn_decl.function.body.is_some() {
+                            let name = fn_decl.ident.sym.to_string();
+                            static_method_names.push(name.clone());
+                            // Pre-register exported functions so other namespace members can call them
+                            if ctx.lookup_func(&name).is_none() {
+                                let id = ctx.fresh_func();
+                                ctx.functions.push((name, id));
+                            }
+                        }
+                    }
+                    ast::Decl::Var(var_decl) => {
+                        // Pre-register exported namespace variables as module-level locals
+                        for decl in &var_decl.decls {
+                            if let Ok(name) = get_binding_name(&decl.name) {
+                                if ctx.lookup_local(&name).is_none() {
+                                    let ty = extract_binding_type(&decl.name);
+                                    ctx.define_local(name.clone(), ty);
+                                    ctx.pre_registered_module_vars.insert(name);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // Pre-register non-exported functions (hoisted like JS)
+            ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Fn(fn_decl))) => {
+                if fn_decl.function.body.is_some() {
+                    let name = fn_decl.ident.sym.to_string();
+                    if ctx.lookup_func(&name).is_none() {
+                        let id = ctx.fresh_func();
+                        ctx.functions.push((name, id));
+                    }
+                }
+            }
+            // Pre-register non-exported variables
+            ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Var(var_decl))) => {
+                for decl in &var_decl.decls {
+                    if let ast::Pat::Ident(ident) = &decl.name {
+                        let name = ident.id.sym.to_string();
+                        if ctx.lookup_local(&name).is_none() {
+                            let ty = ident.type_ann.as_ref()
+                                .map(|ann| extract_ts_type(&ann.type_ann))
+                                .unwrap_or(Type::Any);
+                            ctx.define_local(name.clone(), ty);
+                            ctx.pre_registered_module_vars.insert(name);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Register class and statics early so method bodies can reference them
+    ctx.register_class_statics(ns_name.to_string(), Vec::new(), static_method_names.clone());
+
+    // Set current namespace so internal function calls resolve as StaticMethodCall
+    let prev_namespace = ctx.current_namespace.take();
+    ctx.current_namespace = Some(ns_name.to_string());
+
+    // Second pass: lower all items
+    for item in items {
+        match item {
+            // Non-exported items → module-level variables/functions
+            ast::ModuleItem::Stmt(stmt) => {
+                lower_stmt(ctx, module, stmt)?;
+            }
+            // Exported items
+            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportDecl(export)) => {
+                match &export.decl {
+                    ast::Decl::Fn(fn_decl) => {
+                        if fn_decl.function.body.is_none() {
+                            continue; // Skip declare functions
+                        }
+                        let func = lower_fn_decl(ctx, fn_decl)?;
+                        // Register return type for call-site inference
+                        if !matches!(func.return_type, Type::Any) {
+                            ctx.register_func_return_type(func.name.clone(), func.return_type.clone());
+                        }
+                        static_methods.push(func);
+                    }
+                    ast::Decl::Var(var_decl) => {
+                        // Lower exported namespace variables as module-level locals
+                        let mutable = var_decl.kind != ast::VarDeclKind::Const;
+                        for decl in &var_decl.decls {
+                            let name = get_binding_name(&decl.name)?;
+                            let ty = extract_binding_type(&decl.name);
+                            if let Some(init) = &decl.init {
+                                let expr = lower_expr(ctx, init)?;
+                                let id = if ctx.pre_registered_module_vars.remove(&name) {
+                                    let id = ctx.lookup_local(&name).unwrap();
+                                    if let Some((_, _, existing_ty)) = ctx.locals.iter_mut().rev().find(|(n, _, _)| n == &name) {
+                                        *existing_ty = ty.clone();
+                                    }
+                                    id
+                                } else {
+                                    ctx.define_local(name.clone(), ty.clone())
+                                };
+                                module.init.push(Stmt::Let {
+                                    id,
+                                    name: name.clone(),
+                                    ty,
+                                    mutable,
+                                    init: Some(expr),
+                                });
+                                // Track as namespace variable for Ns.member access resolution
+                                ctx.namespace_vars.push((ns_name.to_string(), name.clone(), id));
+                                // Export the variable for cross-module access
+                                if is_exported {
+                                    module.exported_objects.push(name.clone());
+                                    module.exports.push(Export::Named {
+                                        local: name.clone(),
+                                        exported: name.clone(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    ast::Decl::Class(class_decl) => {
+                        let class = lower_class_decl(ctx, class_decl, is_exported)?;
+                        module.classes.push(class);
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Restore previous namespace context
+    ctx.current_namespace = prev_namespace;
+
+    Ok(Class {
+        id: class_id,
+        name: ns_name.to_string(),
+        type_params: Vec::new(),
+        extends: None,
+        extends_name: None,
+        native_extends: None,
+        fields: Vec::new(),
+        constructor: None,
+        methods: Vec::new(),
+        getters: Vec::new(),
+        setters: Vec::new(),
+        static_fields: Vec::new(),
+        static_methods,
+        is_exported,
+    })
+}
+
 fn lower_stmt(
     ctx: &mut LoweringContext,
     module: &mut Module,
@@ -1200,6 +1438,19 @@ fn lower_stmt(
                 ast::Decl::TsTypeAlias(alias_decl) => {
                     let alias = lower_type_alias_decl(ctx, alias_decl, false)?;
                     module.type_aliases.push(alias);
+                }
+                ast::Decl::TsModule(ts_module) => {
+                    // namespace X { ... } — lower as a synthetic class with static members
+                    if !ts_module.declare {
+                        if let Some(ref body) = ts_module.body {
+                            let ns_name = match &ts_module.id {
+                                ast::TsModuleName::Ident(ident) => ident.sym.to_string(),
+                                ast::TsModuleName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+                            };
+                            let class = lower_namespace_as_class(ctx, module, &ns_name, body, false)?;
+                            module.classes.push(class);
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -4126,6 +4377,23 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                         }
                     }
 
+                    // If inside a namespace, convert calls to namespace functions into StaticMethodCall
+                    if let Expr::FuncRef(func_id) = &callee_expr {
+                        if let Some(ref ns_name) = ctx.current_namespace {
+                            if let Some(func_name) = ctx.lookup_func_name(*func_id) {
+                                if ctx.has_static_method(ns_name, func_name) {
+                                    let method_name = func_name.to_string();
+                                    let class_name = ns_name.clone();
+                                    return Ok(Expr::StaticMethodCall {
+                                        class_name,
+                                        method_name,
+                                        args,
+                                    });
+                                }
+                            }
+                        }
+                    }
+
                     let callee = Box::new(callee_expr);
                     // Extract explicit type arguments if present (e.g., identity<number>(x))
                     let type_args = call.type_args.as_ref()
@@ -4228,6 +4496,17 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                 field_name,
                             });
                         }
+                    }
+                }
+            }
+
+            // Check if this is a namespace variable access (e.g., Flag.OPENCODE_AUTO_SHARE)
+            if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
+                let obj_name = obj_ident.sym.to_string();
+                if let ast::MemberProp::Ident(prop_ident) = &member.prop {
+                    let member_name = prop_ident.sym.to_string();
+                    if let Some(local_id) = ctx.lookup_namespace_var(&obj_name, &member_name) {
+                        return Ok(Expr::LocalGet(local_id));
                     }
                 }
             }
