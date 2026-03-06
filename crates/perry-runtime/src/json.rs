@@ -314,6 +314,7 @@ const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
 const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
 const POINTER_TAG: u64 = 0x7FFD_0000_0000_0000;
 const STRING_TAG: u64 = 0x7FFF_0000_0000_0000;
+const BIGINT_TAG: u64 = 0x7FFA_0000_0000_0000;
 const POINTER_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
 
 const TYPE_UNKNOWN: u32 = 0;
@@ -439,6 +440,18 @@ unsafe fn stringify_value(value: f64, type_hint: u32, buf: &mut String) {
         return;
     }
 
+    // BigInt: serialize as quoted string (matching JSON.stringify with BigInt replacer behavior)
+    if tag == BIGINT_TAG {
+        let bigint_ptr = (bits & POINTER_MASK) as *const crate::BigIntHeader;
+        let str_ptr = crate::bigint::js_bigint_to_string(bigint_ptr);
+        if let Some(s) = str_from_header(str_ptr) {
+            write_escaped_string(buf, s);
+        } else {
+            buf.push_str("null");
+        }
+        return;
+    }
+
     if let Some(ptr) = extract_pointer(bits) {
         if type_hint == TYPE_OBJECT {
             stringify_object(ptr, buf);
@@ -546,6 +559,14 @@ unsafe fn stringify_array(ptr: *const u8, buf: &mut String) {
             buf.push_str("true");
         } else if elem_bits == TAG_FALSE {
             buf.push_str("false");
+        } else if elem_tag == BIGINT_TAG {
+            let bigint_ptr = (elem_bits & POINTER_MASK) as *const crate::BigIntHeader;
+            let str_ptr = crate::bigint::js_bigint_to_string(bigint_ptr);
+            if let Some(s) = str_from_header(str_ptr) {
+                write_escaped_string(buf, s);
+            } else {
+                buf.push_str("null");
+            }
         } else if elem_tag == POINTER_TAG || is_raw_pointer(elem_bits) {
             let elem_ptr = if elem_tag == POINTER_TAG {
                 (elem_bits & POINTER_MASK) as *const u8
@@ -746,7 +767,6 @@ pub unsafe extern "C" fn js_json_get_bool(
 // ─── JSON.stringify with replacer ────────────────────────────────────────────
 
 const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
-const BIGINT_TAG: u64 = 0x7FFA_0000_0000_0000;
 
 /// Call a replacer closure with (key, value) and return the result as f64
 #[inline]

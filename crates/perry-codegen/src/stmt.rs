@@ -344,7 +344,16 @@ pub(crate) fn compile_stmt(
             let is_typed_pointer = matches!(ty, HirType::String | HirType::Array(_) |
                 HirType::Object(_) | HirType::Named(_) | HirType::Generic { .. } |
                 HirType::Function(_));
-            let is_typed_string = matches!(ty, HirType::String);
+            // Check if parameter is a string type (including string enums like ChainName)
+            let is_typed_string = matches!(ty, HirType::String) || {
+                if let HirType::Named(name) = ty {
+                    enums.iter().any(|((enum_name, _), val)| {
+                        enum_name == name && matches!(val, EnumMemberValue::String(_))
+                    })
+                } else {
+                    false
+                }
+            };
             let is_typed_bigint_check = matches!(ty, HirType::BigInt);
 
             // Helper to detect if an expression produces a string (fallback for untyped cases)
@@ -439,6 +448,8 @@ pub(crate) fn compile_stmt(
                         || (module == "uuid" && matches!(method.as_str(), "v4" | "v1" | "v7"))
                         // crypto functions return strings
                         || (module == "crypto" && matches!(method.as_str(), "sha256" | "md5" | "randomUUID" | "hmacSha256" | "randomBytes"))
+                        // ethers formatUnits/formatEther/getAddress return strings
+                        || (module == "ethers" && matches!(method.as_str(), "formatUnits" | "formatEther" | "getAddress"))
                     }
                     _ => false,
                 }
@@ -584,9 +595,22 @@ pub(crate) fn compile_stmt(
             };
             let is_mixed_array = is_mixed_array_from_type || is_mixed_array_from_source;
 
-            // Extract class name from Named type (also check union types for named class)
+            // Extract class name from Named type (also check union types and generics)
             let typed_class_name = if let HirType::Named(name) = ty {
                 Some(name.clone())
+            } else if let HirType::Generic { base, type_args, .. } = ty {
+                // Unwrap Partial<T>, Readonly<T>, Required<T> to inner class name
+                if (base == "Partial" || base == "Readonly" || base == "Required")
+                    && !type_args.is_empty()
+                {
+                    if let HirType::Named(inner) = &type_args[0] {
+                        Some(inner.clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
             } else if let HirType::Union(types) = ty {
                 // For union types like `Person | null`, extract the class name from Named types
                 types.iter().find_map(|t| {

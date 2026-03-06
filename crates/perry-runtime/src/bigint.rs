@@ -51,6 +51,10 @@ pub fn clean_bigint_ptr(p: *const BigIntHeader) -> *const BigIntHeader {
         raw
     } else if bits < 0x10000 {
         std::ptr::null()
+    } else if top16 != 0 {
+        // Non-zero upper 16 bits but not NaN-boxed — not a valid heap pointer
+        // (e.g., raw f64 bits from js_nanbox_get_bigint fallback)
+        std::ptr::null()
     } else {
         p
     }
@@ -318,6 +322,7 @@ pub extern "C" fn js_bigint_to_buffer(a: *const BigIntHeader, length: i32) -> *m
 
 /// Check if BigInt is negative (MSB set in two's complement)
 #[no_mangle]
+#[inline(never)]
 pub extern "C" fn js_bigint_is_negative(a: *const BigIntHeader) -> i32 {
     let a = clean_bigint_ptr(a);
     if a.is_null() { return 0; }
@@ -330,6 +335,7 @@ pub extern "C" fn js_bigint_is_negative(a: *const BigIntHeader) -> i32 {
 
 /// Negate a BigInt (two's complement: flip all bits and add 1)
 #[no_mangle]
+#[inline(never)]
 pub extern "C" fn js_bigint_neg(a: *const BigIntHeader) -> *mut BigIntHeader {
     let a = clean_bigint_ptr(a);
     if a.is_null() { return bigint_alloc(); }
@@ -353,6 +359,7 @@ pub extern "C" fn js_bigint_neg(a: *const BigIntHeader) -> *mut BigIntHeader {
 
 /// Check if a BigInt is zero (all limbs are zero). Returns 1 for zero, 0 for non-zero.
 #[no_mangle]
+#[inline(never)]
 pub extern "C" fn js_bigint_is_zero(a: *const BigIntHeader) -> i32 {
     let a = clean_bigint_ptr(a);
     if a.is_null() { return 1; }
@@ -366,8 +373,8 @@ pub extern "C" fn js_bigint_is_zero(a: *const BigIntHeader) -> i32 {
 
 /// Add two BigInts
 #[no_mangle]
+#[inline(never)]
 pub extern "C" fn js_bigint_add(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
-
     let a = clean_bigint_ptr(a);
     let b = clean_bigint_ptr(b);
     if a.is_null() && b.is_null() { return bigint_alloc(); }
@@ -391,8 +398,8 @@ pub extern "C" fn js_bigint_add(a: *const BigIntHeader, b: *const BigIntHeader) 
 
 /// Subtract two BigInts (a - b)
 #[no_mangle]
+#[inline(never)]
 pub extern "C" fn js_bigint_sub(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
-
     let a = clean_bigint_ptr(a);
     let b = clean_bigint_ptr(b);
     let ptr = bigint_alloc();
@@ -420,7 +427,14 @@ pub extern "C" fn js_bigint_sub(a: *const BigIntHeader, b: *const BigIntHeader) 
 
 /// Multiply two BigInts
 #[no_mangle]
+#[inline(never)]
 pub extern "C" fn js_bigint_mul(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
+    // Opaque side effects prevent LLVM from over-optimizing this function.
+    // Without them, noble-curves secp256k1 BigInt math crashes (Heisenbug).
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static MUL_COUNT: AtomicUsize = AtomicUsize::new(0);
+    let n = MUL_COUNT.fetch_add(1, Ordering::Relaxed);
+    if n == usize::MAX { eprintln!("bigint_mul overflow"); }
     let a = clean_bigint_ptr(a);
     let b = clean_bigint_ptr(b);
     let ptr = bigint_alloc();
@@ -443,15 +457,6 @@ pub extern "C" fn js_bigint_mul(a: *const BigIntHeader, b: *const BigIntHeader) 
                 result[i + j] = product as u64;
                 carry = product >> 64;
             }
-        }
-
-        // Debug: detect positive*positive=negative
-        let a_neg = is_negative(&a_limbs);
-        let b_neg = is_negative(&b_limbs);
-        let r_neg = is_negative(&result);
-        if !a_neg && !b_neg && r_neg {
-            eprintln!("BUG: pos*pos=neg! a_limbs[4..8]: {:?}, result[8..16]: {:?}",
-                      &a_limbs[4..8], &result[8..16]);
         }
 
         (*ptr).limbs = result;
@@ -498,6 +503,7 @@ fn unsigned_div_limbs(a: &[u64; BIGINT_LIMBS], b: &[u64; BIGINT_LIMBS]) -> ([u64
 
 /// Divide two BigInts (a / b) — truncates toward zero like JavaScript
 #[no_mangle]
+#[inline(never)]
 pub extern "C" fn js_bigint_div(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
     let a = clean_bigint_ptr(a);
     let b = clean_bigint_ptr(b);
@@ -533,8 +539,13 @@ pub extern "C" fn js_bigint_div(a: *const BigIntHeader, b: *const BigIntHeader) 
 
 /// Modulo of two BigInts (a % b) — result has sign of dividend (like JavaScript)
 #[no_mangle]
+#[inline(never)]
 pub extern "C" fn js_bigint_mod(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
-
+    // Opaque side effects prevent LLVM from over-optimizing (see js_bigint_mul comment)
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static MOD_COUNT: AtomicUsize = AtomicUsize::new(0);
+    let n = MOD_COUNT.fetch_add(1, Ordering::Relaxed);
+    if n == usize::MAX { eprintln!("bigint_mod overflow"); }
     let a = clean_bigint_ptr(a);
     let b = clean_bigint_ptr(b);
     let ptr = bigint_alloc();
@@ -551,27 +562,11 @@ pub extern "C" fn js_bigint_mod(a: *const BigIntHeader, b: *const BigIntHeader) 
         let a_neg = is_negative(&a_limbs);
         let b_neg = is_negative(&b_limbs);
 
-        // Debug: detect false negative sign in modulo
-        if a_neg && !b_neg {
-            // Check if 'a' is actually a large positive number with bit 1023 set
-            // by checking how many non-zero upper limbs there are
-            let upper_nonzero = a_limbs[8..].iter().filter(|&&l| l != 0).count();
-            if upper_nonzero > 0 {
-                eprintln!("BIGINT_MOD: a detected as neg, upper_nonzero={}, a[8..16]={:?}",
-                    upper_nonzero, &a_limbs[8..16]);
-            }
-        }
-
         // Get magnitudes
         let abs_a = if a_neg { negate_limbs(&a_limbs) } else { a_limbs };
         let abs_b = if b_neg { negate_limbs(&b_limbs) } else { b_limbs };
 
         let (_, remainder) = unsigned_div_limbs(&abs_a, &abs_b);
-
-        // Debug: detect pos % pos = neg
-        if !a_neg && !b_neg && is_negative(&remainder) {
-            eprintln!("BIGINT_MOD: pos%pos=neg! remainder[8..16]={:?}", &remainder[8..16]);
-        }
 
         // Remainder has sign of dividend
         (*ptr).limbs = if a_neg && remainder != ZERO_LIMBS {
@@ -586,6 +581,7 @@ pub extern "C" fn js_bigint_mod(a: *const BigIntHeader, b: *const BigIntHeader) 
 /// Power of two BigInts (a ** b) using binary exponentiation
 /// Note: b is interpreted as a u64 (only lower 64 bits are used)
 #[no_mangle]
+#[inline(never)]
 pub extern "C" fn js_bigint_pow(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
     let a = clean_bigint_ptr(a);
     let b = clean_bigint_ptr(b);
@@ -639,6 +635,7 @@ fn mul_limbs(a: &[u64; BIGINT_LIMBS], b: &[u64; BIGINT_LIMBS]) -> [u64; BIGINT_L
 /// Left shift BigInt by b bits (a << b)
 /// Note: b is interpreted as a u64 (only lower 64 bits are used)
 #[no_mangle]
+#[inline(never)]
 pub extern "C" fn js_bigint_shl(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
     let a = clean_bigint_ptr(a);
     let b = clean_bigint_ptr(b);
@@ -680,6 +677,7 @@ pub extern "C" fn js_bigint_shl(a: *const BigIntHeader, b: *const BigIntHeader) 
 /// Right shift BigInt by b bits (a >> b)
 /// Note: b is interpreted as a u64 (only lower 64 bits are used)
 #[no_mangle]
+#[inline(never)]
 pub extern "C" fn js_bigint_shr(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
 
     let a = clean_bigint_ptr(a);
@@ -721,6 +719,7 @@ pub extern "C" fn js_bigint_shr(a: *const BigIntHeader, b: *const BigIntHeader) 
 
 /// Bitwise AND of two BigInts (a & b)
 #[no_mangle]
+#[inline(never)]
 pub extern "C" fn js_bigint_and(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
 
     let a = clean_bigint_ptr(a);
@@ -742,6 +741,7 @@ pub extern "C" fn js_bigint_and(a: *const BigIntHeader, b: *const BigIntHeader) 
 
 /// Bitwise OR of two BigInts (a | b)
 #[no_mangle]
+#[inline(never)]
 pub extern "C" fn js_bigint_or(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
     let a = clean_bigint_ptr(a);
     let b = clean_bigint_ptr(b);
@@ -760,6 +760,7 @@ pub extern "C" fn js_bigint_or(a: *const BigIntHeader, b: *const BigIntHeader) -
 
 /// Bitwise XOR of two BigInts (a ^ b)
 #[no_mangle]
+#[inline(never)]
 pub extern "C" fn js_bigint_xor(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
     let a = clean_bigint_ptr(a);
     let b = clean_bigint_ptr(b);
@@ -778,7 +779,13 @@ pub extern "C" fn js_bigint_xor(a: *const BigIntHeader, b: *const BigIntHeader) 
 
 /// Compare two BigInts (-1 if a < b, 0 if equal, 1 if a > b)
 #[no_mangle]
+#[inline(never)]
 pub extern "C" fn js_bigint_cmp(a: *const BigIntHeader, b: *const BigIntHeader) -> i32 {
+    // Opaque side effects prevent LLVM from over-optimizing (see js_bigint_mul comment)
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static CMP_COUNT: AtomicUsize = AtomicUsize::new(0);
+    let n = CMP_COUNT.fetch_add(1, Ordering::Relaxed);
+    if n == usize::MAX { eprintln!("bigint_cmp overflow"); }
     let a = clean_bigint_ptr(a);
     let b = clean_bigint_ptr(b);
     if a.is_null() || b.is_null() {
@@ -791,6 +798,7 @@ pub extern "C" fn js_bigint_cmp(a: *const BigIntHeader, b: *const BigIntHeader) 
 
 /// Check if two BigInts are equal
 #[no_mangle]
+#[inline(never)]
 pub extern "C" fn js_bigint_eq(a: *const BigIntHeader, b: *const BigIntHeader) -> bool {
     let a = clean_bigint_ptr(a);
     let b = clean_bigint_ptr(b);
@@ -804,6 +812,7 @@ pub extern "C" fn js_bigint_eq(a: *const BigIntHeader, b: *const BigIntHeader) -
 
 /// Convert BigInt to f64 (may lose precision)
 #[no_mangle]
+#[inline(never)]
 pub extern "C" fn js_bigint_to_f64(a: *const BigIntHeader) -> f64 {
     unsafe {
         if a.is_null() {

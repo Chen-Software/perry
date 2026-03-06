@@ -98,6 +98,10 @@ pub struct CompilationContext {
     pub compile_package_dirs: HashMap<String, PathBuf>,
     /// Optional tsgo type checker client (when --type-check is enabled)
     pub type_checker: Option<super::typecheck::TsGoClient>,
+    /// Cache for resolve_import results: (import_source, importer_dir) -> Option<(resolved_path, kind)>
+    pub resolve_cache: HashMap<(String, PathBuf), Option<(PathBuf, ModuleKind)>>,
+    /// Cache for find_node_modules results: start_dir -> Option<node_modules_dir>
+    pub node_modules_cache: HashMap<PathBuf, Option<PathBuf>>,
 }
 
 impl std::fmt::Debug for CompilationContext {
@@ -126,6 +130,8 @@ impl CompilationContext {
             compile_packages: HashSet::new(),
             compile_package_dirs: HashMap::new(),
             type_checker: None,
+            resolve_cache: HashMap::new(),
+            node_modules_cache: HashMap::new(),
         }
     }
 }
@@ -878,6 +884,24 @@ fn resolve_exports(exports: &serde_json::Value, subpath: &str) -> Option<String>
                 return resolve_exports(entry, subpath);
             }
 
+            // Try wildcard patterns (e.g., "./*" -> "./src/*.ts")
+            for (key, value) in map.iter() {
+                if key.contains('*') {
+                    // Convert "./*" to a prefix/suffix match
+                    let parts: Vec<&str> = key.splitn(2, '*').collect();
+                    if parts.len() == 2 {
+                        let prefix = parts[0];
+                        let suffix = parts[1];
+                        if subpath.starts_with(prefix) && subpath.ends_with(suffix) {
+                            let matched = &subpath[prefix.len()..subpath.len() - suffix.len()];
+                            if let Some(template) = resolve_exports(value, subpath) {
+                                return Some(template.replace('*', matched));
+                            }
+                        }
+                    }
+                }
+            }
+
             // Try common conditions (for both main entry and subpath entries)
             // This handles the case where we've matched a subpath and now need to resolve the conditions
             for condition in ["import", "module", "default", "require", "node"] {
@@ -1096,6 +1120,22 @@ fn compute_module_prefix(resolved_path: &str, project_root: &Path) -> String {
     source_module_name.replace(|c: char| !c.is_alphanumeric() && c != '_', "_")
 }
 
+/// Cached wrapper around resolve_import to avoid redundant I/O
+fn cached_resolve_import(
+    import_source: &str,
+    importer_path: &Path,
+    ctx: &mut CompilationContext,
+) -> Option<(PathBuf, ModuleKind)> {
+    let importer_dir = importer_path.parent().unwrap_or(importer_path).to_path_buf();
+    let cache_key = (import_source.to_string(), importer_dir);
+    if let Some(cached) = ctx.resolve_cache.get(&cache_key) {
+        return cached.clone();
+    }
+    let result = resolve_import(import_source, importer_path, &ctx.project_root, &ctx.compile_packages, &ctx.compile_package_dirs);
+    ctx.resolve_cache.insert(cache_key, result.clone());
+    result
+}
+
 /// Collect all modules to compile (transitive closure of imports)
 fn collect_modules(
     entry_path: &PathBuf,
@@ -1255,7 +1295,7 @@ fn collect_modules(
             continue;
         }
 
-        if let Some((resolved_path, kind)) = resolve_import(&import.source, &canonical, &ctx.project_root, &ctx.compile_packages, &ctx.compile_package_dirs) {
+        if let Some((resolved_path, kind)) = cached_resolve_import(&import.source, &canonical, ctx) {
             import.resolved_path = Some(resolved_path.to_string_lossy().to_string());
             import.module_kind = kind;
 
@@ -1390,7 +1430,7 @@ fn collect_modules(
             perry_hir::Export::Named { .. } => None,
         };
         if let Some(src) = source {
-            if let Some((resolved_path, kind)) = resolve_import(src, &canonical, &ctx.project_root, &ctx.compile_packages, &ctx.compile_package_dirs) {
+            if let Some((resolved_path, kind)) = cached_resolve_import(src, &canonical, ctx) {
                 match kind {
                     ModuleKind::NativeCompiled => {
                         collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, target, next_class_id, skip_transforms)?;

@@ -298,7 +298,7 @@ pub fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>, visited: &m
         Expr::MathLog(expr) | Expr::MathLog2(expr) | Expr::MathLog10(expr) => {
             collect_local_refs_expr(expr, refs, visited);
         }
-        Expr::MathPow(base, exp) => {
+        Expr::MathPow(base, exp) | Expr::MathImul(base, exp) => {
             collect_local_refs_expr(base, refs, visited);
             collect_local_refs_expr(exp, refs, visited);
         }
@@ -1065,7 +1065,7 @@ pub(crate) fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<Local
         Expr::MathLog(expr) | Expr::MathLog2(expr) | Expr::MathLog10(expr) => {
             collect_assigned_locals_expr(expr, assigned);
         }
-        Expr::MathPow(base, exp) => {
+        Expr::MathPow(base, exp) | Expr::MathImul(base, exp) => {
             collect_assigned_locals_expr(base, assigned);
             collect_assigned_locals_expr(exp, assigned);
         }

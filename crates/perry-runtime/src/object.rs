@@ -1056,6 +1056,7 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
         }
 
         let alloc_limit = std::cmp::max((*obj).field_count, 8) as usize;
+
         for i in 0..key_count {
             let key_val = crate::array::js_array_get(keys, i as u32);
             // Keys are stored as string pointers (NaN-boxed)

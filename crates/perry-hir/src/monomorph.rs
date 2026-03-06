@@ -1190,6 +1190,10 @@ fn substitute_expr(expr: &Expr, substitutions: &HashMap<String, Type>) -> Expr {
             Box::new(substitute_expr(base, substitutions)),
             Box::new(substitute_expr(exp, substitutions)),
         ),
+        Expr::MathImul(a, b) => Expr::MathImul(
+            Box::new(substitute_expr(a, substitutions)),
+            Box::new(substitute_expr(b, substitutions)),
+        ),
         Expr::MathMin(args) => Expr::MathMin(
             args.iter().map(|a| substitute_expr(a, substitutions)).collect()
         ),
@@ -1896,7 +1900,7 @@ fn collect_instantiations_in_expr(expr: &Expr, ctx: &mut MonomorphizationContext
         Expr::MathLog(expr) | Expr::MathLog2(expr) | Expr::MathLog10(expr) => {
             collect_instantiations_in_expr(expr, ctx, module);
         }
-        Expr::MathPow(base, exp) => {
+        Expr::MathPow(base, exp) | Expr::MathImul(base, exp) => {
             collect_instantiations_in_expr(base, ctx, module);
             collect_instantiations_in_expr(exp, ctx, module);
         }
@@ -2313,7 +2317,7 @@ fn update_call_sites_in_expr(expr: &mut Expr, ctx: &MonomorphizationContext, loo
         Expr::MathLog(expr) | Expr::MathLog2(expr) | Expr::MathLog10(expr) => {
             update_call_sites_in_expr(expr, ctx, lookup);
         }
-        Expr::MathPow(base, exp) => {
+        Expr::MathPow(base, exp) | Expr::MathImul(base, exp) => {
             update_call_sites_in_expr(base, ctx, lookup);
             update_call_sites_in_expr(exp, ctx, lookup);
         }

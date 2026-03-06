@@ -1008,6 +1008,17 @@ pub extern "C" fn js_array_join(arr: *const ArrayHeader, separator: *const crate
                 let str_data = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                 let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(str_data, str_len));
                 result.push_str(s);
+            } else if jsvalue.is_pointer() {
+                // POINTER_TAG — may be a string stored with the wrong tag (cross-module)
+                let ptr = (element_bits & 0x0000_FFFF_FFFF_FFFF) as *const StringHeader;
+                if !ptr.is_null() && (ptr as usize) >= 0x1000 {
+                    let str_len = (*ptr).length as usize;
+                    let str_data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+                    let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(str_data, str_len));
+                    result.push_str(s);
+                } else {
+                    result.push_str("[object Object]");
+                }
             } else if jsvalue.is_number() {
                 let n = jsvalue.as_number();
                 if n.fract() == 0.0 && n.abs() < 1e15 {
@@ -1021,6 +1032,17 @@ pub extern "C" fn js_array_join(arr: *const ArrayHeader, separator: *const crate
                 // undefined stringifies to empty string in join
             } else if jsvalue.is_bool() {
                 result.push_str(if jsvalue.as_bool() { "true" } else { "false" });
+            } else if element_bits > 0x1000 && element_bits < 0x0001_0000_0000_0000 && (element_bits & 0x3) == 0 {
+                // Raw pointer fallback — string stored without NaN-box tag
+                let str_ptr = element_bits as *const StringHeader;
+                let str_len = (*str_ptr).length as usize;
+                if str_len < 10_000_000 {
+                    let str_data = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+                    let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(str_data, str_len));
+                    result.push_str(s);
+                } else {
+                    result.push_str("[object Object]");
+                }
             } else {
                 // For objects/arrays, just use placeholder
                 result.push_str("[object Object]");

@@ -1014,7 +1014,7 @@ fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_l
         Expr::MathLog(inner) | Expr::MathLog2(inner) | Expr::MathLog10(inner) => {
             substitute_locals(inner, param_map, next_local_id);
         }
-        Expr::MathPow(base, exp) => {
+        Expr::MathPow(base, exp) | Expr::MathImul(base, exp) => {
             substitute_locals(base, param_map, next_local_id);
             substitute_locals(exp, param_map, next_local_id);
         }

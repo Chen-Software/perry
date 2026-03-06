@@ -1960,6 +1960,15 @@ impl JsEmitter {
             Expr::ImportMetaUrl(path) => {
                 let _ = write!(self.output, "{}", self.quote_string(path));
             }
+
+            // --- Math.imul ---
+            Expr::MathImul(a, b) => {
+                let _ = write!(self.output, "Math.imul(");
+                self.emit_expr(a);
+                let _ = write!(self.output, ", ");
+                self.emit_expr(b);
+                let _ = write!(self.output, ")");
+            }
         }
     }
 

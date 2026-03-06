@@ -47,12 +47,44 @@ fn js_string_from_str(s: &str) -> *mut StringHeader {
     crate::string::js_string_from_bytes(s.as_ptr(), s.len() as u32)
 }
 
+/// Translate a JavaScript regex pattern to a Rust regex-crate compatible pattern.
+/// Handles JS-specific escape sequences not supported by the Rust regex crate.
+fn js_regex_to_rust(pattern: &str) -> String {
+    let mut result = String::with_capacity(pattern.len());
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\\' && i + 1 < chars.len() {
+            match chars[i + 1] {
+                // JS allows \/ to escape forward slash — Rust regex doesn't need it
+                '/' => {
+                    result.push('/');
+                    i += 2;
+                }
+                // Pass through all other backslash sequences as-is
+                _ => {
+                    result.push('\\');
+                    result.push(chars[i + 1]);
+                    i += 2;
+                }
+            }
+        } else {
+            result.push(chars[i]);
+            i += 1;
+        }
+    }
+    result
+}
+
 /// Create a new RegExp from pattern and flags strings
 /// Returns a pointer to RegExpHeader
 #[no_mangle]
 pub extern "C" fn js_regexp_new(pattern: *const StringHeader, flags: *const StringHeader) -> *mut RegExpHeader {
     let pattern_str = if is_valid_ptr(pattern) { string_as_str(pattern) } else { "" };
     let flags_str = if is_valid_ptr(flags) { string_as_str(flags) } else { "" };
+
+    // Translate JS regex to Rust-compatible pattern
+    let translated = js_regex_to_rust(pattern_str);
 
     // Parse flags
     let case_insensitive = flags_str.contains('i');
@@ -65,9 +97,9 @@ pub extern "C" fn js_regexp_new(pattern: *const StringHeader, flags: *const Stri
         if case_insensitive { prefix.push('i'); }
         if multiline { prefix.push('m'); }
         prefix.push(')');
-        format!("{}{}", prefix, pattern_str)
+        format!("{}{}", prefix, translated)
     } else {
-        pattern_str.to_string()
+        translated
     };
 
     // Try to compile the regex

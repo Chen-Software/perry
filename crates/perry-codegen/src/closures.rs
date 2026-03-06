@@ -407,7 +407,7 @@ impl crate::codegen::Compiler {
                     self.collect_closures_from_expr(arg, closures, enclosing_class);
                 }
             }
-            Expr::MathPow(base, exp) => {
+            Expr::MathPow(base, exp) | Expr::MathImul(base, exp) => {
                 self.collect_closures_from_expr(base, closures, enclosing_class);
                 self.collect_closures_from_expr(exp, closures, enclosing_class);
             }
@@ -1186,7 +1186,17 @@ impl crate::codegen::Compiler {
                 next_var += 1;
                 // Check parameter type to set appropriate LocalInfo flags
                 let is_closure = matches!(param.ty, perry_types::Type::Function(_));
-                let is_string = matches!(param.ty, perry_types::Type::String);
+                // Check if parameter is a string type (including string enums like ChainName)
+                let is_string = matches!(param.ty, perry_types::Type::String) || {
+                    if let perry_types::Type::Named(ref name) = param.ty {
+                        // Check if this is a string enum by looking up any member
+                        self.enums.iter().any(|((enum_name, _), val)| {
+                            enum_name == name && matches!(val, crate::types::EnumMemberValue::String(_))
+                        })
+                    } else {
+                        false
+                    }
+                };
                 let is_array = matches!(param.ty, perry_types::Type::Array(_));
                 let is_bigint = matches!(param.ty, perry_types::Type::BigInt);
                 // Detect Map/Set parameter types for proper property dispatch (map.size, set.size, etc.)

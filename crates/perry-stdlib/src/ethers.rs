@@ -264,7 +264,7 @@ pub extern "C" fn js_ethers_parse_units(str_ptr: *const StringHeader, decimals: 
 }
 
 /// Number of limbs in BigIntHeader (must match perry-runtime)
-const BIGINT_LIMBS: usize = 8;
+const BIGINT_LIMBS: usize = perry_runtime::bigint::BIGINT_LIMBS;
 
 /// Convert limbs (little-endian u64 array) to decimal string
 fn limbs_to_string(limbs: &[u64; BIGINT_LIMBS]) -> String {

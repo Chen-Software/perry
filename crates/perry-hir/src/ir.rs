@@ -26,9 +26,9 @@ pub const NATIVE_MODULES: &[&str] = &[
     "nanoid",
     "slugify",
     "validator",
-    // Note: ethers NOT in NATIVE_MODULES - Contract/Provider need V8 JS runtime.
-    // Only utility functions (formatUnits, parseUnits, getAddress) had native stubs,
-    // but Contract (Proxy-based dynamic dispatch) requires V8.
+    // ethers utility functions (formatUnits, parseUnits, getAddress, etc.) have native stubs.
+    // Contract/Provider calls fall through to default handler in codegen.
+    "ethers",
     // Node.js built-ins
     "events",
     "os",
@@ -748,6 +748,7 @@ pub enum Expr {
     MathPow(Box<Expr>, Box<Expr>),       // Math.pow(base, exp) -> number
     MathMin(Vec<Expr>),                  // Math.min(...values) -> number
     MathMax(Vec<Expr>),                  // Math.max(...values) -> number
+    MathImul(Box<Expr>, Box<Expr>),      // Math.imul(a, b) -> number (32-bit integer multiply)
     MathRandom,                          // Math.random() -> number
 
     // Crypto operations

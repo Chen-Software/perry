@@ -2479,6 +2479,14 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                         "random" => {
                                             return Ok(Expr::MathRandom);
                                         }
+                                        "imul" => {
+                                            if args.len() >= 2 {
+                                                let mut args_iter = args.into_iter();
+                                                let a = args_iter.next().unwrap();
+                                                let b = args_iter.next().unwrap();
+                                                return Ok(Expr::MathImul(Box::new(a), Box::new(b)));
+                                            }
+                                        }
                                         _ => {} // Fall through to generic handling
                                     }
                                 }

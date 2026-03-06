@@ -36,7 +36,7 @@ database-redis = ["dep:redis", "async-runtime"]
 database-mongodb = ["dep:mongodb", "dep:bson", "async-runtime"]
 
 # Crypto (sha256, md5, bcrypt, jwt, etc.)
-crypto = ["dep:sha2", "dep:md-5", "dep:hex", "dep:hmac", "dep:bcrypt", "dep:jsonwebtoken", "dep:aes", "dep:cbc", "dep:scrypt", "dep:pbkdf2", "dep:argon2", "dep:base64"]
+crypto = ["dep:sha2", "dep:md-5", "dep:hex", "dep:hmac", "dep:bcrypt", "dep:jsonwebtoken", "dep:aes", "dep:cbc", "dep:scrypt", "dep:pbkdf2", "dep:argon2", "dep:base64", "dep:x25519-dalek", "dep:aes-gcm", "dep:hkdf"]
 
 # Compression (zlib)
 compression = ["dep:flate2"]
@@ -120,6 +120,9 @@ scrypt = { version = "0.11", optional = true }
 pbkdf2 = { version = "0.12", features = ["simple"], optional = true }
 argon2 = { version = "0.5", optional = true }
 base64 = { version = "0.22", optional = true }
+x25519-dalek = { version = "2.0", features = ["static_secrets"], optional = true }
+aes-gcm = { version = "0.10", optional = true }
+hkdf = { version = "0.12", optional = true }
 
 # Compression
 flate2 = { version = "1.0", optional = true }

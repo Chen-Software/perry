@@ -128,6 +128,11 @@ pub mod jsonwebtoken;
 #[cfg(feature = "crypto")]
 pub use jsonwebtoken::*;
 
+#[cfg(feature = "crypto")]
+pub mod crypto_e2e;
+#[cfg(feature = "crypto")]
+pub use crypto_e2e::*;
+
 // === Compression ===
 #[cfg(feature = "compression")]
 pub mod zlib;

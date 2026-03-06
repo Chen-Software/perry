@@ -196,6 +196,7 @@ pub(crate) fn ensure_f64(builder: &mut FunctionBuilder, val: Value) -> Value {
 /// Inline truthiness check: returns I8 bool (1=truthy, 0=falsy) without FFI.
 /// Covers falsy values: undefined, null, false (NaN-box tags within 2 of TAG_UNDEFINED),
 /// ±0.0 (bit pattern with all-zero mantissa+exponent after shifting out sign),
+/// NaN (quiet NaN bit pattern), "" (empty string via STRING_TAG + js_string_length),
 /// and BigInt 0n (BIGINT_TAG with all-zero limbs, checked via js_bigint_is_zero).
 pub(crate) fn inline_truthiness_check(
     builder: &mut FunctionBuilder,
@@ -241,11 +242,51 @@ pub(crate) fn inline_truthiness_check(
     let is_bigint_falsy = builder.ins().ireduce(types::I8, is_zero_result);
     builder.ins().jump(merge_block, &[is_bigint_falsy]);
 
-    // Non-BigInt block: use existing tag/float checks
+    // Non-BigInt block: use existing tag/float checks + NaN + empty string
     builder.switch_to_block(non_bigint_block);
     builder.seal_block(non_bigint_block);
     let is_falsy_non_bigint = builder.ins().bor(is_falsy_tag, is_zero_float);
-    builder.ins().jump(merge_block, &[is_falsy_non_bigint]);
+
+    // Check NaN: quiet NaN bit pattern 0x7FF8_0000_0000_0000
+    let nan_bits = builder.ins().iconst(types::I64, 0x7FF8_0000_0000_0000u64 as i64);
+    let is_nan = builder.ins().icmp(IntCC::Equal, val_i64, nan_bits);
+    let is_falsy_with_nan = builder.ins().bor(is_falsy_non_bigint, is_nan);
+
+    // Check empty string: STRING_TAG (0x7FFF) with length == 0
+    let string_tag_val = builder.ins().iconst(types::I64, 0x7FFF);
+    let is_string_tag = builder.ins().icmp(IntCC::Equal, tag, string_tag_val);
+
+    let string_check_block = builder.create_block();
+    let non_string_block = builder.create_block();
+    let string_merge_block = builder.create_block();
+    builder.append_block_param(string_merge_block, types::I8);
+
+    builder.ins().brif(is_string_tag, string_check_block, &[], non_string_block, &[]);
+
+    // String block: extract pointer and check length
+    builder.switch_to_block(string_check_block);
+    builder.seal_block(string_check_block);
+    let pointer_mask2 = builder.ins().iconst(types::I64, 0x0000_FFFF_FFFF_FFFFu64 as i64);
+    let str_ptr = builder.ins().band(val_i64, pointer_mask2);
+    let strlen_func = extern_funcs.get("js_string_length")
+        .expect("js_string_length not declared");
+    let strlen_ref = module.declare_func_in_func(*strlen_func, builder.func);
+    let call = builder.ins().call(strlen_ref, &[str_ptr]);
+    let str_len = builder.inst_results(call)[0]; // u32
+    let zero_u32 = builder.ins().iconst(types::I32, 0);
+    let is_empty_string = builder.ins().icmp(IntCC::Equal, str_len, zero_u32); // i8
+    builder.ins().jump(string_merge_block, &[is_empty_string]);
+
+    // Non-string block: use NaN + tag + float checks
+    builder.switch_to_block(non_string_block);
+    builder.seal_block(non_string_block);
+    builder.ins().jump(string_merge_block, &[is_falsy_with_nan]);
+
+    // String merge block
+    builder.switch_to_block(string_merge_block);
+    builder.seal_block(string_merge_block);
+    let is_falsy_final = builder.block_params(string_merge_block)[0];
+    builder.ins().jump(merge_block, &[is_falsy_final]);
 
     // Merge block
     builder.switch_to_block(merge_block);
