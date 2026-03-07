@@ -26,6 +26,15 @@ use windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2;
 extern "C" {
     fn js_closure_call0(closure: *const u8) -> f64;
     fn js_nanbox_get_pointer(value: f64) -> i64;
+    fn js_callback_timer_tick() -> i32;
+    fn js_interval_timer_tick() -> i32;
+}
+
+/// Timer ID for periodic tick that processes setTimeout/setInterval queues.
+const TICK_TIMER_ID: usize = 9998;
+
+thread_local! {
+    static TIMER_TICK_NEEDED: std::cell::Cell<bool> = std::cell::Cell::new(false);
 }
 
 /// Extract a &str from a *const StringHeader pointer.
@@ -127,7 +136,7 @@ pub fn app_create(title_ptr: *const u8, width: f64, height: f64) -> i64 {
                 lpfnWndProc: Some(wnd_proc),
                 hInstance: HINSTANCE::from(hinstance),
                 hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-                hbrBackground: HBRUSH((COLOR_WINDOW.0 + 1) as *mut _),
+                hbrBackground: HBRUSH(std::ptr::null_mut()),
                 lpszClassName: windows::core::PCWSTR(class_name.as_ptr()),
                 ..Default::default()
             };
@@ -138,7 +147,7 @@ pub fn app_create(title_ptr: *const u8, width: f64, height: f64) -> i64 {
                 WINDOW_EX_STYLE::default(),
                 windows::core::PCWSTR(class_name.as_ptr()),
                 windows::core::PCWSTR(title_wide.as_ptr()),
-                WS_OVERLAPPEDWINDOW,
+                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                 CW_USEDEFAULT, CW_USEDEFAULT,
                 w, h,
                 None,
@@ -231,6 +240,15 @@ pub fn app_run(app_handle: i64) {
             }
         });
 
+        // Start a periodic timer to tick setTimeout/setInterval queues
+        APPS.with(|apps| {
+            let apps = apps.borrow();
+            let idx = (app_handle - 1) as usize;
+            if idx < apps.len() {
+                unsafe { let _ = SetTimer(apps[idx].hwnd, TICK_TIMER_ID, 50, None); }
+            }
+        });
+
         // Message loop
         unsafe {
             let mut msg = MSG::default();
@@ -243,6 +261,13 @@ pub fn app_run(app_handle: i64) {
                 }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
+                // Process setTimeout/setInterval callbacks outside wndproc to avoid re-entrancy
+                if TIMER_TICK_NEEDED.with(|t| t.replace(false)) {
+                    unsafe {
+                        js_callback_timer_tick();
+                        js_interval_timer_tick();
+                    }
+                }
             }
         }
     }
@@ -409,7 +434,16 @@ pub fn on_terminate(callback: f64) {
 
 /// Handle WM_TIMER — dispatch to registered timer callbacks.
 #[cfg(target_os = "windows")]
-pub fn handle_timer(timer_id: usize) {
+pub fn handle_timer(hwnd: HWND, timer_id: usize) {
+    if timer_id == 0 { return; }
+
+    // Periodic tick — just flag it, actual processing happens in message loop
+    if timer_id == TICK_TIMER_ID {
+        TIMER_TICK_NEEDED.with(|t| t.set(true));
+        return;
+    }
+
+    // Recurring timers (setInterval via Win32 SetTimer / perry_ui_app_set_timer)
     TIMERS.with(|t| {
         let timers = t.borrow();
         let idx = timer_id - 1;
@@ -530,8 +564,17 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 if let Some(child_hwnd) = crate::widgets::get_hwnd(root) {
                     let _ = MoveWindow(child_hwnd, 0, 0, width, height, true);
                     crate::layout::layout_widget(root, width, height);
+                    // Set a one-shot timer to force repaint
+                    let _ = SetTimer(hwnd, 9999, 500, None);
                 }
             }
+            LRESULT(0)
+        }
+        WM_PAINT => {
+            // Main window has no content to paint — just validate the region
+            let mut ps = PAINTSTRUCT::default();
+            let _ = BeginPaint(hwnd, &mut ps);
+            EndPaint(hwnd, &ps);
             LRESULT(0)
         }
         WM_GETMINMAXINFO => {
@@ -569,20 +612,26 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_CTLCOLORBTN => {
-            // Make buttons use their parent container's background color
+            // Make buttons use the nearest ancestor's background color
             let hdc = HDC(wparam.0 as *mut _);
-            let btn_hwnd = HWND(lparam.0 as *mut _);
-            if let Ok(parent_hwnd) = GetParent(btn_hwnd) {
-                let parent_handle = crate::widgets::find_handle_by_hwnd(parent_hwnd);
-                if parent_handle > 0 {
-                    if let (Some(color), Some(brush)) = (
-                        crate::widgets::get_bg_color(parent_handle),
-                        crate::widgets::get_bg_brush(parent_handle),
-                    ) {
-                        SetBkColor(hdc, COLORREF(color));
-                        SetBkMode(hdc, TRANSPARENT);
-                        return LRESULT(brush.0 as isize);
+            let mut walk = HWND(lparam.0 as *mut _);
+            for _ in 0..10 {
+                if let Ok(parent_hwnd) = GetParent(walk) {
+                    if parent_hwnd.0.is_null() { break; }
+                    let parent_handle = crate::widgets::find_handle_by_hwnd(parent_hwnd);
+                    if parent_handle > 0 {
+                        if let (Some(color), Some(brush)) = (
+                            crate::widgets::get_bg_color(parent_handle),
+                            crate::widgets::get_bg_brush(parent_handle),
+                        ) {
+                            SetBkColor(hdc, COLORREF(color));
+                            SetBkMode(hdc, TRANSPARENT);
+                            return LRESULT(brush.0 as isize);
+                        }
                     }
+                    walk = parent_hwnd;
+                } else {
+                    break;
                 }
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -602,12 +651,32 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         }
         WM_TIMER => {
             let timer_id = wparam.0;
-            crate::app::handle_timer(timer_id);
+            if timer_id == 9999 {
+                let _ = KillTimer(hwnd, 9999);
+                if let Some(root) = get_root_widget(1) {
+                    crate::layout::force_paint_backgrounds(root);
+                }
+            } else {
+                crate::app::handle_timer(hwnd, timer_id);
+            }
             LRESULT(0)
         }
         WM_ACTIVATEAPP => {
             let activating = wparam.0 != 0;
             crate::app::handle_activate(activating);
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_ERASEBKGND => {
+            // Paint the root widget's background if set
+            if let Some(root) = get_root_widget(1) {
+                if let Some(brush) = crate::widgets::get_bg_brush(root) {
+                    let hdc = HDC(wparam.0 as *mut _);
+                    let mut rect = RECT::default();
+                    let _ = GetClientRect(hwnd, &mut rect);
+                    FillRect(hdc, &rect, brush);
+                    return LRESULT(1);
+                }
+            }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_DESTROY => {

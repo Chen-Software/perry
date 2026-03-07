@@ -63,6 +63,8 @@ fn layout_stack(handle: i64, width: i32, height: i32, vertical: bool) {
         height - inset_top - inset_bottom
     };
 
+    let detaches_hidden = info.detaches_hidden;
+
     // Count visible children and spacers
     let mut visible_children: Vec<i64> = Vec::new();
     let mut spacer_count = 0i32;
@@ -70,6 +72,9 @@ fn layout_stack(handle: i64, width: i32, height: i32, vertical: bool) {
     for &child in &children {
         if let Some(ci) = widgets::get_widget_info(child) {
             if ci.hidden {
+                if detaches_hidden {
+                    continue; // fully excluded from layout
+                }
                 continue;
             }
             visible_children.push(child);
@@ -103,6 +108,11 @@ fn layout_stack(handle: i64, width: i32, height: i32, vertical: bool) {
             let fw = ci.fixed_width.unwrap();
             fixed_total += fw;
             child_sizes.push(fw);
+        } else if vertical && ci.fixed_height.is_some() {
+            // In VStack, use fixed_height as the main-axis size
+            let fh = ci.fixed_height.unwrap();
+            fixed_total += fh;
+            child_sizes.push(fh);
         } else {
             let size = measure_intrinsic(child, &ci.kind, vertical, available_cross);
             fixed_total += size;
@@ -395,4 +405,28 @@ fn measure_text_height(hwnd: HWND, width: i32, vertical: bool) -> i32 {
             size.cx.max(20)
         }
     }
+}
+
+/// Force-invalidate all widgets with a background brush so WM_PAINT fires.
+pub fn force_paint_backgrounds(handle: i64) {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(hwnd) = widgets::get_hwnd(handle) {
+            if widgets::get_bg_brush(handle).is_some() {
+                unsafe {
+                    let _ = InvalidateRect(hwnd, None, true);
+                    let _ = UpdateWindow(hwnd);
+                }
+            }
+        }
+        if let Some(info) = widgets::get_widget_info(handle) {
+            if !info.hidden {
+                for &child in &info.children {
+                    force_paint_backgrounds(child);
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    { let _ = handle; }
 }

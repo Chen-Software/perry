@@ -73,6 +73,12 @@ pub struct WidgetEntry {
     pub fills_remaining: bool,
     /// Fixed width in pixels (set by widgetSetWidth)
     pub fixed_width: Option<i32>,
+    /// Fixed height in pixels (set by widgetSetHeight)
+    pub fixed_height: Option<i32>,
+    /// Whether this widget should stretch to match its parent's height
+    pub match_parent_height: bool,
+    /// Whether this stack should exclude hidden children from layout
+    pub detaches_hidden: bool,
 }
 
 /// Info returned by get_widget_info (clone-safe subset)
@@ -84,6 +90,9 @@ pub struct WidgetInfo {
     pub hidden: bool,
     pub fills_remaining: bool,
     pub fixed_width: Option<i32>,
+    pub fixed_height: Option<i32>,
+    pub match_parent_height: bool,
+    pub detaches_hidden: bool,
 }
 
 thread_local! {
@@ -178,6 +187,9 @@ pub fn register_widget(hwnd: HWND, kind: WidgetKind, control_id: u16) -> i64 {
             control_id,
             fills_remaining: false,
             fixed_width: None,
+            fixed_height: None,
+            match_parent_height: false,
+            detaches_hidden: false,
         });
         widgets.len() as i64
     })
@@ -197,6 +209,9 @@ pub fn register_widget(hwnd: isize, kind: WidgetKind, control_id: u16) -> i64 {
             control_id,
             fills_remaining: false,
             fixed_width: None,
+            fixed_height: None,
+            match_parent_height: false,
+            detaches_hidden: false,
         });
         widgets.len() as i64
     })
@@ -218,6 +233,9 @@ pub fn register_widget_with_layout(hwnd: HWND, kind: WidgetKind, spacing: f64, i
             control_id,
             fills_remaining: false,
             fixed_width: None,
+            fixed_height: None,
+            match_parent_height: false,
+            detaches_hidden: false,
         });
         widgets.len() as i64
     })
@@ -238,6 +256,9 @@ pub fn register_widget_with_layout(hwnd: isize, kind: WidgetKind, spacing: f64, 
             control_id,
             fills_remaining: false,
             fixed_width: None,
+            fixed_height: None,
+            match_parent_height: false,
+            detaches_hidden: false,
         });
         widgets.len() as i64
     })
@@ -284,6 +305,9 @@ pub fn get_widget_info(handle: i64) -> Option<WidgetInfo> {
                 hidden: widgets[idx].hidden,
                 fills_remaining: widgets[idx].fills_remaining,
                 fixed_width: widgets[idx].fixed_width,
+                fixed_height: widgets[idx].fixed_height,
+                match_parent_height: widgets[idx].match_parent_height,
+                detaches_hidden: widgets[idx].detaches_hidden,
             })
         } else {
             None
@@ -645,6 +669,39 @@ pub fn set_fixed_width(handle: i64, width: i32) {
         let idx = (handle - 1) as usize;
         if idx < widgets.len() {
             widgets[idx].fixed_width = Some(width);
+        }
+    });
+}
+
+/// Set the fixed height of a widget (in pixels).
+pub fn set_fixed_height(handle: i64, height: i32) {
+    WIDGETS.with(|w| {
+        let mut widgets = w.borrow_mut();
+        let idx = (handle - 1) as usize;
+        if idx < widgets.len() {
+            widgets[idx].fixed_height = Some(height);
+        }
+    });
+}
+
+/// Set whether this widget should stretch to match its parent's height.
+pub fn set_match_parent_height(handle: i64, value: bool) {
+    WIDGETS.with(|w| {
+        let mut widgets = w.borrow_mut();
+        let idx = (handle - 1) as usize;
+        if idx < widgets.len() {
+            widgets[idx].match_parent_height = value;
+        }
+    });
+}
+
+/// Set whether a stack should detach (exclude) hidden children from layout.
+pub fn set_detaches_hidden(handle: i64, value: bool) {
+    WIDGETS.with(|w| {
+        let mut widgets = w.borrow_mut();
+        let idx = (handle - 1) as usize;
+        if idx < widgets.len() {
+            widgets[idx].detaches_hidden = value;
         }
     });
 }

@@ -217,6 +217,26 @@ pub fn set_selectable(handle: i64, _selectable: bool) {
     let _ = handle;
 }
 
+/// Walk the HWND parent chain to find the nearest ancestor with a background brush.
+#[cfg(target_os = "windows")]
+fn find_ancestor_brush(mut hwnd: HWND) -> Option<HBRUSH> {
+    for _ in 0..10 {
+        if let Ok(parent) = unsafe { GetParent(hwnd) } {
+            if parent.0.is_null() { break; }
+            let parent_handle = super::find_handle_by_hwnd(parent);
+            if parent_handle > 0 {
+                if let Some(brush) = super::get_bg_brush(parent_handle) {
+                    return Some(brush);
+                }
+            }
+            hwnd = parent;
+        } else {
+            break;
+        }
+    }
+    None
+}
+
 /// Handle WM_CTLCOLORSTATIC — set text color and background for styled text widgets.
 #[cfg(target_os = "windows")]
 pub fn handle_ctlcolor(hdc: HDC, child_hwnd: HWND) -> Option<LRESULT> {
@@ -225,6 +245,9 @@ pub fn handle_ctlcolor(hdc: HDC, child_hwnd: HWND) -> Option<LRESULT> {
     });
 
     let handle = handle?;
+
+    // Find the nearest ancestor brush for background
+    let ancestor_brush = find_ancestor_brush(child_hwnd);
 
     TEXT_STYLES.with(|styles| {
         let styles = styles.borrow();
@@ -236,10 +259,20 @@ pub fn handle_ctlcolor(hdc: HDC, child_hwnd: HWND) -> Option<LRESULT> {
             if !style.font.is_invalid() {
                 unsafe { SelectObject(hdc, style.font); }
             }
-            // Return the background brush
-            Some(LRESULT(unsafe { GetStockObject(NULL_BRUSH) }.0 as isize))
+            // Return the ancestor's background brush, or NULL_BRUSH as fallback
+            if let Some(brush) = ancestor_brush {
+                Some(LRESULT(brush.0 as isize))
+            } else {
+                Some(LRESULT(unsafe { GetStockObject(NULL_BRUSH) }.0 as isize))
+            }
         } else {
-            None
+            // No explicit style — still return ancestor brush for correct background
+            if let Some(brush) = ancestor_brush {
+                unsafe { SetBkMode(hdc, TRANSPARENT); }
+                Some(LRESULT(brush.0 as isize))
+            } else {
+                None
+            }
         }
     })
 }

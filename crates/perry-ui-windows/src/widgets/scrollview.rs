@@ -10,7 +10,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Controls::SetScrollInfo;
 #[cfg(target_os = "windows")]
-use windows::Win32::Graphics::Gdi::HBRUSH;
+use windows::Win32::Graphics::Gdi::{HBRUSH, FillRect};
 #[cfg(target_os = "windows")]
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 
@@ -74,14 +74,51 @@ unsafe extern "system" fn scroll_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, 
             }
             LRESULT(0)
         }
-        WM_COMMAND | WM_CTLCOLORSTATIC | WM_CONTEXTMENU => {
+        WM_COMMAND | WM_CTLCOLORSTATIC | WM_CTLCOLORBTN | WM_CONTEXTMENU | WM_DRAWITEM => {
             if let Ok(parent) = GetParent(hwnd) {
                 return SendMessageW(parent, msg, wparam, lparam);
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
+        WM_ERASEBKGND => {
+            let handle = super::find_handle_by_hwnd(hwnd);
+            let brush = if handle > 0 {
+                super::get_bg_brush(handle)
+            } else {
+                None
+            };
+            let brush = brush.or_else(|| find_ancestor_brush(hwnd));
+            if let Some(brush) = brush {
+                let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut _);
+                let mut rect = RECT::default();
+                let _ = GetClientRect(hwnd, &mut rect);
+                FillRect(hdc, &rect, brush);
+                return LRESULT(1);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
+}
+
+/// Walk the HWND parent chain to find the nearest ancestor with a background brush.
+#[cfg(target_os = "windows")]
+fn find_ancestor_brush(mut hwnd: HWND) -> Option<HBRUSH> {
+    for _ in 0..10 {
+        if let Ok(parent) = unsafe { GetParent(hwnd) } {
+            if parent.0.is_null() { break; }
+            let parent_handle = super::find_handle_by_hwnd(parent);
+            if parent_handle > 0 {
+                if let Some(brush) = super::get_bg_brush(parent_handle) {
+                    return Some(brush);
+                }
+            }
+            hwnd = parent;
+        } else {
+            break;
+        }
+    }
+    None
 }
 
 /// Create a ScrollView. Returns widget handle.

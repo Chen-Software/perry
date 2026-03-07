@@ -149,21 +149,45 @@ pub fn set_title(handle: i64, title_ptr: *const u8) {
 /// Set button image by SF Symbol name. On Windows, maps known names to Unicode/text fallbacks.
 pub fn set_image(handle: i64, name_ptr: *const u8) {
     let name = str_from_header(name_ptr);
+    // Use non-emoji Unicode glyphs that respect SetTextColor on Windows.
+    // Emoji glyphs (U+1Fxxx) use color fonts and IGNORE SetTextColor.
     let fallback = match name {
-        "doc.on.doc" | "doc.on.doc.fill" => "\u{1F4C4}",
-        "magnifyingglass" => "\u{1F50D}",
-        "arrow.triangle.branch" => "\u{2442}",
-        "ladybug" | "ladybug.fill" => "\u{1F41B}",
-        "puzzlepiece.extension" | "puzzlepiece.extension.fill" => "\u{1F9E9}",
-        "gearshape" | "gearshape.fill" | "gear" => "\u{2699}",
-        "folder" | "folder.fill" => "\u{1F4C1}",
-        "doc.text" | "doc.text.fill" => "\u{1F4C4}",
-        "xmark" => "\u{2715}",
-        "chevron.right" => "\u{203A}",
-        "chevron.down" => "\u{2304}",
-        "sidebar.left" | "sidebar.leading" => "\u{2261}",
+        // Activity bar & common UI icons — use Segoe UI Symbol / basic Unicode
+        "doc.on.doc" | "doc.on.doc.fill" => "\u{25A1}\u{25A0}",  // □■ (files)
+        "magnifyingglass" => "\u{2315}",                   // ⌕ (search)
+        "arrow.triangle.branch" => "\u{2387}",              // ⎇ (git branch)
+        "sparkles" => "\u{2606}",                            // ☆ (AI)
+        "terminal" => ">_",                                  // terminal prompt
+        "ladybug" | "ladybug.fill" => "\u{25C8}",           // ◈ (debug)
+        "puzzlepiece.extension" | "puzzlepiece.extension.fill" => "\u{29C9}", // ⧉ (extensions)
+        "gearshape" | "gearshape.fill" | "gear" => "\u{2699}", // ⚙
+        "gearshape.2" => "\u{2699}",                         // ⚙
+        "folder" | "folder.fill" => "\u{25B7}",             // ▷ (folder)
+        "doc.text" | "doc.text.fill" | "doc.plaintext" => "\u{25A1}", // □ (doc)
+        "doc" => "\u{25A1}",                                 // □
+        "doc.badge.plus" => "+\u{25A1}",                    // new file
+        "folder.badge.plus" => "+\u{25B7}",                 // new folder
+        "xmark" => "\u{2715}",                               // ✕
+        "circle.fill" => "\u{25CF}",                         // ●
+        "chevron.right" => "\u{203A}",                       // ›
+        "chevron.down" => "\u{2304}",                        // ⌄
+        "chevron.left.forwardslash.chevron.right" => "</>",  // code
+        "sidebar.left" | "sidebar.leading" => "\u{2261}",   // ≡
         "plus" => "+",
-        "ellipsis" => "\u{22EF}",
+        "ellipsis" => "\u{22EF}",                            // ⋯
+        // File type icons
+        "swift" => "TS",                                     // TypeScript (maps from swift)
+        "curlybraces" => "{}",                               // JSON
+        "paintbrush" => "\u{2338}",                          // ⌸ (CSS)
+        // Debug icons
+        "play.fill" => "\u{25B6}",                           // ▶
+        "pause.fill" => "\u{2016}",                          // ‖ (pause)
+        "stop.fill" => "\u{25A0}",                           // ■
+        "arrow.right" => "\u{2192}",                         // → (step over)
+        "arrow.down.right" => "\u{2198}",                    // ↘ (step into)
+        "arrow.up.left" => "\u{2196}",                       // ↖ (step out)
+        "arrow.up.left.and.arrow.down.right" => "\u{2922}",  // ⤢ (maximize)
+        "arrow.down.right.and.arrow.up.left" => "\u{2925}",  // ⤥ (collapse)
         _ => name,
     };
 
@@ -242,16 +266,23 @@ pub fn handle_draw_item(lparam: LPARAM) -> bool {
         let hdc = dis.hDC;
         let mut rect = dis.rcItem;
 
-        // Fill background with parent container's bg color (or default)
-        let parent_hwnd = GetParent(dis.hwndItem);
+        // Fill background with nearest ancestor's bg color (or default)
         let mut bg_filled = false;
-        if let Ok(parent_hwnd) = parent_hwnd {
-            let parent_handle = super::find_handle_by_hwnd(parent_hwnd);
-            if parent_handle > 0 {
-                if let Some(brush) = super::get_bg_brush(parent_handle) {
-                    FillRect(hdc, &rect, brush);
-                    bg_filled = true;
+        let mut walk_hwnd = dis.hwndItem;
+        for _ in 0..10 {
+            if let Ok(parent_hwnd) = GetParent(walk_hwnd) {
+                if parent_hwnd.0.is_null() { break; }
+                let parent_handle = super::find_handle_by_hwnd(parent_hwnd);
+                if parent_handle > 0 {
+                    if let Some(brush) = super::get_bg_brush(parent_handle) {
+                        FillRect(hdc, &rect, brush);
+                        bg_filled = true;
+                        break;
+                    }
                 }
+                walk_hwnd = parent_hwnd;
+            } else {
+                break;
             }
         }
         if !bg_filled {

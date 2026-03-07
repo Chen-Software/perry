@@ -5,7 +5,7 @@ use windows::Win32::Foundation::*;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::*;
 #[cfg(target_os = "windows")]
-use windows::Win32::Graphics::Gdi::{HBRUSH, FillRect, GetDC, ReleaseDC};
+use windows::Win32::Graphics::Gdi::{HBRUSH, FillRect};
 #[cfg(target_os = "windows")]
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 
@@ -51,20 +51,64 @@ unsafe extern "system" fn container_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARA
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_ERASEBKGND => {
+            // Try own brush first, then walk parent chain for nearest background
             let handle = super::find_handle_by_hwnd(hwnd);
-            if handle > 0 {
-                if let Some(brush) = super::get_bg_brush(handle) {
-                    let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut _);
-                    let mut rect = RECT::default();
-                    let _ = GetClientRect(hwnd, &mut rect);
-                    FillRect(hdc, &rect, brush);
-                    return LRESULT(1);
-                }
+            let brush = if handle > 0 {
+                super::get_bg_brush(handle)
+            } else {
+                None
+            };
+            let brush = brush.or_else(|| find_ancestor_brush(hwnd));
+            if let Some(brush) = brush {
+                let hdc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut _);
+                let mut rect = RECT::default();
+                let _ = GetClientRect(hwnd, &mut rect);
+                let _ = FillRect(hdc, &rect, brush);
+                return LRESULT(1);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_PAINT => {
+            let handle = super::find_handle_by_hwnd(hwnd);
+            let brush = if handle > 0 {
+                super::get_bg_brush(handle)
+            } else {
+                None
+            };
+            let brush = brush.or_else(|| find_ancestor_brush(hwnd));
+            if let Some(brush) = brush {
+                let mut ps = windows::Win32::Graphics::Gdi::PAINTSTRUCT::default();
+                let hdc = windows::Win32::Graphics::Gdi::BeginPaint(hwnd, &mut ps);
+                let mut rect = RECT::default();
+                let _ = GetClientRect(hwnd, &mut rect);
+                let _ = FillRect(hdc, &rect, brush);
+                windows::Win32::Graphics::Gdi::EndPaint(hwnd, &ps);
+                return LRESULT(0);
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
+}
+
+/// Walk the HWND parent chain to find the nearest ancestor with a background brush.
+#[cfg(target_os = "windows")]
+fn find_ancestor_brush(mut hwnd: HWND) -> Option<HBRUSH> {
+    for _ in 0..10 { // max 10 levels deep
+        if let Ok(parent) = unsafe { GetParent(hwnd) } {
+            if parent.0.is_null() { break; }
+            let parent_handle = super::find_handle_by_hwnd(parent);
+            if parent_handle > 0 {
+                if let Some(brush) = super::get_bg_brush(parent_handle) {
+                    return Some(brush);
+                }
+            }
+            hwnd = parent;
+        } else {
+            break;
+        }
+    }
+    None
 }
 
 /// Create a VStack. Returns widget handle.

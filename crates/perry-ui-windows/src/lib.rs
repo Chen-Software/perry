@@ -907,6 +907,32 @@ pub extern "C" fn perry_ui_widget_set_hugging(handle: i64, priority: f64) {
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_set_on_click(_handle: i64, _callback: f64) {}
 
+/// Set widget height (fixed).
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_height(handle: i64, height: f64) {
+    widgets::set_fixed_height(handle, height as i32);
+}
+
+/// Match parent height — marks the widget to stretch vertically to fill its parent.
+/// On Windows, this is handled by the HStack/VStack layout engine via fills_remaining.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_match_parent_height(handle: i64) {
+    widgets::set_match_parent_height(handle, true);
+}
+
+/// Set hidden state (perry_ui_widget_set_hidden — matches macOS naming convention).
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_hidden(handle: i64, hidden: i64) {
+    widgets::set_hidden(handle, hidden != 0);
+}
+
+/// Stack: detach hidden children from layout calculation.
+/// When enabled, hidden children don't occupy any space.
+#[no_mangle]
+pub extern "C" fn perry_ui_stack_set_detaches_hidden(handle: i64, flag: i64) {
+    widgets::set_detaches_hidden(handle, flag != 0);
+}
+
 /// Embed a native HWND into the Perry widget system.
 /// Takes the HWND pointer value and returns a 1-based widget handle.
 /// The widget is marked as fills_remaining so it absorbs remaining space in VStack/HStack.
@@ -936,3 +962,51 @@ pub extern "C" fn perry_plugin_unload(_handle: i64) {}
 /// Exponential backoff utility (stub — not yet implemented on Windows).
 #[no_mangle]
 pub extern "C" fn backOff(_func: f64, _opts: f64) -> f64 { 0.0 }
+
+// =============================================================================
+// Stubs for newly-generated symbols not yet implemented on Windows
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn js_crypto_random_bytes_buffer(_len: i64) -> i64 { 0 }
+
+#[no_mangle]
+pub extern "C" fn js_fetch_get_with_auth(_url: i64, _auth: i64) -> f64 { 0.0 }
+
+#[no_mangle]
+pub extern "C" fn js_fetch_post_with_auth(_url: i64, _body: i64, _auth: i64) -> f64 { 0.0 }
+
+#[no_mangle]
+pub extern "C" fn js_fetch_stream_close(_handle: i64) {}
+
+#[no_mangle]
+pub extern "C" fn js_fetch_stream_poll(_handle: i64) -> f64 { 0.0 }
+
+#[no_mangle]
+pub extern "C" fn js_fetch_stream_start(_url: i64, _method: i64, _headers: i64, _body: i64) -> i64 { 0 }
+
+#[no_mangle]
+pub extern "C" fn js_fetch_stream_status(_handle: i64) -> i64 { 0 }
+
+#[no_mangle]
+pub extern "C" fn js_ws_handle_to_i64(_handle: f64) -> i64 { 0 }
+
+#[no_mangle]
+pub extern "C" fn perry_ui_qrcode_create() -> i64 { 0 }
+
+#[no_mangle]
+pub extern "C" fn perry_ui_qrcode_set_data(_handle: i64, _data_ptr: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_scrollview_end_refreshing(_handle: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_scrollview_set_refresh_control(_handle: i64, _callback: f64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_stack_set_distribution(_handle: i64, _distribution: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_reorder_child(_parent: i64, _child: i64, _index: i64) {}
+
+// perry_debug_trace_init and perry_debug_trace_init_done are provided by perry_runtime
