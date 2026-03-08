@@ -133,3 +133,83 @@ pub fn set_text_str(handle: i64, text: &str) {
         }
     }
 }
+
+/// Get the current string value from a UITextField, returns a StringHeader pointer.
+pub fn get_string_value(handle: i64) -> *const u8 {
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            let text: Retained<NSString> = msg_send![&*view, text];
+            let rust_str = text.to_string();
+            let bytes = rust_str.as_bytes();
+            return js_string_from_bytes(bytes.as_ptr(), bytes.len() as i64);
+        }
+    }
+    unsafe { js_string_from_bytes(std::ptr::null(), 0) }
+}
+
+thread_local! {
+    static SUBMIT_CALLBACKS: RefCell<HashMap<usize, (f64, *const objc2::runtime::AnyObject)>> = RefCell::new(HashMap::new());
+}
+
+pub struct PerryTextFieldSubmitTargetIvars {
+    callback_key: std::cell::Cell<usize>,
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "PerryTextFieldSubmitTarget"]
+    #[ivars = PerryTextFieldSubmitTargetIvars]
+    pub struct PerryTextFieldSubmitTarget;
+
+    impl PerryTextFieldSubmitTarget {
+        #[unsafe(method(textFieldDidReturn:))]
+        fn text_field_did_return(&self, sender: &AnyObject) {
+            let key = self.ivars().callback_key.get();
+            SUBMIT_CALLBACKS.with(|cbs| {
+                if let Some(&(closure_f64, _tf_ptr)) = cbs.borrow().get(&key) {
+                    // Get the text
+                    let text: Retained<NSString> = unsafe { msg_send![sender, text] };
+                    let rust_str = text.to_string();
+                    let bytes = rust_str.as_bytes();
+                    let str_ptr = unsafe { js_string_from_bytes(bytes.as_ptr(), bytes.len() as i64) };
+                    let nanboxed = unsafe { js_nanbox_string(str_ptr as i64) };
+                    let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
+                    unsafe {
+                        js_closure_call1(closure_ptr as *const u8, nanboxed);
+                    }
+                }
+            });
+        }
+    }
+);
+
+impl PerryTextFieldSubmitTarget {
+    fn new() -> Retained<Self> {
+        let this = Self::alloc().set_ivars(PerryTextFieldSubmitTargetIvars {
+            callback_key: std::cell::Cell::new(0),
+        });
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// Set an onSubmit callback (fires when user presses Return).
+pub fn set_on_submit(handle: i64, on_submit: f64) {
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            let target = PerryTextFieldSubmitTarget::new();
+            let target_addr = Retained::as_ptr(&target) as usize;
+            target.ivars().callback_key.set(target_addr);
+
+            let tf_raw = Retained::as_ptr(&view) as *const objc2::runtime::AnyObject;
+            SUBMIT_CALLBACKS.with(|cbs| {
+                cbs.borrow_mut().insert(target_addr, (on_submit, tf_raw));
+            });
+
+            let sel = Sel::register(c"textFieldDidReturn:");
+            // UIControlEventEditingDidEndOnExit = 1 << 19 = 524288
+            let _: () = msg_send![&*view, addTarget: &*target, action: sel, forControlEvents: 524288_u64];
+
+            std::mem::forget(target);
+        }
+    }
+}

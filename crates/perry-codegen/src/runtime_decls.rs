@@ -943,6 +943,21 @@ impl Compiler {
             self.extern_funcs.insert("js_array_get_jsvalue".to_string(), func_id);
         }
 
+        // js_handle_array_get(array_handle: f64, index: i32) -> f64
+        // V8 array element access for JS handle arrays (e.g., mysql2 results)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // array handle (NaN-boxed JS_HANDLE_TAG)
+            sig.params.push(AbiParam::new(types::I32)); // index
+            sig.returns.push(AbiParam::new(types::F64)); // result (NaN-boxed)
+            let func_id = self.module.declare_function(
+                "js_handle_array_get",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_handle_array_get".to_string(), func_id);
+        }
+
         // js_array_set_jsvalue(arr: *mut ArrayHeader, index: u32, value: u64)
         {
             let mut sig = self.module.make_signature();
@@ -4398,6 +4413,25 @@ impl Compiler {
             self.extern_funcs.insert("js_ws_connect".to_string(), func_id);
         }
 
+        // js_ws_connect_start(url: f64) -> f64 (ws_id directly, no Promise)
+        // Takes NaN-boxed string directly; extracts pointer internally
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // url NaN-boxed string
+            sig.returns.push(AbiParam::new(types::F64)); // ws_id as f64
+            let func_id = self.module.declare_function("js_ws_connect_start", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_ws_connect_start".to_string(), func_id);
+        }
+
+        // js_ws_message_count(handle: i64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // handle
+            sig.returns.push(AbiParam::new(types::F64)); // count
+            let func_id = self.module.declare_function("js_ws_message_count", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_ws_message_count".to_string(), func_id);
+        }
+
         // js_ws_send(handle: i64, message: i64) -> void
         {
             let mut sig = self.module.make_signature();
@@ -7683,6 +7717,69 @@ impl Compiler {
             self.extern_funcs.insert("perry_ui_hstack_create".to_string(), func_id);
         }
 
+        // perry_ui_splitview_create(left_width: f64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // left_width
+            sig.returns.push(AbiParam::new(types::I64)); // widget handle
+            let func_id = self.module.declare_function("perry_ui_splitview_create", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_splitview_create".to_string(), func_id);
+        }
+
+        // perry_ui_splitview_add_child(parent: i64, child: i64, index: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // parent handle
+            sig.params.push(AbiParam::new(types::I64)); // child handle
+            sig.params.push(AbiParam::new(types::F64)); // child index
+            let func_id = self.module.declare_function("perry_ui_splitview_add_child", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_splitview_add_child".to_string(), func_id);
+        }
+
+        // perry_ui_vbox_create() -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_vbox_create", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_vbox_create".to_string(), func_id);
+        }
+
+        // perry_ui_vbox_add_child(parent: i64, child: i64, slot: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_ui_vbox_add_child", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_vbox_add_child".to_string(), func_id);
+        }
+
+        // perry_ui_vbox_finalize(parent: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_vbox_finalize", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_vbox_finalize".to_string(), func_id);
+        }
+
+        // perry_ui_frame_split_create(left_width: f64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // left_width
+            sig.returns.push(AbiParam::new(types::I64)); // widget handle
+            let func_id = self.module.declare_function("perry_ui_frame_split_create", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_frame_split_create".to_string(), func_id);
+        }
+
+        // perry_ui_frame_split_add_child(parent: i64, child: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // parent handle
+            sig.params.push(AbiParam::new(types::I64)); // child handle
+            let func_id = self.module.declare_function("perry_ui_frame_split_add_child", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_frame_split_add_child".to_string(), func_id);
+        }
+
         // perry_ui_widget_add_child(parent: i64, child: i64)
         {
             let mut sig = self.module.make_signature();
@@ -8066,6 +8163,14 @@ impl Compiler {
             sig.params.push(AbiParam::new(types::I64));
             let func_id = self.module.declare_function("perry_ui_widget_match_parent_height", Linkage::Import, &sig)?;
             self.extern_funcs.insert("perry_ui_widget_match_parent_height".to_string(), func_id);
+        }
+
+        // perry_ui_widget_match_parent_width(handle: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_widget_match_parent_width", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_widget_match_parent_width".to_string(), func_id);
         }
 
         // perry_ui_button_set_title(handle: i64, title_ptr: i64)
@@ -9530,6 +9635,45 @@ impl Compiler {
             sig.returns.push(AbiParam::new(types::F64));
             let func_id = self.module.declare_function("perry_resolve_static_plugin", Linkage::Import, &sig)?;
             self.extern_funcs.insert("perry_resolve_static_plugin".to_string(), func_id);
+        }
+
+        // ============================================
+        // Platform screen detection functions
+        // ============================================
+        // perry_get_screen_width() -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_get_screen_width", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_get_screen_width".to_string(), func_id);
+        }
+        // perry_get_screen_height() -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_get_screen_height", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_get_screen_height".to_string(), func_id);
+        }
+        // perry_get_scale_factor() -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_get_scale_factor", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_get_scale_factor".to_string(), func_id);
+        }
+        // perry_get_orientation() -> f64 (NaN-boxed string)
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_get_orientation", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_get_orientation".to_string(), func_id);
+        }
+        // perry_get_device_idiom() -> f64 (0=phone, 1=pad, 2=tv)
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_get_device_idiom", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_get_device_idiom".to_string(), func_id);
         }
 
         // ============================================

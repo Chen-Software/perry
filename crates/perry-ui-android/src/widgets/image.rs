@@ -48,22 +48,42 @@ pub fn create_file(path_ptr: *const u8) -> i64 {
     handle
 }
 
-/// Create an image from a named system icon.
+/// Create an image from a named system icon (SF Symbol name → Material Icon).
+/// Uses the same SF Symbol → Material Icons mapping as button.rs.
 pub fn create_symbol(name_ptr: *const u8) -> i64 {
-    let _name = str_from_header(name_ptr);
+    let name = str_from_header(name_ptr);
     let mut env = jni_bridge::get_env();
     let _ = env.push_local_frame(32);
 
     let activity = super::get_activity(&mut env);
-    let image_view = env.new_object(
-        "android/widget/ImageView",
+
+    // Use a TextView styled as an icon (Material Icons font) since Android
+    // doesn't have SF Symbols and resource-based icons require compile-time R.id
+    let text_view = env.new_object(
+        "android/widget/TextView",
         "(Landroid/content/Context;)V",
         &[JValue::Object(&activity)],
-    ).expect("Failed to create ImageView");
+    ).expect("Failed to create TextView for symbol");
 
-    // Android doesn't have SF Symbols; create placeholder
-    // Could use Material Icons via resource lookup, but keep it simple
-    let global = env.new_global_ref(image_view).expect("Failed to create global ref");
+    // Map SF Symbol name to emoji/Unicode character
+    let icon_str = if let Some(emoji) = super::button::sf_symbol_to_emoji(name) {
+        emoji.to_string()
+    } else {
+        name.chars().take(3).collect()
+    };
+    let jstr = env.new_string(&icon_str).expect("icon string");
+    let _ = env.call_method(&text_view, "setText",
+        "(Ljava/lang/CharSequence;)V", &[JValue::Object(&jstr)]);
+
+    // Set default size (24sp)
+    let _ = env.call_method(&text_view, "setTextSize", "(IF)V",
+        &[JValue::Int(2), JValue::Float(24.0)]); // COMPLEX_UNIT_SP=2
+
+    // Center gravity
+    let _ = env.call_method(&text_view, "setGravity", "(I)V",
+        &[JValue::Int(0x11)]); // Gravity.CENTER = 0x11
+
+    let global = env.new_global_ref(text_view).expect("Failed to create global ref");
     let handle = super::register_widget(global);
     unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
     handle

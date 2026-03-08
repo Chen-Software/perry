@@ -133,6 +133,7 @@ pub unsafe extern "C" fn js_mysql2_pool_query(
     };
 
     let is_select = is_row_returning_query(&sql);
+    eprintln!("[MYSQL-DEBUG] js_mysql2_pool_query (NO PARAMS) called, sql_first_40={:?}, is_select={}", &sql[..sql.len().min(40)], is_select);
 
     // Use spawn_for_promise_deferred to safely create JSValues on the main thread
     // The async block returns raw Rust data, and the converter creates JSValues
@@ -211,6 +212,7 @@ pub unsafe extern "C" fn js_mysql2_pool_execute(
 
     // Extract parameters from the JSValue array
     let param_values = extract_params_from_jsvalue(params);
+    eprintln!("[MYSQL-DEBUG] js_mysql2_pool_execute (WITH PARAMS) called, sql_first_60={:?}, param_count={}, params={:?}", &sql[..sql.len().min(60)], param_values.len(), param_values);
     let is_select = is_row_returning_query(&sql);
 
     // Use spawn_for_promise_deferred to safely create JSValues on the main thread

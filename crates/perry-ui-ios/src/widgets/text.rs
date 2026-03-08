@@ -117,6 +117,23 @@ pub fn set_font_weight(handle: i64, size: f64, weight: f64) {
     }
 }
 
+/// Enable word wrapping on a UILabel.
+/// max_width sets the preferred wrapping width (0 = use intrinsic width).
+pub fn set_wraps(handle: i64, max_width: f64) {
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            // Set numberOfLines = 0 for unlimited lines
+            let _: () = msg_send![&*view, setNumberOfLines: 0_i64];
+            // NSLineBreakByWordWrapping = 0
+            let _: () = msg_send![&*view, setLineBreakMode: 0_i64];
+            // Set preferred max layout width for Auto Layout wrapping
+            if max_width > 0.0 {
+                let _: () = msg_send![&*view, setPreferredMaxLayoutWidth: max_width];
+            }
+        }
+    }
+}
+
 /// Set whether a UILabel is selectable (UILabel doesn't support this, no-op).
 pub fn set_selectable(_handle: i64, _selectable: bool) {
     // UILabel is not selectable by default and making it so requires

@@ -895,6 +895,7 @@ fn lower_module_decl(
                                                         _ => None,
                                                     };
                                                     if let Some(class_name) = class_name {
+                                                        eprintln!("[HIR-DEBUG] Registering native instance: {} = {}.{} (class: {})", name, obj_name, method_name, class_name);
                                                         ctx.register_native_instance(name.clone(), module_name.to_string(), class_name.to_string());
                                                     }
                                                 }
@@ -2064,6 +2065,62 @@ fn lower_stmt(
     Ok(())
 }
 
+/// Assign a value to an expression target (used for unwrapped paren/type-assertion targets).
+/// Converts an Expr (which should be an ident or member access) into an assignment.
+fn lower_expr_assignment(ctx: &mut LoweringContext, expr: &ast::Expr, value: Box<Expr>) -> Result<Expr> {
+    match expr {
+        ast::Expr::Ident(ident) => {
+            let name = ident.sym.to_string();
+            if let Some(id) = ctx.lookup_local(&name) {
+                Ok(Expr::LocalSet(id, value))
+            } else {
+                eprintln!("  Warning: Assignment to undeclared variable '{}', creating implicit local", name);
+                let id = ctx.define_local(name, Type::Any);
+                Ok(Expr::LocalSet(id, value))
+            }
+        }
+        ast::Expr::Member(member) => {
+            if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
+                let obj_name = obj_ident.sym.to_string();
+                if ctx.lookup_class(&obj_name).is_some() {
+                    if let ast::MemberProp::Ident(prop_ident) = &member.prop {
+                        let field_name = prop_ident.sym.to_string();
+                        if ctx.has_static_field(&obj_name, &field_name) {
+                            return Ok(Expr::StaticFieldSet {
+                                class_name: obj_name,
+                                field_name,
+                                value,
+                            });
+                        }
+                    }
+                }
+            }
+            let object = Box::new(lower_expr(ctx, &member.obj)?);
+            match &member.prop {
+                ast::MemberProp::Ident(ident) => {
+                    let property = ident.sym.to_string();
+                    Ok(Expr::PropertySet { object, property, value })
+                }
+                ast::MemberProp::Computed(computed) => {
+                    let index = Box::new(lower_expr(ctx, &computed.expr)?);
+                    Ok(Expr::IndexSet { object, index, value })
+                }
+                ast::MemberProp::PrivateName(private) => {
+                    let property = format!("#{}", private.name.to_string());
+                    Ok(Expr::PropertySet { object, property, value })
+                }
+            }
+        }
+        // Recursively unwrap parens and type annotations
+        ast::Expr::Paren(paren) => lower_expr_assignment(ctx, &paren.expr, value),
+        ast::Expr::TsAs(ts_as) => lower_expr_assignment(ctx, &ts_as.expr, value),
+        ast::Expr::TsNonNull(ts_nn) => lower_expr_assignment(ctx, &ts_nn.expr, value),
+        ast::Expr::TsTypeAssertion(ts_ta) => lower_expr_assignment(ctx, &ts_ta.expr, value),
+        ast::Expr::TsSatisfies(ts_sat) => lower_expr_assignment(ctx, &ts_sat.expr, value),
+        _ => Err(anyhow!("Unsupported expression as assignment target: {:?}", expr)),
+    }
+}
+
 pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
     match expr {
         ast::Expr::Lit(lit) => lower_lit(lit),
@@ -2528,6 +2585,12 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                             // Clone module_name and class_name to avoid borrow issues
                             let native_instance = ctx.lookup_native_instance(&obj_name)
                                 .map(|(m, c)| (m.to_string(), c.to_string()));
+                            if obj_name == "pool" {
+                                if let ast::MemberProp::Ident(method_ident) = &member.prop {
+                                    let method_name = method_ident.sym.to_string();
+                                    eprintln!("[HIR-DEBUG] pool.{} lookup: native_instance={:?}", method_name, native_instance);
+                                }
+                            }
                             if let Some((module_name, class_name)) = native_instance {
                                 if let ast::MemberProp::Ident(method_ident) = &member.prop {
                                     let method_name = method_ident.sym.to_string();
@@ -4836,6 +4899,22 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                     // Destructuring assignment: [a, b] = expr or { a, b } = expr
                     // We need to lower this to a sequence of assignments
                     lower_destructuring_assignment(ctx, pat, value)
+                }
+                // Unwrap TypeScript type annotations and parentheses for assignment
+                ast::AssignTarget::Simple(ast::SimpleAssignTarget::Paren(paren)) => {
+                    lower_expr_assignment(ctx, &paren.expr, value)
+                }
+                ast::AssignTarget::Simple(ast::SimpleAssignTarget::TsAs(ts_as)) => {
+                    lower_expr_assignment(ctx, &ts_as.expr, value)
+                }
+                ast::AssignTarget::Simple(ast::SimpleAssignTarget::TsNonNull(ts_nn)) => {
+                    lower_expr_assignment(ctx, &ts_nn.expr, value)
+                }
+                ast::AssignTarget::Simple(ast::SimpleAssignTarget::TsTypeAssertion(ts_ta)) => {
+                    lower_expr_assignment(ctx, &ts_ta.expr, value)
+                }
+                ast::AssignTarget::Simple(ast::SimpleAssignTarget::TsSatisfies(ts_sat)) => {
+                    lower_expr_assignment(ctx, &ts_sat.expr, value)
                 }
                 other => Err(anyhow!("Unsupported assignment target: {:?}", other)),
             }

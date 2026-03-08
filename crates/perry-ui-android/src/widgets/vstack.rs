@@ -32,14 +32,7 @@ pub fn create(spacing: f64) -> i64 {
         &[JValue::Object(&layout), JValue::Int(spacing_px)],
     );
 
-    // Default padding (match iOS default of 20dp on all sides)
-    let pad = super::dp_to_px(&mut env, 20.0);
-    let _ = env.call_method(
-        &layout,
-        "setPadding",
-        "(IIII)V",
-        &[JValue::Int(pad), JValue::Int(pad), JValue::Int(pad), JValue::Int(pad)],
-    );
+    // No default padding — matches macOS/iOS behavior (VStack has zero insets)
 
     // LayoutParams: MATCH_PARENT width, WRAP_CONTENT height
     let params = env.new_object(

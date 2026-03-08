@@ -21,6 +21,11 @@ pub extern "C" fn js_ws_connect(_url_ptr: *const StringHeader) -> *mut Promise {
 }
 
 #[no_mangle]
+pub extern "C" fn js_ws_connect_start(_url_nanboxed: f64) -> f64 {
+    0.0
+}
+
+#[no_mangle]
 pub extern "C" fn js_ws_send(_handle: i64, _message_ptr: *const StringHeader) {}
 
 #[no_mangle]

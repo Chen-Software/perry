@@ -100,3 +100,63 @@ pub fn set_string_str(handle: i64, text: &str) {
         unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
     }
 }
+
+extern "C" {
+    fn js_string_from_bytes(ptr: *const u8, len: i64) -> *const u8;
+}
+
+/// Get the current text of an EditText. Returns a raw StringHeader pointer.
+pub fn get_string_value(handle: i64) -> *const u8 {
+    if let Some(view_ref) = super::get_widget(handle) {
+        let mut env = jni_bridge::get_env();
+        let _ = env.push_local_frame(16);
+        let text_result = env.call_method(
+            view_ref.as_obj(),
+            "getText",
+            "()Landroid/text/Editable;",
+            &[],
+        );
+        if let Ok(text_val) = text_result {
+            if let Ok(text_obj) = text_val.l() {
+                if !text_obj.is_null() {
+                    let jstr_result = env.call_method(&text_obj, "toString", "()Ljava/lang/String;", &[]);
+                    if let Ok(jstr_val) = jstr_result {
+                        if let Ok(jstr) = jstr_val.l() {
+                            if let Ok(rust_str) = env.get_string((&jstr).into()) {
+                                let bytes = rust_str.to_str().unwrap_or("").as_bytes();
+                                let str_ptr = unsafe { js_string_from_bytes(bytes.as_ptr(), bytes.len() as i64) };
+                                unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
+                                return str_ptr;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
+    }
+    unsafe { js_string_from_bytes(std::ptr::null(), 0) }
+}
+
+/// Set a callback for when the user presses Enter/Done on the keyboard.
+pub fn set_on_submit(handle: i64, on_submit: f64) {
+    if let Some(view_ref) = super::get_widget(handle) {
+        let mut env = jni_bridge::get_env();
+        let _ = env.push_local_frame(16);
+
+        let cb_key = crate::callback::register(on_submit);
+        let bridge_class = jni_bridge::with_cache(|c| {
+            env.new_local_ref(c.perry_bridge_class.as_obj()).unwrap()
+        });
+        let bridge_cls: &jni::objects::JClass = (&bridge_class).into();
+        // Use PerryBridge to set an OnEditorActionListener
+        let _ = env.call_static_method(
+            bridge_cls,
+            "setOnSubmitCallback",
+            "(Landroid/widget/EditText;J)V",
+            &[JValue::Object(view_ref.as_obj()), JValue::Long(cb_key)],
+        );
+
+        unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
+    }
+}

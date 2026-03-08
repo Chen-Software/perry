@@ -108,6 +108,22 @@ pub(crate) fn lower_assign_target_to_expr(ctx: &mut LoweringContext, target: &as
                 }
             }
         }
+        // Unwrap TypeScript type annotations and parentheses to get the real target
+        ast::AssignTarget::Simple(ast::SimpleAssignTarget::Paren(paren)) => {
+            lower_expr(ctx, &paren.expr)
+        }
+        ast::AssignTarget::Simple(ast::SimpleAssignTarget::TsAs(ts_as)) => {
+            lower_expr(ctx, &ts_as.expr)
+        }
+        ast::AssignTarget::Simple(ast::SimpleAssignTarget::TsNonNull(ts_nn)) => {
+            lower_expr(ctx, &ts_nn.expr)
+        }
+        ast::AssignTarget::Simple(ast::SimpleAssignTarget::TsTypeAssertion(ts_ta)) => {
+            lower_expr(ctx, &ts_ta.expr)
+        }
+        ast::AssignTarget::Simple(ast::SimpleAssignTarget::TsSatisfies(ts_sat)) => {
+            lower_expr(ctx, &ts_sat.expr)
+        }
         _ => Err(anyhow!("Unsupported target in compound assignment")),
     }
 }

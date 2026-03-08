@@ -719,6 +719,26 @@ pub extern "C" fn perry_ui_widget_set_background_gradient(handle: i64, r1: f64, 
     widgets::set_background_gradient(handle, r1, g1, b1, a1, r2, g2, b2, a2, direction);
 }
 
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_border_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    catch_panic_void("perry_ui_widget_set_border_color", || widgets::set_border_color(handle, r, g, b, a));
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_border_width(handle: i64, width: f64) {
+    catch_panic_void("perry_ui_widget_set_border_width", || widgets::set_border_width(handle, width));
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_edge_insets(handle: i64, top: f64, left: f64, bottom: f64, right: f64) {
+    catch_panic_void("perry_ui_widget_set_edge_insets", || widgets::set_edge_insets(handle, top, left, bottom, right));
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_opacity(handle: i64, alpha: f64) {
+    catch_panic_void("perry_ui_widget_set_opacity", || widgets::set_opacity(handle, alpha));
+}
+
 // =============================================================================
 // Events (new)
 // =============================================================================
@@ -901,6 +921,21 @@ pub extern "C" fn perry_ui_button_set_text_color(handle: i64, r: f64, g: f64, b:
 }
 
 #[no_mangle]
+pub extern "C" fn perry_ui_button_set_image(handle: i64, name_ptr: i64) {
+    catch_panic_void("perry_ui_button_set_image", || widgets::button::set_image(handle, name_ptr as *const u8));
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_button_set_image_position(handle: i64, position: i64) {
+    widgets::button::set_image_position(handle, position);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_button_set_content_tint_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    catch_panic_void("perry_ui_button_set_content_tint_color", || widgets::button::set_content_tint_color(handle, r, g, b, a));
+}
+
+#[no_mangle]
 pub extern "C" fn perry_ui_scrollview_set_refresh_control(scroll_handle: i64, callback: f64) {
     catch_panic_void("perry_ui_scrollview_set_refresh_control", || widgets::scrollview::set_refresh_control(scroll_handle, callback));
 }
@@ -919,3 +954,236 @@ pub extern "C" fn perry_ui_widget_set_on_click(handle: i64, callback: f64) {
 pub extern "C" fn perry_ui_widget_set_hugging(handle: i64, priority: f64) {
     catch_panic_void("perry_ui_widget_set_hugging", || widgets::set_hugging(handle, priority));
 }
+
+// =============================================================================
+// Layout functions (parity with iOS)
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_width(handle: i64, width: f64) {
+    catch_panic_void("perry_ui_widget_set_width", || widgets::set_width(handle, width));
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_height(handle: i64, height: f64) {
+    catch_panic_void("perry_ui_widget_set_height", || widgets::set_height(handle, height));
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_remove_child(parent_handle: i64, child_handle: i64) {
+    catch_panic_void("perry_ui_widget_remove_child", || widgets::remove_child(parent_handle, child_handle));
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_reorder_child(parent_handle: i64, from_index: f64, to_index: f64) {
+    catch_panic_void("perry_ui_widget_reorder_child", || widgets::reorder_child(parent_handle, from_index as i64, to_index as i64));
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_match_parent_width(handle: i64) {
+    catch_panic_void("perry_ui_widget_match_parent_width", || widgets::match_parent_width(handle));
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_match_parent_height(handle: i64) {
+    catch_panic_void("perry_ui_widget_match_parent_height", || widgets::match_parent_height(handle));
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_stack_set_detaches_hidden(handle: i64, flag: i64) {
+    widgets::set_detaches_hidden_views(handle, flag != 0);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_stack_set_distribution(handle: i64, distribution: f64) {
+    // On Android LinearLayout, distribution maps to weight distribution.
+    // 0=Fill (default), 1=FillEqually — set all children to equal weight.
+    // Other values are no-ops since Android doesn't have direct equivalents.
+    if distribution as i64 == 1 {
+        // FillEqually: set all children to weight=1
+        if let Some(view_ref) = widgets::get_widget(handle) {
+            let mut env = jni_bridge::get_env();
+            let _ = env.push_local_frame(32);
+            let child_count = env.call_method(view_ref.as_obj(), "getChildCount", "()I", &[])
+                .map(|v| v.i().unwrap_or(0)).unwrap_or(0);
+            for i in 0..child_count {
+                let child = env.call_method(view_ref.as_obj(), "getChildAt",
+                    "(I)Landroid/view/View;", &[jni::objects::JValue::Int(i)]);
+                if let Ok(child_val) = child {
+                    if let Ok(child_obj) = child_val.l() {
+                        if !child_obj.is_null() {
+                            if let Ok(lp) = env.call_method(&child_obj, "getLayoutParams",
+                                "()Landroid/view/ViewGroup$LayoutParams;", &[]) {
+                                if let Ok(lp_obj) = lp.l() {
+                                    if !lp_obj.is_null() {
+                                        if env.is_instance_of(&lp_obj, "android/widget/LinearLayout$LayoutParams").unwrap_or(false) {
+                                            let _ = env.set_field(&lp_obj, "weight", "F", jni::objects::JValue::Float(1.0));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
+        }
+    }
+}
+
+// =============================================================================
+// Text wrapping (parity with iOS)
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_text_set_wraps(handle: i64, max_width: f64) {
+    catch_panic_void("perry_ui_text_set_wraps", || widgets::text::set_wraps(handle, max_width));
+}
+
+// =============================================================================
+// TextField get/submit (parity with iOS)
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_textfield_get_string(handle: i64) -> i64 {
+    widgets::textfield::get_string_value(handle) as usize as i64
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_textfield_set_on_submit(handle: i64, on_submit: f64) {
+    catch_panic_void("perry_ui_textfield_set_on_submit", || widgets::textfield::set_on_submit(handle, on_submit));
+}
+
+// =============================================================================
+// QR Code (parity with iOS)
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_qrcode_create(data_ptr: i64, size: f64) -> i64 {
+    catch_panic("perry_ui_qrcode_create", || widgets::qrcode::create(data_ptr as *const u8, size))
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_qrcode_set_data(handle: i64, data_ptr: i64) {
+    catch_panic_void("perry_ui_qrcode_set_data", || widgets::qrcode::set_data(handle, data_ptr as *const u8));
+}
+
+// =============================================================================
+// Folder Dialog (parity with iOS)
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_open_folder_dialog(callback: f64) {
+    // On Android, use the same file dialog (SAF) for folder picking
+    file_dialog::open_dialog(callback);
+}
+
+// =============================================================================
+// Embed Native View (parity with iOS embed_nsview)
+// =============================================================================
+
+/// Register an external Android View (from a native library) as a Perry widget.
+/// The pointer must be a JNI GlobalRef to an Android View object.
+#[no_mangle]
+pub extern "C" fn perry_ui_embed_nsview(view_ptr: i64) -> i64 {
+    if view_ptr == 0 {
+        return 0;
+    }
+    // On Android, the native view pointer is a raw JNI object pointer.
+    // Convert it to a GlobalRef and register as a widget.
+    let env = jni_bridge::get_env();
+    let _ = env.push_local_frame(8);
+    let obj = unsafe { jni::objects::JObject::from_raw(view_ptr as jni::sys::jobject) };
+    let global = match env.new_global_ref(obj) {
+        Ok(g) => g,
+        Err(_) => {
+            unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
+            return 0;
+        }
+    };
+    let handle = widgets::register_widget(global);
+    unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
+    handle
+}
+
+// =============================================================================
+// Missing stubs — platform functions not yet implemented on Android
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_frame_split_create(_left_width: f64) -> i64 { 0 }
+
+#[no_mangle]
+pub extern "C" fn perry_ui_frame_split_add_child(_parent: i64, _child: i64) {}
+
+/// Query display metrics from the Android system.
+/// Returns (widthDp, heightDp, density).
+fn query_display_metrics() -> (f64, f64, f64) {
+    let mut env = jni_bridge::get_env();
+    let _ = env.push_local_frame(16);
+
+    // Get Application context: ActivityThread.currentApplication()
+    let result = (|| -> Option<(f64, f64, f64)> {
+        let app = env.call_static_method(
+            "android/app/ActivityThread",
+            "currentApplication",
+            "()Landroid/app/Application;",
+            &[],
+        ).ok()?.l().ok()?;
+        if app.is_null() { return None; }
+
+        // Get Resources
+        let res = env.call_method(&app, "getResources", "()Landroid/content/res/Resources;", &[]).ok()?.l().ok()?;
+        // Get DisplayMetrics
+        let dm = env.call_method(&res, "getDisplayMetrics", "()Landroid/util/DisplayMetrics;", &[]).ok()?.l().ok()?;
+
+        let width_px = env.get_field(&dm, "widthPixels", "I").ok()?.i().ok()? as f64;
+        let height_px = env.get_field(&dm, "heightPixels", "I").ok()?.i().ok()? as f64;
+        let density = env.get_field(&dm, "density", "F").ok()?.f().ok()? as f64;
+
+        if density > 0.0 {
+            Some((width_px / density, height_px / density, density))
+        } else {
+            None
+        }
+    })();
+
+    unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
+    result.unwrap_or((412.0, 915.0, 2.625))
+}
+
+#[no_mangle]
+pub extern "C" fn perry_get_screen_width() -> f64 {
+    query_display_metrics().0
+}
+
+#[no_mangle]
+pub extern "C" fn perry_get_screen_height() -> f64 {
+    query_display_metrics().1
+}
+
+#[no_mangle]
+pub extern "C" fn perry_get_scale_factor() -> f64 {
+    query_display_metrics().2
+}
+
+#[no_mangle]
+pub extern "C" fn perry_get_device_idiom() -> i64 { 0 } // 0 = phone
+
+#[no_mangle]
+pub extern "C" fn perry_on_layout_change(_callback: f64) {}
+
+#[no_mangle]
+pub extern "C" fn __wrapper_perry_on_layout_change(_callback: f64) {}
+
+#[no_mangle]
+pub extern "C" fn hone_get_app_files_dir() -> i64 { 0 }
+
+#[no_mangle]
+pub extern "C" fn __wrapper_hone_get_app_files_dir() -> i64 { 0 }
+
+#[no_mangle]
+pub extern "C" fn hone_get_documents_dir() -> i64 { 0 }
+
+#[no_mangle]
+pub extern "C" fn __wrapper_hone_get_documents_dir() -> i64 { 0 }

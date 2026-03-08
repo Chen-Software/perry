@@ -335,6 +335,12 @@ pub extern "C" fn perry_ui_widget_set_hugging(handle: i64, priority: f64) {
     widgets::set_hugging_priority(handle, priority);
 }
 
+/// Pin a child view's leading and trailing to its superview so it fills the parent width.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_match_parent_width(handle: i64) {
+    widgets::match_parent_width(handle);
+}
+
 /// Pin a child view's top and bottom to its superview so it fills the parent height.
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_match_parent_height(handle: i64) {
@@ -1194,3 +1200,53 @@ pub extern "C" fn perry_ui_table_set_on_row_select(handle: i64, callback: f64) {
 pub extern "C" fn perry_ui_table_get_selected_row(handle: i64) -> i64 {
     widgets::table::get_selected_row(handle)
 }
+
+// =============================================================================
+// Splitview / VBox stubs — these are iOS-only layout containers.
+// macOS uses NSStackView which handles all layouts fine.
+// Stubs are needed so the linker resolves the symbols.
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_splitview_create(_left_width: f64) -> i64 { 0 }
+
+#[no_mangle]
+pub extern "C" fn perry_ui_splitview_add_child(_parent: i64, _child: i64, _index: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_vbox_create() -> i64 { 0 }
+
+#[no_mangle]
+pub extern "C" fn perry_ui_vbox_add_child(_parent: i64, _child: i64, _slot: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_vbox_finalize(_parent: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_frame_split_create(_left_width: f64) -> i64 { 0 }
+
+#[no_mangle]
+pub extern "C" fn perry_ui_frame_split_add_child(_parent: i64, _child: i64) {}
+
+// =============================================================================
+// Screen detection stubs — iOS-only, macOS uses desktop defaults in TS.
+// Return 0/NaN so the TS validation rejects them and falls back to defaults.
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_get_screen_width() -> f64 { 0.0 }
+
+#[no_mangle]
+pub extern "C" fn perry_get_screen_height() -> f64 { 0.0 }
+
+#[no_mangle]
+pub extern "C" fn perry_get_scale_factor() -> f64 { 0.0 }
+
+#[no_mangle]
+pub extern "C" fn perry_get_orientation() -> i64 { 0 }
+
+#[no_mangle]
+pub extern "C" fn perry_on_layout_change(_callback: f64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_get_device_idiom() -> f64 { 0.0 }

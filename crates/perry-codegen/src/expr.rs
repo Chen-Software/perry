@@ -13963,12 +13963,37 @@ pub(crate) fn compile_expr(
                             else { let idx_f64 = ensure_f64(builder, idx_val); builder.ins().fcvt_to_sint_sat(types::I32, idx_f64) }
                         };
 
+                        // Check if arr_ptr is 0 (null) — this happens when the value is a JS handle
+                        // (e.g., array returned from V8 mysql2/ethers). Fall back to js_handle_array_get.
+                        let is_null = builder.ins().icmp_imm(IntCC::Equal, arr_ptr, 0);
+                        let native_block = builder.create_block();
+                        let handle_block = builder.create_block();
+                        let merge_block = builder.create_block();
+                        builder.append_block_param(merge_block, types::F64);
+                        builder.ins().brif(is_null, handle_block, &[], native_block, &[]);
+
+                        // Handle block: use js_dynamic_array_get for V8/handle arrays
+                        builder.switch_to_block(handle_block);
+                        builder.seal_block(handle_block);
+                        let handle_var_val = builder.use_var(info.var);
+                        let arr_f64_for_handle = ensure_f64(builder, handle_var_val);
+                        let handle_get_func = extern_funcs.get("js_dynamic_array_get")
+                            .ok_or_else(|| anyhow!("js_dynamic_array_get not declared"))?;
+                        let handle_get_ref = module.declare_func_in_func(*handle_get_func, builder.func);
+                        let handle_call = builder.ins().call(handle_get_ref, &[arr_f64_for_handle, idx_i32]);
+                        let handle_result = builder.inst_results(handle_call)[0];
+                        builder.ins().jump(merge_block, &[handle_result]);
+
+                        // Native block: normal array access
+                        builder.switch_to_block(native_block);
+                        builder.seal_block(native_block);
+
                         // Use safe js_array_get_jsvalue for:
                         // - Mixed-type arrays (explicitly marked)
                         // - Union-typed arrays (from await, JSON.parse, etc.)
                         // - Arrays that might contain NaN-boxed pointers (objects/strings)
                         // The inline optimization is only safe for pure number arrays
-                        if info.is_mixed_array || info.is_union {
+                        let native_result = if info.is_mixed_array || info.is_union {
                             // For mixed-type arrays, use js_array_get_jsvalue which returns u64 (JSValue bits)
                             // The result is used as-is since it's already NaN-boxed
                             let get_func = extern_funcs.get("js_array_get_jsvalue")
@@ -13977,7 +14002,7 @@ pub(crate) fn compile_expr(
                             let call = builder.ins().call(func_ref, &[arr_ptr, idx_i32]);
                             let jsvalue_bits = builder.inst_results(call)[0];
                             // Convert u64 to f64 for uniform value representation
-                            return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), jsvalue_bits));
+                            builder.ins().bitcast(types::F64, MemFlags::new(), jsvalue_bits)
                         } else {
                             // OPTIMIZED inline array access:
                             // element address = arr_ptr + 8 + index * 8
@@ -13985,9 +14010,15 @@ pub(crate) fn compile_expr(
                             let byte_offset = builder.ins().ishl_imm(idx_i64, 3); // index * 8
                             let data_ptr = builder.ins().iadd_imm(arr_ptr, 8); // arr + 8
                             let element_ptr = builder.ins().iadd(data_ptr, byte_offset);
-                            let value = builder.ins().load(types::F64, MemFlags::new(), element_ptr, 0);
-                            return Ok(value);
-                        }
+                            builder.ins().load(types::F64, MemFlags::new(), element_ptr, 0)
+                        };
+                        builder.ins().jump(merge_block, &[native_result]);
+
+                        // Merge block
+                        builder.switch_to_block(merge_block);
+                        builder.seal_block(merge_block);
+                        let result = builder.block_params(merge_block)[0];
+                        return Ok(result);
                     } else if info.is_string {
                         // String character access: str[i] returns single-character string
                         let str_f64 = if info.is_boxed {
@@ -16147,7 +16178,7 @@ pub(crate) fn compile_expr(
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
                     }
-                    "widgetAddChild" | "widgetRemoveChild" => {
+                    "widgetAddChild" | "widgetRemoveChild" | "frameSplitAddChild" => {
                         // (parent, child) — extract 2 handles
                         let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
                             .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
@@ -16163,6 +16194,8 @@ pub(crate) fn compile_expr(
 
                         let ffi_name = if method == "widgetRemoveChild" {
                             "perry_ui_widget_remove_child"
+                        } else if method == "frameSplitAddChild" {
+                            "perry_ui_frame_split_add_child"
                         } else {
                             "perry_ui_widget_add_child"
                         };
@@ -17104,6 +17137,8 @@ pub(crate) fn compile_expr(
                 ("perry/ui", false, "LazyVStack") => "perry_ui_lazyvstack_create",
                 ("perry/ui", false, "Table") => "perry_ui_table_create",
                 ("perry/ui", false, "TabBar") => "perry_ui_tabbar_create",
+                // Frame-based layout (iOS)
+                ("perry/ui", false, "frameSplitCreate") => "perry_ui_frame_split_create",
                 // Widget instance methods
                 ("perry/ui", true, "setValue") => "perry_ui_progressview_set_value",
                 ("perry/ui", true, "setSize") => "perry_ui_image_set_size",

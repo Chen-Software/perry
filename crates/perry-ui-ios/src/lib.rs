@@ -35,8 +35,68 @@ pub extern "C" fn perry_ui_embed_nsview(uiview_ptr: i64) -> i64 {
         return 0;
     }
     match unsafe { Retained::retain(uiview_ptr as *mut UIView) } {
-        Some(view) => widgets::register_widget(view),
+        Some(view) => {
+            // Disable autoresizing mask → Auto Layout constraint translation.
+            // Without this, the embedded view's autoresizing mask conflicts with
+            // UIStackView layout constraints, causing black screen in HStack.
+            let _: () = unsafe { objc2::msg_send![&*view, setTranslatesAutoresizingMaskIntoConstraints: false] };
+            widgets::register_widget(view)
+        },
         None => 0,
+    }
+}
+
+/// Create a split view container (plain UIView with Auto Layout, not UIStackView).
+/// Left panel gets fixed width; right panel fills remaining space.
+#[no_mangle]
+pub extern "C" fn perry_ui_splitview_create(left_width: f64) -> i64 {
+    widgets::splitview::create(left_width)
+}
+
+/// Add a child to a split view. First call adds left panel, second adds right panel.
+#[no_mangle]
+pub extern "C" fn perry_ui_splitview_add_child(parent_handle: i64, child_handle: i64, child_index: f64) {
+    if let (Some(parent), Some(child)) = (widgets::get_widget(parent_handle), widgets::get_widget(child_handle)) {
+        widgets::splitview::add_child(&parent, &child, child_index as usize);
+    }
+}
+
+/// Create a vertical layout container (plain UIView, not UIStackView).
+#[no_mangle]
+pub extern "C" fn perry_ui_vbox_create() -> i64 {
+    widgets::splitview::create_vbox()
+}
+
+/// Add a child to a vbox at a slot: 0=top, 1=middle(fills), 2=bottom.
+#[no_mangle]
+pub extern "C" fn perry_ui_vbox_add_child(parent_handle: i64, child_handle: i64, slot: f64) {
+    if let (Some(parent), Some(child)) = (widgets::get_widget(parent_handle), widgets::get_widget(child_handle)) {
+        widgets::splitview::vbox_add_child(&parent, &child, slot as usize);
+    }
+}
+
+/// Finalize vbox layout by connecting middle.bottom to bottom.top.
+#[no_mangle]
+pub extern "C" fn perry_ui_vbox_finalize(parent_handle: i64) {
+    if let Some(parent) = widgets::get_widget(parent_handle) {
+        widgets::splitview::vbox_finalize(&parent);
+    }
+}
+
+/// Create a frame-based horizontal split container.
+/// Uses layoutSubviews for child positioning (no Auto Layout on children).
+/// This avoids constraint conflicts with embedded UIViews.
+#[no_mangle]
+pub extern "C" fn perry_ui_frame_split_create(left_width: f64) -> i64 {
+    widgets::splitview::create_frame_split(left_width)
+}
+
+/// Add a child to a frame-based split container.
+/// Children use frame-based layout (translatesAutoresizingMaskIntoConstraints = true).
+#[no_mangle]
+pub extern "C" fn perry_ui_frame_split_add_child(parent_handle: i64, child_handle: i64) {
+    if let (Some(parent), Some(child)) = (widgets::get_widget(parent_handle), widgets::get_widget(child_handle)) {
+        widgets::splitview::frame_split_add_child(&parent, &child);
     }
 }
 
@@ -222,6 +282,11 @@ pub extern "C" fn perry_ui_text_set_font_weight(handle: i64, size: f64, weight: 
 }
 
 #[no_mangle]
+pub extern "C" fn perry_ui_text_set_wraps(handle: i64, max_width: f64) {
+    widgets::text::set_wraps(handle, max_width);
+}
+
+#[no_mangle]
 pub extern "C" fn perry_ui_text_set_selectable(handle: i64, selectable: f64) {
     widgets::text::set_selectable(handle, selectable != 0.0);
 }
@@ -242,13 +307,77 @@ pub extern "C" fn perry_ui_button_set_text_color(handle: i64, r: f64, g: f64, b:
 }
 
 #[no_mangle]
+pub extern "C" fn perry_ui_button_set_image(handle: i64, name_ptr: i64) {
+    widgets::button::set_image(handle, name_ptr as *const u8);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_button_set_image_position(handle: i64, position: i64) {
+    widgets::button::set_image_position(handle, position);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_button_set_content_tint_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    widgets::button::set_content_tint_color(handle, r, g, b, a);
+}
+
+#[no_mangle]
 pub extern "C" fn perry_ui_widget_set_width(handle: i64, width: f64) {
     widgets::set_width(handle, width);
 }
 
 #[no_mangle]
+pub extern "C" fn perry_ui_widget_set_height(handle: i64, height: f64) {
+    widgets::set_height(handle, height);
+}
+
+#[no_mangle]
 pub extern "C" fn perry_ui_widget_set_hugging(handle: i64, priority: f64) {
     widgets::set_hugging_priority(handle, priority);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_remove_child(parent_handle: i64, child_handle: i64) {
+    widgets::remove_child(parent_handle, child_handle);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_reorder_child(parent_handle: i64, from_index: f64, to_index: f64) {
+    widgets::reorder_child(parent_handle, from_index as i64, to_index as i64);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_match_parent_width(handle: i64) {
+    widgets::match_parent_width(handle);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_match_parent_height(handle: i64) {
+    widgets::match_parent_height(handle);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_stack_set_detaches_hidden(handle: i64, flag: i64) {
+    widgets::set_detaches_hidden_views(handle, flag != 0);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_stack_set_distribution(handle: i64, distribution: f64) {
+    // UIStackView distribution: 0=Fill, 1=FillEqually, 2=FillProportionally, 3=EqualSpacing, 4=EqualCentering
+    if let Some(view) = widgets::get_widget(handle) {
+        let is_stack = if let Some(cls) = objc2::runtime::AnyClass::get(c"UIStackView") {
+            use objc2_foundation::NSObjectProtocol;
+            view.isKindOfClass(cls)
+        } else {
+            false
+        };
+        if is_stack {
+            let dist = if distribution < 0.0 { 0_i64 } else { distribution as i64 };
+            unsafe {
+                let _: () = objc2::msg_send![&*view, setDistribution: dist];
+            }
+        }
+    }
 }
 
 // =============================================================================
@@ -352,6 +481,16 @@ pub extern "C" fn perry_ui_app_set_max_size(app_handle: i64, w: f64, h: f64) {
 #[no_mangle]
 pub extern "C" fn perry_ui_textfield_set_string(handle: i64, text_ptr: i64) {
     widgets::textfield::set_string_value(handle, text_ptr as *const u8);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_textfield_get_string(handle: i64) -> i64 {
+    widgets::textfield::get_string_value(handle) as i64
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_textfield_set_on_submit(handle: i64, on_submit: f64) {
+    widgets::textfield::set_on_submit(handle, on_submit);
 }
 
 #[no_mangle]
@@ -747,6 +886,63 @@ pub extern "C" fn perry_system_preferences_get(key_ptr: i64) -> f64 {
     }
 }
 
+/// Set border color on a widget via its CALayer.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_border_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    if let Some(view) = widgets::get_widget(handle) {
+        unsafe {
+            let layer: *mut objc2::runtime::AnyObject = objc2::msg_send![&*view, layer];
+            if !layer.is_null() {
+                let cg_color = widgets::create_cg_color(r, g, b, a);
+                let _: () = objc2::msg_send![layer, setBorderColor: cg_color];
+            }
+        }
+    }
+}
+
+/// Set border width on a widget via its CALayer.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_border_width(handle: i64, width: f64) {
+    if let Some(view) = widgets::get_widget(handle) {
+        unsafe {
+            let layer: *mut objc2::runtime::AnyObject = objc2::msg_send![&*view, layer];
+            if !layer.is_null() {
+                let _: () = objc2::msg_send![layer, setBorderWidth: width];
+            }
+        }
+    }
+}
+
+/// Set edge insets (padding) on a UIStackView. No-op for other widget types.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_edge_insets(handle: i64, top: f64, left: f64, bottom: f64, right: f64) {
+    if let Some(view) = widgets::get_widget(handle) {
+        unsafe {
+            let is_stack = if let Some(cls) = objc2::runtime::AnyClass::get(c"UIStackView") {
+                use objc2_foundation::NSObjectProtocol;
+                view.isKindOfClass(cls)
+            } else {
+                false
+            };
+            if is_stack {
+                let _: () = objc2::msg_send![&*view, setLayoutMarginsRelativeArrangement: true];
+                let insets = objc2_ui_kit::UIEdgeInsets { top, left, bottom, right };
+                let _: () = objc2::msg_send![&*view, setDirectionalLayoutMargins: insets];
+            }
+        }
+    }
+}
+
+/// Set view opacity (alpha) in [0.0, 1.0].
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_opacity(handle: i64, alpha: f64) {
+    if let Some(view) = widgets::get_widget(handle) {
+        unsafe {
+            let _: () = objc2::msg_send![&*view, setAlpha: alpha];
+        }
+    }
+}
+
 /// Set the font family on a Text widget.
 #[no_mangle]
 pub extern "C" fn perry_ui_text_set_font_family(handle: i64, family_ptr: i64) {
@@ -781,6 +977,30 @@ pub extern "C" fn perry_ui_text_set_font_family(handle: i64, family_ptr: i64) {
             let _: () = objc2::msg_send![&*view, setFont: &*font];
         }
     }
+}
+
+// =============================================================================
+// QR Code
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_qrcode_create(data_ptr: i64, size: f64) -> i64 {
+    widgets::qrcode::create(data_ptr as *const u8, size)
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_qrcode_set_data(handle: i64, data_ptr: i64) {
+    widgets::qrcode::set_data(handle, data_ptr as *const u8);
+}
+
+// =============================================================================
+// Folder Dialog
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_open_folder_dialog(callback: f64) {
+    // iOS: UIDocumentPickerViewController for directories — stub for now
+    file_dialog::open_dialog(callback);
 }
 
 // =============================================================================
@@ -824,6 +1044,96 @@ pub extern "C" fn perry_ui_sheet_present(_sheet: i64) {}
 
 #[no_mangle]
 pub extern "C" fn perry_ui_sheet_dismiss(_sheet: i64) {}
+
+// =============================================================================
+// Screen Detection (iPad vs iPhone, orientation)
+// =============================================================================
+
+extern "C" {
+    fn js_string_from_bytes(ptr: *const u8, len: i64) -> *const u8;
+    fn js_nanbox_string(ptr: i64) -> f64;
+}
+
+fn nanbox_static_str(s: &'static [u8]) -> f64 {
+    let ptr = unsafe { js_string_from_bytes(s.as_ptr(), s.len() as i64) };
+    unsafe { js_nanbox_string(ptr as i64) }
+}
+
+/// perry_get_screen_width() → logical width in points (e.g. 820 for iPad Air portrait)
+#[no_mangle]
+pub extern "C" fn perry_get_screen_width() -> f64 {
+    unsafe {
+        let screen_cls = objc2::runtime::AnyClass::get(c"UIScreen").unwrap();
+        let main_screen: *mut objc2::runtime::AnyObject = objc2::msg_send![screen_cls, mainScreen];
+        // UIScreen.bounds is orientation-aware since iOS 8
+        let bounds: objc2_core_foundation::CGRect = objc2::msg_send![main_screen, bounds];
+        bounds.size.width
+    }
+}
+
+/// perry_get_screen_height() → logical height in points
+#[no_mangle]
+pub extern "C" fn perry_get_screen_height() -> f64 {
+    unsafe {
+        let screen_cls = objc2::runtime::AnyClass::get(c"UIScreen").unwrap();
+        let main_screen: *mut objc2::runtime::AnyObject = objc2::msg_send![screen_cls, mainScreen];
+        let bounds: objc2_core_foundation::CGRect = objc2::msg_send![main_screen, bounds];
+        bounds.size.height
+    }
+}
+
+/// perry_get_scale_factor() → device pixel ratio (e.g. 2.0 for iPad, 3.0 for iPhone Pro)
+#[no_mangle]
+pub extern "C" fn perry_get_scale_factor() -> f64 {
+    unsafe {
+        let screen_cls = objc2::runtime::AnyClass::get(c"UIScreen").unwrap();
+        let main_screen: *mut objc2::runtime::AnyObject = objc2::msg_send![screen_cls, mainScreen];
+        let scale: f64 = objc2::msg_send![main_screen, scale];
+        scale
+    }
+}
+
+/// perry_get_orientation() → "landscape" or "portrait"
+#[no_mangle]
+pub extern "C" fn perry_get_orientation() -> f64 {
+    unsafe {
+        let screen_cls = objc2::runtime::AnyClass::get(c"UIScreen").unwrap();
+        let main_screen: *mut objc2::runtime::AnyObject = objc2::msg_send![screen_cls, mainScreen];
+        let bounds: objc2_core_foundation::CGRect = objc2::msg_send![main_screen, bounds];
+        if bounds.size.width > bounds.size.height {
+            nanbox_static_str(b"landscape")
+        } else {
+            nanbox_static_str(b"portrait")
+        }
+    }
+}
+
+/// perry_get_device_idiom() → 0 = phone, 1 = pad
+/// Uses UIDevice.model string comparison (more reliable than userInterfaceIdiom
+/// which can return 0 before full UIApplication init on iOS 26 simulator).
+#[no_mangle]
+pub extern "C" fn perry_get_device_idiom() -> f64 {
+    unsafe {
+        let device_cls = objc2::runtime::AnyClass::get(c"UIDevice").unwrap();
+        let current: *mut objc2::runtime::AnyObject = objc2::msg_send![device_cls, currentDevice];
+
+        // Check UIDevice.model — returns @"iPad" on iPad, @"iPhone" on iPhone
+        let model: *mut objc2::runtime::AnyObject = objc2::msg_send![current, model];
+        let utf8: *const u8 = objc2::msg_send![model, UTF8String];
+        if !utf8.is_null() {
+            // "iPad" starts with 'i' (0x69) then 'P' (0x50)
+            // "iPhone" starts with 'i' (0x69) then 'P' (0x50) too...
+            // Actually: "iPad" has 4 chars, "iPhone" has 6 chars
+            // Check 3rd char: 'a' (0x61) for iPad vs 'h' (0x68) for iPhone
+            let third = *utf8.add(2);
+            if third == b'a' {
+                // "iPad"
+                return 1.0;
+            }
+        }
+        0.0
+    }
+}
 
 // =============================================================================
 // App Lifecycle

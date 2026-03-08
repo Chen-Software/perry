@@ -18,6 +18,7 @@ pub mod navstack;
 pub mod lazyvstack;
 pub mod image;
 pub mod tabbar;
+pub mod qrcode;
 
 use jni::objects::{GlobalRef, JObject, JValue};
 use std::sync::Mutex;
@@ -402,6 +403,237 @@ pub fn animate_position(handle: i64, dx: f64, dy: f64, duration_ms: f64) {
     }
 }
 
+/// Set a fixed width on a widget via LayoutParams.
+pub fn set_width(handle: i64, width: f64) {
+    if let Some(view_ref) = get_widget(handle) {
+        let mut env = jni_bridge::get_env();
+        let _ = env.push_local_frame(16);
+        let width_px = dp_to_px(&mut env, width as f32);
+        if let Ok(lp) = env.call_method(view_ref.as_obj(), "getLayoutParams",
+            "()Landroid/view/ViewGroup$LayoutParams;", &[]) {
+            if let Ok(lp_obj) = lp.l() {
+                if !lp_obj.is_null() {
+                    let _ = env.set_field(&lp_obj, "width", "I", JValue::Int(width_px));
+                    // Clear weight so width is respected
+                    if env.is_instance_of(&lp_obj, "android/widget/LinearLayout$LayoutParams").unwrap_or(false) {
+                        let _ = env.set_field(&lp_obj, "weight", "F", JValue::Float(0.0));
+                    }
+                    let _ = env.call_method(view_ref.as_obj(), "setLayoutParams",
+                        "(Landroid/view/ViewGroup$LayoutParams;)V", &[JValue::Object(&lp_obj)]);
+                } else {
+                    // No LayoutParams yet — create one
+                    let params = env.new_object(
+                        "android/widget/LinearLayout$LayoutParams",
+                        "(II)V",
+                        &[JValue::Int(width_px), JValue::Int(-2)], // -2 = WRAP_CONTENT
+                    );
+                    if let Ok(params) = params {
+                        let _ = env.call_method(view_ref.as_obj(), "setLayoutParams",
+                            "(Landroid/view/ViewGroup$LayoutParams;)V", &[JValue::Object(&params)]);
+                    }
+                }
+            }
+        }
+        unsafe { env.pop_local_frame(&JObject::null()); }
+    }
+}
+
+/// Set a fixed height on a widget via LayoutParams.
+pub fn set_height(handle: i64, height: f64) {
+    if let Some(view_ref) = get_widget(handle) {
+        let mut env = jni_bridge::get_env();
+        let _ = env.push_local_frame(16);
+        let height_px = dp_to_px(&mut env, height as f32);
+        if let Ok(lp) = env.call_method(view_ref.as_obj(), "getLayoutParams",
+            "()Landroid/view/ViewGroup$LayoutParams;", &[]) {
+            if let Ok(lp_obj) = lp.l() {
+                if !lp_obj.is_null() {
+                    let _ = env.set_field(&lp_obj, "height", "I", JValue::Int(height_px));
+                    let _ = env.call_method(view_ref.as_obj(), "setLayoutParams",
+                        "(Landroid/view/ViewGroup$LayoutParams;)V", &[JValue::Object(&lp_obj)]);
+                } else {
+                    let params = env.new_object(
+                        "android/widget/LinearLayout$LayoutParams",
+                        "(II)V",
+                        &[JValue::Int(-2), JValue::Int(height_px)], // -2 = WRAP_CONTENT
+                    );
+                    if let Ok(params) = params {
+                        let _ = env.call_method(view_ref.as_obj(), "setLayoutParams",
+                            "(Landroid/view/ViewGroup$LayoutParams;)V", &[JValue::Object(&params)]);
+                    }
+                }
+            }
+        }
+        unsafe { env.pop_local_frame(&JObject::null()); }
+    }
+}
+
+/// Remove a single child view from a parent ViewGroup.
+pub fn remove_child(parent_handle: i64, child_handle: i64) {
+    if let (Some(parent_ref), Some(child_ref)) = (get_widget(parent_handle), get_widget(child_handle)) {
+        let mut env = jni_bridge::get_env();
+        let _ = env.push_local_frame(8);
+        let _ = env.call_method(
+            parent_ref.as_obj(),
+            "removeView",
+            "(Landroid/view/View;)V",
+            &[JValue::Object(child_ref.as_obj())],
+        );
+        unsafe { env.pop_local_frame(&JObject::null()); }
+    }
+}
+
+/// Reorder a child widget within a parent ViewGroup by index.
+pub fn reorder_child(parent_handle: i64, from_index: i64, to_index: i64) {
+    if let Some(parent_ref) = get_widget(parent_handle) {
+        let mut env = jni_bridge::get_env();
+        let _ = env.push_local_frame(16);
+        // Get child at from_index
+        let child_result = env.call_method(
+            parent_ref.as_obj(),
+            "getChildAt",
+            "(I)Landroid/view/View;",
+            &[JValue::Int(from_index as i32)],
+        );
+        if let Ok(child_val) = child_result {
+            if let Ok(child_obj) = child_val.l() {
+                if !child_obj.is_null() {
+                    // Remove and re-add at target index
+                    let _ = env.call_method(parent_ref.as_obj(), "removeViewAt", "(I)V",
+                        &[JValue::Int(from_index as i32)]);
+                    let _ = env.call_method(parent_ref.as_obj(), "addView",
+                        "(Landroid/view/View;I)V",
+                        &[JValue::Object(&child_obj), JValue::Int(to_index as i32)]);
+                }
+            }
+        }
+        unsafe { env.pop_local_frame(&JObject::null()); }
+    }
+}
+
+/// Pin a child view's width to match its parent (MATCH_PARENT).
+pub fn match_parent_width(child_handle: i64) {
+    if let Some(view_ref) = get_widget(child_handle) {
+        let mut env = jni_bridge::get_env();
+        let _ = env.push_local_frame(16);
+        if let Ok(lp) = env.call_method(view_ref.as_obj(), "getLayoutParams",
+            "()Landroid/view/ViewGroup$LayoutParams;", &[]) {
+            if let Ok(lp_obj) = lp.l() {
+                if !lp_obj.is_null() {
+                    let _ = env.set_field(&lp_obj, "width", "I", JValue::Int(-1)); // MATCH_PARENT
+                    let _ = env.call_method(view_ref.as_obj(), "setLayoutParams",
+                        "(Landroid/view/ViewGroup$LayoutParams;)V", &[JValue::Object(&lp_obj)]);
+                }
+            }
+        }
+        unsafe { env.pop_local_frame(&JObject::null()); }
+    }
+}
+
+/// Pin a child view's height to match its parent (MATCH_PARENT).
+pub fn match_parent_height(child_handle: i64) {
+    if let Some(view_ref) = get_widget(child_handle) {
+        let mut env = jni_bridge::get_env();
+        let _ = env.push_local_frame(16);
+        if let Ok(lp) = env.call_method(view_ref.as_obj(), "getLayoutParams",
+            "()Landroid/view/ViewGroup$LayoutParams;", &[]) {
+            if let Ok(lp_obj) = lp.l() {
+                if !lp_obj.is_null() {
+                    let _ = env.set_field(&lp_obj, "height", "I", JValue::Int(-1)); // MATCH_PARENT
+                    let _ = env.call_method(view_ref.as_obj(), "setLayoutParams",
+                        "(Landroid/view/ViewGroup$LayoutParams;)V", &[JValue::Object(&lp_obj)]);
+                }
+            }
+        }
+        unsafe { env.pop_local_frame(&JObject::null()); }
+    }
+}
+
+/// Set detachesHiddenViews equivalent — no-op on Android.
+/// LinearLayout already excludes GONE views from layout.
+pub fn set_detaches_hidden_views(_handle: i64, _detaches: bool) {
+    // No-op: Android LinearLayout already excludes GONE views from layout.
+}
+
+/// Set border color on a widget via GradientDrawable stroke.
+pub fn set_border_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    if let Some(view_ref) = get_widget(handle) {
+        let mut env = jni_bridge::get_env();
+        let _ = env.push_local_frame(16);
+        let color = argb_color(a, r, g, b);
+        // Try to reuse existing GradientDrawable
+        if let Ok(bg) = env.call_method(view_ref.as_obj(), "getBackground",
+            "()Landroid/graphics/drawable/Drawable;", &[]) {
+            if let Ok(bg_obj) = bg.l() {
+                if !bg_obj.is_null() {
+                    if env.is_instance_of(&bg_obj, "android/graphics/drawable/GradientDrawable").unwrap_or(false) {
+                        let _ = env.call_method(&bg_obj, "setStroke", "(II)V",
+                            &[JValue::Int(2), JValue::Int(color)]); // 2px default width
+                        unsafe { env.pop_local_frame(&JObject::null()); }
+                        return;
+                    }
+                }
+            }
+        }
+        // Create new GradientDrawable with border
+        let gd = env.new_object("android/graphics/drawable/GradientDrawable", "()V", &[])
+            .expect("GradientDrawable");
+        let _ = env.call_method(&gd, "setColor", "(I)V", &[JValue::Int(0)]); // transparent fill
+        let _ = env.call_method(&gd, "setStroke", "(II)V", &[JValue::Int(2), JValue::Int(color)]);
+        let _ = env.call_method(view_ref.as_obj(), "setBackground",
+            "(Landroid/graphics/drawable/Drawable;)V", &[JValue::Object(&gd)]);
+        unsafe { env.pop_local_frame(&JObject::null()); }
+    }
+}
+
+/// Set border width on a widget via GradientDrawable stroke.
+pub fn set_border_width(handle: i64, width: f64) {
+    if let Some(view_ref) = get_widget(handle) {
+        let mut env = jni_bridge::get_env();
+        let _ = env.push_local_frame(16);
+        let width_px = dp_to_px(&mut env, width as f32);
+        if let Ok(bg) = env.call_method(view_ref.as_obj(), "getBackground",
+            "()Landroid/graphics/drawable/Drawable;", &[]) {
+            if let Ok(bg_obj) = bg.l() {
+                if !bg_obj.is_null() {
+                    if env.is_instance_of(&bg_obj, "android/graphics/drawable/GradientDrawable").unwrap_or(false) {
+                        // setStroke requires both width and color
+                        let _ = env.call_method(&bg_obj, "setStroke", "(II)V",
+                            &[JValue::Int(width_px), JValue::Int(0xFF000000u32 as i32)]); // black default
+                    }
+                }
+            }
+        }
+        unsafe { env.pop_local_frame(&JObject::null()); }
+    }
+}
+
+/// Set edge insets (padding) on a widget.
+pub fn set_edge_insets(handle: i64, top: f64, left: f64, bottom: f64, right: f64) {
+    if let Some(view_ref) = get_widget(handle) {
+        let mut env = jni_bridge::get_env();
+        let _ = env.push_local_frame(8);
+        let t = dp_to_px(&mut env, top as f32);
+        let l = dp_to_px(&mut env, left as f32);
+        let b = dp_to_px(&mut env, bottom as f32);
+        let r = dp_to_px(&mut env, right as f32);
+        let _ = env.call_method(view_ref.as_obj(), "setPadding", "(IIII)V",
+            &[JValue::Int(l), JValue::Int(t), JValue::Int(r), JValue::Int(b)]);
+        unsafe { env.pop_local_frame(&JObject::null()); }
+    }
+}
+
+/// Set view opacity (alpha) in [0.0, 1.0].
+pub fn set_opacity(handle: i64, alpha: f64) {
+    if let Some(view_ref) = get_widget(handle) {
+        let mut env = jni_bridge::get_env();
+        let _ = env.push_local_frame(8);
+        let _ = env.call_method(view_ref.as_obj(), "setAlpha", "(F)V",
+            &[JValue::Float(alpha as f32)]);
+        unsafe { env.pop_local_frame(&JObject::null()); }
+    }
+}
+
 /// Set on-click callback for any widget (via PerryBridge).
 pub fn set_on_click(handle: i64, callback: f64) {
     if let Some(view_ref) = get_widget(handle) {
@@ -430,12 +662,13 @@ pub fn set_hugging(handle: i64, priority: f64) {
         let mut env = jni_bridge::get_env();
         let _ = env.push_local_frame(16);
         // Map hugging priority to weight: low hugging = high weight (expands more)
-        let weight = if priority < 100.0 { 1.0f32 } else { 0.0f32 };
-        // Create LinearLayout.LayoutParams(MATCH_PARENT, 0, weight) for vertical expansion
+        // weight>0 → height=0 (weight distributes remaining space)
+        // weight=0 → height=WRAP_CONTENT (-2) (view sizes to its content)
+        let (weight, height) = if priority < 100.0 { (1.0f32, 0) } else { (0.0f32, -2) };
         let params = env.new_object(
             "android/widget/LinearLayout$LayoutParams",
             "(IIF)V",
-            &[JValue::Int(-1), JValue::Int(0), JValue::Float(weight)],
+            &[JValue::Int(-1), JValue::Int(height), JValue::Float(weight)],
         );
         if let Ok(params) = params {
             let _ = env.call_method(

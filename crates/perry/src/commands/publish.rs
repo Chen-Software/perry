@@ -593,18 +593,31 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     };
 
     // .p12 certificate for code signing (path saved, password never saved)
-    let apple_certificate_path = if !is_android && !is_linux {
-        resolve_path_credential(
+    // Priority: explicit path (CLI/env/saved) → auto-export from Keychain → skip
+    let (apple_certificate_path, auto_exported_p12) = if !is_android && !is_linux {
+        // Check explicit path first (CLI flag, env var, or saved config)
+        let explicit_path = resolve_path_credential(
             args.certificate.as_deref(),
             "PERRY_APPLE_CERTIFICATE",
             saved.apple.as_ref().and_then(|a| a.certificate_path.as_deref()),
-            "  Apple .p12 certificate path (or press Enter to skip)",
-            interactive,
-        )
+            "", // empty prompt — don't prompt, we'll try auto-export instead
+            false, // never prompt for path
+        );
+        if explicit_path.is_some() {
+            (explicit_path, None)
+        } else {
+            // Try auto-export from Keychain
+            let auto = auto_export_p12_from_keychain(
+                apple_identity.as_deref(),
+                interactive,
+            );
+            (None, auto)
+        }
     } else {
-        None
+        (None, None)
     };
     let apple_certificate_password = if apple_certificate_path.is_some() {
+        // Explicit .p12 file — need password from user
         std::env::var("PERRY_APPLE_CERTIFICATE_PASSWORD")
             .ok()
             .filter(|s| !s.is_empty())
@@ -758,18 +771,21 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         None
     };
 
-    let apple_certificate_p12_b64 = if let Some(ref path_str) = apple_certificate_path {
+    let (apple_certificate_p12_b64, apple_certificate_password) = if let Some((b64, pass)) = auto_exported_p12 {
+        // Auto-exported from Keychain — data and password already available
+        (Some(b64), Some(pass))
+    } else if let Some(ref path_str) = apple_certificate_path {
         let path = Path::new(path_str);
         if path.exists() {
             use base64::Engine;
             let data = fs::read(path)
                 .with_context(|| format!("Failed to read .p12 certificate: {path_str}"))?;
-            Some(base64::engine::general_purpose::STANDARD.encode(&data))
+            (Some(base64::engine::general_purpose::STANDARD.encode(&data)), apple_certificate_password)
         } else {
-            None
+            (None, apple_certificate_password)
         }
     } else {
-        None
+        (None, None)
     };
 
     let google_play_json = if let Some(ref path_str) = google_play_key_path {
@@ -1494,6 +1510,152 @@ fn resolve_credential(
         }
     }
     None
+}
+
+/// Auto-detect a signing identity from the macOS Keychain and export it as .p12.
+/// Returns (base64_p12_data, password) or None if not on macOS, no identity found, or user declines.
+fn auto_export_p12_from_keychain(
+    configured_identity: Option<&str>,
+    interactive: bool,
+) -> Option<(String, String)> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    if !interactive {
+        return None;
+    }
+
+    // List available codesigning identities
+    let output = std::process::Command::new("security")
+        .args(["find-identity", "-v", "-p", "codesigning"])
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Parse identity lines: '  1) SHA1HASH "Identity Name"'
+    let mut identities: Vec<(String, String)> = Vec::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if !line.starts_with(|c: char| c.is_ascii_digit()) {
+            continue;
+        }
+        if let Some(quote_start) = line.find('"') {
+            if let Some(quote_end) = line.rfind('"') {
+                if quote_end > quote_start {
+                    let name = &line[quote_start + 1..quote_end];
+                    let after_paren = line.find(") ").map(|i| i + 2).unwrap_or(0);
+                    let hash_end = line.find(" \"").unwrap_or(line.len());
+                    if hash_end > after_paren {
+                        let hash = line[after_paren..hash_end].trim().to_string();
+                        identities.push((hash, name.to_string()));
+                    }
+                }
+            }
+        }
+    }
+
+    if identities.is_empty() {
+        return None;
+    }
+
+    // Match against configured identity or let user pick
+    let selected = if let Some(configured) = configured_identity {
+        identities
+            .iter()
+            .find(|(_, name)| name == configured)
+            .or_else(|| identities.iter().find(|(_, name)| name.contains(configured)))
+            .cloned()
+    } else {
+        None
+    };
+
+    let selected = if let Some(s) = selected {
+        s
+    } else {
+        let labels: Vec<&str> = identities.iter().map(|(_, n)| n.as_str()).collect();
+        let selection = Select::new()
+            .with_prompt("  Select signing identity from Keychain")
+            .items(&labels)
+            .default(0)
+            .interact()
+            .ok()?;
+        identities[selection].clone()
+    };
+
+    println!();
+    println!(
+        "  Found identity: {}",
+        style(&selected.1).bold()
+    );
+    let consent = Confirm::new()
+        .with_prompt("  Export this certificate from Keychain? (macOS will ask for access)")
+        .default(true)
+        .interact()
+        .unwrap_or(false);
+    if !consent {
+        return None;
+    }
+
+    // Generate a random password for the temp .p12 using system time as entropy
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let password: String = (0..24u64)
+        .map(|i| {
+            let v = ((seed.wrapping_mul(6364136223846793005).wrapping_add(i as u128 * 1442695040888963407)) >> 16) as u8 % 62;
+            match v {
+                0..=9 => (b'0' + v) as char,
+                10..=35 => (b'a' + v - 10) as char,
+                _ => (b'A' + v - 36) as char,
+            }
+        })
+        .collect();
+
+    // Export to temp .p12
+    let temp_path = std::env::temp_dir().join("perry-cert-export.p12");
+    let export_result = std::process::Command::new("security")
+        .args([
+            "export",
+            "-k",
+            &format!(
+                "{}/Library/Keychains/login.keychain-db",
+                std::env::var("HOME").unwrap_or_default()
+            ),
+            "-t",
+            "identities",
+            "-f",
+            "pkcs12",
+            "-P",
+            &password,
+            "-o",
+            &temp_path.to_string_lossy(),
+        ])
+        .output();
+
+    match export_result {
+        Ok(out) if out.status.success() => {}
+        _ => {
+            println!(
+                "  {} Could not export from Keychain.",
+                style("!").yellow()
+            );
+            return None;
+        }
+    }
+
+    // Read, base64-encode, clean up
+    let data = std::fs::read(&temp_path).ok()?;
+    let _ = std::fs::remove_file(&temp_path);
+
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+
+    println!(
+        "  {} Certificate exported successfully",
+        style("✓").green()
+    );
+    Some((b64, password))
 }
 
 /// Resolve a file path credential: CLI → env → saved config → interactive prompt.

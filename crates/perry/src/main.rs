@@ -100,6 +100,15 @@ fn transform_legacy_args(args: Vec<String>) -> Vec<String> {
 }
 
 fn main() -> Result<()> {
+    // Use a thread with a large stack (64 MB) to avoid stack overflow on large codebases
+    let builder = std::thread::Builder::new()
+        .name("perry-main".into())
+        .stack_size(64 * 1024 * 1024);
+    let handler = builder.spawn(|| main_inner()).unwrap();
+    handler.join().unwrap()
+}
+
+fn main_inner() -> Result<()> {
     env_logger::init();
 
     // Handle legacy invocation (perry file.ts -o out)

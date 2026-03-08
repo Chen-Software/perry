@@ -166,6 +166,64 @@ pub fn set_title(handle: i64, title_ptr: *const u8) {
     }
 }
 
+/// Set an SF Symbol image on a UIButton.
+pub fn set_image(handle: i64, name_ptr: *const u8) {
+    let name = str_from_header(name_ptr);
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            let ns_name = NSString::from_str(name);
+            // UIImage.systemImageNamed:
+            let img_cls = objc2::runtime::AnyClass::get(c"UIImage").unwrap();
+            let img: *mut AnyObject = msg_send![img_cls, systemImageNamed: &*ns_name];
+            if !img.is_null() {
+                // Apply large symbol configuration
+                let config_cls = objc2::runtime::AnyClass::get(c"UIImageSymbolConfiguration");
+                if let Some(config_cls) = config_cls {
+                    // UIImageSymbolScale: 1=small, 2=medium, 3=large
+                    let config: *mut AnyObject = msg_send![
+                        config_cls, configurationWithScale: 3_i64
+                    ];
+                    if !config.is_null() {
+                        let scaled_img: *mut AnyObject = msg_send![img, imageWithConfiguration: config];
+                        if !scaled_img.is_null() {
+                            let _: () = msg_send![&*view, setImage: scaled_img, forState: 0_u64];
+                        } else {
+                            let _: () = msg_send![&*view, setImage: img, forState: 0_u64];
+                        }
+                    } else {
+                        let _: () = msg_send![&*view, setImage: img, forState: 0_u64];
+                    }
+                } else {
+                    let _: () = msg_send![&*view, setImage: img, forState: 0_u64];
+                }
+            }
+        }
+    }
+}
+
+/// Set the image position of a UIButton (no-op on iOS — UIButton handles layout differently).
+pub fn set_image_position(_handle: i64, _position: i64) {
+    // iOS UIButton doesn't have NSImagePosition.
+    // Image placement is controlled by configuration or content edge insets.
+    // No-op for compatibility.
+}
+
+/// Set the tint color of a UIButton (affects SF Symbol icon color).
+pub fn set_content_tint_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            let color: objc2::rc::Retained<AnyObject> = msg_send![
+                objc2::runtime::AnyClass::get(c"UIColor").unwrap(),
+                colorWithRed: r,
+                green: g,
+                blue: b,
+                alpha: a
+            ];
+            let _: () = msg_send![&*view, setTintColor: &*color];
+        }
+    }
+}
+
 thread_local! {
     static TAP_CALLBACKS: RefCell<HashMap<usize, f64>> = RefCell::new(HashMap::new());
 }

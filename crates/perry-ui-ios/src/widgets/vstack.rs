@@ -32,7 +32,7 @@ unsafe impl objc2::encode::RefEncode for UIEdgeInsets {
     );
 }
 
-/// Create a UIStackView with vertical axis.
+/// Create a UIStackView with vertical axis (no default edge insets — matches macOS).
 pub fn create(spacing: f64) -> i64 {
     unsafe {
         let stack: Retained<UIStackView> = msg_send![
@@ -42,12 +42,8 @@ pub fn create(spacing: f64) -> i64 {
         let _: () = msg_send![&*stack, setAxis: 1i64]; // UILayoutConstraintAxisVertical = 1
         let _: () = msg_send![&*stack, setSpacing: spacing as objc2_core_foundation::CGFloat];
         let _: () = msg_send![&*stack, setAlignment: 0i64]; // UIStackViewAlignmentFill = 0
+        let _: () = msg_send![&*stack, setDistribution: 0i64]; // UIStackViewDistributionFill = 0
         let _: () = msg_send![&*stack, setTranslatesAutoresizingMaskIntoConstraints: false];
-
-        // Set layout margins for padding
-        let insets = UIEdgeInsets { top: 20.0, left: 20.0, bottom: 20.0, right: 20.0 };
-        let _: () = msg_send![&*stack, setLayoutMargins: insets];
-        let _: () = msg_send![&*stack, setLayoutMarginsRelativeArrangement: true];
 
         let view: Retained<UIView> = Retained::cast_unchecked(stack);
         super::register_widget(view)

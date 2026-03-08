@@ -109,6 +109,30 @@ pub extern "C" fn js_set_new_from_handle_v8(func: JsNewFromHandleV8Fn) {
     JS_NEW_FROM_HANDLE_V8.store(func as *mut (), Ordering::SeqCst);
 }
 
+/// Get element from a JS handle array. Dispatches through the function pointer
+/// set by perry-jsruntime, or returns TAG_UNDEFINED if JS runtime not loaded.
+#[no_mangle]
+pub extern "C" fn js_handle_array_get(array_handle: f64, index: i32) -> f64 {
+    let ptr = JS_HANDLE_ARRAY_GET.load(Ordering::Relaxed);
+    if ptr.is_null() {
+        return f64::from_bits(TAG_UNDEFINED);
+    }
+    let func: JsHandleArrayGetFn = unsafe { std::mem::transmute(ptr) };
+    func(array_handle, index)
+}
+
+/// Get length of a JS handle array. Dispatches through the function pointer
+/// set by perry-jsruntime, or returns 0 if JS runtime not loaded.
+#[no_mangle]
+pub extern "C" fn js_handle_array_length(array_handle: f64) -> i32 {
+    let ptr = JS_HANDLE_ARRAY_LENGTH.load(Ordering::Relaxed);
+    if ptr.is_null() {
+        return 0;
+    }
+    let func: JsHandleArrayLengthFn = unsafe { std::mem::transmute(ptr) };
+    func(array_handle)
+}
+
 /// Try to load a property from a native module via V8 JS runtime.
 /// Returns TAG_UNDEFINED if JS runtime is not available or property not found.
 pub fn native_module_try_js_property(module_name: &str, property_name: &str) -> f64 {
@@ -381,12 +405,8 @@ impl Default for JSValue {
 pub extern "C" fn js_nanbox_pointer(ptr: i64) -> f64 {
     // Guard: null pointer (ptr == 0) must NOT produce null POINTER_TAG (0x7FFD_0000_0000_0000).
     // Null POINTER_TAG causes crashes when code tries to dereference it as a real object pointer.
-    // Main source: Perry captures an uninitialized I64 variable (value=0) in a closure
-    // that is created inside the variable's own initializer (self-referential closures like
-    // @noble/curves `const f = { pow: (x) => FpPow(f, x) }`). Return TAG_NULL instead so
-    // method calls on it return undefined gracefully rather than crashing.
     if ptr == 0 {
-        return f64::from_bits(TAG_NULL); // JS null — not callable, method calls return undefined
+        return f64::from_bits(TAG_NULL);
     }
     let bits = ptr as u64;
     // If value already has a NaN-box tag (top bits in NaN range), preserve it
@@ -1043,6 +1063,15 @@ pub extern "C" fn js_is_truthy(value: f64) -> i32 {
             return 0;
         }
         return 1;
+    }
+
+    // Check for BigInt (0n is falsy, non-zero is truthy)
+    if (bits & !POINTER_MASK) == BIGINT_TAG {
+        let ptr = (bits & POINTER_MASK) as *const u8;
+        if ptr.is_null() {
+            return 0;
+        }
+        return if crate::bigint::js_bigint_is_zero(ptr as *const crate::bigint::BigIntHeader) != 0 { 0 } else { 1 };
     }
 
     // Check for JS handle (always truthy - they represent objects)

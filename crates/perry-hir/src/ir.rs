@@ -26,9 +26,9 @@ pub const NATIVE_MODULES: &[&str] = &[
     "nanoid",
     "slugify",
     "validator",
-    // ethers: NOT native — runs entirely through V8 interop.
-    // Native stubs only covered utility functions; Contract/Provider/Wallet
-    // require the full ethers.js library running in V8.
+    // ethers utility functions (formatUnits, parseUnits, getAddress, etc.) have native stubs.
+    // Contract/Provider are NOT implemented natively — use raw JSON-RPC fetch instead.
+    "ethers",
     // Node.js built-ins
     "events",
     "os",

@@ -184,6 +184,11 @@
 #[no_mangle] pub extern "C" fn js_fastify_req_url() -> i64 { 0 }
 #[no_mangle] pub extern "C" fn js_fastify_route() -> i64 { 0 }
 #[no_mangle] pub extern "C" fn js_fastify_set_error_handler() -> i64 { 0 }
+// js_fetch_stream_* — not yet implemented for Android
+#[no_mangle] pub extern "C" fn js_fetch_stream_start() -> i64 { 0 }
+#[no_mangle] pub extern "C" fn js_fetch_stream_poll() -> i64 { 0 }
+#[no_mangle] pub extern "C" fn js_fetch_stream_close() -> i64 { 0 }
+#[no_mangle] pub extern "C" fn js_fetch_stream_status() -> i64 { 0 }
 // js_fetch_* — real implementations in fetch.rs
 #[no_mangle] pub extern "C" fn js_get_export() -> i64 { 0 }
 #[no_mangle] pub extern "C" fn js_http_request_body() -> i64 { 0 }

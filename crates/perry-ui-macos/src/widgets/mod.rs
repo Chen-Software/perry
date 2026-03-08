@@ -65,6 +65,11 @@ pub fn register_external_nsview(nsview_ptr: i64) -> i64 {
             unsafe {
                 let _: () = objc2::msg_send![&*nsview, setTranslatesAutoresizingMaskIntoConstraints: false];
             }
+            // Set low content hugging so it stretches in both axes.
+            unsafe {
+                let _: () = msg_send![&*nsview, setContentHuggingPriority: 1.0f32 forOrientation: 0i64]; // horizontal
+                let _: () = msg_send![&*nsview, setContentHuggingPriority: 1.0f32 forOrientation: 1i64]; // vertical
+            }
             register_widget(nsview)
         },
         None => {
@@ -525,6 +530,45 @@ pub fn set_hugging_priority(handle: i64, priority: f64) {
             priority as f32, NSLayoutConstraintOrientation::Horizontal);
         view.setContentHuggingPriority_forOrientation(
             priority as f32, NSLayoutConstraintOrientation::Vertical);
+    }
+}
+
+/// Pin a child view's width to match its containing NSStackView.
+/// Walks the superview chain to find the nearest NSStackView, then pins
+/// the child's widthAnchor to that stack's widthAnchor. Useful for VStack
+/// children (especially embedded NSViews) that should stretch horizontally.
+pub fn match_parent_width(child_handle: i64) {
+    if let Some(child) = get_widget(child_handle) {
+        unsafe {
+            // Walk up the superview chain to find the NSStackView.
+            // NSStackView may wrap arranged subviews in intermediate views.
+            let stack_cls = AnyClass::get(c"NSStackView");
+            if stack_cls.is_none() {
+                eprintln!("match_parent_width: NSStackView class not found");
+                return;
+            }
+            let stack_cls = stack_cls.unwrap();
+            let mut sv: *const NSView = msg_send![&*child, superview];
+            let mut found_stack: *const NSView = std::ptr::null();
+            let mut depth = 0;
+            while !sv.is_null() && depth < 10 {
+                let is_stack: bool = msg_send![sv, isKindOfClass: stack_cls];
+                if is_stack {
+                    found_stack = sv;
+                    break;
+                }
+                sv = msg_send![sv, superview];
+                depth += 1;
+            }
+            if found_stack.is_null() {
+                eprintln!("match_parent_width: no NSStackView ancestor found");
+                return;
+            }
+            let child_width: Retained<AnyObject> = msg_send![&*child, widthAnchor];
+            let stack_width: Retained<AnyObject> = msg_send![found_stack, widthAnchor];
+            let c: Retained<AnyObject> = msg_send![&*child_width, constraintEqualToAnchor: &*stack_width];
+            let _: () = msg_send![&*c, setActive: true];
+        }
     }
 }
 

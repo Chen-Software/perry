@@ -429,22 +429,16 @@ pub extern "C" fn js_bigint_sub(a: *const BigIntHeader, b: *const BigIntHeader) 
 #[no_mangle]
 #[inline(never)]
 pub extern "C" fn js_bigint_mul(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
-    // Opaque side effects prevent LLVM from over-optimizing this function.
-    // Without them, noble-curves secp256k1 BigInt math crashes (Heisenbug).
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static MUL_COUNT: AtomicUsize = AtomicUsize::new(0);
-    let n = MUL_COUNT.fetch_add(1, Ordering::Relaxed);
-    if n == usize::MAX { eprintln!("bigint_mul overflow"); }
-    let a = clean_bigint_ptr(a);
-    let b = clean_bigint_ptr(b);
+    let a = std::hint::black_box(clean_bigint_ptr(a));
+    let b = std::hint::black_box(clean_bigint_ptr(b));
     let ptr = bigint_alloc();
     unsafe {
         if a.is_null() || b.is_null() {
             (*ptr).limbs = ZERO_LIMBS;
             return ptr;
         }
-        let a_limbs = (*a).limbs;
-        let b_limbs = (*b).limbs;
+        let a_limbs = std::hint::black_box((*a).limbs);
+        let b_limbs = std::hint::black_box((*b).limbs);
         let mut result = ZERO_LIMBS;
 
         // School multiplication (keeping lower 1024 bits)
@@ -459,7 +453,7 @@ pub extern "C" fn js_bigint_mul(a: *const BigIntHeader, b: *const BigIntHeader) 
             }
         }
 
-        (*ptr).limbs = result;
+        (*ptr).limbs = std::hint::black_box(result);
         ptr
     }
 }
@@ -541,17 +535,12 @@ pub extern "C" fn js_bigint_div(a: *const BigIntHeader, b: *const BigIntHeader) 
 #[no_mangle]
 #[inline(never)]
 pub extern "C" fn js_bigint_mod(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
-    // Opaque side effects prevent LLVM from over-optimizing (see js_bigint_mul comment)
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static MOD_COUNT: AtomicUsize = AtomicUsize::new(0);
-    let n = MOD_COUNT.fetch_add(1, Ordering::Relaxed);
-    if n == usize::MAX { eprintln!("bigint_mod overflow"); }
-    let a = clean_bigint_ptr(a);
-    let b = clean_bigint_ptr(b);
+    let a = std::hint::black_box(clean_bigint_ptr(a));
+    let b = std::hint::black_box(clean_bigint_ptr(b));
     let ptr = bigint_alloc();
     unsafe {
-        let a_limbs = if a.is_null() { ZERO_LIMBS } else { (*a).limbs };
-        let b_limbs = if b.is_null() { ZERO_LIMBS } else { (*b).limbs };
+        let a_limbs = std::hint::black_box(if a.is_null() { ZERO_LIMBS } else { (*a).limbs });
+        let b_limbs = std::hint::black_box(if b.is_null() { ZERO_LIMBS } else { (*b).limbs });
 
         // Division by zero: return 0 instead of panicking (panic can't unwind in extern "C")
         if b_limbs == ZERO_LIMBS {
@@ -569,11 +558,11 @@ pub extern "C" fn js_bigint_mod(a: *const BigIntHeader, b: *const BigIntHeader) 
         let (_, remainder) = unsigned_div_limbs(&abs_a, &abs_b);
 
         // Remainder has sign of dividend
-        (*ptr).limbs = if a_neg && remainder != ZERO_LIMBS {
+        (*ptr).limbs = std::hint::black_box(if a_neg && remainder != ZERO_LIMBS {
             negate_limbs(&remainder)
         } else {
             remainder
-        };
+        });
         ptr
     }
 }
@@ -790,13 +779,8 @@ pub extern "C" fn js_bigint_xor(a: *const BigIntHeader, b: *const BigIntHeader) 
 #[no_mangle]
 #[inline(never)]
 pub extern "C" fn js_bigint_cmp(a: *const BigIntHeader, b: *const BigIntHeader) -> i32 {
-    // Opaque side effects prevent LLVM from over-optimizing (see js_bigint_mul comment)
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static CMP_COUNT: AtomicUsize = AtomicUsize::new(0);
-    let n = CMP_COUNT.fetch_add(1, Ordering::Relaxed);
-    if n == usize::MAX { eprintln!("bigint_cmp overflow"); }
-    let a = clean_bigint_ptr(a);
-    let b = clean_bigint_ptr(b);
+    let a = std::hint::black_box(clean_bigint_ptr(a));
+    let b = std::hint::black_box(clean_bigint_ptr(b));
     if a.is_null() || b.is_null() {
         return 0;
     }

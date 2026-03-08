@@ -137,9 +137,61 @@ fn attach_root_to_activity() {
     }
 }
 
+extern "C" {
+    fn js_callback_timer_tick() -> i32;
+    fn js_interval_timer_tick() -> i32;
+    fn js_promise_run_microtasks() -> i32;
+}
+
+/// Start the timer pump that drives setInterval/setTimeout/Promise callbacks.
+/// Equivalent to iOS's PerryPumpTarget (8ms NSTimer).
+/// On Android, we use PerryBridge.setTimer to create a Handler-based repeating timer.
+fn start_timer_pump() {
+    unsafe {
+        __android_log_print(
+            3, b"PerryApp\0".as_ptr(),
+            b"start_timer_pump: setting up 8ms pump\0".as_ptr(),
+        );
+    }
+
+    // Register a no-op closure as the pump callback key.
+    // The actual pump work is done in the JNI callback handler.
+    // We use a special callback key (i64::MAX) that the JNI bridge recognizes.
+    let mut env = jni_bridge::get_env();
+    let _ = env.push_local_frame(16);
+
+    let bridge_class = jni_bridge::with_cache(|c| {
+        env.new_local_ref(c.perry_bridge_class.as_obj()).unwrap()
+    });
+    let bridge_cls: &jni::objects::JClass = (&bridge_class).into();
+
+    // Register the pump timer — fires every 8ms, calls nativePumpTick
+    let _ = env.call_static_method(
+        bridge_cls,
+        "startPumpTimer",
+        "(J)V",
+        &[jni::objects::JValue::Long(8)],  // 8ms interval
+    );
+
+    unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
+}
+
+/// Called from JNI on every pump tick (8ms). Drives the Perry runtime timers.
+#[no_mangle]
+pub extern "C" fn Java_com_perry_app_PerryBridge_nativePumpTick(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+) {
+    unsafe {
+        js_callback_timer_tick();
+        js_interval_timer_tick();
+        js_promise_run_microtasks();
+    }
+}
+
 /// Run the app event loop.
 /// On Android, the event loop is the Activity lifecycle managed by the system.
-/// This just attaches the root widget to the Activity and returns.
+/// This just attaches the root widget to the Activity and starts the timer pump.
 /// Unlike macOS/iOS, this does NOT block — the Activity keeps running.
 pub fn app_run(_app_handle: i64) {
     unsafe {
@@ -150,6 +202,9 @@ pub fn app_run(_app_handle: i64) {
     }
     // Attach the root widget to the Activity
     attach_root_to_activity();
+
+    // Start the timer pump for setInterval/setTimeout/Promise callbacks
+    start_timer_pump();
 
     // On Android we run on the UI thread, so we must NOT block.
     // The Activity lifecycle IS the event loop.

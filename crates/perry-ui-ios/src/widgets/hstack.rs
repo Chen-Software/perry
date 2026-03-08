@@ -12,10 +12,8 @@ pub fn create(spacing: f64) -> i64 {
         let _: () = msg_send![&*stack, setAxis: 0i64]; // UILayoutConstraintAxisHorizontal = 0
         let _: () = msg_send![&*stack, setSpacing: spacing as objc2_core_foundation::CGFloat];
         let _: () = msg_send![&*stack, setAlignment: 3i64]; // UIStackViewAlignmentCenter = 3 (CenterY)
+        let _: () = msg_send![&*stack, setDistribution: 0i64]; // UIStackViewDistributionFill = 0
         let _: () = msg_send![&*stack, setTranslatesAutoresizingMaskIntoConstraints: false];
-
-        let insets = super::vstack::UIEdgeInsets { top: 0.0, left: 0.0, bottom: 0.0, right: 0.0 };
-        let _: () = msg_send![&*stack, setLayoutMargins: insets];
 
         let view: Retained<UIView> = Retained::cast_unchecked(stack);
         super::register_widget(view)
@@ -32,6 +30,7 @@ pub fn create_with_insets(spacing: f64, top: f64, left: f64, bottom: f64, right:
         let _: () = msg_send![&*stack, setAxis: 0i64];
         let _: () = msg_send![&*stack, setSpacing: spacing as objc2_core_foundation::CGFloat];
         let _: () = msg_send![&*stack, setAlignment: 3i64];
+        let _: () = msg_send![&*stack, setDistribution: 0i64]; // UIStackViewDistributionFill = 0
         let _: () = msg_send![&*stack, setTranslatesAutoresizingMaskIntoConstraints: false];
 
         let insets = super::vstack::UIEdgeInsets { top, left, bottom, right };

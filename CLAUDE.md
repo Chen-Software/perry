@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.172
+**Current Version:** 0.2.173
 
 ## Workflow Requirements
 
@@ -152,6 +152,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - `CGPoint`/`CGSize`/`CGRect` in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.173
+- **`perry publish` auto-export .p12**: auto-detect signing identity from macOS Keychain via `security find-identity`, export to temp .p12 with generated password, eliminates manual Keychain Access export step; falls back gracefully on non-macOS/non-interactive
 
 ### v0.2.172
 - **Codebase refactor**: Split `codegen.rs` (40,749→1,588 lines) into 12 modules (types, util, stubs, runtime_decls, classes, functions, closures, module_init, stmt, expr) and `lower.rs` (11,320→5,421 lines) into 8 modules (analysis, enums, jsx, lower_types, lower_patterns, destructuring, lower_decl)

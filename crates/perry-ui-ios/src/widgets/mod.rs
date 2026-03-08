@@ -17,6 +17,8 @@ pub mod form;
 pub mod navstack;
 pub mod zstack;
 pub mod tabbar;
+pub mod qrcode;
+pub mod splitview;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject};
@@ -28,6 +30,8 @@ use std::ffi::c_void;
 thread_local! {
     /// Map from widget handle (1-based) to UIView
     static WIDGETS: RefCell<Vec<Retained<UIView>>> = RefCell::new(Vec::new());
+    /// Stored height constraints per widget handle, so set_height can update instead of duplicate.
+    static HEIGHT_CONSTRAINTS: RefCell<std::collections::HashMap<i64, Retained<AnyObject>>> = RefCell::new(std::collections::HashMap::new());
 }
 
 /// Store a UIView and return its handle (1-based i64).
@@ -128,7 +132,7 @@ extern "C" {
 }
 
 /// Create a CGColor from RGBA via UIColor (iOS doesn't have CGColorCreateGenericRGB).
-unsafe fn create_cg_color(r: f64, g: f64, b: f64, a: f64) -> *mut c_void {
+pub unsafe fn create_cg_color(r: f64, g: f64, b: f64, a: f64) -> *mut c_void {
     let ui_color: *mut AnyObject = objc2::msg_send![
         AnyClass::get(c"UIColor").unwrap(),
         colorWithRed: r,
@@ -263,13 +267,140 @@ pub fn set_width(handle: i64, width: f64) {
     }
 }
 
+/// Set a fixed height constraint on a widget.
+/// Idempotent: deactivates any previous height constraint before creating a new one.
+pub fn set_height(handle: i64, height: f64) {
+    if let Some(view) = get_widget(handle) {
+        // Deactivate old height constraint if any
+        HEIGHT_CONSTRAINTS.with(|hc| {
+            let mut map = hc.borrow_mut();
+            if let Some(old) = map.remove(&handle) {
+                unsafe {
+                    let _: () = objc2::msg_send![&*old, setActive: false];
+                }
+            }
+        });
+        unsafe {
+            let height_anchor: Retained<AnyObject> = objc2::msg_send![&*view, heightAnchor];
+            let constraint: Retained<AnyObject> = objc2::msg_send![
+                &*height_anchor, constraintEqualToConstant: height
+            ];
+            let _: () = objc2::msg_send![&*constraint, setActive: true];
+            HEIGHT_CONSTRAINTS.with(|hc| {
+                hc.borrow_mut().insert(handle, constraint);
+            });
+        }
+    }
+}
+
+/// Remove a child view from a parent view.
+/// If the parent is a UIStackView, removes from arranged subviews first.
+pub fn remove_child(parent_handle: i64, child_handle: i64) {
+    if let (Some(parent), Some(child)) = (get_widget(parent_handle), get_widget(child_handle)) {
+        let is_stack = if let Some(cls) = AnyClass::get(c"UIStackView") {
+            parent.isKindOfClass(cls)
+        } else {
+            false
+        };
+
+        if is_stack {
+            let stack: &UIStackView = unsafe { &*(Retained::as_ptr(&parent) as *const UIStackView) };
+            unsafe {
+                let _: () = objc2::msg_send![stack, removeArrangedSubview: &*child];
+            }
+        }
+        child.removeFromSuperview();
+    }
+}
+
+/// Reorder a child widget within a parent (UIStackView) by index.
+pub fn reorder_child(parent_handle: i64, from_index: i64, to_index: i64) {
+    if let Some(parent) = get_widget(parent_handle) {
+        let is_stack = if let Some(cls) = AnyClass::get(c"UIStackView") {
+            parent.isKindOfClass(cls)
+        } else {
+            false
+        };
+        if is_stack {
+            let stack: &UIStackView = unsafe { &*(Retained::as_ptr(&parent) as *const UIStackView) };
+            let subviews = stack.arrangedSubviews();
+            let from = from_index as usize;
+            if from < subviews.len() {
+                // Get child at index via objectAtIndex:
+                unsafe {
+                    let child: *mut AnyObject = objc2::msg_send![&*subviews, objectAtIndex: from];
+                    if !child.is_null() {
+                        let _: () = objc2::msg_send![stack, removeArrangedSubview: child];
+                        let _: () = objc2::msg_send![stack, insertArrangedSubview: child, atIndex: to_index as usize];
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Pin a child view's width to match its containing UIStackView.
+pub fn match_parent_width(child_handle: i64) {
+    if let Some(child) = get_widget(child_handle) {
+        unsafe {
+            let stack_cls = AnyClass::get(c"UIStackView");
+            if stack_cls.is_none() { return; }
+            let stack_cls = stack_cls.unwrap();
+            let mut sv: *const UIView = objc2::msg_send![&*child, superview];
+            let mut found_stack: *const UIView = std::ptr::null();
+            let mut depth = 0;
+            while !sv.is_null() && depth < 10 {
+                let is_stack: bool = objc2::msg_send![sv, isKindOfClass: stack_cls];
+                if is_stack {
+                    found_stack = sv;
+                    break;
+                }
+                sv = objc2::msg_send![sv, superview];
+                depth += 1;
+            }
+            if found_stack.is_null() { return; }
+            let child_width: Retained<AnyObject> = objc2::msg_send![&*child, widthAnchor];
+            let stack_width: Retained<AnyObject> = objc2::msg_send![found_stack, widthAnchor];
+            let c: Retained<AnyObject> = objc2::msg_send![&*child_width, constraintEqualToAnchor: &*stack_width];
+            let _: () = objc2::msg_send![&*c, setActive: true];
+        }
+    }
+}
+
+/// Pin a child view's top and bottom anchors to its superview, forcing it to
+/// fill the parent's height.
+pub fn match_parent_height(child_handle: i64) {
+    if let Some(child) = get_widget(child_handle) {
+        unsafe {
+            let superview_ptr: *const UIView = objc2::msg_send![&*child, superview];
+            if superview_ptr.is_null() { return; }
+            let child_top: Retained<AnyObject> = objc2::msg_send![&*child, topAnchor];
+            let child_bottom: Retained<AnyObject> = objc2::msg_send![&*child, bottomAnchor];
+            let parent_top: Retained<AnyObject> = objc2::msg_send![superview_ptr, topAnchor];
+            let parent_bottom: Retained<AnyObject> = objc2::msg_send![superview_ptr, bottomAnchor];
+            let top_c: Retained<AnyObject> = objc2::msg_send![&*child_top, constraintEqualToAnchor: &*parent_top];
+            let bot_c: Retained<AnyObject> = objc2::msg_send![&*child_bottom, constraintEqualToAnchor: &*parent_bottom];
+            let _: () = objc2::msg_send![&*top_c, setActive: true];
+            let _: () = objc2::msg_send![&*bot_c, setActive: true];
+        }
+    }
+}
+
+/// Set detachesHiddenViews equivalent — no-op on iOS.
+/// UIStackView on iOS automatically adjusts for hidden views.
+pub fn set_detaches_hidden_views(_handle: i64, _detaches: bool) {
+    // No-op: UIStackView on iOS doesn't have this property.
+    // Hidden arranged subviews are automatically excluded from layout.
+}
+
 /// Set the content hugging priority for both axes.
 pub fn set_hugging_priority(handle: i64, priority: f64) {
     if let Some(view) = get_widget(handle) {
         unsafe {
+            let p = priority as f32;
             // UILayoutConstraintAxis: 0 = Horizontal, 1 = Vertical
-            let _: () = objc2::msg_send![&*view, setContentHuggingPriority: priority as f32, forAxis: 0i64];
-            let _: () = objc2::msg_send![&*view, setContentHuggingPriority: priority as f32, forAxis: 1i64];
+            let _: () = objc2::msg_send![&*view, setContentHuggingPriority: p, forAxis: 0isize];
+            let _: () = objc2::msg_send![&*view, setContentHuggingPriority: p, forAxis: 1isize];
         }
     }
 }

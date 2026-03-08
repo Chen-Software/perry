@@ -218,6 +218,133 @@ pub unsafe extern "C" fn js_ws_connect(url_ptr: *const StringHeader) -> *mut per
     promise
 }
 
+/// Create a new WebSocket connection (synchronous — returns handle immediately).
+/// Connection happens in background. isOpen() returns 0 until connected.
+/// connectStart(url) -> handle (number)
+/// Accepts f64 NaN-boxed string (extracts pointer internally).
+#[no_mangle]
+pub unsafe extern "C" fn js_ws_connect_start(url_nanboxed: f64) -> f64 {
+    // Extract string pointer from NaN-boxed value
+    let url_ptr = perry_runtime::js_get_string_pointer_unified(url_nanboxed) as *const StringHeader;
+    let url = match string_from_header(url_ptr) {
+        Some(u) => u,
+        None => return 0.0,
+    };
+
+    // Allocate ws_id immediately (before async connection)
+    let mut id_guard = NEXT_WS_ID.lock().unwrap();
+    let ws_id = *id_guard;
+    *id_guard += 1;
+    drop(id_guard);
+
+    // Create command channel
+    let (tx, mut rx) = mpsc::unbounded_channel::<WsCommand>();
+
+    // Store connection (initially NOT open)
+    WS_CONNECTIONS.lock().unwrap().insert(ws_id, WsConnection {
+        sender: tx,
+        messages: Vec::new(),
+        is_open: false,
+    });
+
+    // Initialize client listeners
+    WS_CLIENT_LISTENERS.lock().unwrap().insert(ws_id, WsClientListeners {
+        listeners: HashMap::new(),
+    });
+
+    // Connect in background
+    spawn(async move {
+        match connect_async(&url).await {
+            Ok((ws_stream, _response)) => {
+                let (mut write, mut read) = ws_stream.split();
+
+                // Mark as open
+                if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id) {
+                    conn.is_open = true;
+                }
+
+                // Spawn task to handle outgoing messages
+                let ws_id_send = ws_id;
+                tokio::spawn(async move {
+                    while let Some(cmd) = rx.recv().await {
+                        match cmd {
+                            WsCommand::Send(msg) => {
+                                if write.send(Message::Text(msg)).await.is_err() {
+                                    break;
+                                }
+                            }
+                            WsCommand::Close => {
+                                let _ = write.send(Message::Close(None)).await;
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_send) {
+                        conn.is_open = false;
+                    }
+                });
+
+                // Spawn task to handle incoming messages
+                let ws_id_recv = ws_id;
+                tokio::spawn(async move {
+                    while let Some(msg_result) = read.next().await {
+                        match msg_result {
+                            Ok(Message::Text(text)) => {
+                                let has_listeners = WS_CLIENT_LISTENERS.lock().unwrap()
+                                    .get(&ws_id_recv)
+                                    .map(|l| l.listeners.get("message").map(|v| !v.is_empty()).unwrap_or(false))
+                                    .unwrap_or(false);
+
+                                if has_listeners {
+                                    WS_PENDING_EVENTS.lock().unwrap().push(
+                                        PendingWsEvent::Message(ws_id_recv, text)
+                                    );
+                                } else {
+                                    if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_recv) {
+                                        conn.messages.push(text);
+                                    }
+                                }
+                            }
+                            Ok(Message::Close(frame)) => {
+                                let (code, reason) = frame
+                                    .map(|f| (f.code.into(), f.reason.to_string()))
+                                    .unwrap_or((1000u16, String::new()));
+                                if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_recv) {
+                                    conn.is_open = false;
+                                }
+                                WS_PENDING_EVENTS.lock().unwrap().push(
+                                    PendingWsEvent::Close(ws_id_recv, code, reason)
+                                );
+                                break;
+                            }
+                            Err(e) => {
+                                if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_recv) {
+                                    conn.is_open = false;
+                                }
+                                WS_PENDING_EVENTS.lock().unwrap().push(
+                                    PendingWsEvent::Error(ws_id_recv, format!("{}", e))
+                                );
+                                WS_PENDING_EVENTS.lock().unwrap().push(
+                                    PendingWsEvent::Close(ws_id_recv, 1006, String::new())
+                                );
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                });
+            }
+            Err(e) => {
+                WS_PENDING_EVENTS.lock().unwrap().push(
+                    PendingWsEvent::Error(ws_id, format!("WebSocket connection error: {}", e))
+                );
+            }
+        }
+    });
+
+    ws_id as f64
+}
+
 /// Send a message through the WebSocket
 /// ws.send(message) -> void
 #[no_mangle]

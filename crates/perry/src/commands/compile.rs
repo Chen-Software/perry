@@ -576,7 +576,7 @@ fn parse_native_library_manifest(
 /// These must never be loaded into V8 — Perry's codegen intercepts all imports
 /// from these packages and replaces them with native calls.
 const PERRY_NATIVE_EXTENSION_PACKAGES: &[&str] = &[
-    "ioredis", "mysql2", "ws", "dotenv",
+    "ioredis", "ethers", "mysql2", "ws", "dotenv",
 ];
 
 /// Check if a file path is inside a Perry native extension package (has built-in stdlib support)
@@ -1189,7 +1189,7 @@ fn collect_modules(
             return Ok(());
         }
 
-        // Perry native extension packages (ioredis, mysql2, ws, dotenv) are handled
+        // Perry native extension packages (ioredis, ethers, mysql2, ws, dotenv) are handled
         // entirely by Perry's built-in stdlib — they must NOT be loaded into V8.
         if is_perry_native {
             return Ok(());
@@ -2683,6 +2683,13 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             if let Some(ref p) = stdlib_lib_path { all_scan_paths.push(p.clone()); }
         }
         if let Some(ref p) = jsruntime_lib_path { all_scan_paths.push(p.clone()); }
+        // Scan UI library for defined symbols so we don't generate stubs for
+        // functions that exist in the platform UI library (e.g. screen detection FFI)
+        if ctx.needs_ui {
+            if let Some(ui_lib) = find_ui_library(target.as_deref()) {
+                all_scan_paths.push(ui_lib);
+            }
+        }
         // Find the nm tool: use system `nm` on macOS/Linux, or `llvm-nm` from Rust toolchain on Windows
         let nm_cmd = {
             #[cfg(target_os = "windows")]
@@ -3140,7 +3147,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             if is_ios {
                 // UIKit already linked above
             } else if is_android {
-                // Android UI uses JNI - no additional system libs needed
+                // Allow multiple definitions from perry-runtime in both UI lib and native libs
+                cmd.arg("-Wl,--allow-multiple-definition");
             } else if is_linux {
                 // Allow multiple definitions from perry-runtime in both stdlib and UI lib
                 cmd.arg("-Wl,--allow-multiple-definition");
@@ -3239,7 +3247,19 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 }
 
                 if let Some(lib) = lib_path {
-                    cmd.arg(&lib);
+                    // For shared libraries (.so) on Android, use -L/-l so the linker
+                    // records just the soname (not the full build path) in DT_NEEDED.
+                    if is_android && lib_name.ends_with(".so") {
+                        if let Some(dir) = lib.parent() {
+                            cmd.arg(format!("-L{}", dir.display()));
+                        }
+                        // Strip "lib" prefix and ".so" suffix for -l flag
+                        let stem = lib_name.strip_prefix("lib").unwrap_or(lib_name);
+                        let stem = stem.strip_suffix(".so").unwrap_or(stem);
+                        cmd.arg(format!("-l{}", stem));
+                    } else {
+                        cmd.arg(&lib);
+                    }
                     match format {
                         OutputFormat::Text => println!("Linking native library: {}", lib.display()),
                         OutputFormat::Json => {}
@@ -3313,8 +3333,26 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     <string>1.0</string>
     <key>MinimumOSVersion</key>
     <string>17.0</string>
+    <key>UIDeviceFamily</key>
+    <array>
+        <integer>1</integer>
+        <integer>2</integer>
+    </array>
     <key>UILaunchStoryboardName</key>
-    <string></string>
+    <string>LaunchScreen</string>
+    <key>UIRequiresFullScreen</key>
+    <true/>
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+    </array>
+    <key>UISupportedInterfaceOrientations~ipad</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationPortraitUpsideDown</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
     <key>UIApplicationSceneManifest</key>
     <dict>
         <key>UIApplicationSupportsMultipleScenes</key>
@@ -3337,6 +3375,41 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             exe_stem, bundle_id, exe_stem
         );
         fs::write(app_dir.join("Info.plist"), info_plist)?;
+
+        // Write a minimal compiled LaunchScreen storyboard so iPadOS treats
+        // the app as native iPad (not iPhone compatibility mode).
+        let launch_sb_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="21701" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" launchScreen="YES" useTraitCollections="YES" useSafeAreas="YES" colorMatched="YES" initialViewController="01J-lp-oVM">
+    <scenes>
+        <scene sceneID="EHf-IW-A2E">
+            <objects>
+                <viewController id="01J-lp-oVM" sceneMemberID="viewController">
+                    <view key="view" contentMode="scaleToFill" id="Ze5-6b-2t3">
+                        <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>
+                        <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
+                        <color key="backgroundColor" systemColor="systemBackgroundColor"/>
+                    </view>
+                </viewController>
+                <placeholder placeholderIdentifier="IBFirstResponder" id="iYj-Kq-Ea1" userLabel="First Responder" sceneMemberID="firstResponder"/>
+            </objects>
+            <point key="canvasLocation" x="0" y="0"/>
+        </scene>
+    </scenes>
+</document>"#;
+        let sb_source = app_dir.join("_LaunchScreen.storyboard");
+        fs::write(&sb_source, launch_sb_xml)?;
+        let storyboardc = app_dir.join("Base.lproj").join("LaunchScreen.storyboardc");
+        let _ = fs::create_dir_all(app_dir.join("Base.lproj"));
+        let _ = fs::remove_dir_all(&storyboardc);
+        let ibt_result = std::process::Command::new("ibtool")
+            .arg("--compile")
+            .arg(storyboardc.as_os_str())
+            .arg(sb_source.as_os_str())
+            .output();
+        let _ = fs::remove_file(&sb_source);
+        if ibt_result.is_err() || !ibt_result.as_ref().unwrap().status.success() {
+            eprintln!("Warning: ibtool failed to compile LaunchScreen.storyboard");
+        }
 
         match format {
             OutputFormat::Text => {

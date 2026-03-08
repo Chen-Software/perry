@@ -138,6 +138,26 @@ pub fn set_font_family(handle: i64, family_ptr: *const u8) {
     }
 }
 
+/// Set text wrapping on a TextView.
+/// max_width > 0: enable wrapping at that width. max_width <= 0: disable wrapping (single line).
+pub fn set_wraps(handle: i64, max_width: f64) {
+    if let Some(view_ref) = super::get_widget(handle) {
+        let mut env = jni_bridge::get_env();
+        let _ = env.push_local_frame(16);
+        if max_width > 0.0 {
+            // Enable wrapping
+            let _ = env.call_method(view_ref.as_obj(), "setSingleLine", "(Z)V", &[JValue::Bool(0)]);
+            // Set max width in dp → px
+            let max_px = super::dp_to_px(&mut env, max_width as f32);
+            let _ = env.call_method(view_ref.as_obj(), "setMaxWidth", "(I)V", &[JValue::Int(max_px)]);
+        } else {
+            // Disable wrapping
+            let _ = env.call_method(view_ref.as_obj(), "setSingleLine", "(Z)V", &[JValue::Bool(1)]);
+        }
+        unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
+    }
+}
+
 /// Set whether a TextView is selectable.
 pub fn set_selectable(handle: i64, selectable: bool) {
     if let Some(view_ref) = super::get_widget(handle) {
