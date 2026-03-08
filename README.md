@@ -2,7 +2,7 @@
 
 A native TypeScript compiler written in Rust. Compiles TypeScript source code directly to native executables for macOS, iOS, Android, Windows, GTK4 (Linux), and Web — no Node.js, no Electron, no browser engine.
 
-**Current Version:** 0.2.168 | **Status:** Active Development
+**Current Version:** 0.2.173 | **Status:** Active Development
 
 ## What it does
 
@@ -61,6 +61,28 @@ ls -lh hello   # → ~330KB
 
 ## Installation
 
+### macOS (Homebrew)
+
+```bash
+brew install perryts/perry/perry
+```
+
+### Debian / Ubuntu (APT)
+
+```bash
+curl -fsSL https://perryts.github.io/perry-apt/perry.gpg.pub | sudo gpg --dearmor -o /usr/share/keyrings/perry.gpg
+echo "deb [signed-by=/usr/share/keyrings/perry.gpg] https://perryts.github.io/perry-apt stable main" | sudo tee /etc/apt/sources.list.d/perry.list
+sudo apt update && sudo apt install perry
+```
+
+### Quick install (macOS / Linux)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/PerryTS/perry/main/packaging/install.sh | sh
+```
+
+### From source
+
 ```bash
 git clone https://github.com/PerryTS/perry.git
 cd perry
@@ -68,7 +90,7 @@ cargo build --release
 # Binary at: target/release/perry
 ```
 
-This builds the compiler and all platform-independent crates. To also build the native UI crate for your platform:
+To also build the native UI crate for your platform:
 
 ```bash
 # macOS
@@ -80,6 +102,15 @@ cargo build --release -p perry-ui-gtk4
 # Windows
 cargo build --release -p perry-ui-windows
 ```
+
+### Requirements
+
+Perry requires a C linker to link compiled executables:
+- **macOS:** Xcode Command Line Tools (`xcode-select --install`)
+- **Linux:** GCC or Clang (`sudo apt install build-essential`)
+- **Windows:** MSVC (Visual Studio Build Tools)
+
+Run `perry doctor` to verify your environment.
 
 ## Quick Start
 
