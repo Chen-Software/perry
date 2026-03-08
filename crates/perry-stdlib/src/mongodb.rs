@@ -9,7 +9,7 @@ use perry_runtime::{
     JSValue, ObjectHeader, Promise, StringHeader,
 };
 use mongodb::{Client, Collection, Database};
-use crate::common::{get_handle, register_handle, spawn_for_promise, Handle};
+use crate::common::{get_handle, register_handle, spawn_for_promise, spawn_for_promise_deferred, Handle};
 
 /// Helper to extract string from StringHeader pointer
 unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
@@ -152,25 +152,39 @@ pub unsafe extern "C" fn js_mongodb_collection_find_one(
 
     let filter_json = string_from_header(filter_json_ptr).unwrap_or_else(|| "{}".to_string());
 
-    spawn_for_promise(promise as *mut u8, async move {
-        if let Some(coll_wrapper) = get_handle::<MongoCollectionHandle>(collection_handle) {
-            let filter: Document = serde_json::from_str(&filter_json)
-                .unwrap_or_else(|_| doc! {});
+    // Use deferred to avoid allocating JSValues on worker threads.
+    // The async block returns Option<String> (raw Rust data),
+    // and the converter creates the JSValue string on the main thread.
+    spawn_for_promise_deferred(
+        promise as *mut u8,
+        async move {
+            if let Some(coll_wrapper) = get_handle::<MongoCollectionHandle>(collection_handle) {
+                let filter: Document = serde_json::from_str(&filter_json)
+                    .unwrap_or_else(|_| doc! {});
 
-            match coll_wrapper.collection.find_one(filter, None).await {
-                Ok(Some(doc)) => {
-                    let json = serde_json::to_string(&doc)
-                        .unwrap_or_else(|_| "{}".to_string());
-                    let ptr = js_string_from_bytes(json.as_ptr(), json.len() as u32);
-                    Ok(JSValue::string_ptr(ptr).bits())
+                match coll_wrapper.collection.find_one(filter, None).await {
+                    Ok(Some(doc)) => {
+                        let json = serde_json::to_string(&doc)
+                            .unwrap_or_else(|_| "{}".to_string());
+                        Ok(Some(json))
+                    }
+                    Ok(None) => Ok(None),
+                    Err(e) => Err(format!("Find failed: {}", e)),
                 }
-                Ok(None) => Ok(JSValue::null().bits()),
-                Err(e) => Err(format!("Find failed: {}", e)),
+            } else {
+                Err("Invalid collection handle".to_string())
             }
-        } else {
-            Err("Invalid collection handle".to_string())
-        }
-    });
+        },
+        |result: Option<String>| {
+            match result {
+                Some(json) => {
+                    let ptr = js_string_from_bytes(json.as_ptr(), json.len() as u32);
+                    JSValue::string_ptr(ptr).bits()
+                }
+                None => JSValue::null().bits(),
+            }
+        },
+    );
 
     promise
 }
@@ -185,29 +199,38 @@ pub unsafe extern "C" fn js_mongodb_collection_find(
 
     let filter_json = string_from_header(filter_json_ptr).unwrap_or_else(|| "{}".to_string());
 
-    spawn_for_promise(promise as *mut u8, async move {
-        use futures_util::TryStreamExt;
+    // Use deferred to avoid allocating JSValues on worker threads.
+    // The async block returns the JSON string (raw Rust data),
+    // and the converter creates the JSValue string on the main thread.
+    spawn_for_promise_deferred(
+        promise as *mut u8,
+        async move {
+            use futures_util::TryStreamExt;
 
-        if let Some(coll_wrapper) = get_handle::<MongoCollectionHandle>(collection_handle) {
-            let filter: Document = serde_json::from_str(&filter_json)
-                .unwrap_or_else(|_| doc! {});
+            if let Some(coll_wrapper) = get_handle::<MongoCollectionHandle>(collection_handle) {
+                let filter: Document = serde_json::from_str(&filter_json)
+                    .unwrap_or_else(|_| doc! {});
 
-            match coll_wrapper.collection.find(filter, None).await {
-                Ok(cursor) => {
-                    let docs: Vec<Document> = cursor.try_collect().await
-                        .map_err(|e| format!("Cursor error: {}", e))?;
+                match coll_wrapper.collection.find(filter, None).await {
+                    Ok(cursor) => {
+                        let docs: Vec<Document> = cursor.try_collect().await
+                            .map_err(|e| format!("Cursor error: {}", e))?;
 
-                    let json = serde_json::to_string(&docs)
-                        .unwrap_or_else(|_| "[]".to_string());
-                    let ptr = js_string_from_bytes(json.as_ptr(), json.len() as u32);
-                    Ok(JSValue::string_ptr(ptr).bits())
+                        let json = serde_json::to_string(&docs)
+                            .unwrap_or_else(|_| "[]".to_string());
+                        Ok(json)
+                    }
+                    Err(e) => Err(format!("Find failed: {}", e)),
                 }
-                Err(e) => Err(format!("Find failed: {}", e)),
+            } else {
+                Err("Invalid collection handle".to_string())
             }
-        } else {
-            Err("Invalid collection handle".to_string())
-        }
-    });
+        },
+        |json: String| {
+            let ptr = js_string_from_bytes(json.as_ptr(), json.len() as u32);
+            JSValue::string_ptr(ptr).bits()
+        },
+    );
 
     promise
 }
@@ -230,23 +253,28 @@ pub unsafe extern "C" fn js_mongodb_collection_insert_one(
         }
     };
 
-    spawn_for_promise(promise as *mut u8, async move {
-        if let Some(coll_wrapper) = get_handle::<MongoCollectionHandle>(collection_handle) {
-            let doc: Document = serde_json::from_str(&doc_json)
-                .map_err(|e| format!("Invalid JSON: {}", e))?;
+    spawn_for_promise_deferred(
+        promise as *mut u8,
+        async move {
+            if let Some(coll_wrapper) = get_handle::<MongoCollectionHandle>(collection_handle) {
+                let doc: Document = serde_json::from_str(&doc_json)
+                    .map_err(|e| format!("Invalid JSON: {}", e))?;
 
-            match coll_wrapper.collection.insert_one(doc, None).await {
-                Ok(result) => {
-                    let id = result.inserted_id.to_string();
-                    let ptr = js_string_from_bytes(id.as_ptr(), id.len() as u32);
-                    Ok(JSValue::string_ptr(ptr).bits())
+                match coll_wrapper.collection.insert_one(doc, None).await {
+                    Ok(result) => {
+                        Ok(result.inserted_id.to_string())
+                    }
+                    Err(e) => Err(format!("Insert failed: {}", e)),
                 }
-                Err(e) => Err(format!("Insert failed: {}", e)),
+            } else {
+                Err("Invalid collection handle".to_string())
             }
-        } else {
-            Err("Invalid collection handle".to_string())
-        }
-    });
+        },
+        |id: String| {
+            let ptr = js_string_from_bytes(id.as_ptr(), id.len() as u32);
+            JSValue::string_ptr(ptr).bits()
+        },
+    );
 
     promise
 }

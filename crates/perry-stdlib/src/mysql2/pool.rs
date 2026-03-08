@@ -57,7 +57,6 @@ impl MysqlPoolConnectionHandle {
 /// The config parameter must be a valid JSValue representing a config object.
 #[no_mangle]
 pub unsafe extern "C" fn js_mysql2_create_pool(config: JSValue) -> Handle {
-    eprintln!("[MYSQL-ENTRY] js_mysql2_create_pool ENTERED, config_bits=0x{:016x}", config.bits());
     let mysql_config = parse_mysql_config(config);
     let url = mysql_config.to_url();
 
@@ -134,7 +133,6 @@ pub unsafe extern "C" fn js_mysql2_pool_query(
     };
 
     let is_select = is_row_returning_query(&sql);
-    eprintln!("[MYSQL-DEBUG] js_mysql2_pool_query (NO PARAMS) called, sql_first_40={:?}, is_select={}", &sql[..sql.len().min(40)], is_select);
 
     // Use spawn_for_promise_deferred to safely create JSValues on the main thread
     // The async block returns raw Rust data, and the converter creates JSValues
@@ -198,7 +196,6 @@ pub unsafe extern "C" fn js_mysql2_pool_execute(
     sql_ptr: *const u8,
     params: JSValue,
 ) -> *mut Promise {
-    eprintln!("[MYSQL-ENTRY] js_mysql2_pool_execute ENTERED, pool_handle={}, sql_ptr={:?}, params_bits=0x{:016x}", pool_handle, sql_ptr, params.bits());
     let promise = js_promise_new();
 
     // Extract the SQL string
@@ -214,7 +211,6 @@ pub unsafe extern "C" fn js_mysql2_pool_execute(
 
     // Extract parameters from the JSValue array
     let param_values = extract_params_from_jsvalue(params);
-    eprintln!("[MYSQL-DEBUG] js_mysql2_pool_execute (WITH PARAMS) called, sql_first_60={:?}, param_count={}, params={:?}", &sql[..sql.len().min(60)], param_values.len(), param_values);
     let is_select = is_row_returning_query(&sql);
 
     // Use spawn_for_promise_deferred to safely create JSValues on the main thread

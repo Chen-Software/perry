@@ -364,13 +364,16 @@ fn call_function_impl(
     let scope = &mut state.runtime.handle_scope();
     let namespace = v8::Local::new(scope, namespace);
 
+    // Use TryCatch to properly handle V8 exceptions
+    let tc_scope = &mut v8::TryCatch::new(scope);
+
     // Get the function from the namespace
-    let key = match v8::String::new(scope, func_name) {
+    let key = match v8::String::new(tc_scope, func_name) {
         Some(k) => k,
         None => return f64::from_bits(0x7FFC_0000_0000_0001),
     };
 
-    let func_val = match namespace.get(scope, key.into()) {
+    let func_val = match namespace.get(tc_scope, key.into()) {
         Some(v) => v,
         None => {
             log::error!("Function '{}' not found in module", func_name);
@@ -388,22 +391,48 @@ fn call_function_impl(
     // Convert arguments from native to V8
     let v8_args: Vec<v8::Local<v8::Value>> = args
         .iter()
-        .map(|&arg| native_to_v8(scope, fixup_native_for_v8(arg)))
+        .map(|&arg| native_to_v8(tc_scope, fixup_native_for_v8(arg)))
         .collect();
 
     // Call the function
-    let undefined = v8::undefined(scope);
-    let result = match func.call(scope, undefined.into(), &v8_args) {
+    let undefined = v8::undefined(tc_scope);
+    let result = match func.call(tc_scope, undefined.into(), &v8_args) {
         Some(r) => r,
         None => {
-            log::error!("Function call failed");
+            // Get and log the exception, then clear it so subsequent calls work
+            if tc_scope.has_caught() {
+                if let Some(exception) = tc_scope.exception() {
+                    // Try to get detailed message
+                    if let Some(msg_obj) = tc_scope.message() {
+                        let msg_str = msg_obj.get(tc_scope).to_rust_string_lossy(tc_scope);
+                        let line = msg_obj.get_line_number(tc_scope).unwrap_or(0);
+                        let script = msg_obj.get_script_resource_name(tc_scope)
+                            .map(|s| s.to_rust_string_lossy(tc_scope))
+                            .unwrap_or_default();
+                        eprintln!("[JS-INTEROP] Function '{}' threw: {} ({}:{})", func_name, msg_str, script, line);
+                    } else {
+                        let msg = exception.to_rust_string_lossy(tc_scope);
+                        eprintln!("[JS-INTEROP] Function '{}' threw: {}", func_name, msg);
+                    }
+
+                    // Log args for debugging
+                    for (i, &arg) in args.iter().enumerate() {
+                        let bits = arg.to_bits();
+                        let tag = bits >> 48;
+                        eprintln!("[JS-INTEROP]   arg[{}]: bits=0x{:016x} tag=0x{:04x}", i, bits, tag);
+                    }
+                }
+                // Exception is automatically cleared when TryCatch scope drops
+            } else {
+                eprintln!("[JS-INTEROP] Function '{}' call returned None (no exception)", func_name);
+            }
             return f64::from_bits(0x7FFC_0000_0000_0001);
         }
     };
 
     // Handle promises - for now just return the promise object
     // Proper async support would require more complex handling
-    v8_to_native(scope, result)
+    v8_to_native(tc_scope, result)
 }
 
 /// Call a method on a JavaScript object

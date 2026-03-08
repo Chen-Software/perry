@@ -1195,7 +1195,16 @@ impl Compiler {
             // Analyze function parameter types FIRST (body may reference params via LocalGet)
             for param in &func.params {
                 let is_bigint = matches!(param.ty, perry_types::Type::BigInt);
-                let is_string = matches!(param.ty, perry_types::Type::String);
+                let is_string = matches!(param.ty, perry_types::Type::String) || {
+                    if let perry_types::Type::Named(name) = &param.ty {
+                        self.enums.iter().any(|((enum_name, _), v)| enum_name == name && matches!(v, EnumMemberValue::String(_)))
+                    } else if let perry_types::Type::Union(types) = &param.ty {
+                        // Union of all strings (e.g. string | string) should be treated as strings
+                        !types.is_empty() && types.iter().all(|t| matches!(t, perry_types::Type::String))
+                    } else {
+                        false
+                    }
+                };
                 let is_array = matches!(param.ty, perry_types::Type::Array(_));
                 let is_closure = matches!(param.ty, perry_types::Type::Function(_));
                 let is_pointer = matches!(param.ty, perry_types::Type::String | perry_types::Type::Array(_) |

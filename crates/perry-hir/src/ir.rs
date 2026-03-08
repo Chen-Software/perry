@@ -29,6 +29,9 @@ pub const NATIVE_MODULES: &[&str] = &[
     // ethers utility functions (formatUnits, parseUnits, getAddress, etc.) have native stubs.
     // Contract/Provider are NOT implemented natively — use raw JSON-RPC fetch instead.
     "ethers",
+    // Database native libraries
+    "mongodb",
+    "better-sqlite3",
     // Node.js built-ins
     "events",
     "os",

@@ -732,6 +732,7 @@ pub(crate) fn lower_var_decl_with_destructuring(
                             // Database clients
                             "Pool" => Some("pg"),  // PostgreSQL connection pool
                             "Client" => Some("pg"), // PostgreSQL client
+                            "MongoClient" => Some("mongodb"),
                             _ => None,
                         };
                         if let Some(module) = module_name {
@@ -761,6 +762,7 @@ pub(crate) fn lower_var_decl_with_destructuring(
                                 // Database clients
                                 "Pool" => Some("pg"),  // PostgreSQL connection pool
                                 "Client" => Some("pg"), // PostgreSQL client
+                                "MongoClient" => Some("mongodb"),
                                 _ => None,
                             };
                             if let Some(module) = module_name {
@@ -815,6 +817,72 @@ pub(crate) fn lower_var_decl_with_destructuring(
                                             ctx.register_native_instance(name.clone(), module_name.to_string(), method_name.to_string());
                                         }
                                         _ => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check if this is an awaited factory call (e.g., const client = await MongoClient.connect(uri))
+            if let Some(init_expr) = &decl.init {
+                if let ast::Expr::Await(await_expr) = init_expr.as_ref() {
+                    if let ast::Expr::Call(call_expr) = await_expr.arg.as_ref() {
+                        if let ast::Callee::Expr(callee) = &call_expr.callee {
+                            if let ast::Expr::Member(member) = callee.as_ref() {
+                                if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
+                                    let obj_name = obj_ident.sym.as_ref();
+                                    if let Some((module_name, _)) = ctx.lookup_native_module(obj_name) {
+                                        if let ast::MemberProp::Ident(method_ident) = &member.prop {
+                                            let class_name = match (module_name, method_ident.sym.as_ref()) {
+                                                ("mongodb", "connect") => Some("MongoClient"),
+                                                ("mysql2" | "mysql2/promise", "createPool") => Some("Pool"),
+                                                ("mysql2" | "mysql2/promise", "createConnection") => Some("Connection"),
+                                                ("pg", "connect") => Some("Client"),
+                                                _ => None,
+                                            };
+                                            if let Some(class_name) = class_name {
+                                                ctx.register_native_instance(name.clone(), module_name.to_string(), class_name.to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check if this is a method call on a registered native instance (chaining).
+            // e.g., const db = client.db(name) where client is a mongodb native instance.
+            if let Some(init_expr) = &decl.init {
+                // Unwrap await if present
+                let actual_init = if let ast::Expr::Await(await_expr) = init_expr.as_ref() {
+                    await_expr.arg.as_ref()
+                } else {
+                    init_expr.as_ref()
+                };
+                if let ast::Expr::Call(call_expr) = actual_init {
+                    if let ast::Callee::Expr(callee) = &call_expr.callee {
+                        if let ast::Expr::Member(member) = callee.as_ref() {
+                            if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
+                                let obj_name = obj_ident.sym.to_string();
+                                if let Some((module_name, _class)) = ctx.lookup_native_instance(&obj_name)
+                                    .map(|(m, c)| (m.to_string(), c.to_string()))
+                                {
+                                    if let ast::MemberProp::Ident(method_ident) = &member.prop {
+                                        let method_name = method_ident.sym.as_ref();
+                                        // Determine if the method returns a handle (another native instance)
+                                        let returns_handle = match (module_name.as_str(), method_name) {
+                                            ("mongodb", "db") => Some("Database"),
+                                            ("mongodb", "collection") => Some("Collection"),
+                                            ("mysql2" | "mysql2/promise", "getConnection") => Some("PoolConnection"),
+                                            _ => None,
+                                        };
+                                        if let Some(class_name) = returns_handle {
+                                            ctx.register_native_instance(name.clone(), module_name, class_name.to_string());
+                                        }
                                     }
                                 }
                             }

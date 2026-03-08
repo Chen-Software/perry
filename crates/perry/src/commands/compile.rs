@@ -1856,6 +1856,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                     func.is_async,
                     func.is_exported
                 );
+
             }
             println!("Init statements: {}", hir_module.init.len());
             for (i, stmt) in hir_module.init.iter().enumerate() {
@@ -2924,7 +2925,11 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
 
         let mut c = Command::new(clang);
         c.arg("-target").arg(triple)
-         .arg("-isysroot").arg(sysroot);
+         .arg("-isysroot").arg(sysroot)
+         // perry-stdlib and perry-ui-ios both bundle perry-runtime symbols;
+         // the new Apple ld treats duplicate archive symbols as errors.
+         // Use the classic linker which applies first-definition-wins.
+         .arg("-Wl,-ld_classic");
         c
     } else if is_android {
         // Use Android NDK clang to produce a shared library (.so)

@@ -59,6 +59,25 @@ impl JsRuntimeState {
             ..Default::default()
         });
 
+        // Set a very low stack limit to give V8 plenty of stack space.
+        // Perry's native code can have deep call stacks during module init,
+        // and V8 uses the same thread stack. By setting the limit low, we tell
+        // V8 it has much more stack available.
+        //
+        // The Rust v8 bindings (v8 0.106) don't expose Isolate::SetStackLimit,
+        // so we call the C++ function directly via its Itanium ABI mangled name.
+        {
+            extern "C" {
+                #[link_name = "_ZN2v87Isolate13SetStackLimitEm"]
+                fn v8_isolate_set_stack_limit(isolate: *mut std::ffi::c_void, stack_limit: usize);
+            }
+            let isolate: &mut deno_core::v8::Isolate = runtime.v8_isolate();
+            let isolate_ptr: *mut std::ffi::c_void = (isolate as *mut deno_core::v8::Isolate).cast();
+            // Set stack limit to near the bottom of the address space (0x10000)
+            // so V8 thinks it has the full thread stack available
+            unsafe { v8_isolate_set_stack_limit(isolate_ptr, 0x10000); }
+        }
+
         // Set up Node.js global polyfills before any modules are loaded
         runtime.execute_script("<node-polyfills>", deno_core::ascii_str_include!("node_polyfills.js"))
             .expect("Failed to initialize Node.js polyfills");

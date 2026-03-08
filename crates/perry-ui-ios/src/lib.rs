@@ -1232,3 +1232,43 @@ pub extern "C" fn perry_ui_table_set_on_row_select(_handle: i64, _callback: f64)
 pub extern "C" fn perry_ui_table_get_selected_row(_handle: i64) -> i64 {
     -1
 }
+
+// =============================================================================
+// iOS Documents directory (for persistent storage)
+// =============================================================================
+
+/// Returns the app's Documents directory path as a NaN-boxed string.
+/// Used by hone-ide's paths.ts for persistent storage on iOS.
+#[no_mangle]
+pub extern "C" fn hone_get_documents_dir() -> f64 {
+    extern "C" {
+        fn js_string_from_bytes(ptr: *const u8, len: i64) -> *const u8;
+        fn js_nanbox_string(ptr: i64) -> f64;
+    }
+    unsafe {
+        let file_manager: *const objc2::runtime::AnyObject =
+            objc2::msg_send![objc2::runtime::AnyClass::get(c"NSFileManager").unwrap(), defaultManager];
+        // NSDocumentDirectory = 9, NSUserDomainMask = 1
+        let urls: objc2::rc::Retained<objc2_foundation::NSArray<objc2_foundation::NSURL>> =
+            objc2::msg_send![file_manager, URLsForDirectory: 9u64, inDomains: 1u64];
+        let count: usize = objc2::msg_send![&*urls, count];
+        if count > 0 {
+            let url: *const objc2::runtime::AnyObject = objc2::msg_send![&*urls, objectAtIndex: 0usize];
+            let path: objc2::rc::Retained<objc2_foundation::NSString> = objc2::msg_send![url, path];
+            let rust_str = path.to_string();
+            let bytes = rust_str.as_bytes();
+            let str_ptr = js_string_from_bytes(bytes.as_ptr(), bytes.len() as i64);
+            js_nanbox_string(str_ptr as i64)
+        } else {
+            // Return empty string
+            let str_ptr = js_string_from_bytes(std::ptr::null(), 0);
+            js_nanbox_string(str_ptr as i64)
+        }
+    }
+}
+
+/// Wrapper for Perry codegen (some declare functions use __wrapper_ prefix).
+#[no_mangle]
+pub extern "C" fn __wrapper_hone_get_documents_dir() -> f64 {
+    hone_get_documents_dir()
+}
