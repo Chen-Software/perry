@@ -8511,6 +8511,18 @@ impl Compiler {
             self.extern_funcs.insert("perry_ui_widget_set_corner_radius".to_string(), func_id);
         }
 
+        // perry_ui_widget_set_edge_insets(handle: i64, top: f64, left: f64, bottom: f64, right: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // widget handle
+            sig.params.push(AbiParam::new(types::F64)); // top
+            sig.params.push(AbiParam::new(types::F64)); // left
+            sig.params.push(AbiParam::new(types::F64)); // bottom
+            sig.params.push(AbiParam::new(types::F64)); // right
+            let func_id = self.module.declare_function("perry_ui_widget_set_edge_insets", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_widget_set_edge_insets".to_string(), func_id);
+        }
+
         // perry_ui_canvas_create(width: f64, height: f64) -> i64
         {
             let mut sig = self.module.make_signature();

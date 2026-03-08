@@ -4594,15 +4594,11 @@ pub(crate) fn compile_expr(
                     }
                     // String method calls (substring, slice, trim, etc.)
                     Expr::Call { callee, .. } => {
-                        if let Expr::PropertyGet { object, property } = callee.as_ref() {
+                        if let Expr::PropertyGet { property, .. } = callee.as_ref() {
+                            // These methods only exist on strings and always return strings
                             if property == "slice" || property == "substring" || property == "trim"
                                || property == "toLowerCase" || property == "toUpperCase" || property == "replace"
                                || property == "padStart" || property == "padEnd" || property == "repeat" || property == "charAt" {
-                                // Check if the object is a string
-                                if let Expr::LocalGet(id) = object.as_ref() {
-                                    return locals.get(id).map(|i| i.is_string).unwrap_or(true);
-                                }
-                                // For non-LocalGet (like property chains), assume it's a string method
                                 return true;
                             }
                         }
@@ -16363,6 +16359,43 @@ pub(crate) fn compile_expr(
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
                     }
+                    "widgetSetEdgeInsets" | "setPadding" | "setEdgeInsets" => {
+                        // (handle, top, left, bottom, right)
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let handle_f64 = ensure_f64(builder, arg_vals[0]);
+                        let ptr_call = builder.ins().call(get_ptr_ref, &[handle_f64]);
+                        let handle = builder.inst_results(ptr_call)[0];
+
+                        let top = ensure_f64(builder, arg_vals[1]);
+                        let left = ensure_f64(builder, arg_vals[2]);
+                        let bottom = ensure_f64(builder, arg_vals[3]);
+                        let right = ensure_f64(builder, arg_vals[4]);
+                        let func = extern_funcs.get("perry_ui_widget_set_edge_insets")
+                            .ok_or_else(|| anyhow!("perry_ui_widget_set_edge_insets not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[handle, top, left, bottom, right]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "setCornerRadius" => {
+                        // Alias for widgetSetCornerRadius — (handle, radius)
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let handle_f64 = ensure_f64(builder, arg_vals[0]);
+                        let ptr_call = builder.ins().call(get_ptr_ref, &[handle_f64]);
+                        let handle = builder.inst_results(ptr_call)[0];
+
+                        let radius = ensure_f64(builder, arg_vals[1]);
+                        let func = extern_funcs.get("perry_ui_widget_set_corner_radius")
+                            .ok_or_else(|| anyhow!("perry_ui_widget_set_corner_radius not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[handle, radius]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
                     "Canvas" => {
                         // Canvas(width, height) -> handle
                         let w = ensure_f64(builder, arg_vals[0]);
@@ -16547,10 +16580,6 @@ pub(crate) fn compile_expr(
             }
 
             // Determine which FFI function to call based on module, class, and method
-            if native_module.contains("mysql") {
-                eprintln!("[CODEGEN-DEBUG] NativeMethodCall: module={:?}, class={:?}, method={:?}, has_object={}, arg_vals.len()={}, is_pool={}, is_pool_connection={}",
-                    native_module, class_name, method, object.is_some(), arg_vals.len(), is_pool, is_pool_connection);
-            }
             let func_name = match (native_module.as_str(), object.is_some(), method.as_str()) {
                 // mysql2 module functions (no object)
                 ("mysql2" | "mysql2/promise", false, "createConnection") => "js_mysql2_create_connection",
@@ -17219,10 +17248,6 @@ pub(crate) fn compile_expr(
                 ("perry/plugin", false, "listTools") => "perry_plugin_list_tools",
 
                 _ => {
-                    if native_module.contains("mysql") {
-                        eprintln!("[CODEGEN-DEBUG] FALLBACK for mysql call: module={:?}, class={:?}, method={:?}, has_object={}, arg_vals.len()={}",
-                            native_module, class_name, method, object.is_some(), arg_vals.len());
-                    }
                     // If JS runtime is enabled, fall back to JS runtime for unsupported native methods
                     // For module-level calls (object is None), use js_call_function
                     // For instance method calls (object is Some), use js_native_call_method
@@ -18160,6 +18185,103 @@ pub(crate) fn compile_expr(
                         }
                         _ => {}
                     }
+                } else if native_module == "mongodb" {
+                    // mongodb instance methods - db(name), collection(name), find(filter), etc.
+                    match method.as_str() {
+                        "db" | "collection" => {
+                            // db(name) / collection(name) - name is a string, extract raw pointer
+                            if !arg_vals.is_empty() {
+                                let str_f64 = ensure_f64(builder, arg_vals[0]);
+                                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                let call = builder.ins().call(get_str_ref, &[str_f64]);
+                                call_args.push(builder.inst_results(call)[0]);
+                            }
+                        }
+                        "find" | "findOne" | "deleteOne" | "deleteMany" | "countDocuments" => {
+                            // These take a filter as a JSON string - extract the string pointer
+                            if !arg_vals.is_empty() {
+                                let str_f64 = ensure_f64(builder, arg_vals[0]);
+                                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                let call = builder.ins().call(get_str_ref, &[str_f64]);
+                                call_args.push(builder.inst_results(call)[0]);
+                            } else {
+                                // Empty filter - pass null
+                                call_args.push(builder.ins().iconst(types::I64, 0));
+                            }
+                        }
+                        "insertOne" => {
+                            // insertOne(doc) - stringify the document
+                            if !arg_vals.is_empty() {
+                                let doc_f64 = ensure_f64(builder, arg_vals[0]);
+                                let type_hint = builder.ins().iconst(types::I32, 1);
+                                let stringify_func = extern_funcs.get("js_json_stringify")
+                                    .ok_or_else(|| anyhow!("js_json_stringify not declared"))?;
+                                let stringify_ref = module.declare_func_in_func(*stringify_func, builder.func);
+                                let stringify_call = builder.ins().call(stringify_ref, &[doc_f64, type_hint]);
+                                call_args.push(builder.inst_results(stringify_call)[0]);
+                            }
+                        }
+                        "updateOne" | "updateMany" => {
+                            // updateOne(filter, update) - both are JSON strings, extract string pointers
+                            for &arg_val in arg_vals.iter().take(2) {
+                                let str_f64 = ensure_f64(builder, arg_val);
+                                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                let call = builder.ins().call(get_str_ref, &[str_f64]);
+                                call_args.push(builder.inst_results(call)[0]);
+                            }
+                        }
+                        "insertMany" => {
+                            // insertMany(docs) - stringify the array
+                            if !arg_vals.is_empty() {
+                                let docs_f64 = ensure_f64(builder, arg_vals[0]);
+                                let type_hint = builder.ins().iconst(types::I32, 2); // 2 = array
+                                let stringify_func = extern_funcs.get("js_json_stringify")
+                                    .ok_or_else(|| anyhow!("js_json_stringify not declared"))?;
+                                let stringify_ref = module.declare_func_in_func(*stringify_func, builder.func);
+                                let stringify_call = builder.ins().call(stringify_ref, &[docs_f64, type_hint]);
+                                call_args.push(builder.inst_results(stringify_call)[0]);
+                            }
+                        }
+                        "close" => {
+                            // close() - no additional args
+                        }
+                        _ => {}
+                    }
+                } else if native_module == "better-sqlite3" {
+                    // better-sqlite3 instance methods
+                    match method.as_str() {
+                        "prepare" | "exec" => {
+                            // prepare(sql) / exec(sql) - sql is a string
+                            if !arg_vals.is_empty() {
+                                let str_f64 = ensure_f64(builder, arg_vals[0]);
+                                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                let call = builder.ins().call(get_str_ref, &[str_f64]);
+                                call_args.push(builder.inst_results(call)[0]);
+                            }
+                        }
+                        "run" | "get" | "all" => {
+                            // run(params) / get(params) / all(params) - params is array
+                            if !arg_vals.is_empty() {
+                                let params_f64 = ensure_f64(builder, arg_vals[0]);
+                                let params_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), params_f64);
+                                call_args.push(params_i64);
+                            } else {
+                                call_args.push(builder.ins().iconst(types::I64, 0));
+                            }
+                        }
+                        "close" | "transaction" | "commit" | "rollback" => {
+                            // No additional args
+                        }
+                        _ => {}
+                    }
                 } else if native_module == "perry/plugin" {
                     // Plugin API instance methods
                     match method.as_str() {
@@ -18720,6 +18842,24 @@ pub(crate) fn compile_expr(
                             }
                             args
                         }
+                        "QRCode" => {
+                            // QRCode(data, size) - string arg + f64 size
+                            let mut args = Vec::new();
+                            if !arg_vals.is_empty() {
+                                let str_f64 = ensure_f64(builder, arg_vals[0]);
+                                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                let call = builder.ins().call(get_str_ref, &[str_f64]);
+                                args.push(builder.inst_results(call)[0]);
+                            }
+                            if arg_vals.len() >= 2 {
+                                args.push(ensure_f64(builder, arg_vals[1]));
+                            } else {
+                                args.push(builder.ins().f64const(200.0));
+                            }
+                            args
+                        }
                         "Image" | "ImageFile" => {
                             // Image(name) / ImageFile(path) - string arg
                             let mut args = Vec::new();
@@ -18943,6 +19083,42 @@ pub(crate) fn compile_expr(
                                     val
                                 }
                             }).collect()
+                        }
+                        _ => arg_vals.clone()
+                    }
+                } else if native_module == "mongodb" {
+                    // mongodb static functions - connect(uri) takes a string pointer
+                    match method.as_str() {
+                        "connect" => {
+                            // MongoClient.connect(uri) - uri is a string, extract raw pointer
+                            let mut args = Vec::new();
+                            if !arg_vals.is_empty() {
+                                let str_f64 = ensure_f64(builder, arg_vals[0]);
+                                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                let call = builder.ins().call(get_str_ref, &[str_f64]);
+                                args.push(builder.inst_results(call)[0]);
+                            }
+                            args
+                        }
+                        _ => arg_vals.clone()
+                    }
+                } else if native_module == "better-sqlite3" {
+                    // better-sqlite3 static functions - open(path) takes a string pointer
+                    match method.as_str() {
+                        "open" => {
+                            // Database.open(path) - path is a string, extract raw pointer
+                            let mut args = Vec::new();
+                            if !arg_vals.is_empty() {
+                                let str_f64 = ensure_f64(builder, arg_vals[0]);
+                                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                let call = builder.ins().call(get_str_ref, &[str_f64]);
+                                args.push(builder.inst_results(call)[0]);
+                            }
+                            args
                         }
                         _ => arg_vals.clone()
                     }
@@ -20013,12 +20189,30 @@ pub(crate) fn compile_expr(
                     }
                 }
 
+                // Helper to detect if an expression is a bigint
+                fn is_bigint_js_arg(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+                    match expr {
+                        Expr::BigInt(_) | Expr::BigIntCoerce(_) => true,
+                        Expr::LocalGet(id) => locals.get(id).map(|i| i.is_bigint).unwrap_or(false),
+                        Expr::Binary { left, right, .. } => {
+                            is_bigint_js_arg(left, locals) || is_bigint_js_arg(right, locals)
+                        }
+                        Expr::Unary { operand, .. } => is_bigint_js_arg(operand, locals),
+                        _ => false,
+                    }
+                }
+
                 // Get nanbox_string function for string arguments
                 let nanbox_string_func = extern_funcs.get("js_nanbox_string")
                     .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
                 let nanbox_string_ref = module.declare_func_in_func(*nanbox_string_func, builder.func);
 
-                // Store each argument, NaN-boxing strings with STRING_TAG
+                // Get nanbox_bigint function for bigint arguments
+                let nanbox_bigint_func = extern_funcs.get("js_nanbox_bigint")
+                    .ok_or_else(|| anyhow!("js_nanbox_bigint not declared"))?;
+                let nanbox_bigint_ref = module.declare_func_in_func(*nanbox_bigint_func, builder.func);
+
+                // Store each argument, NaN-boxing strings with STRING_TAG and bigints with BIGINT_TAG
                 for (i, arg) in args.iter().enumerate() {
                     let arg_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, arg, this_ctx)?;
 
@@ -20026,6 +20220,11 @@ pub(crate) fn compile_expr(
                     let final_val = if is_string_js_arg(arg, locals) {
                         let ptr = ensure_i64(builder, arg_val);
                         let call = builder.ins().call(nanbox_string_ref, &[ptr]);
+                        builder.inst_results(call)[0]
+                    } else if is_bigint_js_arg(arg, locals) {
+                        // BigInt: NaN-box with BIGINT_TAG for JS interop
+                        let ptr = ensure_i64(builder, arg_val);
+                        let call = builder.ins().call(nanbox_bigint_ref, &[ptr]);
                         builder.inst_results(call)[0]
                     } else {
                         // Ensure non-string arguments are f64 for JS interop
