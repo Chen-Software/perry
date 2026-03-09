@@ -65,6 +65,7 @@ define_class!(
         #[unsafe(method(URLSession:webSocketTask:didOpenWithProtocol:))]
         fn did_open(&self, _session: &AnyObject, _task: &AnyObject, _protocol: Option<&NSString>) {
             let cid = self.ivars().conn_id.get();
+            crate::ws_log!("[WS-iOS] didOpen for conn_id={}", cid);
             CONNECTIONS.with(|conns| {
                 if let Some(conn) = conns.borrow_mut().get_mut(&cid) {
                     conn.is_open = true;
@@ -77,6 +78,28 @@ define_class!(
         #[unsafe(method(URLSession:webSocketTask:didCloseWithCode:reason:))]
         fn did_close(&self, _session: &AnyObject, _task: &AnyObject, _code: i64, _reason: Option<&AnyObject>) {
             let cid = self.ivars().conn_id.get();
+            crate::ws_log!("[WS-iOS] didClose for conn_id={}, code={}", cid, _code);
+            CONNECTIONS.with(|conns| {
+                if let Some(conn) = conns.borrow_mut().get_mut(&cid) {
+                    conn.is_open = false;
+                }
+            });
+        }
+
+        #[unsafe(method(URLSession:task:didCompleteWithError:))]
+        fn did_complete(&self, _session: &AnyObject, _task: &AnyObject, error: Option<&AnyObject>) {
+            let cid = self.ivars().conn_id.get();
+            if let Some(err) = error {
+                let desc: *const NSString = unsafe { msg_send![err, localizedDescription] };
+                if !desc.is_null() {
+                    let msg = unsafe { (*desc).to_string() };
+                    crate::ws_log!("[WS-iOS] didCompleteWithError conn_id={}: {}", cid, msg);
+                } else {
+                    crate::ws_log!("[WS-iOS] didCompleteWithError conn_id={}: (no description)", cid);
+                }
+            } else {
+                crate::ws_log!("[WS-iOS] didComplete conn_id={} (no error)", cid);
+            }
             CONNECTIONS.with(|conns| {
                 if let Some(conn) = conns.borrow_mut().get_mut(&cid) {
                     conn.is_open = false;
@@ -139,7 +162,9 @@ fn schedule_receive_raw(conn_id: u32, task_ptr: *const AnyObject) {
 /// Connect to a WebSocket URL. Returns a connection handle (f64).
 pub fn connect(url_ptr: *const u8) -> f64 {
     let url_str = str_from_header(url_ptr);
+    crate::ws_log!("[WS-iOS] connect called, url={}", url_str);
     if url_str.is_empty() {
+        crate::ws_log!("[WS-iOS] empty URL, returning 0");
         return 0.0;
     }
 
@@ -148,12 +173,14 @@ pub fn connect(url_ptr: *const u8) -> f64 {
         *id.borrow_mut() = current + 1;
         current
     });
+    crate::ws_log!("[WS-iOS] conn_id={}", conn_id);
 
     unsafe {
         let ns_url_str = NSString::from_str(url_str);
         let url_cls = AnyClass::get(c"NSURL").unwrap();
         let url: *const AnyObject = msg_send![url_cls, URLWithString: &*ns_url_str];
         if url.is_null() {
+            crate::ws_log!("[WS-iOS] NSURL is null!");
             return 0.0;
         }
         CFRetain(url as *const _);

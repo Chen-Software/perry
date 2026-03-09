@@ -14,59 +14,69 @@ use crate::string::StringHeader;
 use crate::promise::Promise;
 
 // === WebSocket stubs ===
+// On iOS, perry-stdlib provides the real WebSocket implementation (using
+// NSURLSessionWebSocketTask). These stubs must NOT be compiled for iOS,
+// otherwise libperry_ui_ios.a (which bundles perry-runtime) will contain
+// duplicate stub symbols that override stdlib's real implementation.
+#[cfg(not(target_os = "ios"))]
+mod ws_stubs {
+    use std::ptr;
+    use crate::string::StringHeader;
+    use crate::promise::Promise;
 
-#[no_mangle]
-pub extern "C" fn js_ws_connect(_url_ptr: *const StringHeader) -> *mut Promise {
-    ptr::null_mut()
-}
+    #[no_mangle]
+    pub extern "C" fn js_ws_connect(_url_ptr: *const StringHeader) -> *mut Promise {
+        ptr::null_mut()
+    }
 
-#[no_mangle]
-pub extern "C" fn js_ws_connect_start(_url_nanboxed: f64) -> f64 {
-    0.0
-}
+    #[no_mangle]
+    pub extern "C" fn js_ws_connect_start(_url_nanboxed: f64) -> f64 {
+        0.0
+    }
 
-#[no_mangle]
-pub extern "C" fn js_ws_send(_handle: i64, _message_ptr: *const StringHeader) {}
+    #[no_mangle]
+    pub extern "C" fn js_ws_send(_handle: i64, _message_ptr: *const StringHeader) {}
 
-#[no_mangle]
-pub extern "C" fn js_ws_close(_handle: i64) {}
+    #[no_mangle]
+    pub extern "C" fn js_ws_close(_handle: i64) {}
 
-#[no_mangle]
-pub extern "C" fn js_ws_is_open(_handle: i64) -> f64 {
-    0.0
-}
+    #[no_mangle]
+    pub extern "C" fn js_ws_is_open(_handle: i64) -> f64 {
+        0.0
+    }
 
-#[no_mangle]
-pub extern "C" fn js_ws_message_count(_handle: i64) -> f64 {
-    0.0
-}
+    #[no_mangle]
+    pub extern "C" fn js_ws_message_count(_handle: i64) -> f64 {
+        0.0
+    }
 
-#[no_mangle]
-pub extern "C" fn js_ws_receive(_handle: i64) -> *mut StringHeader {
-    ptr::null_mut()
-}
+    #[no_mangle]
+    pub extern "C" fn js_ws_receive(_handle: i64) -> *mut StringHeader {
+        ptr::null_mut()
+    }
 
-#[no_mangle]
-pub extern "C" fn js_ws_wait_for_message(_handle: i64, _timeout_ms: f64) -> *mut Promise {
-    ptr::null_mut()
-}
+    #[no_mangle]
+    pub extern "C" fn js_ws_wait_for_message(_handle: i64, _timeout_ms: f64) -> *mut Promise {
+        ptr::null_mut()
+    }
 
-#[no_mangle]
-pub extern "C" fn js_ws_on(_handle: i64, _event_name_ptr: *const StringHeader, _callback_ptr: i64) -> i64 {
-    0
-}
+    #[no_mangle]
+    pub extern "C" fn js_ws_on(_handle: i64, _event_name_ptr: *const StringHeader, _callback_ptr: i64) -> i64 {
+        0
+    }
 
-#[no_mangle]
-pub extern "C" fn js_ws_server_new(_opts_f64: f64) -> i64 {
-    0
-}
+    #[no_mangle]
+    pub extern "C" fn js_ws_server_new(_opts_f64: f64) -> i64 {
+        0
+    }
 
-#[no_mangle]
-pub extern "C" fn js_ws_server_close(_handle: i64) {}
+    #[no_mangle]
+    pub extern "C" fn js_ws_server_close(_handle: i64) {}
 
-#[no_mangle]
-pub extern "C" fn js_ws_process_pending() -> i32 {
-    0
+    #[no_mangle]
+    pub extern "C" fn js_ws_process_pending() -> i32 {
+        0
+    }
 }
 
 // === HTTP stubs (for programs that reference HTTP without importing http modules) ===

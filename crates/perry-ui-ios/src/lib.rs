@@ -7,6 +7,18 @@ pub mod state;
 pub mod websocket;
 pub mod widgets;
 
+/// Debug logging macro that writes to a file (NSLog/eprintln don't work reliably on iOS)
+#[macro_export]
+macro_rules! ws_log {
+    ($($arg:tt)*) => {{
+        use std::io::Write;
+        let msg = format!($($arg)*);
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/hone-ws-ios.log") {
+            let _ = writeln!(f, "{}", msg);
+        }
+    }};
+}
+
 // =============================================================================
 // FFI exports — identical signatures to perry-ui-macos
 // =============================================================================
@@ -1145,6 +1157,9 @@ pub extern "C" fn perry_ui_app_on_terminate(_callback: f64) {}
 
 #[no_mangle]
 pub extern "C" fn perry_ui_app_on_activate(_callback: f64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_app_set_icon(_path_ptr: i64) {}
 
 // =============================================================================
 // Toolbar
