@@ -189,6 +189,52 @@ fn setup_menu_bar(app: &NSApplication, mtm: MainThreadMarker) {
             menu_bar
         };
 
+        // --- Edit menu (Cut/Copy/Paste/Select All via responder chain) ---
+        let edit_menu_item = NSMenuItem::new(mtm);
+        let edit_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Edit"));
+
+        let undo_item = NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm), &NSString::from_str("Undo"),
+            Some(Sel::register(c"undo:")), &NSString::from_str("z"));
+        undo_item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+        edit_menu.addItem(&undo_item);
+
+        let redo_item = NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm), &NSString::from_str("Redo"),
+            Some(Sel::register(c"redo:")), &NSString::from_str("z"));
+        redo_item.setKeyEquivalentModifierMask(
+            NSEventModifierFlags::Command | NSEventModifierFlags::Shift);
+        edit_menu.addItem(&redo_item);
+
+        edit_menu.addItem(&NSMenuItem::separatorItem(mtm));
+
+        let cut_item = NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm), &NSString::from_str("Cut"),
+            Some(Sel::register(c"cut:")), &NSString::from_str("x"));
+        cut_item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+        edit_menu.addItem(&cut_item);
+
+        let copy_item = NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm), &NSString::from_str("Copy"),
+            Some(Sel::register(c"copy:")), &NSString::from_str("c"));
+        copy_item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+        edit_menu.addItem(&copy_item);
+
+        let paste_item = NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm), &NSString::from_str("Paste"),
+            Some(Sel::register(c"paste:")), &NSString::from_str("v"));
+        paste_item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+        edit_menu.addItem(&paste_item);
+
+        let select_all_item = NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm), &NSString::from_str("Select All"),
+            Some(Sel::register(c"selectAll:")), &NSString::from_str("a"));
+        select_all_item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+        edit_menu.addItem(&select_all_item);
+
+        edit_menu_item.setSubmenu(Some(&edit_menu));
+        menu_bar.addItem(&edit_menu_item);
+
         app.setMainMenu(Some(&menu_bar));
     }
 }

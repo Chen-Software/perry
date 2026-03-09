@@ -90,7 +90,7 @@ impl FastifyContext {
             id: CONTEXT_ID_COUNTER.fetch_add(1, Ordering::SeqCst),
             request_id,
             method,
-            url: path,
+            url: url,
             query_string,
             params,
             headers,
@@ -189,10 +189,15 @@ pub unsafe extern "C" fn js_fastify_req_method(ctx_handle: Handle) -> *mut Strin
     std::ptr::null_mut()
 }
 
-/// Get request URL path
+/// Get request URL (including query string)
 #[no_mangle]
 pub unsafe extern "C" fn js_fastify_req_url(ctx_handle: Handle) -> *mut StringHeader {
     if let Some(ctx) = get_handle::<FastifyContext>(ctx_handle) {
+        // Always include query string in the URL for consistency
+        if !ctx.query_string.is_empty() {
+            let full = format!("{}?{}", ctx.url, ctx.query_string);
+            return js_string_from_bytes(full.as_ptr(), full.len() as u32);
+        }
         return js_string_from_bytes(ctx.url.as_ptr(), ctx.url.len() as u32);
     }
     std::ptr::null_mut()

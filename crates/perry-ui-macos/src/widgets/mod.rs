@@ -188,6 +188,8 @@ pub fn set_alignment(handle: i64, alignment: i64) {
 }
 
 /// Remove all arranged subviews from a container (NSStackView).
+/// Deactivates constraints referencing the stack before removal to avoid
+/// dangling constraint crashes (e.g. from widgetMatchParentWidth).
 pub fn clear_children(handle: i64) {
     if let Some(parent) = get_widget(handle) {
         let is_stack = if let Some(cls) = AnyClass::get(c"NSStackView") {
@@ -199,6 +201,18 @@ pub fn clear_children(handle: i64) {
             let stack: &NSStackView = unsafe { &*(Retained::as_ptr(&parent) as *const NSStackView) };
             let subviews = stack.arrangedSubviews();
             for sv in subviews.iter() {
+                // Deactivate all constraints on this view that reference
+                // the parent stack (created by e.g. match_parent_width)
+                unsafe {
+                    let constraints: Retained<AnyObject> = msg_send![&**sv, constraints];
+                    let count: usize = msg_send![&*constraints, count];
+                    for i in 0..count {
+                        let c: *mut AnyObject = msg_send![&*constraints, objectAtIndex: i];
+                        if !c.is_null() {
+                            let _: () = msg_send![c, setActive: false];
+                        }
+                    }
+                }
                 stack.removeArrangedSubview(&*sv);
                 sv.removeFromSuperview();
             }
