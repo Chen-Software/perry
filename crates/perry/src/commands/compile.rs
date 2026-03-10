@@ -2945,9 +2945,18 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             "arm64-apple-ios17.0"
         };
 
+        // Discover Xcode developer directory for Swift standard library paths.
+        // Swift libs live in the toolchain, not the SDK sysroot, so the linker
+        // needs explicit -L flags to resolve auto-linked libs like swiftCore.
+        let developer_dir = String::from_utf8(
+            Command::new("xcode-select").arg("-p").output()?.stdout
+        )?.trim().to_string();
+
         let mut c = Command::new(clang);
         c.arg("-target").arg(triple)
-         .arg("-isysroot").arg(sysroot)
+         .arg("-isysroot").arg(&sysroot)
+         .arg("-L").arg(format!("{}/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/{}", developer_dir, sdk))
+         .arg("-L").arg(format!("{}/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/{}", developer_dir, sdk))
          // perry-stdlib and perry-ui-ios both bundle perry-runtime symbols;
          // the new Apple ld treats duplicate archive symbols as errors.
          // Use the classic linker which applies first-definition-wins.
