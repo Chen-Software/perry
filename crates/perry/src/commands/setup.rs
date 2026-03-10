@@ -421,36 +421,37 @@ fn ios_wizard(saved: &mut PerryConfig) -> Result<()> {
     let p12_password = "perry-auto";
 
     // Check if we already have a valid .p12 with matching cert
-    let existing_cert_id = if let Some(cert_list) = certs {
-        // Find any valid (not revoked/expired) distribution cert
-        let valid: Vec<&serde_json::Value> = cert_list.iter()
-            .filter(|c| {
-                c["attributes"]["certificateType"].as_str() == Some("DISTRIBUTION")
-            })
+    // Collect ALL valid distribution cert IDs — profile will include all of them
+    let all_cert_ids: Vec<String> = if let Some(cert_list) = certs {
+        let valid: Vec<String> = cert_list.iter()
+            .filter(|c| c["attributes"]["certificateType"].as_str() == Some("DISTRIBUTION"))
+            .filter_map(|c| c["id"].as_str().map(|s| s.to_string()))
             .collect();
         if valid.is_empty() {
             println!("{}", style("none found").yellow());
-            None
         } else {
             println!("{} found", style(format!("{}", valid.len())).green());
-            // Check if existing .p12 matches any cert
-            let mut matched_id = None;
-            if p12_path.exists() {
-                // Try to read the existing .p12's serial and match
-                // For simplicity, just ask if they want to keep or recreate
-                println!("  Found existing .p12 at {}", style(p12_path.display()).dim());
-                let keep = Confirm::new()
-                    .with_prompt("  Keep existing certificate?")
-                    .default(true)
-                    .interact()?;
-                if keep {
-                    matched_id = Some(valid[0]["id"].as_str().unwrap_or("").to_string());
-                }
-            }
-            matched_id
         }
+        valid
     } else {
         println!("{}", style("error reading").red());
+        vec![]
+    };
+
+    let existing_cert_id = if !all_cert_ids.is_empty() && p12_path.exists() {
+        println!("  Found existing .p12 at {}", style(p12_path.display()).dim());
+        let keep = Confirm::new()
+            .with_prompt("  Keep existing certificate?")
+            .default(true)
+            .interact()?;
+        if keep {
+            Some(all_cert_ids[0].clone()) // placeholder — profile will use all certs
+        } else {
+            None
+        }
+    } else if !all_cert_ids.is_empty() {
+        Some(all_cert_ids[0].clone())
+    } else {
         None
     };
 
@@ -620,11 +621,22 @@ fn ios_wizard(saved: &mut PerryConfig) -> Result<()> {
         });
 
     let profile_b64 = if let Some(profile) = existing_profile {
-        println!("{}", style("found existing").green());
-        let profile_content = profile["attributes"]["profileContent"].as_str()
-            .ok_or_else(|| anyhow::anyhow!("No profile content in existing profile"))?;
-        profile_content.to_string()
+        // Delete existing profile and recreate — it may reference an old certificate
+        let profile_id = profile["id"].as_str().unwrap_or("");
+        if !profile_id.is_empty() {
+            print!("{}, replacing... ", style("found existing").yellow());
+            std::io::Write::flush(&mut std::io::stdout()).ok();
+            let jwt = generate_asc_jwt(&key_id, &issuer_id, &p8_content)?;
+            let _ = client.delete(format!("https://api.appstoreconnect.apple.com/v1/profiles/{profile_id}"))
+                .bearer_auth(&jwt)
+                .send();
+        }
+        // Fall through to create new profile below
+        "".to_string()
     } else {
+        "".to_string()
+    };
+    let profile_b64 = if profile_b64.is_empty() {
         // Create new profile
         let create_body = serde_json::json!({
             "data": {
@@ -641,10 +653,9 @@ fn ios_wizard(saved: &mut PerryConfig) -> Result<()> {
                         }
                     },
                     "certificates": {
-                        "data": [{
-                            "type": "certificates",
-                            "id": cert_resource_id
-                        }]
+                        "data": all_cert_ids.iter().map(|id| {
+                            serde_json::json!({"type": "certificates", "id": id})
+                        }).collect::<Vec<_>>()
                     }
                 }
             }
@@ -664,6 +675,8 @@ fn ios_wizard(saved: &mut PerryConfig) -> Result<()> {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("No profile content in response"))?
             .to_string()
+    } else {
+        profile_b64
     };
 
     // Decode and save the provisioning profile
