@@ -875,9 +875,9 @@ fn macos_wizard(saved: &mut PerryConfig) -> Result<()> {
     println!();
 
     let cert_types = &[
-        "TestFlight (macOS beta testing via App Store Connect)",
-        "Mac App Store (submit to App Store)",
-        "Developer ID (direct distribution / notarize)",
+        "App Store / TestFlight (upload to App Store Connect)",
+        "Notarized DMG (direct download)",
+        "Both (App Store + Notarized DMG)",
     ];
     let cert_type_idx = Select::new()
         .with_prompt("  Distribution method")
@@ -886,47 +886,85 @@ fn macos_wizard(saved: &mut PerryConfig) -> Result<()> {
         .interact()?;
 
     let distribute_value = match cert_type_idx {
-        0 => "testflight",
-        1 => "appstore",
-        _ => "notarize",
+        0 => "appstore",
+        1 => "notarize",
+        _ => "both",
     };
-    let is_notarize = distribute_value == "notarize";
+    let needs_appstore_cert = distribute_value == "appstore" || distribute_value == "both";
+    let needs_notarize_cert = distribute_value == "notarize" || distribute_value == "both";
 
-    println!();
-    if is_notarize {
+    // -- App Store / Apple Distribution certificate --
+    let mut cert_path = String::new();
+    let mut signing_identity = String::new();
+    if needs_appstore_cert {
+        println!();
+        if distribute_value == "both" {
+            println!("  {} App Store certificate (Apple Distribution):", style("A)").cyan().bold());
+        }
+        println!("  To create a Mac App Store distribution certificate:");
+        println!("  1. Open Xcode → Settings → Accounts → select your Apple ID.");
+        println!("  2. Click 'Manage Certificates'.");
+        println!("  3. Create a '3rd Party Mac Developer Application' certificate.");
+        println!("  4. Right-click → Export Certificate → save as .p12.");
+        println!();
+        press_enter_to_continue("  Press Enter when ready");
+
+        cert_path = prompt_file_path("  Path to .p12 certificate (App Store)", ".p12")?;
+        signing_identity = Input::<String>::new()
+            .with_prompt("  Signing identity (optional, e.g. 'Apple Distribution: ...')")
+            .allow_empty(true)
+            .interact_text()?;
+
+        println!("  {} App Store certificate: {}", style("✓").green(), style(&cert_path).bold());
+    }
+
+    // -- Developer ID certificate (for notarization) --
+    let mut notarize_cert_path = String::new();
+    let mut notarize_signing_identity = String::new();
+    if needs_notarize_cert {
+        println!();
+        if distribute_value == "both" {
+            println!("  {} Developer ID certificate (for notarization):", style("B)").cyan().bold());
+        }
         println!("  To create a Developer ID Application certificate:");
         println!("  1. Open Xcode → Settings → Accounts → select your Apple ID.");
         println!("  2. Click 'Manage Certificates'.");
         println!("  3. Create a 'Developer ID Application' certificate.");
         println!("  4. Right-click → Export Certificate → save as .p12.");
-    } else {
-        println!("  To create a Mac App Store distribution certificate:");
-        println!("  1. Open Xcode → Settings → Accounts → select your Apple ID.");
-        println!("  2. Click 'Manage Certificates'.");
-        println!("  3. Create a 'Mac App Distribution' certificate.");
-        println!("  4. Right-click → Export Certificate → save as .p12.");
+        println!();
+        press_enter_to_continue("  Press Enter when ready");
+
+        notarize_cert_path = prompt_file_path(
+            if distribute_value == "both" { "  Path to .p12 certificate (Developer ID)" } else { "  Path to .p12 certificate" },
+            ".p12",
+        )?;
+        notarize_signing_identity = Input::<String>::new()
+            .with_prompt("  Signing identity (optional, e.g. 'Developer ID Application: ...')")
+            .allow_empty(true)
+            .interact_text()?;
+
+        println!("  {} Developer ID certificate: {}", style("✓").green(), style(&notarize_cert_path).bold());
     }
+
+    // For single-cert modes, normalize into cert_path
+    if distribute_value == "notarize" {
+        cert_path = notarize_cert_path.clone();
+        signing_identity = notarize_signing_identity.clone();
+    }
+
     println!();
-
-    press_enter_to_continue("  Press Enter when ready");
-
-    let cert_path = prompt_file_path("  Path to .p12 certificate", ".p12")?;
-
-    let identity_example = if is_notarize {
-        "Developer ID Application: ..."
-    } else {
-        "Apple Distribution: ..."
-    };
-    let signing_identity = Input::<String>::new()
-        .with_prompt(format!("  Signing identity string (optional, e.g. '{identity_example}')"))
-        .allow_empty(true)
-        .interact_text()?;
-
-    println!("  {} Certificate: {}", style("✓").green(), style(&cert_path).bold());
     println!(
-        "  {} Certificate password is NOT saved — set PERRY_APPLE_CERTIFICATE_PASSWORD",
-        style("ℹ").blue()
+        "  {} Certificate password is NOT saved — set {}",
+        style("ℹ").blue(),
+        style("PERRY_APPLE_CERTIFICATE_PASSWORD").bold()
     );
+    if distribute_value == "both" {
+        println!(
+            "  {} Notarize cert password: set {} (falls back to main password)",
+            style("ℹ").blue(),
+            style("PERRY_APPLE_NOTARIZE_CERTIFICATE_PASSWORD").bold()
+        );
+    }
     println!();
 
     // --- Save project-specific credentials to perry.toml ---
@@ -937,6 +975,12 @@ fn macos_wizard(saved: &mut PerryConfig) -> Result<()> {
             distribute_value,
             &cert_path,
             if signing_identity.is_empty() { None } else { Some(&signing_identity) },
+            if distribute_value == "both" { Some(&notarize_cert_path) } else { None },
+            if distribute_value == "both" && !notarize_signing_identity.is_empty() {
+                Some(&notarize_signing_identity)
+            } else {
+                None
+            },
         ) {
             Ok(()) => {
                 println!("  {} macOS credentials saved to {}", style("✓").green().bold(),
@@ -958,10 +1002,16 @@ fn macos_wizard(saved: &mut PerryConfig) -> Result<()> {
         if !signing_identity.is_empty() {
             println!("  signing_identity = \"{}\"", signing_identity);
         }
+        if distribute_value == "both" {
+            println!("  notarize_certificate = \"{}\"", notarize_cert_path);
+            if !notarize_signing_identity.is_empty() {
+                println!("  notarize_signing_identity = \"{}\"", notarize_signing_identity);
+            }
+        }
     }
 
-    // --- Export compliance (for App Store / TestFlight) ---
-    if !is_notarize {
+    // --- Export compliance (for App Store) ---
+    if needs_appstore_cert {
         println!();
         println!("  {} Export Compliance", style("→").cyan().bold());
         println!("  Most apps only use HTTPS and don't need custom encryption declarations.");
@@ -984,9 +1034,20 @@ fn macos_wizard(saved: &mut PerryConfig) -> Result<()> {
     // --- Summary ---
     println!("  {}", style("Setup complete!").green().bold());
     println!();
-    println!("  Certificate:  {}", style(&cert_path).dim());
+    match distribute_value {
+        "both" => {
+            println!("  App Store cert: {}", style(&cert_path).dim());
+            println!("  Notarize cert:  {}", style(&notarize_cert_path).dim());
+        }
+        _ => {
+            println!("  Certificate:  {}", style(&cert_path).dim());
+        }
+    }
     println!("  Distribute:   {}", style(distribute_value).bold());
     println!("  Cert password: set PERRY_APPLE_CERTIFICATE_PASSWORD");
+    if distribute_value == "both" {
+        println!("  Notarize cert password: set PERRY_APPLE_NOTARIZE_CERTIFICATE_PASSWORD");
+    }
     println!();
     println!("  Then run: {}", style("perry publish --macos").bold());
 
@@ -1097,6 +1158,8 @@ fn update_perry_toml_macos(
     distribute: &str,
     certificate: &str,
     signing_identity: Option<&str>,
+    notarize_certificate: Option<&str>,
+    notarize_signing_identity: Option<&str>,
 ) -> Result<()> {
     let content = std::fs::read_to_string(perry_toml_path)?;
     let mut doc = content.parse::<toml::Table>()
@@ -1111,6 +1174,12 @@ fn update_perry_toml_macos(
     macos.insert("certificate".into(), toml::Value::String(certificate.into()));
     if let Some(identity) = signing_identity {
         macos.insert("signing_identity".into(), toml::Value::String(identity.into()));
+    }
+    if let Some(notarize_cert) = notarize_certificate {
+        macos.insert("notarize_certificate".into(), toml::Value::String(notarize_cert.into()));
+    }
+    if let Some(notarize_identity) = notarize_signing_identity {
+        macos.insert("notarize_signing_identity".into(), toml::Value::String(notarize_identity.into()));
     }
 
     let new_content = toml::to_string_pretty(&doc)

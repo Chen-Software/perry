@@ -152,6 +152,7 @@ struct MacosConfig {
     category: Option<String>,
     minimum_os: Option<String>,
     entitlements: Option<Vec<String>>,
+    /// "appstore", "notarize", or "both"
     distribute: Option<String>,
     signing_identity: Option<String>,
     // Per-project signing credentials (override global ~/.perry/config.toml)
@@ -162,6 +163,9 @@ struct MacosConfig {
     p8_key_path: Option<String>,
     /// If true, adds ITSAppUsesNonExemptEncryption=NO to Info.plist
     encryption_exempt: Option<bool>,
+    /// For distribute = "both": separate Developer ID cert for notarization
+    notarize_certificate: Option<String>,
+    notarize_signing_identity: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -343,6 +347,13 @@ struct CredentialsPayload {
     apple_certificate_p12_base64: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     apple_certificate_password: Option<String>,
+    /// For macOS distribute = "both": separate Developer ID cert for notarization
+    #[serde(skip_serializing_if = "Option::is_none")]
+    apple_notarize_certificate_p12_base64: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    apple_notarize_certificate_password: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    apple_notarize_signing_identity: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     android_keystore_base64: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -499,7 +510,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     let is_macos = !is_ios && !is_android && !is_linux;
     let macos_needs_upload = is_macos && matches!(
         macos_distribute.as_deref(),
-        Some("appstore") | Some("testflight")
+        Some("appstore") | Some("both")
     );
     let build_number = if is_ios || is_android || macos_needs_upload {
         let n = toml_build_number + 1;
@@ -872,6 +883,32 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         (None, None)
     };
 
+    // For macOS distribute = "both": resolve the separate Developer ID cert for notarization
+    let (notarize_cert_b64, notarize_cert_password, notarize_identity) = if is_macos
+        && macos_distribute.as_deref() == Some("both")
+    {
+        let notarize_cert_path = config.macos.as_ref().and_then(|m| m.notarize_certificate.clone());
+        let notarize_identity = config.macos.as_ref().and_then(|m| m.notarize_signing_identity.clone());
+        let cert_b64 = if let Some(ref path_str) = notarize_cert_path {
+            let path = Path::new(path_str);
+            if path.exists() {
+                use base64::Engine;
+                let data = fs::read(path)
+                    .with_context(|| format!("Failed to read notarize .p12: {path_str}"))?;
+                Some(base64::engine::general_purpose::STANDARD.encode(&data))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let password = std::env::var("PERRY_APPLE_NOTARIZE_CERTIFICATE_PASSWORD").ok()
+            .or_else(|| apple_certificate_password.clone());
+        (cert_b64, password, notarize_identity)
+    } else {
+        (None, None, None)
+    };
+
     let google_play_json = if let Some(ref path_str) = google_play_key_path {
         let path = Path::new(path_str);
         if path.exists() {
@@ -1088,10 +1125,10 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         }
     }
 
-    // Pre-flight validation for macOS App Store / TestFlight
+    // Pre-flight validation for macOS App Store / Both
     if is_macos {
         let distribute = macos_distribute.as_deref().unwrap_or("");
-        if distribute == "appstore" || distribute == "testflight" {
+        if matches!(distribute, "appstore" | "both") {
             let mut warnings: Vec<String> = Vec::new();
             let mut errors: Vec<String> = Vec::new();
 
@@ -1142,7 +1179,17 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
                 );
             }
 
-            // 5. Warn if encryption_exempt is not set
+            // 5. For "both": check notarize certificate
+            if distribute == "both" && notarize_cert_b64.is_none() {
+                errors.push(
+                    "distribute = \"both\" requires a separate Developer ID certificate for notarization.\n\
+                     \x20\x20  Add notarize_certificate to [macos] in perry.toml\n\
+                     \x20\x20  Run `perry setup macos` and select \"Both\" to configure"
+                    .into()
+                );
+            }
+
+            // 6. Warn if encryption_exempt is not set
             if macos_encryption_exempt.is_none() {
                 warnings.push(
                     "encryption_exempt not set in [macos] of perry.toml.\n\
@@ -1186,9 +1233,11 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         }
         if android_distribute.as_deref() == Some("playstore") {
             println!("  Distribute: Google Play");
-        } else if ios_distribute.as_deref() == Some("appstore") || ios_distribute.as_deref() == Some("testflight")
-            || matches!(macos_distribute.as_deref(), Some("appstore") | Some("testflight"))
-        {
+        } else if ios_distribute.as_deref() == Some("appstore") || ios_distribute.as_deref() == Some("testflight") {
+            println!("  Distribute: App Store Connect (TestFlight)");
+        } else if macos_distribute.as_deref() == Some("both") {
+            println!("  Distribute: App Store + Notarized DMG");
+        } else if matches!(macos_distribute.as_deref(), Some("appstore") | Some("testflight")) {
             println!("  Distribute: App Store Connect (TestFlight)");
         } else if macos_distribute.as_deref() == Some("notarize") {
             println!("  Distribute: Notarized DMG");
@@ -1286,6 +1335,9 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         provisioning_profile_base64: provisioning_profile_b64,
         apple_certificate_p12_base64: apple_certificate_p12_b64,
         apple_certificate_password,
+        apple_notarize_certificate_p12_base64: notarize_cert_b64,
+        apple_notarize_certificate_password: notarize_cert_password,
+        apple_notarize_signing_identity: notarize_identity,
         android_keystore_base64: android_keystore_b64,
         android_keystore_password,
         android_key_alias,
@@ -2195,19 +2247,20 @@ fn validate_credentials_for_distribute(
         }
     }
 
-    // macOS + appstore/testflight/notarize
+    // macOS + appstore/notarize/both
     if is_macos {
         let distribute = macos_distribute.unwrap_or("");
-        if distribute == "appstore" || distribute == "testflight" || distribute == "notarize" {
+        if matches!(distribute, "appstore" | "testflight" | "notarize" | "both") {
             let mut missing = Vec::new();
             if apple_key_id.is_none() { missing.push("Key ID (--apple-key-id / PERRY_APPLE_KEY_ID)"); }
             if apple_issuer_id.is_none() { missing.push("Issuer ID (--apple-issuer-id / PERRY_APPLE_ISSUER_ID)"); }
             if p8_key_content.is_none() { missing.push(".p8 key (--apple-p8-key / PERRY_APPLE_P8_KEY)"); }
             if !missing.is_empty() {
-                let purpose = if distribute == "notarize" {
-                    "notarization"
-                } else {
-                    "App Store Connect upload"
+                let purpose = match distribute {
+                    "notarize" => "notarization",
+                    "both" => "App Store upload and notarization",
+                    "appstore" | "testflight" => "App Store Connect upload",
+                    _ => "distribution",
                 };
                 bail!(
                     "macos.distribute = \"{distribute}\" requires App Store Connect API credentials for {purpose}.\n\
@@ -2317,6 +2370,9 @@ mod tests {
             provisioning_profile_base64: None,
             apple_certificate_p12_base64: None,
             apple_certificate_password: None,
+            apple_notarize_certificate_p12_base64: None,
+            apple_notarize_certificate_password: None,
+            apple_notarize_signing_identity: None,
             android_keystore_base64: Some("dGVzdA==".into()),
             android_keystore_password: Some("pass".into()),
             android_key_alias: Some("key0".into()),
@@ -2339,6 +2395,9 @@ mod tests {
             provisioning_profile_base64: None,
             apple_certificate_p12_base64: None,
             apple_certificate_password: None,
+            apple_notarize_certificate_p12_base64: None,
+            apple_notarize_certificate_password: None,
+            apple_notarize_signing_identity: None,
             android_keystore_base64: None,
             android_keystore_password: None,
             android_key_alias: None,
