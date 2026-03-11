@@ -1083,6 +1083,14 @@ fn lower_module_decl(
                                 ast::Expr::Arrow(_)
                             );
 
+                            // Check if this is a Widget({...}) call from perry/widget
+                            if let ast::Expr::Call(call_expr) = init.as_ref() {
+                                if let Some(widget_decl) = try_lower_widget_decl(ctx, call_expr) {
+                                    module.widgets.push(widget_decl);
+                                    continue;
+                                }
+                            }
+
                             let expr = lower_expr(ctx, init)?;
                             let id = if ctx.pre_registered_module_vars.remove(&name) {
                                 let id = ctx.lookup_local(&name).unwrap();
@@ -1569,6 +1577,15 @@ fn lower_stmt(
                 ast::Decl::Var(var_decl) => {
                     let mutable = var_decl.kind != ast::VarDeclKind::Const;
                     for decl in &var_decl.decls {
+                        // Check if this is a Widget({...}) call from perry/widget
+                        if let Some(init) = &decl.init {
+                            if let ast::Expr::Call(call_expr) = init.as_ref() {
+                                if let Some(widget_decl) = try_lower_widget_decl(ctx, call_expr) {
+                                    module.widgets.push(widget_decl);
+                                    continue;
+                                }
+                            }
+                        }
                         let stmts = lower_var_decl_with_destructuring(ctx, decl, mutable)?;
                         module.init.extend(stmts);
                     }
@@ -6027,3 +6044,589 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
 
 /// Unescape template literal strings (handle \n, \t, etc.)
 fn _unescape_template() {}
+
+/// Try to lower a Widget({...}) call from perry/widget into a WidgetDecl.
+/// Returns Some(WidgetDecl) if this is a widget declaration, None otherwise.
+fn try_lower_widget_decl(
+    ctx: &LoweringContext,
+    call_expr: &ast::CallExpr,
+) -> Option<WidgetDecl> {
+    // Check callee is a function imported from perry/widget named "Widget"
+    let callee = match &call_expr.callee {
+        ast::Callee::Expr(expr) => expr,
+        _ => return None,
+    };
+    let func_name = match callee.as_ref() {
+        ast::Expr::Ident(ident) => ident.sym.as_ref(),
+        _ => return None,
+    };
+    let (module, method) = ctx.lookup_native_module(func_name)?;
+    if module != "perry/widget" {
+        return None;
+    }
+    let method_name = method.unwrap_or(func_name);
+    if method_name != "Widget" {
+        return None;
+    }
+
+    // First arg should be the config object literal
+    let config_obj = match call_expr.args.first() {
+        Some(arg) => match arg.expr.as_ref() {
+            ast::Expr::Object(obj) => obj,
+            _ => return None,
+        },
+        None => return None,
+    };
+
+    let mut kind = String::new();
+    let mut display_name = String::new();
+    let mut description = String::new();
+    let mut supported_families: Vec<String> = Vec::new();
+    let mut entry_fields: Vec<(String, WidgetFieldType)> = Vec::new();
+    let mut render_body: Vec<WidgetNode> = Vec::new();
+    let mut entry_param_name = "entry".to_string();
+
+    for prop in &config_obj.props {
+        let kv = match prop {
+            ast::PropOrSpread::Prop(p) => match p.as_ref() {
+                ast::Prop::KeyValue(kv) => kv,
+                ast::Prop::Method(method) => {
+                    let key = prop_name_to_string(&method.key);
+                    if key == "render" {
+                        // Extract parameter name
+                        if let Some(param) = method.function.params.first() {
+                            if let ast::Pat::Ident(ident) = &param.pat {
+                                entry_param_name = ident.id.sym.to_string();
+                            }
+                        }
+                        // Extract type annotation for entry fields (only if not already specified via entryFields)
+                        if entry_fields.is_empty() {
+                            if let Some(param) = method.function.params.first() {
+                                extract_entry_fields_from_param(&param.pat, &mut entry_fields);
+                            }
+                        }
+                        // Parse render body
+                        if let Some(body) = &method.function.body {
+                            for stmt in &body.stmts {
+                                if let ast::Stmt::Return(ret) = stmt {
+                                    if let Some(arg) = &ret.arg {
+                                        if let Some(node) = parse_widget_node(arg) {
+                                            render_body.push(node);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+                _ => continue,
+            },
+            _ => continue,
+        };
+
+        let key = prop_name_to_string(&kv.key);
+        match key.as_str() {
+            "kind" => {
+                if let ast::Expr::Lit(ast::Lit::Str(s)) = kv.value.as_ref() {
+                    kind = s.value.as_str().unwrap_or("").to_string();
+                }
+            }
+            "displayName" => {
+                if let ast::Expr::Lit(ast::Lit::Str(s)) = kv.value.as_ref() {
+                    display_name = s.value.as_str().unwrap_or("").to_string();
+                }
+            }
+            "description" => {
+                if let ast::Expr::Lit(ast::Lit::Str(s)) = kv.value.as_ref() {
+                    description = s.value.as_str().unwrap_or("").to_string();
+                }
+            }
+            "supportedFamilies" => {
+                if let ast::Expr::Array(arr) = kv.value.as_ref() {
+                    for elem in &arr.elems {
+                        if let Some(ast::ExprOrSpread { expr, .. }) = elem {
+                            if let ast::Expr::Lit(ast::Lit::Str(s)) = expr.as_ref() {
+                                supported_families.push(s.value.as_str().unwrap_or("").to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            "entryFields" => {
+                // Allow explicit entry field declarations
+                if let ast::Expr::Object(obj) = kv.value.as_ref() {
+                    for field_prop in &obj.props {
+                        if let ast::PropOrSpread::Prop(p) = field_prop {
+                            if let ast::Prop::KeyValue(field_kv) = p.as_ref() {
+                                let field_name = prop_name_to_string(&field_kv.key);
+                                let field_type = match field_kv.value.as_ref() {
+                                    ast::Expr::Lit(ast::Lit::Str(s)) => {
+                                        match s.value.as_str().unwrap_or("") {
+                                            "number" => WidgetFieldType::Number,
+                                            "boolean" => WidgetFieldType::Boolean,
+                                            _ => WidgetFieldType::String,
+                                        }
+                                    }
+                                    _ => WidgetFieldType::String,
+                                };
+                                entry_fields.push((field_name, field_type));
+                            }
+                        }
+                    }
+                }
+            }
+            "render" => {
+                // Arrow function: render: (entry) => VStack(...)
+                match kv.value.as_ref() {
+                    ast::Expr::Arrow(arrow) => {
+                        // Extract parameter name
+                        if let Some(param) = arrow.params.first() {
+                            if let ast::Pat::Ident(ident) = param {
+                                entry_param_name = ident.id.sym.to_string();
+                            }
+                        }
+                        // Extract entry fields from type annotation (only if not already specified via entryFields)
+                        if entry_fields.is_empty() {
+                            if let Some(param) = arrow.params.first() {
+                                extract_entry_fields_from_param(param, &mut entry_fields);
+                            }
+                        }
+                        // Parse body
+                        match arrow.body.as_ref() {
+                            ast::BlockStmtOrExpr::Expr(expr) => {
+                                if let Some(node) = parse_widget_node(expr) {
+                                    render_body.push(node);
+                                }
+                            }
+                            ast::BlockStmtOrExpr::BlockStmt(block) => {
+                                for stmt in &block.stmts {
+                                    if let ast::Stmt::Return(ret) = stmt {
+                                        if let Some(arg) = &ret.arg {
+                                            if let Some(node) = parse_widget_node(arg) {
+                                                render_body.push(node);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {} // Skip timeline and other fields handled differently
+        }
+    }
+
+    if kind.is_empty() {
+        kind = "com.perry.widget".to_string();
+    }
+
+    Some(WidgetDecl {
+        kind,
+        display_name,
+        description,
+        supported_families,
+        entry_fields,
+        render_body,
+        entry_param_name,
+    })
+}
+
+/// Extract entry fields from a typed parameter pattern (e.g., `entry: MyEntry`)
+fn extract_entry_fields_from_param(pat: &ast::Pat, fields: &mut Vec<(String, WidgetFieldType)>) {
+    // Try to get type annotation
+    let type_ann = match pat {
+        ast::Pat::Ident(ident) => ident.type_ann.as_ref(),
+        _ => None,
+    };
+    if let Some(ann) = type_ann {
+        if let ast::TsType::TsTypeLit(lit) = ann.type_ann.as_ref() {
+            for member in &lit.members {
+                if let ast::TsTypeElement::TsPropertySignature(prop) = member {
+                    if let ast::Expr::Ident(ident) = prop.key.as_ref() {
+                        let field_name = ident.sym.to_string();
+                        // Skip 'date' as it's always present in TimelineEntry
+                        if field_name == "date" {
+                            continue;
+                        }
+                        let field_type = if let Some(ann) = &prop.type_ann {
+                            match ann.type_ann.as_ref() {
+                                ast::TsType::TsKeywordType(kw) => match kw.kind {
+                                    ast::TsKeywordTypeKind::TsNumberKeyword => WidgetFieldType::Number,
+                                    ast::TsKeywordTypeKind::TsBooleanKeyword => WidgetFieldType::Boolean,
+                                    _ => WidgetFieldType::String,
+                                },
+                                _ => WidgetFieldType::String,
+                            }
+                        } else {
+                            WidgetFieldType::String
+                        };
+                        fields.push((field_name, field_type));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Parse a widget node from an AST expression.
+/// Recognizes calls like Text("hello"), VStack({...}, [...]), Image({systemName: "star"}), etc.
+fn parse_widget_node(expr: &ast::Expr) -> Option<WidgetNode> {
+    match expr {
+        ast::Expr::Call(call) => {
+            let func_name = match &call.callee {
+                ast::Callee::Expr(e) => match e.as_ref() {
+                    ast::Expr::Ident(ident) => ident.sym.to_string(),
+                    _ => return None,
+                },
+                _ => return None,
+            };
+
+            match func_name.as_str() {
+                "Text" => {
+                    let content = call.args.first()
+                        .map(|arg| parse_text_content(&arg.expr))
+                        .unwrap_or(WidgetTextContent::Literal(String::new()));
+                    let modifiers = parse_modifiers_from_args(&call.args, 1);
+                    Some(WidgetNode::Text { content, modifiers })
+                }
+                "VStack" | "HStack" | "ZStack" => {
+                    let kind = match func_name.as_str() {
+                        "VStack" => WidgetStackKind::VStack,
+                        "HStack" => WidgetStackKind::HStack,
+                        "ZStack" => WidgetStackKind::ZStack,
+                        _ => unreachable!(),
+                    };
+                    parse_stack_node(kind, &call.args)
+                }
+                "Image" => {
+                    parse_image_node(&call.args)
+                }
+                "Spacer" => {
+                    Some(WidgetNode::Spacer)
+                }
+                _ => None,
+            }
+        }
+        ast::Expr::Cond(cond) => {
+            // Ternary: condition ? then : else
+            parse_conditional_node(cond)
+        }
+        _ => None,
+    }
+}
+
+/// Parse text content from an expression
+fn parse_text_content(expr: &ast::Expr) -> WidgetTextContent {
+    match expr {
+        ast::Expr::Lit(ast::Lit::Str(s)) => {
+            WidgetTextContent::Literal(s.value.as_str().unwrap_or("").to_string())
+        }
+        ast::Expr::Member(member) => {
+            // entry.fieldName
+            if let ast::MemberProp::Ident(prop) = &member.prop {
+                WidgetTextContent::Field(prop.sym.to_string())
+            } else {
+                WidgetTextContent::Literal(String::new())
+            }
+        }
+        ast::Expr::Tpl(tpl) => {
+            // Template literal: `Score: ${entry.score}`
+            let mut parts = Vec::new();
+            for (i, quasi) in tpl.quasis.iter().enumerate() {
+                let raw = quasi.raw.as_ref().to_string();
+                if !raw.is_empty() {
+                    parts.push(WidgetTemplatePart::Literal(raw));
+                }
+                if i < tpl.exprs.len() {
+                    if let ast::Expr::Member(member) = tpl.exprs[i].as_ref() {
+                        if let ast::MemberProp::Ident(prop) = &member.prop {
+                            parts.push(WidgetTemplatePart::Field(prop.sym.to_string()));
+                        }
+                    }
+                }
+            }
+            WidgetTextContent::Template(parts)
+        }
+        _ => WidgetTextContent::Literal(String::new()),
+    }
+}
+
+/// Parse a stack node (VStack, HStack, ZStack) from call arguments.
+/// Supports two patterns:
+///   VStack([child1, child2])
+///   VStack({ spacing: 8 }, [child1, child2])
+fn parse_stack_node(kind: WidgetStackKind, args: &[ast::ExprOrSpread]) -> Option<WidgetNode> {
+    let mut spacing = None;
+    let mut children = Vec::new();
+    let mut modifiers = Vec::new();
+    let mut children_arg_idx = 0;
+
+    // Check if first arg is config object
+    if let Some(first) = args.first() {
+        match first.expr.as_ref() {
+            ast::Expr::Object(obj) => {
+                // First arg is config: { spacing: 8 }
+                for prop in &obj.props {
+                    if let ast::PropOrSpread::Prop(p) = prop {
+                        if let ast::Prop::KeyValue(kv) = p.as_ref() {
+                            let key = prop_name_to_string(&kv.key);
+                            if key == "spacing" {
+                                if let ast::Expr::Lit(ast::Lit::Num(n)) = kv.value.as_ref() {
+                                    spacing = Some(n.value);
+                                }
+                            }
+                        }
+                    }
+                }
+                children_arg_idx = 1;
+            }
+            ast::Expr::Array(_) => {
+                // First arg is children array directly
+                children_arg_idx = 0;
+            }
+            _ => {}
+        }
+    }
+
+    // Parse children array
+    if let Some(arg) = args.get(children_arg_idx) {
+        if let ast::Expr::Array(arr) = arg.expr.as_ref() {
+            for elem in &arr.elems {
+                if let Some(ast::ExprOrSpread { expr, .. }) = elem {
+                    if let Some(node) = parse_widget_node(expr) {
+                        children.push(node);
+                    }
+                }
+            }
+        }
+    }
+
+    // Parse modifiers from remaining args
+    let modifier_start = children_arg_idx + 1;
+    modifiers = parse_modifiers_from_args(args, modifier_start);
+
+    Some(WidgetNode::Stack { kind, spacing, children, modifiers })
+}
+
+/// Parse an Image node from call arguments.
+/// Image({ systemName: "star.fill" })
+fn parse_image_node(args: &[ast::ExprOrSpread]) -> Option<WidgetNode> {
+    let first = args.first()?;
+    let system_name = match first.expr.as_ref() {
+        ast::Expr::Object(obj) => {
+            let mut name = String::new();
+            for prop in &obj.props {
+                if let ast::PropOrSpread::Prop(p) = prop {
+                    if let ast::Prop::KeyValue(kv) = p.as_ref() {
+                        let key = prop_name_to_string(&kv.key);
+                        if key == "systemName" {
+                            if let ast::Expr::Lit(ast::Lit::Str(s)) = kv.value.as_ref() {
+                                name = s.value.as_str().unwrap_or("").to_string();
+                            }
+                        }
+                    }
+                }
+            }
+            name
+        }
+        ast::Expr::Lit(ast::Lit::Str(s)) => s.value.as_str().unwrap_or("").to_string(),
+        _ => return None,
+    };
+
+    let modifiers = parse_modifiers_from_args(args, 1);
+    Some(WidgetNode::Image { system_name, modifiers })
+}
+
+/// Parse a conditional node from a ternary expression
+fn parse_conditional_node(cond: &ast::CondExpr) -> Option<WidgetNode> {
+    // Parse condition: entry.field > value, entry.field == value, etc.
+    let (field, op, value) = parse_condition(&cond.test)?;
+    let then_node = parse_widget_node(&cond.cons)?;
+    let else_node = parse_widget_node(&cond.alt);
+
+    Some(WidgetNode::Conditional {
+        field,
+        op,
+        value,
+        then_node: Box::new(then_node),
+        else_node: else_node.map(Box::new),
+    })
+}
+
+/// Parse a binary condition expression
+fn parse_condition(expr: &ast::Expr) -> Option<(String, WidgetConditionOp, WidgetTextContent)> {
+    match expr {
+        ast::Expr::Bin(bin) => {
+            let field = match bin.left.as_ref() {
+                ast::Expr::Member(member) => {
+                    if let ast::MemberProp::Ident(prop) = &member.prop {
+                        prop.sym.to_string()
+                    } else {
+                        return None;
+                    }
+                }
+                _ => return None,
+            };
+            let op = match bin.op {
+                ast::BinaryOp::Gt => WidgetConditionOp::GreaterThan,
+                ast::BinaryOp::Lt => WidgetConditionOp::LessThan,
+                ast::BinaryOp::EqEq | ast::BinaryOp::EqEqEq => WidgetConditionOp::Equals,
+                ast::BinaryOp::NotEq | ast::BinaryOp::NotEqEq => WidgetConditionOp::NotEquals,
+                _ => return None,
+            };
+            let value = parse_text_content(&bin.right);
+            Some((field, op, value))
+        }
+        ast::Expr::Member(member) => {
+            // Truthy check: entry.isActive
+            if let ast::MemberProp::Ident(prop) = &member.prop {
+                Some((
+                    prop.sym.to_string(),
+                    WidgetConditionOp::Truthy,
+                    WidgetTextContent::Literal(String::new()),
+                ))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Parse modifiers from a chained method call or from arguments.
+/// In the TypeScript API, modifiers are passed as the last argument (object):
+///   Text("hello", { font: "title", fontWeight: "bold", foregroundColor: "blue" })
+fn parse_modifiers_from_args(args: &[ast::ExprOrSpread], start_idx: usize) -> Vec<WidgetModifier> {
+    let mut modifiers = Vec::new();
+    if let Some(arg) = args.get(start_idx) {
+        if let ast::Expr::Object(obj) = arg.expr.as_ref() {
+            for prop in &obj.props {
+                if let ast::PropOrSpread::Prop(p) = prop {
+                    if let ast::Prop::KeyValue(kv) = p.as_ref() {
+                        let key = prop_name_to_string(&kv.key);
+                        if let Some(m) = parse_single_modifier(&key, &kv.value) {
+                            modifiers.push(m);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    modifiers
+}
+
+/// Parse a single modifier from key/value
+fn parse_single_modifier(key: &str, value: &ast::Expr) -> Option<WidgetModifier> {
+    match key {
+        "font" => {
+            match value {
+                ast::Expr::Lit(ast::Lit::Str(s)) => {
+                    let font = match s.value.as_str().unwrap_or("") {
+                        "headline" => WidgetFont::Headline,
+                        "title" => WidgetFont::Title,
+                        "title2" => WidgetFont::Title2,
+                        "title3" => WidgetFont::Title3,
+                        "body" => WidgetFont::Body,
+                        "caption" => WidgetFont::Caption,
+                        "caption2" => WidgetFont::Caption2,
+                        "footnote" => WidgetFont::Footnote,
+                        "subheadline" => WidgetFont::Subheadline,
+                        "largeTitle" => WidgetFont::LargeTitle,
+                        name => WidgetFont::Named(name.to_string()),
+                    };
+                    Some(WidgetModifier::Font(font))
+                }
+                ast::Expr::Lit(ast::Lit::Num(n)) => {
+                    Some(WidgetModifier::Font(WidgetFont::System(n.value)))
+                }
+                _ => None,
+            }
+        }
+        "fontWeight" | "weight" => {
+            if let ast::Expr::Lit(ast::Lit::Str(s)) = value {
+                Some(WidgetModifier::FontWeight(s.value.as_str().unwrap_or("").to_string()))
+            } else {
+                None
+            }
+        }
+        "foregroundColor" | "color" => {
+            if let ast::Expr::Lit(ast::Lit::Str(s)) = value {
+                Some(WidgetModifier::ForegroundColor(s.value.as_str().unwrap_or("").to_string()))
+            } else {
+                None
+            }
+        }
+        "padding" => {
+            if let ast::Expr::Lit(ast::Lit::Num(n)) = value {
+                Some(WidgetModifier::Padding(n.value))
+            } else {
+                None
+            }
+        }
+        "cornerRadius" => {
+            if let ast::Expr::Lit(ast::Lit::Num(n)) = value {
+                Some(WidgetModifier::CornerRadius(n.value))
+            } else {
+                None
+            }
+        }
+        "background" | "backgroundColor" => {
+            if let ast::Expr::Lit(ast::Lit::Str(s)) = value {
+                Some(WidgetModifier::Background(s.value.as_str().unwrap_or("").to_string()))
+            } else {
+                None
+            }
+        }
+        "opacity" => {
+            if let ast::Expr::Lit(ast::Lit::Num(n)) = value {
+                Some(WidgetModifier::Opacity(n.value))
+            } else {
+                None
+            }
+        }
+        "lineLimit" => {
+            if let ast::Expr::Lit(ast::Lit::Num(n)) = value {
+                Some(WidgetModifier::LineLimit(n.value as u32))
+            } else {
+                None
+            }
+        }
+        "frame" => {
+            if let ast::Expr::Object(obj) = value {
+                let mut width = None;
+                let mut height = None;
+                for prop in &obj.props {
+                    if let ast::PropOrSpread::Prop(p) = prop {
+                        if let ast::Prop::KeyValue(kv) = p.as_ref() {
+                            let k = prop_name_to_string(&kv.key);
+                            if let ast::Expr::Lit(ast::Lit::Num(n)) = kv.value.as_ref() {
+                                match k.as_str() {
+                                    "width" => width = Some(n.value),
+                                    "height" => height = Some(n.value),
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+                Some(WidgetModifier::Frame { width, height })
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Extract a property name from a PropName
+fn prop_name_to_string(name: &ast::PropName) -> String {
+    match name {
+        ast::PropName::Ident(ident) => ident.sym.to_string(),
+        ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+        ast::PropName::Num(n) => format!("{}", n.value),
+        _ => String::new(),
+    }
+}

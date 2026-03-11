@@ -38,9 +38,13 @@ pub struct CompileArgs {
     #[arg(long)]
     pub enable_js_runtime: bool,
 
-    /// Target platform: ios-simulator, ios, android (default: native host)
+    /// Target platform: ios-simulator, ios, android, ios-widget, ios-widget-simulator (default: native host)
     #[arg(long)]
     pub target: Option<String>,
+
+    /// App bundle identifier (required for widget targets)
+    #[arg(long)]
+    pub app_bundle_id: Option<String>,
 
     /// Output type: executable (default) or dylib (shared library plugin)
     #[arg(long, default_value = "executable")]
@@ -170,8 +174,8 @@ pub struct TargetNativeConfig {
 /// Get the Rust target triple for a given perry target string
 fn rust_target_triple(target: Option<&str>) -> Option<&'static str> {
     match target {
-        Some("ios-simulator") => Some("aarch64-apple-ios-sim"),
-        Some("ios") => Some("aarch64-apple-ios"),
+        Some("ios-simulator") | Some("ios-widget-simulator") => Some("aarch64-apple-ios-sim"),
+        Some("ios") | Some("ios-widget") => Some("aarch64-apple-ios"),
         Some("android") => Some("aarch64-linux-android"),
         Some("linux") => Some("x86_64-unknown-linux-gnu"),
         Some("windows") => Some("x86_64-pc-windows-msvc"),
@@ -1502,6 +1506,97 @@ fn generate_js_bundle(ctx: &CompilationContext, output_dir: &Path) -> Result<Pat
     Ok(bundle_path)
 }
 
+/// Compile for iOS widget target: emit SwiftUI source for WidgetKit extension
+fn compile_for_ios_widget(ctx: &CompilationContext, args: &CompileArgs, format: OutputFormat) -> Result<()> {
+    let app_bundle_id = args.app_bundle_id.as_deref()
+        .ok_or_else(|| anyhow!("--app-bundle-id is required for ios-widget target"))?;
+
+    // Collect all widget declarations from all modules
+    let mut widgets: Vec<&perry_hir::ir::WidgetDecl> = Vec::new();
+    for (_, hir_module) in &ctx.native_modules {
+        for widget in &hir_module.widgets {
+            widgets.push(widget);
+        }
+    }
+
+    if widgets.is_empty() {
+        return Err(anyhow!("No Widget() declarations found. Import {{ Widget }} from 'perry/widget' and call Widget({{...}})."));
+    }
+
+    match format {
+        OutputFormat::Text => println!("Generating WidgetKit extension ({} widget{})...",
+            widgets.len(), if widgets.len() == 1 { "" } else { "s" }),
+        OutputFormat::Json => {}
+    }
+
+    // Determine output directory
+    let output_dir = if let Some(ref out) = args.output {
+        out.clone()
+    } else {
+        let stem = args.input.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("widget");
+        PathBuf::from(format!("{}_widget", stem))
+    };
+
+    // Create output directory
+    fs::create_dir_all(&output_dir)?;
+
+    // Generate SwiftUI for each widget
+    let mut all_swift_files: Vec<(String, String)> = Vec::new();
+    let mut all_info_plists: Vec<(String, String)> = Vec::new();
+
+    for widget in &widgets {
+        let bundle = perry_codegen_swiftui::compile_widget(widget, app_bundle_id)?;
+
+        for (filename, source) in &bundle.swift_files {
+            let swift_path = output_dir.join(filename);
+            fs::write(&swift_path, source)?;
+            all_swift_files.push((filename.clone(), source.clone()));
+        }
+
+        // Write Info.plist
+        let plist_path = output_dir.join("Info.plist");
+        fs::write(&plist_path, &bundle.info_plist)?;
+        all_info_plists.push(("Info.plist".to_string(), bundle.info_plist.clone()));
+    }
+
+    // Report results
+    let total_size: usize = all_swift_files.iter()
+        .map(|(_, s)| s.len())
+        .sum();
+
+    match format {
+        OutputFormat::Text => {
+            println!("Widget extension generated: {}/", output_dir.display());
+            for (name, source) in &all_swift_files {
+                println!("  {} ({:.1} KB)", name, source.len() as f64 / 1024.0);
+            }
+            println!("  Info.plist");
+            println!("Total: {:.1} KB SwiftUI source", total_size as f64 / 1024.0);
+            println!();
+            println!("To build the widget extension:");
+            let sdk = if args.target.as_deref() == Some("ios-widget-simulator") {
+                "iphonesimulator"
+            } else {
+                "iphoneos"
+            };
+            println!("  xcrun --sdk {} swiftc -target arm64-apple-ios17.0 \\", sdk);
+            for (name, _) in &all_swift_files {
+                println!("    {}/{} \\", output_dir.display(), name);
+            }
+            println!("    -framework WidgetKit -framework SwiftUI \\");
+            println!("    -o {}/WidgetExtension", output_dir.display());
+        }
+        OutputFormat::Json => {
+            println!("{{\"output\": \"{}\", \"widgets\": {}, \"size\": {}, \"target\": \"ios-widget\"}}",
+                output_dir.display(), widgets.len(), total_size);
+        }
+    }
+
+    Ok(())
+}
+
 /// Compile for web target: emit JavaScript + HTML instead of native code
 fn compile_for_web(ctx: &CompilationContext, args: &CompileArgs, format: OutputFormat) -> Result<()> {
     match format {
@@ -1788,6 +1883,11 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     // --- Web target: emit JavaScript instead of native code ---
     if args.target.as_deref() == Some("web") {
         return compile_for_web(&ctx, &args, format);
+    }
+
+    // --- iOS Widget target: emit SwiftUI + native timeline ---
+    if matches!(args.target.as_deref(), Some("ios-widget") | Some("ios-widget-simulator")) {
+        return compile_for_ios_widget(&ctx, &args, format);
     }
 
     // Transform JS imports into runtime calls

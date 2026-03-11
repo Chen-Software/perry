@@ -18,6 +18,7 @@ members = [
     "crates/perry-ui-gtk4",
     "crates/perry-ui-windows",
     "crates/perry-codegen-js",
+    "crates/perry-codegen-swiftui",
     "crates/perry-ui-test",
 ]
 # Only build platform-independent crates by default.
@@ -36,6 +37,7 @@ default-members = [
     "crates/perry-diagnostics",
     "crates/perry-ui",
     "crates/perry-codegen-js",
+    "crates/perry-codegen-swiftui",
 ]
 
 # Aggressive release optimizations for small, fast binaries
@@ -62,7 +64,7 @@ opt-level = "s"       # Optimize for size in stdlib
 opt-level = 3
 
 [workspace.package]
-version = "0.2.173"
+version = "0.2.174"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/PerryTS/perry"
@@ -136,3 +138,4 @@ perry-stdlib = { path = "crates/perry-stdlib" }
 perry-diagnostics = { path = "crates/perry-diagnostics" }
 perry-jsruntime = { path = "crates/perry-jsruntime" }
 perry-codegen-js = { path = "crates/perry-codegen-js" }
+perry-codegen-swiftui = { path = "crates/perry-codegen-swiftui" }

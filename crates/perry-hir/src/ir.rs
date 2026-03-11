@@ -61,6 +61,8 @@ pub const NATIVE_MODULES: &[&str] = &[
     "perry/system",
     // Perry plugin system
     "perry/plugin",
+    // Perry widget extensions (WidgetKit / Glance)
+    "perry/widget",
     // Node.js worker threads
     "worker_threads",
     // SQLite
@@ -86,6 +88,7 @@ const RUNTIME_ONLY_MODULES: &[&str] = &[
     "fs", "path", "os", "buffer", "child_process", "net", "stream", "url", "util",
     "perry/ui",
     "perry/system",
+    "perry/widget",
 ];
 
 /// Check if a native module import requires linking perry-stdlib.
@@ -186,6 +189,131 @@ pub struct Module {
     /// This tracks functions like `export function foo() { ... }` or `export async function bar() { ... }`
     /// that may be imported and used as values (not just called) by other modules
     pub exported_functions: Vec<(String, FuncId)>,
+    /// Widget extension declarations (perry/widget)
+    pub widgets: Vec<WidgetDecl>,
+}
+
+/// A widget extension declaration (WidgetKit on iOS, Glance on Android)
+#[derive(Debug, Clone)]
+pub struct WidgetDecl {
+    /// Widget kind identifier (e.g., "com.example.MyWidget")
+    pub kind: String,
+    /// Display name for the widget gallery
+    pub display_name: String,
+    /// Description for the widget gallery
+    pub description: String,
+    /// Supported widget families (e.g., "systemSmall", "systemMedium", "systemLarge")
+    pub supported_families: Vec<String>,
+    /// Entry type fields: (name, type) — flattened from the TypeScript interface
+    pub entry_fields: Vec<(String, WidgetFieldType)>,
+    /// The render function body — compiled to SwiftUI/Compose source at compile time
+    pub render_body: Vec<WidgetNode>,
+    /// The render function's entry parameter name
+    pub entry_param_name: String,
+}
+
+/// Supported field types in a widget entry
+#[derive(Debug, Clone)]
+pub enum WidgetFieldType {
+    String,
+    Number,
+    Boolean,
+}
+
+/// A node in the widget render tree — declarative UI description
+#[derive(Debug, Clone)]
+pub enum WidgetNode {
+    /// Text("hello") or Text(entry.field)
+    Text {
+        content: WidgetTextContent,
+        modifiers: Vec<WidgetModifier>,
+    },
+    /// VStack/HStack/ZStack container
+    Stack {
+        kind: WidgetStackKind,
+        spacing: Option<f64>,
+        children: Vec<WidgetNode>,
+        modifiers: Vec<WidgetModifier>,
+    },
+    /// Image(systemName: "star.fill")
+    Image {
+        system_name: String,
+        modifiers: Vec<WidgetModifier>,
+    },
+    /// Spacer()
+    Spacer,
+    /// Conditional rendering: condition ? then : else
+    Conditional {
+        field: String,
+        op: WidgetConditionOp,
+        value: WidgetTextContent,
+        then_node: Box<WidgetNode>,
+        else_node: Option<Box<WidgetNode>>,
+    },
+}
+
+/// Text content — either static string or entry field reference
+#[derive(Debug, Clone)]
+pub enum WidgetTextContent {
+    /// Static string literal
+    Literal(String),
+    /// Reference to entry field (e.g., entry.title)
+    Field(String),
+    /// Template literal with parts: `Score: ${entry.score}`
+    Template(Vec<WidgetTemplatePart>),
+}
+
+#[derive(Debug, Clone)]
+pub enum WidgetTemplatePart {
+    Literal(String),
+    Field(String),
+}
+
+#[derive(Debug, Clone)]
+pub enum WidgetStackKind {
+    VStack,
+    HStack,
+    ZStack,
+}
+
+#[derive(Debug, Clone)]
+pub enum WidgetConditionOp {
+    GreaterThan,
+    LessThan,
+    Equals,
+    NotEquals,
+    Truthy,
+}
+
+/// Style modifiers for widget nodes
+#[derive(Debug, Clone)]
+pub enum WidgetModifier {
+    Font(WidgetFont),
+    FontWeight(String),
+    ForegroundColor(String),
+    Padding(f64),
+    Frame { width: Option<f64>, height: Option<f64> },
+    CornerRadius(f64),
+    Background(String),
+    Opacity(f64),
+    LineLimit(u32),
+    Multiline,
+}
+
+#[derive(Debug, Clone)]
+pub enum WidgetFont {
+    System(f64),
+    Named(String),
+    Headline,
+    Title,
+    Title2,
+    Title3,
+    Body,
+    Caption,
+    Caption2,
+    Footnote,
+    Subheadline,
+    LargeTitle,
 }
 
 /// An enum definition
@@ -1314,6 +1442,7 @@ impl Module {
             exported_func_return_native_instances: Vec::new(),
             exported_objects: Vec::new(),
             exported_functions: Vec::new(),
+            widgets: Vec::new(),
         }
     }
 }

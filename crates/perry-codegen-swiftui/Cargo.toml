@@ -1,0 +1,11 @@
+[package]
+name = "perry-codegen-swiftui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SwiftUI code generation for Perry widget extensions (--target ios-widget)"
+
+[dependencies]
+perry-hir.workspace = true
+perry-types.workspace = true
+anyhow.workspace = true
