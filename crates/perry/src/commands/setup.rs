@@ -953,6 +953,7 @@ fn macos_wizard(saved: &mut PerryConfig) -> Result<()> {
     let mut signing_identity = String::new();
     let mut notarize_cert_path = String::new();
     let mut notarize_signing_identity = String::new();
+    let mut installer_cert_path: Option<String> = None;
 
     // -- App Store certificate (MAC_APP_DISTRIBUTION + MAC_INSTALLER_DISTRIBUTION) --
     if needs_appstore_cert {
@@ -965,23 +966,16 @@ fn macos_wizard(saved: &mut PerryConfig) -> Result<()> {
         cert_path = p12;
         signing_identity = identity;
 
-        // Also create MAC_INSTALLER_DISTRIBUTION for .pkg signing, then merge
-        // both certs into the app store .p12 so the builder's temp keychain
-        // has both identities available.
+        // Also create MAC_INSTALLER_DISTRIBUTION for .pkg signing
+        // Stored as a separate .p12 since openssl can only export one key per .p12
         match create_apple_certificate(
             &client, &key_id, &issuer_id, &p8_content,
             "MAC_INSTALLER_DISTRIBUTION", &csr_pem, &key_path,
             &perry_dir.join("macos_installer.p12"), p12_password,
             "Mac Installer Distribution",
         ) {
-            Ok((installer_p12, _installer_identity)) => {
-                // Merge: import both .p12s into one combined file
-                merge_p12_files(
-                    &perry_dir.join("macos_appstore.p12"),
-                    &installer_p12,
-                    p12_password,
-                    &perry_dir,
-                ).ok();
+            Ok((_installer_p12, _installer_identity)) => {
+                installer_cert_path = Some(perry_dir.join("macos_installer.p12").to_string_lossy().to_string());
             }
             Err(e) => {
                 println!("  {} Installer cert: {} (pkg signing may fail)", style("!").yellow(), e);
@@ -1024,6 +1018,7 @@ fn macos_wizard(saved: &mut PerryConfig) -> Result<()> {
             } else {
                 None
             },
+            installer_cert_path.as_deref(),
         ) {
             Ok(()) => {
                 println!("  {} macOS credentials saved to {}", style("✓").green().bold(),
@@ -1593,6 +1588,7 @@ fn update_perry_toml_macos(
     signing_identity: Option<&str>,
     notarize_certificate: Option<&str>,
     notarize_signing_identity: Option<&str>,
+    installer_certificate: Option<&str>,
 ) -> Result<()> {
     let content = std::fs::read_to_string(perry_toml_path)?;
     let mut doc = content.parse::<toml::Table>()
@@ -1613,6 +1609,9 @@ fn update_perry_toml_macos(
     }
     if let Some(notarize_identity) = notarize_signing_identity {
         macos.insert("notarize_signing_identity".into(), toml::Value::String(notarize_identity.into()));
+    }
+    if let Some(installer_cert) = installer_certificate {
+        macos.insert("installer_certificate".into(), toml::Value::String(installer_cert.into()));
     }
 
     let new_content = toml::to_string_pretty(&doc)

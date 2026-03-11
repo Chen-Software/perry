@@ -166,6 +166,8 @@ struct MacosConfig {
     /// For distribute = "both": separate Developer ID cert for notarization
     notarize_certificate: Option<String>,
     notarize_signing_identity: Option<String>,
+    /// Separate .p12 for the Mac Installer Distribution cert (for .pkg signing)
+    installer_certificate: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -354,6 +356,11 @@ struct CredentialsPayload {
     apple_notarize_certificate_password: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     apple_notarize_signing_identity: Option<String>,
+    /// Separate .p12 for the Mac Installer Distribution cert (for .pkg signing)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    apple_installer_certificate_p12_base64: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    apple_installer_certificate_password: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     android_keystore_base64: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -924,6 +931,42 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         (None, None, None)
     };
 
+    // For macOS appstore/both: resolve the separate installer cert for .pkg signing
+    let (installer_cert_b64, installer_cert_password) = if is_macos
+        && (macos_distribute.as_deref() == Some("both")
+            || macos_distribute.as_deref() == Some("appstore")
+            || macos_distribute.as_deref() == Some("testflight"))
+    {
+        let installer_cert_path = config.macos.as_ref().and_then(|m| m.installer_certificate.clone());
+        let cert_b64 = if let Some(ref path_str) = installer_cert_path {
+            let path = Path::new(path_str);
+            if path.exists() {
+                use base64::Engine;
+                let data = fs::read(path)
+                    .with_context(|| format!("Failed to read installer .p12: {path_str}"))?;
+                Some(base64::engine::general_purpose::STANDARD.encode(&data))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let is_auto_generated = installer_cert_path.as_deref()
+            .map(|p| p.contains("/.perry/"))
+            .unwrap_or(false);
+        let password = std::env::var("PERRY_APPLE_INSTALLER_CERTIFICATE_PASSWORD").ok()
+            .or_else(|| {
+                if is_auto_generated {
+                    Some("perry-auto".to_string())
+                } else {
+                    apple_certificate_password.clone()
+                }
+            });
+        (cert_b64, password)
+    } else {
+        (None, None)
+    };
+
     let google_play_json = if let Some(ref path_str) = google_play_key_path {
         let path = Path::new(path_str);
         if path.exists() {
@@ -1354,6 +1397,8 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         apple_notarize_certificate_p12_base64: notarize_cert_b64,
         apple_notarize_certificate_password: notarize_cert_password,
         apple_notarize_signing_identity: notarize_identity,
+        apple_installer_certificate_p12_base64: installer_cert_b64,
+        apple_installer_certificate_password: installer_cert_password,
         android_keystore_base64: android_keystore_b64,
         android_keystore_password,
         android_key_alias,
@@ -2389,6 +2434,8 @@ mod tests {
             apple_notarize_certificate_p12_base64: None,
             apple_notarize_certificate_password: None,
             apple_notarize_signing_identity: None,
+            apple_installer_certificate_p12_base64: None,
+            apple_installer_certificate_password: None,
             android_keystore_base64: Some("dGVzdA==".into()),
             android_keystore_password: Some("pass".into()),
             android_key_alias: Some("key0".into()),
@@ -2414,6 +2461,8 @@ mod tests {
             apple_notarize_certificate_p12_base64: None,
             apple_notarize_certificate_password: None,
             apple_notarize_signing_identity: None,
+            apple_installer_certificate_p12_base64: None,
+            apple_installer_certificate_password: None,
             android_keystore_base64: None,
             android_keystore_password: None,
             android_key_alias: None,
