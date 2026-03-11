@@ -11,6 +11,7 @@ create-missing = false
 [output.html]
 default-theme = "light"
 preferred-dark-theme = "ayu"
+site-url = "https://docs.perryts.com/"
 git-repository-url = "https://github.com/skelpo/perry"
 edit-url-template = "https://github.com/skelpo/perry/edit/main/docs/src/{path}"
 
