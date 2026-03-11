@@ -288,6 +288,31 @@ pub fn remove_child(parent_handle: i64, child_handle: i64) {
     }
 }
 
+/// Add a child as a floating overlay (plain addSubview, not arranged).
+/// The overlay floats on top of the parent's stack layout.
+/// Caller must set frame via widgetSetOverlayFrame(child, x, y, w, h).
+pub fn add_overlay(parent_handle: i64, child_handle: i64) {
+    if let (Some(parent), Some(child)) = (get_widget(parent_handle), get_widget(child_handle)) {
+        // Always use plain addSubview (not addArrangedSubview) so it floats on top
+        parent.addSubview(&child);
+    }
+}
+
+/// Set the frame (position + size) of an overlay child.
+/// x/y are relative to the parent's coordinate system.
+pub fn set_overlay_frame(handle: i64, x: f64, y: f64, w: f64, h: f64) {
+    if let Some(view) = get_widget(handle) {
+        unsafe {
+            view.setTranslatesAutoresizingMaskIntoConstraints(true);
+            let frame = objc2_core_foundation::CGRect::new(
+                objc2_core_foundation::CGPoint::new(x, y),
+                objc2_core_foundation::CGSize::new(w, h),
+            );
+            view.setFrame(frame);
+        }
+    }
+}
+
 /// Reorder a child within an NSStackView by moving from one index to another.
 pub fn reorder_child(parent_handle: i64, from_index: i64, to_index: i64) {
     if let Some(parent) = get_widget(parent_handle) {

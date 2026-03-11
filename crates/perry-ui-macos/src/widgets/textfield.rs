@@ -11,6 +11,8 @@ thread_local! {
     static TEXTFIELD_CALLBACKS: RefCell<HashMap<usize, (f64, *const AnyObject)>> = RefCell::new(HashMap::new());
     /// Map from observer address to (submit_closure_f64, textfield_view_ptr)
     static TEXTFIELD_SUBMIT_CALLBACKS: RefCell<HashMap<usize, (f64, *const AnyObject)>> = RefCell::new(HashMap::new());
+    /// Map from observer address to (focus_closure_f64, textfield_view_ptr)
+    static TEXTFIELD_FOCUS_CALLBACKS: RefCell<HashMap<usize, (f64, *const AnyObject)>> = RefCell::new(HashMap::new());
 }
 
 extern "C" {
@@ -257,6 +259,86 @@ pub fn set_on_submit(handle: i64, on_submit: f64) {
             let _: () = msg_send![&center, addObserver: &*observer, selector: sel, name: &*notif_name, object: tf_raw];
 
             std::mem::forget(observer);
+        }
+    }
+}
+
+/// Observer for NSControlTextDidBeginEditingNotification (text field gained focus/started editing).
+pub struct PerryTextFieldFocusObserverIvars {
+    callback_key: std::cell::Cell<usize>,
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "PerryTextFieldFocusObserver"]
+    #[ivars = PerryTextFieldFocusObserverIvars]
+    pub struct PerryTextFieldFocusObserver;
+
+    impl PerryTextFieldFocusObserver {
+        #[unsafe(method(textDidBeginEditing:))]
+        fn text_did_begin_editing(&self, notification: &NSNotification) {
+            let key = self.ivars().callback_key.get();
+            crate::catch_callback_panic("textfield focus callback", std::panic::AssertUnwindSafe(|| {
+                TEXTFIELD_FOCUS_CALLBACKS.with(|cbs| {
+                    if let Some(&(closure_f64, tf_ptr)) = cbs.borrow().get(&key) {
+                        if tf_ptr.is_null() { return; }
+                        let notif_obj = notification.object();
+                        if let Some(obj) = notif_obj {
+                            let obj_ptr = &*obj as *const AnyObject;
+                            if obj_ptr != tf_ptr { return; }
+                        } else { return; }
+                        let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
+                        unsafe {
+                            js_closure_call1(closure_ptr as *const u8, 0.0);
+                        }
+                    }
+                });
+            }));
+        }
+    }
+);
+
+impl PerryTextFieldFocusObserver {
+    fn new() -> Retained<Self> {
+        let this = Self::alloc().set_ivars(PerryTextFieldFocusObserverIvars {
+            callback_key: std::cell::Cell::new(0),
+        });
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// Set an onFocus callback (fires when text field begins editing).
+pub fn set_on_focus(handle: i64, on_focus: f64) {
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            let tf_raw: *const AnyObject = Retained::as_ptr(&view) as *const AnyObject;
+
+            let observer = PerryTextFieldFocusObserver::new();
+            let observer_addr = Retained::as_ptr(&observer) as usize;
+            observer.ivars().callback_key.set(observer_addr);
+
+            TEXTFIELD_FOCUS_CALLBACKS.with(|cbs| {
+                cbs.borrow_mut().insert(observer_addr, (on_focus, tf_raw));
+            });
+
+            let center = NSNotificationCenter::defaultCenter();
+            let notif_name = NSString::from_str("NSControlTextDidBeginEditingNotification");
+            let sel = Sel::register(c"textDidBeginEditing:");
+            let _: () = msg_send![&center, addObserver: &*observer, selector: sel, name: &*notif_name, object: tf_raw];
+
+            std::mem::forget(observer);
+        }
+    }
+}
+
+/// Resign first responder from the key window (blur all text fields).
+pub fn blur_all() {
+    unsafe {
+        let app_cls = objc2::runtime::AnyClass::get(c"NSApplication").unwrap();
+        let app: *mut AnyObject = msg_send![app_cls, sharedApplication];
+        let window: *mut AnyObject = msg_send![app, keyWindow];
+        if !window.is_null() {
+            let _: () = msg_send![window, makeFirstResponder: std::ptr::null::<AnyObject>()];
         }
     }
 }

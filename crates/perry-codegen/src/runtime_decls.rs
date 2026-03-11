@@ -7946,6 +7946,27 @@ impl Compiler {
             self.extern_funcs.insert("perry_ui_widget_add_child".to_string(), func_id);
         }
 
+        // perry_ui_widget_add_overlay(parent: i64, child: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // parent handle
+            sig.params.push(AbiParam::new(types::I64)); // child handle
+            let func_id = self.module.declare_function("perry_ui_widget_add_overlay", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_widget_add_overlay".to_string(), func_id);
+        }
+
+        // perry_ui_widget_set_overlay_frame(handle: i64, x: f64, y: f64, w: f64, h: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // handle
+            sig.params.push(AbiParam::new(types::F64)); // x
+            sig.params.push(AbiParam::new(types::F64)); // y
+            sig.params.push(AbiParam::new(types::F64)); // w
+            sig.params.push(AbiParam::new(types::F64)); // h
+            let func_id = self.module.declare_function("perry_ui_widget_set_overlay_frame", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_widget_set_overlay_frame".to_string(), func_id);
+        }
+
         // perry_ui_widget_remove_child(parent: i64, child: i64)
         {
             let mut sig = self.module.make_signature();
@@ -8439,6 +8460,22 @@ impl Compiler {
             sig.params.push(AbiParam::new(types::F64)); // callback closure
             let func_id = self.module.declare_function("perry_ui_textfield_set_on_submit", Linkage::Import, &sig)?;
             self.extern_funcs.insert("perry_ui_textfield_set_on_submit".to_string(), func_id);
+        }
+
+        // perry_ui_textfield_set_on_focus(handle: i64, on_focus: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // widget handle
+            sig.params.push(AbiParam::new(types::F64)); // callback closure
+            let func_id = self.module.declare_function("perry_ui_textfield_set_on_focus", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_textfield_set_on_focus".to_string(), func_id);
+        }
+
+        // perry_ui_textfield_blur_all()
+        {
+            let mut sig = self.module.make_signature();
+            let func_id = self.module.declare_function("perry_ui_textfield_blur_all", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_textfield_blur_all".to_string(), func_id);
         }
 
         // perry_ui_scrollview_scroll_to(scroll_handle: i64, child_handle: i64)

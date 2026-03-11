@@ -110,6 +110,18 @@ pub extern "C" fn perry_ui_widget_add_child(parent_handle: i64, child_handle: i6
     widgets::add_child(parent_handle, child_handle);
 }
 
+/// Add a child as a floating overlay (not arranged in stack layout).
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_add_overlay(parent_handle: i64, child_handle: i64) {
+    widgets::add_overlay(parent_handle, child_handle);
+}
+
+/// Set the frame (position + size) of an overlay child.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_overlay_frame(handle: i64, x: f64, y: f64, w: f64, h: f64) {
+    widgets::set_overlay_frame(handle, x, y, w, h);
+}
+
 /// Remove a child widget from a parent widget.
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_remove_child(parent_handle: i64, child_handle: i64) {
@@ -535,6 +547,18 @@ pub extern "C" fn perry_ui_textfield_get_string(handle: i64) -> i64 {
 #[no_mangle]
 pub extern "C" fn perry_ui_textfield_set_on_submit(handle: i64, on_submit: f64) {
     widgets::textfield::set_on_submit(handle, on_submit);
+}
+
+/// Set an onFocus callback for a text field (fires when editing begins).
+#[no_mangle]
+pub extern "C" fn perry_ui_textfield_set_on_focus(handle: i64, on_focus: f64) {
+    widgets::textfield::set_on_focus(handle, on_focus);
+}
+
+/// Resign first responder from the key window (blur all text fields).
+#[no_mangle]
+pub extern "C" fn perry_ui_textfield_blur_all() {
+    widgets::textfield::blur_all();
 }
 
 // --- TextArea (multi-line editor) ---

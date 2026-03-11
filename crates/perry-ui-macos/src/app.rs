@@ -88,6 +88,17 @@ pub fn app_create(title_ptr: *const u8, width: f64, height: f64) -> i64 {
         let ns_title = NSString::from_str(title);
         window.setTitle(&ns_title);
 
+        // Set dark appearance on the window so all native controls (NSPopUpButton, etc.)
+        // render with dark theme colors.
+        let dark_appearance_name = NSString::from_str("NSAppearanceNameDarkAqua");
+        let appearance_cls = objc2::runtime::AnyClass::get(c"NSAppearance").unwrap();
+        let dark_appearance: *mut objc2::runtime::AnyObject = objc2::msg_send![
+            appearance_cls, appearanceNamed: &*dark_appearance_name
+        ];
+        if !dark_appearance.is_null() {
+            let _: () = objc2::msg_send![&*window, setAppearance: dark_appearance];
+        }
+
         APPS.with(|a| {
             let mut apps = a.borrow_mut();
             apps.push(AppEntry {

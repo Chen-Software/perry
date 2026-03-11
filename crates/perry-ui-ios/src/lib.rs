@@ -507,6 +507,17 @@ pub extern "C" fn perry_ui_textfield_set_on_submit(handle: i64, on_submit: f64) 
 }
 
 #[no_mangle]
+pub extern "C" fn perry_ui_textfield_set_on_focus(handle: i64, on_focus: f64) {
+    // TODO: implement iOS textfield focus observer
+    let _ = (handle, on_focus);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_textfield_blur_all() {
+    // TODO: implement iOS blur
+}
+
+#[no_mangle]
 pub extern "C" fn perry_ui_widget_add_child_at(parent_handle: i64, child_handle: i64, index: f64) {
     widgets::add_child_at(parent_handle, child_handle, index as i64);
 }
@@ -1044,6 +1055,20 @@ pub extern "C" fn perry_ui_poll_open_file() -> i64 {
         fn js_string_from_bytes(ptr: *const u8, len: i32) -> i64;
     }
     unsafe { js_string_from_bytes(std::ptr::null(), 0) }
+}
+
+// =============================================================================
+// Overlay (stub — iOS uses different approach)
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_add_overlay(_parent_handle: i64, _child_handle: i64) {
+    // Stub — iOS would use addSubview directly
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_overlay_frame(_handle: i64, _x: f64, _y: f64, _w: f64, _h: f64) {
+    // Stub
 }
 
 // =============================================================================

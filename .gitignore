@@ -1,6 +1,7 @@
 # Build artifacts
 target/
 *.o
+*.app/
 
 # Compiled test executables (no extension)
 test_*

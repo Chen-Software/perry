@@ -15736,7 +15736,7 @@ pub(crate) fn compile_expr(
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
                     }
-                    "widgetSetOnClick" | "textfieldSetOnSubmit" => {
+                    "widgetSetOnClick" | "textfieldSetOnSubmit" | "textfieldSetOnFocus" => {
                         // (handle, callback) — extract handle as i64, pass callback as f64
                         let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
                             .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
@@ -15748,6 +15748,8 @@ pub(crate) fn compile_expr(
 
                         let ffi_name = if method == "textfieldSetOnSubmit" {
                             "perry_ui_textfield_set_on_submit"
+                        } else if method == "textfieldSetOnFocus" {
+                            "perry_ui_textfield_set_on_focus"
                         } else {
                             "perry_ui_widget_set_on_click"
                         };
@@ -15761,7 +15763,8 @@ pub(crate) fn compile_expr(
                     "widgetSetHidden" | "stackSetDetachesHidden" | "stackSetDistribution" | "stackSetAlignment" | "textSetFontSize" | "textSetSelectable" |
                     "textSetWraps" |
                     "buttonSetBordered" | "textfieldFocus" | "widgetClearChildren" | "widgetMatchParentHeight" | "widgetMatchParentWidth" |
-                    "widgetSetWidth" | "widgetSetHeight" | "widgetSetHugging" | "buttonSetImagePosition" => {
+                    "widgetSetWidth" | "widgetSetHeight" | "widgetSetHugging" | "buttonSetImagePosition" |
+                    "widgetSetOverlayFrame" => {
                         // (handle, ...) — extract handle, pass remaining args as f64
                         let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
                             .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
@@ -15787,6 +15790,7 @@ pub(crate) fn compile_expr(
                             "widgetSetHeight" => "perry_ui_widget_set_height",
                             "widgetSetHugging" => "perry_ui_widget_set_hugging",
                             "buttonSetImagePosition" => "perry_ui_button_set_image_position",
+                            "widgetSetOverlayFrame" => "perry_ui_widget_set_overlay_frame",
                             _ => unreachable!(),
                         };
 
@@ -15985,6 +15989,15 @@ pub(crate) fn compile_expr(
                         let func_ref = module.declare_func_in_func(*func, builder.func);
                         let call = builder.ins().call(func_ref, &[]);
                         return Ok(builder.inst_results(call)[0]); // already NaN-boxed f64
+                    }
+                    "textfieldBlurAll" => {
+                        // () — no args, void return
+                        let func = extern_funcs.get("perry_ui_textfield_blur_all")
+                            .ok_or_else(|| anyhow!("perry_ui_textfield_blur_all not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
                     }
                     "clipboardWrite" => {
                         // (text) — extract string pointer
@@ -16292,7 +16305,7 @@ pub(crate) fn compile_expr(
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
                     }
-                    "widgetAddChild" | "widgetRemoveChild" | "frameSplitAddChild" => {
+                    "widgetAddChild" | "widgetRemoveChild" | "widgetAddOverlay" | "frameSplitAddChild" => {
                         // (parent, child) — extract 2 handles
                         let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
                             .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
@@ -16308,6 +16321,8 @@ pub(crate) fn compile_expr(
 
                         let ffi_name = if method == "widgetRemoveChild" {
                             "perry_ui_widget_remove_child"
+                        } else if method == "widgetAddOverlay" {
+                            "perry_ui_widget_add_overlay"
                         } else if method == "frameSplitAddChild" {
                             "perry_ui_frame_split_add_child"
                         } else {
