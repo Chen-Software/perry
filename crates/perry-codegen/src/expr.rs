@@ -18650,6 +18650,54 @@ pub(crate) fn compile_expr(
                                 ensure_i64(builder, val)
                             }).collect()
                         }
+                        "x25519Keypair" | "randomNonce" => {
+                            // No args
+                            vec![]
+                        }
+                        "x25519SharedSecret" => {
+                            // x25519SharedSecret(secret, public) - both hex strings
+                            arg_vals.iter().map(|&val| {
+                                ensure_i64(builder, val)
+                            }).collect()
+                        }
+                        "aes256GcmEncrypt" | "aes256GcmDecrypt" => {
+                            // aes256GcmEncrypt(plaintext, key, nonce) - all strings
+                            arg_vals.iter().map(|&val| {
+                                ensure_i64(builder, val)
+                            }).collect()
+                        }
+                        "hkdfSha256" => {
+                            // hkdfSha256(ikm, salt, info, length) - first 3 strings, last is number
+                            let mut args = Vec::new();
+                            for (i, &val) in arg_vals.iter().enumerate() {
+                                if i < 3 {
+                                    args.push(ensure_i64(builder, val));
+                                } else {
+                                    args.push(val); // length as f64
+                                }
+                            }
+                            args
+                        }
+                        "aes256Encrypt" | "aes256Decrypt" => {
+                            // aes256Encrypt(data, key) / aes256Decrypt(data, key) - both strings
+                            arg_vals.iter().map(|&val| {
+                                ensure_i64(builder, val)
+                            }).collect()
+                        }
+                        "pbkdf2Sync" | "scryptSync" => {
+                            // pbkdf2Sync(password, salt, iterations, keylen, digest)
+                            // scryptSync(password, salt, keylen)
+                            // First 2 are strings, rest are numbers
+                            let mut args = Vec::new();
+                            for (i, &val) in arg_vals.iter().enumerate() {
+                                if i < 2 {
+                                    args.push(ensure_i64(builder, val));
+                                } else {
+                                    args.push(val);
+                                }
+                            }
+                            args
+                        }
                         _ => arg_vals.clone()
                     }
                 } else if native_module == "zlib" {

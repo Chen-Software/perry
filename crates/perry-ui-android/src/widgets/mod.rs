@@ -19,6 +19,7 @@ pub mod lazyvstack;
 pub mod image;
 pub mod tabbar;
 pub mod qrcode;
+pub mod textarea;
 
 use jni::objects::{GlobalRef, JObject, JValue};
 use std::sync::Mutex;
@@ -678,14 +679,37 @@ pub fn set_hugging(handle: i64, priority: f64) {
     if let Some(view_ref) = get_widget(handle) {
         let mut env = jni_bridge::get_env();
         let _ = env.push_local_frame(16);
-        // Map hugging priority to weight: low hugging = high weight (expands more)
-        // weight>0 → height=0 (weight distributes remaining space)
-        // weight=0 → height=WRAP_CONTENT (-2) (view sizes to its content)
-        let (weight, height) = if priority < 100.0 { (1.0f32, 0) } else { (0.0f32, -2) };
+
+        // Determine parent orientation to set the correct axis
+        let parent_horizontal = (|| -> Option<bool> {
+            let parent = env.call_method(view_ref.as_obj(), "getParent",
+                "()Landroid/view/ViewParent;", &[]).ok()?.l().ok()?;
+            if parent.is_null() { return None; }
+            if !env.is_instance_of(&parent, "android/widget/LinearLayout").unwrap_or(false) {
+                return None;
+            }
+            let orient = env.call_method(&parent, "getOrientation", "()I", &[])
+                .map(|v| v.i().unwrap_or(-1)).unwrap_or(-1);
+            Some(orient == 0) // 0=HORIZONTAL
+        })().unwrap_or(false);
+
+        // Map hugging priority to weight:
+        // low hugging (< 100) = high weight (expands), high hugging = compact (wrap content)
+        let expand = priority < 100.0;
+        let weight = if expand { 1.0f32 } else { 0.0f32 };
+
+        let (w, h) = if parent_horizontal {
+            // HStack: weight distributes WIDTH; cross-axis (height) = MATCH_PARENT
+            if expand { (0, -1) } else { (-2, -1) } // width=0+weight or WRAP_CONTENT; height=MATCH_PARENT
+        } else {
+            // VStack (default): weight distributes HEIGHT; cross-axis (width) = MATCH_PARENT
+            if expand { (-1, 0) } else { (-1, -2) } // width=MATCH_PARENT; height=0+weight or WRAP_CONTENT
+        };
+
         let params = env.new_object(
             "android/widget/LinearLayout$LayoutParams",
             "(IIF)V",
-            &[JValue::Int(-1), JValue::Int(height), JValue::Float(weight)],
+            &[JValue::Int(w), JValue::Int(h), JValue::Float(weight)],
         );
         if let Ok(params) = params {
             let _ = env.call_method(

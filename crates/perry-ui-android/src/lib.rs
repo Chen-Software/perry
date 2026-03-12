@@ -146,6 +146,36 @@ pub extern "C" fn Java_com_perry_app_PerryBridge_nativeMain(
     _env: jni::JNIEnv,
     _class: jni::objects::JClass,
 ) {
+    // Set CWD to the app's internal files directory so that relative paths
+    // (e.g. SQLite databases like "mango.db") resolve to a writable location.
+    {
+        let mut env = jni_bridge::get_env();
+        let _ = env.push_local_frame(16);
+        if let Ok(activity) = env.call_static_method(
+            "com/perry/app/PerryBridge", "getActivity",
+            "()Landroid/app/Activity;", &[],
+        ) {
+            if let Ok(act_obj) = activity.l() {
+                if let Ok(files_dir) = env.call_method(&act_obj, "getFilesDir",
+                    "()Ljava/io/File;", &[]) {
+                    if let Ok(fd_obj) = files_dir.l() {
+                        if let Ok(abs_val) = env.call_method(&fd_obj, "getAbsolutePath",
+                            "()Ljava/lang/String;", &[]) {
+                            if let Ok(abs_obj) = abs_val.l() {
+                                if let Ok(path_str) = env.get_string((&abs_obj).into()) {
+                                    let path: String = path_str.into();
+                                    let _ = std::fs::create_dir_all(&path);
+                                    let _ = std::env::set_current_dir(&path);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
+    }
+
     unsafe {
         __android_log_print(
             3, b"PerryJNI\0".as_ptr(),
@@ -1111,6 +1141,25 @@ pub extern "C" fn perry_ui_textfield_set_on_submit(handle: i64, on_submit: f64) 
 }
 
 // =============================================================================
+// TextArea (multi-line EditText)
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_textarea_create(placeholder_ptr: i64, on_change: f64) -> i64 {
+    catch_panic("perry_ui_textarea_create", || widgets::textarea::create(placeholder_ptr as *const u8, on_change))
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_textarea_set_string(handle: i64, text_ptr: i64) {
+    catch_panic_void("perry_ui_textarea_set_string", || widgets::textfield::set_string_value(handle, text_ptr as *const u8));
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_textarea_get_string(handle: i64) -> i64 {
+    widgets::textfield::get_string_value(handle) as usize as i64
+}
+
+// =============================================================================
 // QR Code (parity with iOS)
 // =============================================================================
 
@@ -1290,3 +1339,37 @@ pub extern "C" fn hone_get_documents_dir() -> f64 { get_app_files_dir_string() }
 
 #[no_mangle]
 pub extern "C" fn __wrapper_hone_get_documents_dir() -> f64 { get_app_files_dir_string() }
+
+// =============================================================================
+// Stubs for UI functions not yet implemented on Android
+// =============================================================================
+
+/// perry_ui_poll_open_file() — macOS "Open With" not applicable on Android
+#[no_mangle]
+pub extern "C" fn perry_ui_poll_open_file() -> i64 {
+    0 // null (no file)
+}
+
+/// perry_ui_textfield_blur_all() — dismiss all keyboard focus
+#[no_mangle]
+pub extern "C" fn perry_ui_textfield_blur_all() {
+    // TODO: hide soft keyboard via InputMethodManager
+}
+
+/// perry_ui_textfield_set_on_focus(handle, callback) — on-focus callback for textfield
+#[no_mangle]
+pub extern "C" fn perry_ui_textfield_set_on_focus(_handle: f64, _callback: f64) {
+    // TODO: wire OnFocusChangeListener
+}
+
+/// perry_ui_widget_add_overlay(parent, child) — add overlay view
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_add_overlay(_parent: f64, _child: f64) {
+    // TODO: add child as overlay in FrameLayout
+}
+
+/// perry_ui_widget_set_overlay_frame(child, x, y, w, h) — position overlay
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_overlay_frame(_child: f64, _x: f64, _y: f64, _w: f64, _h: f64) {
+    // TODO: set FrameLayout.LayoutParams with margins
+}
