@@ -393,6 +393,25 @@ pub extern "C" fn perry_ui_stack_set_distribution(handle: i64, distribution: f64
     }
 }
 
+#[no_mangle]
+pub extern "C" fn perry_ui_stack_set_alignment(handle: i64, alignment: f64) {
+    // UIStackView alignment: 0=Fill, 1=Leading, 2=FirstBaseline, 3=Center, 4=Trailing, 5=LastBaseline
+    if let Some(view) = widgets::get_widget(handle) {
+        let is_stack = if let Some(cls) = objc2::runtime::AnyClass::get(c"UIStackView") {
+            use objc2_foundation::NSObjectProtocol;
+            view.isKindOfClass(cls)
+        } else {
+            false
+        };
+        if is_stack {
+            let align = alignment as i64;
+            unsafe {
+                let _: () = objc2::msg_send![&*view, setAlignment: align];
+            }
+        }
+    }
+}
+
 // =============================================================================
 // Phase A.4: Focus & Scroll-To
 // =============================================================================

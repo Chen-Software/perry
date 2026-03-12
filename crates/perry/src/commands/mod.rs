@@ -1,5 +1,6 @@
 //! CLI command implementations
 
+pub mod audit;
 pub mod check;
 pub mod compile;
 pub mod deps;
@@ -12,3 +13,4 @@ pub mod publish;
 pub mod setup;
 pub mod typecheck;
 pub mod update;
+pub mod verify;

@@ -3172,6 +3172,14 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             // Runtime-only linking — no stdlib needed
             cmd.arg(&runtime_lib);
         }
+    } else if ctx.needs_stdlib {
+        // Android + UI: runtime is provided by UI lib, but stdlib must still be linked
+        // separately (UI lib does not bundle perry-stdlib).
+        if let Some(ref stdlib) = stdlib_lib {
+            cmd.arg(stdlib);
+        } else {
+            eprintln!("Warning: stdlib required but libperry_stdlib.a not found");
+        }
     }
 
     if is_windows {

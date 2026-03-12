@@ -16982,6 +16982,14 @@ pub(crate) fn compile_expr(
                 ("crypto", false, "pbkdf2Sync") => "js_crypto_pbkdf2",
                 ("crypto", false, "scryptSync") => "js_crypto_scrypt",
 
+                // Tier 4: crypto E2E (X25519, AES-256-GCM, HKDF)
+                ("crypto", false, "x25519Keypair") => "js_crypto_x25519_keypair",
+                ("crypto", false, "x25519SharedSecret") => "js_crypto_x25519_shared_secret",
+                ("crypto", false, "aes256GcmEncrypt") => "js_crypto_aes256_gcm_encrypt",
+                ("crypto", false, "aes256GcmDecrypt") => "js_crypto_aes256_gcm_decrypt",
+                ("crypto", false, "randomNonce") => "js_crypto_random_nonce",
+                ("crypto", false, "hkdfSha256") => "js_crypto_hkdf_sha256",
+
                 // Tier 4: dayjs module
                 ("dayjs", false, "dayjs") => "js_dayjs_now",
                 ("dayjs", true, "format") => "js_dayjs_format",

@@ -86,14 +86,21 @@ pub fn clear_children(handle: i64) {
             env.pop_local_frame(&JObject::null());
         }
 
-        // Release global refs for widgets created after this handle.
-        // Perry rebuilds the entire UI tree on each rebuild(), so all
-        // widgets after the root are temporary and get recreated.
-        let idx = (handle - 1) as usize;
-        let mut widgets = WIDGETS.lock().unwrap();
-        if idx < widgets.len() {
-            // Drop all global refs after this handle (they are removed from the view tree)
-            widgets.truncate(idx + 1);
+        // Only truncate widget handles when ALL of the following are true:
+        // 1. The app has completed its initial build (app_set_body called)
+        // 2. The handle being cleared is the root body widget
+        // During init, clearChildren may be called on non-root containers (e.g.
+        // refreshConnectionList) while sibling widgets are still being created.
+        // Truncating during init would destroy those handles.
+        if crate::app::is_initialized() {
+            let root = crate::app::get_root_handle();
+            if handle == root {
+                let idx = (handle - 1) as usize;
+                let mut widgets = WIDGETS.lock().unwrap();
+                if idx < widgets.len() {
+                    widgets.truncate(idx + 1);
+                }
+            }
         }
     }
 }
@@ -105,6 +112,16 @@ pub fn add_child(parent_handle: i64, child_handle: i64) {
     if let (Some(parent_ref), Some(child_ref)) = (get_widget(parent_handle), get_widget(child_handle)) {
         let mut env = jni_bridge::get_env();
         let _ = env.push_local_frame(16);
+
+        // Debug: log parent/child handles and child class
+        unsafe {
+            __android_log_print(
+                3, b"PerryWidgets\0".as_ptr(),
+                b"add_child: parent=%lld child=%lld\0".as_ptr(),
+                parent_handle, child_handle,
+            );
+        }
+
         let result = env.call_method(
             parent_ref.as_obj(),
             "addView",

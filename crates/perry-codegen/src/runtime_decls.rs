@@ -5445,6 +5445,70 @@ impl Compiler {
         }
 
         // ========================================================================
+        // Tier 4: crypto E2E (X25519, AES-256-GCM, HKDF)
+        // ========================================================================
+
+        // js_crypto_x25519_keypair() -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64)); // JSON string ptr
+            let func_id = self.module.declare_function("js_crypto_x25519_keypair", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_crypto_x25519_keypair".to_string(), func_id);
+        }
+
+        // js_crypto_x25519_shared_secret(secret: i64, public: i64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // secret key (hex)
+            sig.params.push(AbiParam::new(types::I64)); // public key (hex)
+            sig.returns.push(AbiParam::new(types::I64)); // shared secret (hex)
+            let func_id = self.module.declare_function("js_crypto_x25519_shared_secret", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_crypto_x25519_shared_secret".to_string(), func_id);
+        }
+
+        // js_crypto_aes256_gcm_encrypt(plaintext: i64, key: i64, nonce: i64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // plaintext
+            sig.params.push(AbiParam::new(types::I64)); // key (hex)
+            sig.params.push(AbiParam::new(types::I64)); // nonce (hex)
+            sig.returns.push(AbiParam::new(types::I64)); // ciphertext (base64)
+            let func_id = self.module.declare_function("js_crypto_aes256_gcm_encrypt", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_crypto_aes256_gcm_encrypt".to_string(), func_id);
+        }
+
+        // js_crypto_aes256_gcm_decrypt(ciphertext: i64, key: i64, nonce: i64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // ciphertext (base64)
+            sig.params.push(AbiParam::new(types::I64)); // key (hex)
+            sig.params.push(AbiParam::new(types::I64)); // nonce (hex)
+            sig.returns.push(AbiParam::new(types::I64)); // plaintext
+            let func_id = self.module.declare_function("js_crypto_aes256_gcm_decrypt", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_crypto_aes256_gcm_decrypt".to_string(), func_id);
+        }
+
+        // js_crypto_random_nonce() -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64)); // hex nonce
+            let func_id = self.module.declare_function("js_crypto_random_nonce", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_crypto_random_nonce".to_string(), func_id);
+        }
+
+        // js_crypto_hkdf_sha256(ikm: i64, salt: i64, info: i64, length: f64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // ikm (hex)
+            sig.params.push(AbiParam::new(types::I64)); // salt (hex)
+            sig.params.push(AbiParam::new(types::I64)); // info (utf8)
+            sig.params.push(AbiParam::new(types::F64)); // length
+            sig.returns.push(AbiParam::new(types::I64)); // derived key (hex)
+            let func_id = self.module.declare_function("js_crypto_hkdf_sha256", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_crypto_hkdf_sha256".to_string(), func_id);
+        }
+
+        // ========================================================================
         // Tier 4: dayjs/date-fns
         // ========================================================================
 

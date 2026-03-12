@@ -4842,12 +4842,20 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                 _ => Some("Instance"),
                                             };
                                             if let Some(class_name) = class_name {
-                                                ctx.module_native_instances.push((var_name, module_name.to_string(), class_name.to_string()));
+                                                ctx.module_native_instances.push((var_name.clone(), module_name.to_string(), class_name.to_string()));
                                             }
                                         }
                                     }
                                 }
                             }
+                        }
+                    }
+                    // Check for variable-to-variable assignment: `x = y` where y is a known native instance.
+                    // e.g., `mongoClient = client` where client was tracked from MongoClient.connect().
+                    if let ast::Expr::Ident(rhs_ident) = inner_rhs {
+                        let rhs_name = rhs_ident.sym.as_ref();
+                        if let Some((module, class)) = ctx.lookup_native_instance(rhs_name) {
+                            ctx.module_native_instances.push((var_name, module.to_string(), class.to_string()));
                         }
                     }
                 }

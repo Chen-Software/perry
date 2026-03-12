@@ -1038,6 +1038,55 @@ pub extern "C" fn perry_ui_stack_set_distribution(handle: i64, distribution: f64
     }
 }
 
+#[no_mangle]
+pub extern "C" fn perry_ui_stack_set_alignment(handle: i64, alignment: f64) {
+    // On Android LinearLayout, alignment maps to gravity on the cross-axis.
+    // iOS/macOS alignment values: 0=Fill, 1=Leading, 3=Center, 4=Trailing
+    // For HStack (horizontal), cross-axis is vertical: TOP=48, CENTER_VERTICAL=16, BOTTOM=80
+    // For VStack (vertical), cross-axis is horizontal: LEFT=3, CENTER_HORIZONTAL=1, RIGHT=5
+    // Fill (0) means children stretch to fill the cross-axis — we don't set gravity
+    // so that MATCH_PARENT on children takes effect.
+    if let Some(view_ref) = widgets::get_widget(handle) {
+        let mut env = jni_bridge::get_env();
+        let _ = env.push_local_frame(8);
+
+        // Determine orientation: 0=HORIZONTAL (HStack), 1=VERTICAL (VStack)
+        let orientation = env.call_method(view_ref.as_obj(), "getOrientation", "()I", &[])
+            .map(|v| v.i().unwrap_or(0)).unwrap_or(0);
+
+        let align = alignment as i64;
+        let gravity = if orientation == 0 {
+            // HStack: cross-axis is vertical
+            match align {
+                0 => -1,         // Fill — no gravity override (let children use MATCH_PARENT height)
+                1 => 48,         // Leading → TOP
+                3 => 16,         // Center → CENTER_VERTICAL
+                4 => 80,         // Trailing → BOTTOM
+                _ => -1,
+            }
+        } else {
+            // VStack: cross-axis is horizontal
+            match align {
+                0 => -1,         // Fill — no gravity override
+                1 => 3,          // Leading → LEFT
+                3 => 1,          // Center → CENTER_HORIZONTAL
+                4 => 5,          // Trailing → RIGHT
+                _ => -1,
+            }
+        };
+
+        if gravity >= 0 {
+            let _ = env.call_method(
+                view_ref.as_obj(),
+                "setGravity",
+                "(I)V",
+                &[jni::objects::JValue::Int(gravity)],
+            );
+        }
+        unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
+    }
+}
+
 // =============================================================================
 // Text wrapping (parity with iOS)
 // =============================================================================
@@ -1074,6 +1123,13 @@ pub extern "C" fn perry_ui_qrcode_create(data_ptr: i64, size: f64) -> i64 {
 pub extern "C" fn perry_ui_qrcode_set_data(handle: i64, data_ptr: i64) {
     catch_panic_void("perry_ui_qrcode_set_data", || widgets::qrcode::set_data(handle, data_ptr as *const u8));
 }
+
+// =============================================================================
+// App icon (no-op on Android — icons are set via AndroidManifest.xml)
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_app_set_icon(_path_ptr: i64) {}
 
 // =============================================================================
 // Folder Dialog (parity with iOS)

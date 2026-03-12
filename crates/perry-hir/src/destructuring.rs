@@ -718,25 +718,30 @@ pub(crate) fn lower_var_decl_with_destructuring(
                 if let ast::Expr::New(new_expr) = init_expr.as_ref() {
                     if let ast::Expr::Ident(class_ident) = new_expr.callee.as_ref() {
                         let class_name = class_ident.sym.as_ref();
-                        // Map class names to their modules
-                        let module_name = match class_name {
-                            "EventEmitter" => Some("events"),
-                            "AsyncLocalStorage" => Some("async_hooks"),
-                            "WebSocket" | "WebSocketServer" => Some("ws"),
-                            "Redis" => Some("ioredis"),
-                            "LRUCache" => Some("lru-cache"),
-                            "Command" => Some("commander"),
-                            "Big" => Some("big.js"),
-                            "Decimal" => Some("decimal.js"),
-                            "BigNumber" => Some("bignumber.js"),
-                            // Database clients
-                            "Pool" => Some("pg"),  // PostgreSQL connection pool
-                            "Client" => Some("pg"), // PostgreSQL client
-                            "MongoClient" => Some("mongodb"),
-                            _ => None,
+                        // First try the general native module lookup (covers all imported native classes)
+                        let module_name = if let Some((m, _)) = ctx.lookup_native_module(class_name) {
+                            Some(m.to_string())
+                        } else {
+                            // Fallback to hardcoded map for known classes
+                            match class_name {
+                                "EventEmitter" => Some("events".to_string()),
+                                "AsyncLocalStorage" => Some("async_hooks".to_string()),
+                                "WebSocket" | "WebSocketServer" => Some("ws".to_string()),
+                                "Redis" => Some("ioredis".to_string()),
+                                "LRUCache" => Some("lru-cache".to_string()),
+                                "Command" => Some("commander".to_string()),
+                                "Big" => Some("big.js".to_string()),
+                                "Decimal" => Some("decimal.js".to_string()),
+                                "BigNumber" => Some("bignumber.js".to_string()),
+                                // Database clients
+                                "Pool" => Some("pg".to_string()),
+                                "Client" => Some("pg".to_string()),
+                                "MongoClient" => Some("mongodb".to_string()),
+                                _ => None,
+                            }
                         };
                         if let Some(module) = module_name {
-                            ctx.register_native_instance(name.clone(), module.to_string(), class_name.to_string());
+                            ctx.register_native_instance(name.clone(), module, class_name.to_string());
                         }
                     }
                 }
@@ -748,25 +753,28 @@ pub(crate) fn lower_var_decl_with_destructuring(
                     if let ast::Expr::New(new_expr) = await_expr.arg.as_ref() {
                         if let ast::Expr::Ident(class_ident) = new_expr.callee.as_ref() {
                             let class_name = class_ident.sym.as_ref();
-                            // Map class names to their modules
-                            let module_name = match class_name {
-                                "EventEmitter" => Some("events"),
-                                "AsyncLocalStorage" => Some("async_hooks"),
-                                "WebSocket" | "WebSocketServer" => Some("ws"),
-                                "Redis" => Some("ioredis"),
-                                "LRUCache" => Some("lru-cache"),
-                                "Command" => Some("commander"),
-                                "Big" => Some("big.js"),
-                                "Decimal" => Some("decimal.js"),
-                                "BigNumber" => Some("bignumber.js"),
-                                // Database clients
-                                "Pool" => Some("pg"),  // PostgreSQL connection pool
-                                "Client" => Some("pg"), // PostgreSQL client
-                                "MongoClient" => Some("mongodb"),
-                                _ => None,
+                            // First try the general native module lookup
+                            let module_name = if let Some((m, _)) = ctx.lookup_native_module(class_name) {
+                                Some(m.to_string())
+                            } else {
+                                match class_name {
+                                    "EventEmitter" => Some("events".to_string()),
+                                    "AsyncLocalStorage" => Some("async_hooks".to_string()),
+                                    "WebSocket" | "WebSocketServer" => Some("ws".to_string()),
+                                    "Redis" => Some("ioredis".to_string()),
+                                    "LRUCache" => Some("lru-cache".to_string()),
+                                    "Command" => Some("commander".to_string()),
+                                    "Big" => Some("big.js".to_string()),
+                                    "Decimal" => Some("decimal.js".to_string()),
+                                    "BigNumber" => Some("bignumber.js".to_string()),
+                                    "Pool" => Some("pg".to_string()),
+                                    "Client" => Some("pg".to_string()),
+                                    "MongoClient" => Some("mongodb".to_string()),
+                                    _ => None,
+                                }
                             };
                             if let Some(module) = module_name {
-                                ctx.register_native_instance(name.clone(), module.to_string(), class_name.to_string());
+                                ctx.register_native_instance(name.clone(), module, class_name.to_string());
                             }
                         }
                     }

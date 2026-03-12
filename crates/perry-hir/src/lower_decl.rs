@@ -117,6 +117,16 @@ pub(crate) fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) ->
         Vec::new()
     };
 
+    // After body lowering, check if any return statement returns a native instance.
+    // This handles patterns like: function initDb() { const d = new Database(...); return d; }
+    // where the return type annotation is `any` but the actual value is a native handle.
+    let ni_start = scope_mark.1;
+    if ctx.native_instances.len() > ni_start {
+        if let Some(ref block) = fn_decl.function.body {
+            find_native_return_in_stmts(&block.stmts, ctx, &name, ni_start);
+        }
+    }
+
     ctx.exit_scope(scope_mark);
 
     // Exit type parameter scope
@@ -1659,5 +1669,63 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
     }
 
     Ok(result)
+}
+
+/// Scan AST statements for `return <ident>` where the ident is a native instance.
+/// Registers the containing function in `func_return_native_instances` so callers
+/// can track `const db = initDb()` as returning a native handle.
+fn find_native_return_in_stmts(
+    stmts: &[ast::Stmt],
+    ctx: &mut LoweringContext,
+    func_name: &str,
+    ni_start: usize,
+) {
+    for stmt in stmts {
+        match stmt {
+            ast::Stmt::Return(ret_stmt) => {
+                if let Some(ref arg) = ret_stmt.arg {
+                    if let ast::Expr::Ident(ident) = arg.as_ref() {
+                        let var = ident.sym.as_ref();
+                        for i in ni_start..ctx.native_instances.len() {
+                            if ctx.native_instances[i].0 == var {
+                                ctx.func_return_native_instances.push((
+                                    func_name.to_string(),
+                                    ctx.native_instances[i].1.clone(),
+                                    ctx.native_instances[i].2.clone(),
+                                ));
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            // Recurse into blocks that may contain returns
+            ast::Stmt::Block(block) => {
+                find_native_return_in_stmts(&block.stmts, ctx, func_name, ni_start);
+            }
+            ast::Stmt::If(if_stmt) => {
+                if let ast::Stmt::Block(ref block) = *if_stmt.cons {
+                    find_native_return_in_stmts(&block.stmts, ctx, func_name, ni_start);
+                }
+                if let Some(ref alt) = if_stmt.alt {
+                    if let ast::Stmt::Block(ref block) = **alt {
+                        find_native_return_in_stmts(&block.stmts, ctx, func_name, ni_start);
+                    }
+                }
+            }
+            ast::Stmt::Try(try_stmt) => {
+                find_native_return_in_stmts(&try_stmt.block.stmts, ctx, func_name, ni_start);
+                if let Some(ref handler) = try_stmt.handler {
+                    find_native_return_in_stmts(&handler.body.stmts, ctx, func_name, ni_start);
+                }
+            }
+            _ => {}
+        }
+        // Stop once registered (early return in Return arm handles the direct case;
+        // check here for nested finds)
+        if ctx.func_return_native_instances.iter().any(|(n, _, _)| n == func_name) {
+            return;
+        }
+    }
 }
 

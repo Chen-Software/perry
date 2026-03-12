@@ -123,7 +123,11 @@ pub fn get_string_value(handle: i64) -> *const u8 {
                     if let Ok(jstr_val) = jstr_result {
                         if let Ok(jstr) = jstr_val.l() {
                             if let Ok(rust_str) = env.get_string((&jstr).into()) {
-                                let bytes = rust_str.to_str().unwrap_or("").as_bytes();
+                                // Copy to owned String before pop_local_frame frees JNI refs.
+                                // JavaStr's Drop calls ReleaseStringUTFChars — if the jstring
+                                // local ref is already freed by pop_local_frame, JNI aborts.
+                                let owned: String = rust_str.into();
+                                let bytes = owned.as_bytes();
                                 let str_ptr = unsafe { js_string_from_bytes(bytes.as_ptr(), bytes.len() as i64) };
                                 unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
                                 return str_ptr;

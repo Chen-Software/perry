@@ -8,8 +8,11 @@ fn str_from_header(ptr: *const u8) -> &'static str {
 }
 
 /// Create an image from a file path.
+/// For relative paths, tries the Android assets directory first (bundled in APK),
+/// then falls back to BitmapFactory.decodeFile for absolute paths.
 pub fn create_file(path_ptr: *const u8) -> i64 {
     let path = str_from_header(path_ptr);
+    crate::log_debug(&format!("image create_file: path={}", path));
     let mut env = jni_bridge::get_env();
     let _ = env.push_local_frame(32);
 
@@ -20,24 +23,86 @@ pub fn create_file(path_ptr: *const u8) -> i64 {
         &[JValue::Object(&activity)],
     ).expect("Failed to create ImageView");
 
-    // Try to load bitmap from file
-    let jpath = env.new_string(path).expect("Failed to create JNI string");
-    let bitmap = env.call_static_method(
-        "android/graphics/BitmapFactory",
-        "decodeFile",
-        "(Ljava/lang/String;)Landroid/graphics/Bitmap;",
-        &[JValue::Object(&jpath)],
-    );
+    // Ensure the ImageView adjusts bounds to its LayoutParams and scales content
+    let _ = env.call_method(&image_view, "setAdjustViewBounds", "(Z)V", &[JValue::Bool(1)]);
+    // ScaleType.FIT_CENTER = enum ordinal → use setScaleType with enum constant
+    let scale_type_class = env.find_class("android/widget/ImageView$ScaleType").expect("ScaleType");
+    let fit_center = env.get_static_field(
+        &scale_type_class,
+        "FIT_CENTER",
+        "Landroid/widget/ImageView$ScaleType;",
+    ).expect("FIT_CENTER").l().expect("scale type");
+    let _ = env.call_method(&image_view, "setScaleType",
+        "(Landroid/widget/ImageView$ScaleType;)V",
+        &[JValue::Object(&fit_center)]);
 
-    if let Ok(bmp_val) = bitmap {
-        if let Ok(bmp) = bmp_val.l() {
-            if !bmp.is_null() {
-                let _ = env.call_method(
-                    &image_view,
-                    "setImageBitmap",
-                    "(Landroid/graphics/Bitmap;)V",
-                    &[JValue::Object(&bmp)],
-                );
+    let mut loaded = false;
+
+    // For relative paths, try loading from APK assets first
+    if !path.starts_with('/') {
+        if let Ok(asset_mgr) = env.call_method(&activity, "getAssets",
+            "()Landroid/content/res/AssetManager;", &[]) {
+            if let Ok(mgr) = asset_mgr.l() {
+                if !mgr.is_null() {
+                    let jpath = env.new_string(path).expect("asset path string");
+                    // AssetManager.open(path) -> InputStream
+                    let stream = env.call_method(&mgr, "open",
+                        "(Ljava/lang/String;)Ljava/io/InputStream;",
+                        &[JValue::Object(&jpath)]);
+                    if let Ok(stream_val) = stream {
+                        if let Ok(stream_obj) = stream_val.l() {
+                            if !stream_obj.is_null() {
+                                // BitmapFactory.decodeStream(inputStream)
+                                let bitmap = env.call_static_method(
+                                    "android/graphics/BitmapFactory",
+                                    "decodeStream",
+                                    "(Ljava/io/InputStream;)Landroid/graphics/Bitmap;",
+                                    &[JValue::Object(&stream_obj)],
+                                );
+                                if let Ok(bmp_val) = bitmap {
+                                    if let Ok(bmp) = bmp_val.l() {
+                                        if !bmp.is_null() {
+                                            let _ = env.call_method(&image_view,
+                                                "setImageBitmap",
+                                                "(Landroid/graphics/Bitmap;)V",
+                                                &[JValue::Object(&bmp)]);
+                                            loaded = true;
+                                            crate::log_debug("image create_file: loaded from assets");
+                                        }
+                                    }
+                                }
+                                let _ = env.call_method(&stream_obj, "close", "()V", &[]);
+                            }
+                        }
+                    }
+                    // Clear any FileNotFoundException from assets.open()
+                    if env.exception_check().unwrap_or(false) {
+                        let _ = env.exception_clear();
+                    }
+                }
+            }
+        }
+    }
+
+    // Fall back to filesystem (absolute path or if assets failed)
+    if !loaded {
+        let jpath = env.new_string(path).expect("Failed to create JNI string");
+        let bitmap = env.call_static_method(
+            "android/graphics/BitmapFactory",
+            "decodeFile",
+            "(Ljava/lang/String;)Landroid/graphics/Bitmap;",
+            &[JValue::Object(&jpath)],
+        );
+        if let Ok(bmp_val) = bitmap {
+            if let Ok(bmp) = bmp_val.l() {
+                if !bmp.is_null() {
+                    let _ = env.call_method(
+                        &image_view,
+                        "setImageBitmap",
+                        "(Landroid/graphics/Bitmap;)V",
+                        &[JValue::Object(&bmp)],
+                    );
+                }
             }
         }
     }

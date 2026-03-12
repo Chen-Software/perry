@@ -3,6 +3,7 @@
 //! CLI driver for compiling TypeScript to native executables.
 
 mod commands;
+mod telemetry;
 mod update_checker;
 
 use anyhow::Result;
@@ -66,6 +67,12 @@ enum Commands {
 
     /// Check for updates and self-update Perry
     Update(commands::update::UpdateArgs),
+
+    /// Scan TypeScript source for security vulnerabilities
+    Audit(commands::audit::AuditArgs),
+
+    /// Submit compiled binary for runtime verification
+    Verify(commands::verify::VerifyArgs),
 }
 
 /// Check if the first non-flag argument looks like a TypeScript file
@@ -82,7 +89,7 @@ fn is_legacy_invocation(args: &[String]) -> bool {
         // If it's a known subcommand, not legacy
         if matches!(
             arg.as_str(),
-            "compile" | "check" | "init" | "doctor" | "explain" | "publish" | "update" | "setup" | "help"
+            "compile" | "check" | "init" | "doctor" | "explain" | "publish" | "update" | "setup" | "audit" | "verify" | "help"
         ) {
             return false;
         }
@@ -132,6 +139,13 @@ fn main_inner() -> Result<()> {
         return Ok(());
     }
 
+    // Check telemetry consent (prompts once on first interactive run)
+    let telemetry_active = if !cli.quiet {
+        telemetry::init_and_check_consent()
+    } else {
+        false
+    };
+
     // Spawn background update check (non-blocking, cached for 24h)
     let is_update_cmd = matches!(cli.command, Some(Commands::Update(_)));
     let bg_check = if !cli.quiet && !is_update_cmd && !update_checker::should_skip_check() {
@@ -145,9 +159,30 @@ fn main_inner() -> Result<()> {
         None
     };
 
-    let result = match cli.command.unwrap() {
+    let command = cli.command.unwrap();
+    let command_name = match &command {
+        Commands::Compile(_) => Some("compile"),
+        Commands::Init(_) => Some("init"),
+        Commands::Publish(_) => Some("publish"),
+        Commands::Doctor(_) => Some("doctor"),
+        Commands::Update(_) => Some("update"),
+        _ => None, // check, explain, setup — no telemetry
+    };
+
+    let result = match command {
         Commands::Compile(args) => {
-            commands::compile::run(args, cli.format, use_color, cli.verbose)
+            let target = args.target.as_deref().unwrap_or("native").to_string();
+            let r = commands::compile::run(args, cli.format, use_color, cli.verbose);
+            if telemetry_active {
+                let status = if r.is_ok() { "success" } else { "error" };
+                telemetry::send_event("compile", &[
+                    ("platform", std::env::consts::OS),
+                    ("target", &target),
+                    ("version", env!("CARGO_PKG_VERSION")),
+                    ("status", status),
+                ]);
+            }
+            r
         }
         Commands::Check(args) => {
             commands::check::run(args, cli.format, use_color, cli.verbose)
@@ -170,7 +205,25 @@ fn main_inner() -> Result<()> {
         Commands::Update(args) => {
             commands::update::run(args, cli.format, use_color, cli.verbose)
         }
+        Commands::Audit(args) => {
+            commands::audit::run(args, cli.format, use_color)
+        }
+        Commands::Verify(args) => {
+            commands::verify::run(args, cli.format, use_color)
+        }
     };
+
+    // Send telemetry for non-compile commands (compile is handled above for target/status)
+    if telemetry_active {
+        if let Some(name) = command_name {
+            if name != "compile" {
+                telemetry::send_event(name, &[
+                    ("platform", std::env::consts::OS),
+                    ("version", env!("CARGO_PKG_VERSION")),
+                ]);
+            }
+        }
+    }
 
     // Print update notice if available (to stderr, non-blocking)
     if !cli.quiet && !is_update_cmd {

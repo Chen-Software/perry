@@ -61,6 +61,12 @@ pub fn app_create(title_ptr: *const u8, width: f64, height: f64) -> i64 {
 /// widgetAddChild as a fallback.
 static GLOBAL_BODY: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
+/// Whether app_set_body has been called (initial build complete).
+/// Widget handle truncation in clear_children is only safe AFTER the initial build,
+/// because during init, clearChildren may be called on non-root containers (e.g.
+/// refreshing a list) while sibling widgets haven't been created yet.
+static APP_INITIALIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Set the root widget (body) of the app.
 pub fn app_set_body(_app_handle: i64, root_handle: i64) {
     unsafe {
@@ -73,6 +79,7 @@ pub fn app_set_body(_app_handle: i64, root_handle: i64) {
     if root_handle > 0 {
         GLOBAL_BODY.store(root_handle, std::sync::atomic::Ordering::Relaxed);
     }
+    APP_INITIALIZED.store(true, std::sync::atomic::Ordering::Relaxed);
     PENDING_BODY.with(|b| {
         *b.borrow_mut() = Some(root_handle);
     });
@@ -86,6 +93,16 @@ pub fn track_root_candidate(handle: i64) {
     if current == 0 {
         GLOBAL_BODY.store(handle, std::sync::atomic::Ordering::Relaxed);
     }
+}
+
+/// Get the current root body handle (used by clear_children to decide whether to truncate).
+pub fn get_root_handle() -> i64 {
+    GLOBAL_BODY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether the app has completed its initial build (app_set_body called).
+pub fn is_initialized() -> bool {
+    APP_INITIALIZED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Attach the root widget to the Activity's content view.
