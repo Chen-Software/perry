@@ -24,6 +24,165 @@ use crate::util::*;
 use crate::stmt::{compile_stmt, compile_async_stmt};
 use crate::expr::compile_expr;
 
+/// Collect all LocalIds referenced (read or written) in a list of statements.
+/// Used to filter module-level variable loading to only variables the closure
+/// actually references, avoiding unnecessary Cranelift instructions.
+fn collect_referenced_locals_stmts(stmts: &[Stmt], out: &mut std::collections::HashSet<LocalId>) {
+    for stmt in stmts {
+        collect_referenced_locals_stmt(stmt, out);
+    }
+}
+
+fn collect_referenced_locals_stmt(stmt: &Stmt, out: &mut std::collections::HashSet<LocalId>) {
+    match stmt {
+        Stmt::Let { init, .. } => {
+            if let Some(expr) = init {
+                collect_referenced_locals_expr(expr, out);
+            }
+        }
+        Stmt::Expr(expr) => collect_referenced_locals_expr(expr, out),
+        Stmt::Return(Some(expr)) => collect_referenced_locals_expr(expr, out),
+        Stmt::Return(None) => {}
+        Stmt::If { condition, then_branch, else_branch } => {
+            collect_referenced_locals_expr(condition, out);
+            collect_referenced_locals_stmts(then_branch, out);
+            if let Some(els) = else_branch {
+                collect_referenced_locals_stmts(els, out);
+            }
+        }
+        Stmt::While { condition, body } => {
+            collect_referenced_locals_expr(condition, out);
+            collect_referenced_locals_stmts(body, out);
+        }
+        Stmt::For { init, condition, update, body } => {
+            if let Some(i) = init { collect_referenced_locals_stmt(i, out); }
+            if let Some(c) = condition { collect_referenced_locals_expr(c, out); }
+            if let Some(u) = update { collect_referenced_locals_expr(u, out); }
+            collect_referenced_locals_stmts(body, out);
+        }
+        Stmt::Throw(expr) => collect_referenced_locals_expr(expr, out),
+        Stmt::Try { body, catch, finally } => {
+            collect_referenced_locals_stmts(body, out);
+            if let Some(c) = catch {
+                collect_referenced_locals_stmts(&c.body, out);
+            }
+            if let Some(f) = finally {
+                collect_referenced_locals_stmts(f, out);
+            }
+        }
+        Stmt::Switch { discriminant, cases } => {
+            collect_referenced_locals_expr(discriminant, out);
+            for case in cases {
+                if let Some(test) = &case.test {
+                    collect_referenced_locals_expr(test, out);
+                }
+                collect_referenced_locals_stmts(&case.body, out);
+            }
+        }
+        Stmt::Break | Stmt::Continue => {}
+    }
+}
+
+fn collect_referenced_locals_expr(expr: &Expr, out: &mut std::collections::HashSet<LocalId>) {
+    match expr {
+        Expr::LocalGet(id) | Expr::LocalSet(id, _) => {
+            out.insert(*id);
+            if let Expr::LocalSet(_, val) = expr {
+                collect_referenced_locals_expr(val, out);
+            }
+        }
+        Expr::Update { id, .. } => { out.insert(*id); }
+        Expr::Binary { left, right, .. }
+        | Expr::Compare { left, right, .. }
+        | Expr::Logical { left, right, .. } => {
+            collect_referenced_locals_expr(left, out);
+            collect_referenced_locals_expr(right, out);
+        }
+        Expr::Unary { operand, .. } | Expr::TypeOf(operand) | Expr::Void(operand)
+        | Expr::Await(operand) => {
+            collect_referenced_locals_expr(operand, out);
+        }
+        Expr::Call { callee, args, .. } => {
+            collect_referenced_locals_expr(callee, out);
+            for a in args { collect_referenced_locals_expr(a, out); }
+        }
+        Expr::CallSpread { callee, args, .. } => {
+            collect_referenced_locals_expr(callee, out);
+            for a in args {
+                match a {
+                    CallArg::Expr(e) | CallArg::Spread(e) => collect_referenced_locals_expr(e, out),
+                }
+            }
+        }
+        Expr::NativeMethodCall { object, args, .. } => {
+            if let Some(obj) = object { collect_referenced_locals_expr(obj, out); }
+            for a in args { collect_referenced_locals_expr(a, out); }
+        }
+        Expr::PropertyGet { object, .. } => collect_referenced_locals_expr(object, out),
+        Expr::PropertySet { object, value, .. } => {
+            collect_referenced_locals_expr(object, out);
+            collect_referenced_locals_expr(value, out);
+        }
+        Expr::PropertyUpdate { object, .. } => collect_referenced_locals_expr(object, out),
+        Expr::IndexGet { object, index } => {
+            collect_referenced_locals_expr(object, out);
+            collect_referenced_locals_expr(index, out);
+        }
+        Expr::IndexSet { object, index, value } => {
+            collect_referenced_locals_expr(object, out);
+            collect_referenced_locals_expr(index, out);
+            collect_referenced_locals_expr(value, out);
+        }
+        Expr::IndexUpdate { object, index, .. } => {
+            collect_referenced_locals_expr(object, out);
+            collect_referenced_locals_expr(index, out);
+        }
+        Expr::Object(fields) => {
+            for (_, e) in fields { collect_referenced_locals_expr(e, out); }
+        }
+        Expr::ObjectSpread { parts } => {
+            for (_, e) in parts { collect_referenced_locals_expr(e, out); }
+        }
+        Expr::Array(elems) => {
+            for e in elems { collect_referenced_locals_expr(e, out); }
+        }
+        Expr::ArraySpread(elems) => {
+            for elem in elems {
+                match elem {
+                    ArrayElement::Expr(e) | ArrayElement::Spread(e) => collect_referenced_locals_expr(e, out),
+                }
+            }
+        }
+        Expr::Conditional { condition, then_expr, else_expr } => {
+            collect_referenced_locals_expr(condition, out);
+            collect_referenced_locals_expr(then_expr, out);
+            collect_referenced_locals_expr(else_expr, out);
+        }
+        Expr::InstanceOf { expr, .. } => collect_referenced_locals_expr(expr, out),
+        Expr::In { property, object } => {
+            collect_referenced_locals_expr(property, out);
+            collect_referenced_locals_expr(object, out);
+        }
+        Expr::New { args, .. } | Expr::NewDynamic { args, .. } | Expr::SuperCall(args) => {
+            // NewDynamic also has callee
+            if let Expr::NewDynamic { callee, .. } = expr {
+                collect_referenced_locals_expr(callee, out);
+            }
+            for a in args { collect_referenced_locals_expr(a, out); }
+        }
+        Expr::SuperMethodCall { args, .. } | Expr::StaticMethodCall { args, .. } => {
+            for a in args { collect_referenced_locals_expr(a, out); }
+        }
+        Expr::StaticFieldSet { value, .. } => collect_referenced_locals_expr(value, out),
+        Expr::Yield { value, .. } => {
+            if let Some(v) = value { collect_referenced_locals_expr(v, out); }
+        }
+        Expr::EnvGetDynamic(e) => collect_referenced_locals_expr(e, out),
+        // Leaf nodes with no LocalId references
+        _ => {}
+    }
+}
+
 impl crate::codegen::Compiler {
     pub(crate) fn collect_closures_from_stmts_into(&self, stmts: &[Stmt], closures: &mut Vec<(u32, Vec<perry_hir::Param>, Vec<Stmt>, Vec<LocalId>, Vec<LocalId>, bool, Option<String>, bool)>, enclosing_class: Option<&str>) {
         for stmt in stmts {
@@ -1367,9 +1526,19 @@ impl crate::codegen::Compiler {
                 }
             }
 
+            // Collect which module-level variables the closure body actually references.
+            // Only load those, to avoid generating unnecessary Cranelift instructions
+            // for all module-level variables in every closure.
+            let mut referenced = std::collections::HashSet::new();
+            collect_referenced_locals_stmts(body, &mut referenced);
+
             // Load module-level variables from their global slots
-            // These are variables defined at module scope that the closure may reference
+            // Only load variables that the closure body actually references
             for (local_id, data_id) in &self.module_var_data_ids {
+                // Skip if not referenced by the closure body
+                if !referenced.contains(local_id) {
+                    continue;
+                }
                 // Skip if already in locals (e.g., passed as a capture)
                 if locals.contains_key(local_id) {
                     continue;
