@@ -11,6 +11,14 @@ use std::process::Command;
 
 use crate::OutputFormat;
 
+/// Result of a successful compilation
+pub struct CompileResult {
+    pub output_path: PathBuf,
+    pub target: String,
+    pub bundle_id: Option<String>,
+    pub is_dylib: bool,
+}
+
 #[derive(Args, Debug)]
 pub struct CompileArgs {
     /// Input TypeScript file
@@ -1507,7 +1515,7 @@ fn generate_js_bundle(ctx: &CompilationContext, output_dir: &Path) -> Result<Pat
 }
 
 /// Compile for iOS widget target: emit SwiftUI source for WidgetKit extension
-fn compile_for_ios_widget(ctx: &CompilationContext, args: &CompileArgs, format: OutputFormat) -> Result<()> {
+fn compile_for_ios_widget(ctx: &CompilationContext, args: &CompileArgs, format: OutputFormat) -> Result<CompileResult> {
     let app_bundle_id = args.app_bundle_id.as_deref()
         .ok_or_else(|| anyhow!("--app-bundle-id is required for ios-widget target"))?;
 
@@ -1594,11 +1602,17 @@ fn compile_for_ios_widget(ctx: &CompilationContext, args: &CompileArgs, format: 
         }
     }
 
-    Ok(())
+    let target_str = args.target.as_deref().unwrap_or("ios-widget").to_string();
+    Ok(CompileResult {
+        output_path: output_dir,
+        target: target_str,
+        bundle_id: Some(app_bundle_id.to_string()),
+        is_dylib: false,
+    })
 }
 
 /// Compile for web target: emit JavaScript + HTML instead of native code
-fn compile_for_web(ctx: &CompilationContext, args: &CompileArgs, format: OutputFormat) -> Result<()> {
+fn compile_for_web(ctx: &CompilationContext, args: &CompileArgs, format: OutputFormat) -> Result<CompileResult> {
     match format {
         OutputFormat::Text => println!("Generating JavaScript for web target..."),
         OutputFormat::Json => {}
@@ -1698,10 +1712,15 @@ fn compile_for_web(ctx: &CompilationContext, args: &CompileArgs, format: OutputF
         }
     }
 
-    Ok(())
+    Ok(CompileResult {
+        output_path,
+        target: "web".to_string(),
+        bundle_id: None,
+        is_dylib: false,
+    })
 }
 
-pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: u8) -> Result<()> {
+pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: u8) -> Result<CompileResult> {
     match format {
         OutputFormat::Text => println!("Collecting modules..."),
         OutputFormat::Json => {}
@@ -2953,7 +2972,12 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     }
 
     if args.no_link {
-        return Ok(());
+        return Ok(CompileResult {
+            output_path: exe_path,
+            target: target.clone().unwrap_or_else(|| "native".to_string()),
+            bundle_id: None,
+            is_dylib,
+        });
     }
 
     match format {
@@ -3013,7 +3037,12 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             }
         }
 
-        return Ok(());
+        return Ok(CompileResult {
+            output_path: exe_path,
+            target: target.clone().unwrap_or_else(|| "native".to_string()),
+            bundle_id: None,
+            is_dylib: true,
+        });
     }
 
     let runtime_lib = find_runtime_library(target.as_deref())?;
@@ -3476,6 +3505,10 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         return Err(anyhow!("Linking failed"));
     }
 
+    // Track iOS bundle info for CompileResult
+    let mut result_bundle_id: Option<String> = None;
+    let mut result_app_dir: Option<PathBuf> = None;
+
     // For iOS targets, create a .app bundle
     if is_ios {
         let app_dir = exe_path.with_extension("app");
@@ -3503,6 +3536,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             }
             None
         })().unwrap_or_else(|| format!("com.perry.{}", exe_stem));
+        result_bundle_id = Some(bundle_id.clone());
+        result_app_dir = Some(app_dir.clone());
 
         // Check perry.toml for iOS-specific settings (e.g. encryption_exempt)
         let encryption_exempt_plist = (|| -> Option<String> {
@@ -3835,5 +3870,12 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         }
     }
 
-    Ok(())
+    let final_output_path = result_app_dir.unwrap_or(exe_path);
+
+    Ok(CompileResult {
+        output_path: final_output_path,
+        target: target.unwrap_or_else(|| "native".to_string()),
+        bundle_id: result_bundle_id,
+        is_dylib,
+    })
 }

@@ -73,6 +73,9 @@ enum Commands {
 
     /// Submit compiled binary for runtime verification
     Verify(commands::verify::VerifyArgs),
+
+    /// Compile and run a TypeScript file in one step
+    Run(commands::run::RunArgs),
 }
 
 /// Check if the first non-flag argument looks like a TypeScript file
@@ -89,7 +92,7 @@ fn is_legacy_invocation(args: &[String]) -> bool {
         // If it's a known subcommand, not legacy
         if matches!(
             arg.as_str(),
-            "compile" | "check" | "init" | "doctor" | "explain" | "publish" | "update" | "setup" | "audit" | "verify" | "help"
+            "compile" | "check" | "init" | "doctor" | "explain" | "publish" | "update" | "setup" | "audit" | "verify" | "run" | "help"
         ) {
             return false;
         }
@@ -166,6 +169,7 @@ fn main_inner() -> Result<()> {
         Commands::Publish(_) => Some("publish"),
         Commands::Doctor(_) => Some("doctor"),
         Commands::Update(_) => Some("update"),
+        Commands::Run(_) => Some("run"),
         _ => None, // check, explain, setup — no telemetry
     };
 
@@ -182,7 +186,10 @@ fn main_inner() -> Result<()> {
                     ("status", status),
                 ]);
             }
-            r
+            r.map(|_| ())
+        }
+        Commands::Run(args) => {
+            commands::run::run(args, cli.format, use_color, cli.verbose)
         }
         Commands::Check(args) => {
             commands::check::run(args, cli.format, use_color, cli.verbose)
