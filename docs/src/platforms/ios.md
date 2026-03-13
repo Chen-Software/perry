@@ -70,6 +70,35 @@ perry widget.ts --target ios-widget
 
 See [Widgets (WidgetKit)](../widgets/overview.md) for details.
 
+## Splash Screen
+
+Perry auto-generates a native `LaunchScreen.storyboard` from the `perry.splash` config in `package.json`. The splash screen appears instantly during cold start.
+
+```json
+{
+  "perry": {
+    "splash": {
+      "image": "logo/icon-256.png",
+      "background": "#FFF5EE"
+    }
+  }
+}
+```
+
+The image is centered at 128x128pt with `scaleAspectFit`. You can provide a custom storyboard for full control:
+
+```json
+{
+  "perry": {
+    "splash": {
+      "ios": { "storyboard": "splash/LaunchScreen.storyboard" }
+    }
+  }
+}
+```
+
+See [Project Configuration](../getting-started/project-config.md#splash) for the full config reference.
+
 ## Differences from macOS
 
 - **No menu bar**: iOS doesn't support menu bars. Use toolbar or navigation patterns.

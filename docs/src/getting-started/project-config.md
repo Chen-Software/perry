@@ -48,6 +48,80 @@ When a package is listed here, Perry:
 
 This is useful for pure TypeScript/JavaScript packages that don't rely on Node.js APIs. Packages that use native bindings, `eval()`, or dynamic `require()` won't work.
 
+#### `splash`
+
+Configure a native splash screen for iOS and Android. The splash screen appears instantly during cold start, before your app code runs.
+
+**Minimal (both platforms share the same splash):**
+
+```json
+{
+  "perry": {
+    "splash": {
+      "image": "logo/icon-256.png",
+      "background": "#FFF5EE"
+    }
+  }
+}
+```
+
+**Per-platform overrides:**
+
+```json
+{
+  "perry": {
+    "splash": {
+      "image": "logo/icon-256.png",
+      "background": "#FFF5EE",
+      "ios": {
+        "image": "logo/splash-ios.png",
+        "background": "#FFFFFF"
+      },
+      "android": {
+        "image": "logo/splash-android.png",
+        "background": "#FFFFFF"
+      }
+    }
+  }
+}
+```
+
+**Full custom override (complete control):**
+
+```json
+{
+  "perry": {
+    "splash": {
+      "ios": {
+        "storyboard": "splash/LaunchScreen.storyboard"
+      },
+      "android": {
+        "layout": "splash/splash_background.xml",
+        "theme": "splash/themes.xml"
+      }
+    }
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `splash.image` | Path to a PNG image, centered on the splash screen (both platforms) |
+| `splash.background` | Hex color for the background (default: `#FFFFFF`) |
+| `splash.ios.image` | iOS-specific image override |
+| `splash.ios.background` | iOS-specific background color |
+| `splash.ios.storyboard` | Custom LaunchScreen.storyboard (compiled with ibtool) |
+| `splash.android.image` | Android-specific image override |
+| `splash.android.background` | Android-specific background color |
+| `splash.android.layout` | Custom drawable XML for `windowBackground` |
+| `splash.android.theme` | Custom themes.xml |
+
+**Resolution order** per platform:
+1. Custom file override (storyboard / layout+theme)
+2. Platform-specific image/color (`splash.{platform}.image`)
+3. Universal image/color (`splash.image`)
+4. No `splash` key → blank white screen (backward compatible)
+
 ## Using npm Packages
 
 Perry natively supports many popular npm packages without any configuration:

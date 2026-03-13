@@ -2,6 +2,14 @@
 
 Detailed changelog for Perry. See CLAUDE.md for concise summaries.
 
+## v0.2.178
+- **Splash screen support for iOS and Android**
+  - Parse `perry.splash` config from `package.json` with three tiers: universal (single image + color), per-platform overrides, full custom file override
+  - iOS: auto-generate LaunchScreen.storyboard with centered image (128x128pt, scaleAspectFit) and custom background color; or use a custom storyboard
+  - Android: `Theme.Perry.Splash` style with `windowBackground` layer-list drawable; activity calls `setTheme()` in `onCreate` to switch to normal theme
+  - New template file: `perry-ui-android/template/app/src/main/res/drawable/splash_background.xml`
+  - Modified: `compile.rs` (iOS storyboard generation), `themes.xml`, `AndroidManifest.xml`, `PerryActivity.kt`
+
 ## v0.2.147
 - **Mark-sweep garbage collection** for bounded memory in long-running programs
   - New `crates/perry-runtime/src/gc.rs`: full GC infrastructure
