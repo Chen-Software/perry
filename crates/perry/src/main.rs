@@ -241,5 +241,8 @@ fn main_inner() -> Result<()> {
         }
     }
 
+    // Wait for any pending telemetry events to be delivered before exiting
+    telemetry::flush();
+
     result
 }

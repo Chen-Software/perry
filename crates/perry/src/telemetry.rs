@@ -5,8 +5,16 @@
 //! on background threads — never slows down the CLI.
 
 use serde::{Deserialize, Serialize};
+use std::sync::{Mutex, OnceLock};
 
 use crate::commands::publish::{load_config, save_config};
+
+/// Pending telemetry completion signals. Each `send_event` pushes a receiver;
+/// `flush()` drains them with a timeout so the process doesn't exit too early.
+fn pending_signals() -> &'static Mutex<Vec<std::sync::mpsc::Receiver<()>>> {
+    static INSTANCE: OnceLock<Mutex<Vec<std::sync::mpsc::Receiver<()>>>> = OnceLock::new();
+    INSTANCE.get_or_init(|| Mutex::new(Vec::new()))
+}
 
 const CHIRP_URL: &str = "https://api.chirp247.com/api/v1/event";
 const CHIRP_KEY: &str = "testkey123";
@@ -20,7 +28,7 @@ pub(crate) struct TelemetryConfig {
     pub(crate) client_id: String,
 }
 
-/// Returns true if telemetry should be skipped entirely.
+/// Returns true if telemetry should be skipped entirely (explicit opt-out).
 fn should_skip_telemetry() -> bool {
     if std::env::var("PERRY_NO_TELEMETRY").map_or(false, |v| v == "1" || v == "true") {
         return true;
@@ -28,10 +36,13 @@ fn should_skip_telemetry() -> bool {
     if std::env::var("CI").map_or(false, |v| v == "true" || v == "1") {
         return true;
     }
-    if !atty::is(atty::Stream::Stderr) {
-        return true;
-    }
     false
+}
+
+/// Returns true if we should skip the interactive consent prompt
+/// (non-TTY environments can't prompt, but should still send if already consented).
+fn should_skip_consent_prompt() -> bool {
+    !atty::is(atty::Stream::Stderr)
 }
 
 /// Load telemetry config from ~/.perry/config.toml.
@@ -112,12 +123,14 @@ pub(crate) fn init_and_check_consent() -> bool {
 
     match load_telemetry_config() {
         Some(config) => config.enabled,
+        // Only prompt if we have an interactive terminal; otherwise don't nag
+        None if should_skip_consent_prompt() => false,
         None => prompt_consent(),
     }
 }
 
-/// Fire-and-forget: send an event on a background thread.
-/// All errors are silently ignored.
+/// Send an event on a background thread. The thread is tracked so `flush()`
+/// can wait for it before process exit. All errors are silently ignored.
 pub(crate) fn send_event(event: &str, dims: &[(&str, &str)]) {
     let config = match load_telemetry_config() {
         Some(c) if c.enabled => c,
@@ -128,9 +141,39 @@ pub(crate) fn send_event(event: &str, dims: &[(&str, &str)]) {
     let dims: Vec<(String, String)> = dims.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
     let client_id = config.client_id.clone();
 
+    let (tx, rx) = std::sync::mpsc::channel();
+
     std::thread::spawn(move || {
         send_event_blocking(&event, &dims, &client_id);
+        let _ = tx.send(());
     });
+
+    if let Ok(mut guard) = pending_signals().lock() {
+        guard.push(rx);
+    }
+}
+
+/// Wait for all pending telemetry events to complete (up to 3 seconds total).
+/// Call this before process exit to ensure events are delivered.
+pub(crate) fn flush() {
+    let receivers = if let Ok(mut guard) = pending_signals().lock() {
+        std::mem::take(&mut *guard)
+    } else {
+        return;
+    };
+
+    if receivers.is_empty() {
+        return;
+    }
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    for rx in receivers {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let _ = rx.recv_timeout(remaining);
+    }
 }
 
 /// Actual HTTP POST to Chirp API.
