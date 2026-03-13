@@ -15,10 +15,11 @@ use crate::promise::Promise;
 
 // === WebSocket stubs ===
 // On iOS, perry-stdlib provides the real WebSocket implementation (using
-// NSURLSessionWebSocketTask). These stubs must NOT be compiled for iOS,
-// otherwise libperry_ui_ios.a (which bundles perry-runtime) will contain
-// duplicate stub symbols that override stdlib's real implementation.
-#[cfg(not(target_os = "ios"))]
+// NSURLSessionWebSocketTask). On Android, perry-ui-android provides a real
+// WebSocket implementation using tungstenite+rustls. These stubs must NOT
+// be compiled for either platform, otherwise the real implementations will
+// be shadowed by the no-op stubs.
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod ws_stubs {
     use std::ptr;
     use crate::string::StringHeader;
@@ -79,12 +80,15 @@ mod ws_stubs {
     }
 }
 
-// === HTTP stubs (for programs that reference HTTP without importing http modules) ===
-
+// === Stdlib dispatch stubs ===
+// On Android, perry-ui-android provides a real js_stdlib_process_pending
+// that processes WebSocket promise resolves.
+#[cfg(not(target_os = "android"))]
 #[no_mangle]
 pub extern "C" fn js_stdlib_process_pending() -> i32 {
     0
 }
 
+#[cfg(not(target_os = "android"))]
 #[no_mangle]
 pub extern "C" fn js_stdlib_init_dispatch() {}

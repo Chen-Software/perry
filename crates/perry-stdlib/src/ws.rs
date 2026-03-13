@@ -114,6 +114,11 @@ unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
 #[cfg(not(target_os = "ios"))]
 #[no_mangle]
 pub unsafe extern "C" fn js_ws_connect(url_ptr: *const StringHeader) -> *mut perry_runtime::Promise {
+    #[cfg(target_os = "android")]
+    {
+        extern "C" { fn __android_log_print(prio: i32, tag: *const u8, fmt: *const u8, ...) -> i32; }
+        __android_log_print(3, b"PerryWS\0".as_ptr(), b"js_ws_connect called\0".as_ptr());
+    }
     let promise = perry_runtime::js_promise_new();
     let promise_ptr = promise as usize;
 
@@ -128,9 +133,26 @@ pub unsafe extern "C" fn js_ws_connect(url_ptr: *const StringHeader) -> *mut per
         }
     };
 
+    #[cfg(target_os = "android")]
+    {
+        extern "C" { fn __android_log_print(prio: i32, tag: *const u8, fmt: *const u8, ...) -> i32; }
+        __android_log_print(3, b"PerryWS\0".as_ptr(), b"ws_connect: spawning async for URL\0".as_ptr());
+    }
+
+    let url_for_log = url.clone();
     spawn(async move {
-        match connect_async(&url).await {
+        #[cfg(target_os = "android")]
+        {
+            extern "C" { fn __android_log_print(prio: i32, tag: *const u8, fmt: *const u8, ...) -> i32; }
+            unsafe { __android_log_print(3, b"PerryWS\0".as_ptr(), b"ws_connect: connect_async starting\0".as_ptr()); }
+        }
+        match connect_async(&url_for_log).await {
             Ok((ws_stream, _response)) => {
+                #[cfg(target_os = "android")]
+                {
+                    extern "C" { fn __android_log_print(prio: i32, tag: *const u8, fmt: *const u8, ...) -> i32; }
+                    unsafe { __android_log_print(3, b"PerryWS\0".as_ptr(), b"ws_connect: SUCCESS connected\0".as_ptr()); }
+                }
                 // Create command channel
                 let (tx, mut rx) = mpsc::unbounded_channel::<WsCommand>();
 
@@ -241,6 +263,12 @@ pub unsafe extern "C" fn js_ws_connect(url_ptr: *const StringHeader) -> *mut per
                 queue_promise_resolution(promise_ptr, true, result_bits);
             }
             Err(e) => {
+                #[cfg(target_os = "android")]
+                {
+                    extern "C" { fn __android_log_print(prio: i32, tag: *const u8, fmt: *const u8, ...) -> i32; }
+                    let msg = format!("ws_connect: FAILED: {}\0", e);
+                    unsafe { __android_log_print(6, b"PerryWS\0".as_ptr(), b"%s\0".as_ptr(), msg.as_ptr()); }
+                }
                 let err_msg = format!("WebSocket connection error: {}", e);
                 let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
                 let err_bits = JSValue::pointer(err_str as *const u8).bits();
@@ -259,6 +287,11 @@ pub unsafe extern "C" fn js_ws_connect(url_ptr: *const StringHeader) -> *mut per
 #[cfg(not(target_os = "ios"))]
 #[no_mangle]
 pub unsafe extern "C" fn js_ws_connect_start(url_nanboxed: f64) -> f64 {
+    #[cfg(target_os = "android")]
+    {
+        extern "C" { fn __android_log_print(prio: i32, tag: *const u8, fmt: *const u8, ...) -> i32; }
+        __android_log_print(3, b"PerryWS\0".as_ptr(), b"js_ws_connect_start called\0".as_ptr());
+    }
     // Extract string pointer from NaN-boxed value
     let url_ptr = perry_runtime::js_get_string_pointer_unified(url_nanboxed) as *const StringHeader;
     let url = match string_from_header(url_ptr) {

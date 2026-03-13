@@ -16,6 +16,7 @@ pub mod system;
 pub mod toolbar;
 pub mod widgets;
 pub mod window;
+pub mod ws;
 
 // =============================================================================
 // JNI lifecycle

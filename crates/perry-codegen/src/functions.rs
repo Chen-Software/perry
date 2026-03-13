@@ -239,7 +239,11 @@ impl crate::codegen::Compiler {
                 let is_array = matches!(&param.ty, perry_types::Type::Array(_));
                 let is_closure = matches!(param.ty, perry_types::Type::Function(_));
                 let is_bigint = matches!(param.ty, perry_types::Type::BigInt);
-                let is_pointer = abi_type == types::I64;
+                let is_numeric_enum = if let perry_types::Type::Named(name) = &param.ty {
+                    self.enums.iter().any(|((en, _), _)| en == name)
+                        && !self.enums.iter().any(|((en, _), v)| en == name && matches!(v, EnumMemberValue::String(_)))
+                } else { false };
+                let is_pointer = !is_numeric_enum && abi_type == types::I64;
                 // Detect Map/Set parameter types for proper property dispatch
                 let is_map = matches!(&param.ty, perry_types::Type::Generic { base, .. } if base == "Map")
                     || matches!(&param.ty, perry_types::Type::Named(name) if name == "Map");
@@ -247,7 +251,7 @@ impl crate::codegen::Compiler {
                     || matches!(&param.ty, perry_types::Type::Named(name) if name == "Set");
                 // Named types (interfaces) and Object types may contain NaN-boxed values
                 // when accessed via PropertyGet, so treat them as potentially union
-                let is_union = matches!(param.ty,
+                let is_union = !is_numeric_enum && matches!(param.ty,
                     perry_types::Type::Union(_) |
                     perry_types::Type::Named(_) |
                     perry_types::Type::Object(_) |

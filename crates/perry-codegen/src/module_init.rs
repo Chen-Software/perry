@@ -571,14 +571,25 @@ impl crate::codegen::Compiler {
                     compile_stmt(&mut builder, &mut self.module, &self.func_ids, &self.closure_func_ids, &self.func_wrapper_ids, &self.extern_funcs, &self.async_func_ids, &self.closure_returning_funcs, &self.classes, &self.enums, &self.func_param_types, &self.func_union_params, &self.func_return_types, &self.func_hir_return_types, &self.func_rest_param_index, &self.imported_func_param_counts, &mut locals, &mut next_var, stmt, None, None, &boxed_vars, None)?;
                 }
 
-                // Note: Module-level Cranelift variables may be stale after function calls
-                // that modify module variables (the called function writes to the global slot
-                // but the init function's local variable isn't updated). This is handled by
-                // disabling function inlining in init statements (see inline.rs Phase 4),
-                // which ensures function calls like getIt() generate actual calls that load
-                // from the global slot at function entry. Direct module variable reads
-                // (e.g., console.log(counter) after inc()) still read the stale local value,
-                // but this is a rare pattern in practice.
+                // Reload all module-level variables from their global slots.
+                // Function calls inside the statement may have modified module variables
+                // via LocalSet write-back. The init function's Cranelift locals are stale
+                // unless we reload them from the global data slots.
+                // Collect vars to reload first to avoid borrow conflicts
+                let vars_to_reload: Vec<(Variable, cranelift::prelude::types::Type, cranelift_module::DataId)> = locals.iter()
+                    .filter(|(_, info)| !info.is_boxed && info.module_var_data_id.is_some())
+                    .map(|(_, info)| {
+                        let val = builder.use_var(info.var);
+                        let var_type = builder.func.dfg.value_type(val);
+                        (info.var, var_type, info.module_var_data_id.unwrap())
+                    })
+                    .collect();
+                for (var, var_type, data_id) in vars_to_reload {
+                    let global_val = self.module.declare_data_in_func(data_id, builder.func);
+                    let ptr = builder.ins().global_value(types::I64, global_val);
+                    let loaded = builder.ins().load(var_type, MemFlags::new(), ptr, 0);
+                    builder.def_var(var, loaded);
+                }
             }
 
             // NOTE: The old "write back all module-level variables" loop was removed.

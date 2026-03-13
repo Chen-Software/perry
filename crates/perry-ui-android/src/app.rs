@@ -6,6 +6,7 @@ use crate::widgets;
 
 extern "C" {
     fn __android_log_print(prio: i32, tag: *const u8, fmt: *const u8, ...) -> i32;
+    fn js_stdlib_process_pending();
 }
 
 thread_local! {
@@ -161,8 +162,9 @@ extern "C" {
 }
 
 /// Start the timer pump that drives setInterval/setTimeout/Promise callbacks.
-/// Equivalent to iOS's PerryPumpTarget (8ms NSTimer).
-/// On Android, we use PerryBridge.setTimer to create a Handler-based repeating timer.
+/// Uses PerryBridge.startPumpTimer to create a Handler-based repeating timer
+/// on the UI thread. Timer state is now global (Mutex-protected, not TLS),
+/// so timers registered on the perry-native thread are visible from the UI thread.
 fn start_timer_pump() {
     unsafe {
         __android_log_print(
@@ -171,9 +173,6 @@ fn start_timer_pump() {
         );
     }
 
-    // Register a no-op closure as the pump callback key.
-    // The actual pump work is done in the JNI callback handler.
-    // We use a special callback key (i64::MAX) that the JNI bridge recognizes.
     let mut env = jni_bridge::get_env();
     let _ = env.push_local_frame(16);
 
@@ -182,7 +181,7 @@ fn start_timer_pump() {
     });
     let bridge_cls: &jni::objects::JClass = (&bridge_class).into();
 
-    // Register the pump timer — fires every 8ms, calls nativePumpTick
+    // Register the pump timer — fires every 8ms, calls nativePumpTick on UI thread
     let _ = env.call_static_method(
         bridge_cls,
         "startPumpTimer",
@@ -193,13 +192,29 @@ fn start_timer_pump() {
     unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
 }
 
+/// Counter for throttled pump tick logging
+static PUMP_TICK_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Called from JNI on every pump tick (8ms). Drives the Perry runtime timers.
+/// Timer state is global (Mutex-protected), so this works from the UI thread
+/// even though timers were registered on the perry-native thread.
 #[no_mangle]
 pub extern "C" fn Java_com_perry_app_PerryBridge_nativePumpTick(
     _env: jni::JNIEnv,
     _class: jni::objects::JClass,
 ) {
+    let count = PUMP_TICK_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if count < 5 || count % 500 == 0 {
+        unsafe {
+            __android_log_print(
+                3, b"PerryPump\0".as_ptr(),
+                b"nativePumpTick count=%llu\0".as_ptr(),
+                count,
+            );
+        }
+    }
     unsafe {
+        js_stdlib_process_pending();
         js_callback_timer_tick();
         js_interval_timer_tick();
         js_promise_run_microtasks();
@@ -220,11 +235,12 @@ pub fn app_run(_app_handle: i64) {
     // Attach the root widget to the Activity
     attach_root_to_activity();
 
-    // Start the timer pump for setInterval/setTimeout/Promise callbacks
+    // Start the timer pump for setInterval/setTimeout/Promise callbacks.
+    // Timer state is now global (Mutex), so the UI thread pump can see
+    // timers registered by the perry-native thread.
     start_timer_pump();
 
-    // On Android we run on the UI thread, so we must NOT block.
-    // The Activity lifecycle IS the event loop.
+    // On Android we must NOT block — the Activity lifecycle IS the event loop.
 }
 
 /// Called when the Activity is destroyed. No-op since App() doesn't block on Android.

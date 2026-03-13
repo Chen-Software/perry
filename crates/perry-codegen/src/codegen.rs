@@ -598,7 +598,18 @@ impl Compiler {
                     // When passed through closures (js_closure_call2 uses f64 for all args),
                     // they must be declared as f64 in function signatures to avoid ABI mismatch.
                     "FastifyInstance" | "FastifyRequest" | "FastifyReply" => types::F64,
-                    _ => types::I64,  // Other named types are object pointers
+                    _ => {
+                        // Check if this is a numeric const enum — its values are inlined
+                        // as f64 constants, so the ABI type must be f64, not i64.
+                        // String enums are i64 (string pointers).
+                        let is_numeric_enum = self.enums.iter().any(|((enum_name, _), _)| enum_name == name)
+                            && !self.enums.iter().any(|((enum_name, _), v)| enum_name == name && matches!(v, EnumMemberValue::String(_)));
+                        if is_numeric_enum {
+                            types::F64
+                        } else {
+                            types::I64  // Other named types are object pointers
+                        }
+                    }
                 }
             }
             // Generic types are pointers
@@ -952,6 +963,20 @@ impl Compiler {
         // Store HIR functions for wrapper generation
         self.hir_functions = hir.functions.clone();
 
+        // Process classes first to build metadata
+        for class in &hir.classes {
+            self.process_class(class, &hir.classes)?;
+        }
+
+        // Resolve class inheritance (merge parent fields into child classes)
+        self.resolve_class_inheritance();
+
+        // Process enums to store their member values
+        // Must happen before func_param_types so type_to_abi can detect numeric enums
+        for en in &hir.enums {
+            self.process_enum(en)?;
+        }
+
         // Build function parameter and return types map for proper call-site type conversion
         for func in &hir.functions {
             let param_types: Vec<types::Type> = func.params.iter()
@@ -985,19 +1010,6 @@ impl Compiler {
                     self.func_hir_return_types.insert(func.id, perry_types::Type::BigInt);
                 }
             }
-        }
-
-        // Process classes first to build metadata
-        for class in &hir.classes {
-            self.process_class(class, &hir.classes)?;
-        }
-
-        // Resolve class inheritance (merge parent fields into child classes)
-        self.resolve_class_inheritance();
-
-        // Process enums to store their member values
-        for en in &hir.enums {
-            self.process_enum(en)?;
         }
 
         // Check for dotenv/config side-effect import (auto-calls dotenv.config())
@@ -1207,12 +1219,17 @@ impl Compiler {
                 };
                 let is_array = matches!(param.ty, perry_types::Type::Array(_));
                 let is_closure = matches!(param.ty, perry_types::Type::Function(_));
-                let is_pointer = matches!(param.ty, perry_types::Type::String | perry_types::Type::Array(_) |
+                // Check if this Named type is a numeric enum (values are f64, not pointers)
+                let is_numeric_enum = if let perry_types::Type::Named(name) = &param.ty {
+                    self.enums.iter().any(|((en, _), _)| en == name)
+                        && !self.enums.iter().any(|((en, _), v)| en == name && matches!(v, EnumMemberValue::String(_)))
+                } else { false };
+                let is_pointer = !is_numeric_enum && matches!(param.ty, perry_types::Type::String | perry_types::Type::Array(_) |
                     perry_types::Type::Object(_) | perry_types::Type::Named(_) | perry_types::Type::Generic { .. } |
                     perry_types::Type::Function(_));
                 let is_map = matches!(&param.ty, perry_types::Type::Generic { base, .. } if base == "Map");
                 let is_set = matches!(&param.ty, perry_types::Type::Generic { base, .. } if base == "Set");
-                let is_union = matches!(param.ty, perry_types::Type::Union(_) | perry_types::Type::Named(_) |
+                let is_union = !is_numeric_enum && matches!(param.ty, perry_types::Type::Union(_) | perry_types::Type::Named(_) |
                     perry_types::Type::Object(_) | perry_types::Type::Any | perry_types::Type::Unknown);
                 // Only insert if not already present (module-level takes precedence)
                 if !self.module_level_locals.contains_key(&param.id) {

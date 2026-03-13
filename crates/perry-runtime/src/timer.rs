@@ -1,8 +1,13 @@
 //! Timer support for setTimeout/setInterval
 //!
 //! Provides a simple timer queue that integrates with the Promise runtime.
+//!
+//! Uses global Mutex-protected state (not thread_local) so that timers
+//! registered on one thread can be pumped from another. This is critical
+//! on Android where TypeScript runs on the perry-native thread but the
+//! timer pump fires on the UI thread.
 
-use std::cell::RefCell;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use crate::promise::{Promise, js_promise_new, js_promise_resolve};
 
@@ -16,28 +21,27 @@ struct Timer {
     value: f64,
 }
 
-// Global timer queue
-thread_local! {
-    static TIMER_QUEUE: RefCell<Vec<Timer>> = RefCell::new(Vec::new());
-    static START_TIME: RefCell<Option<Instant>> = RefCell::new(None);
-}
+// SAFETY: Promise pointers are only accessed from the pump thread
+unsafe impl Send for Timer {}
+
+// Global timer queues (Mutex-protected for cross-thread access)
+static TIMER_QUEUE: Mutex<Vec<Timer>> = Mutex::new(Vec::new());
+static START_TIME: Mutex<Option<Instant>> = Mutex::new(None);
 
 /// Initialize the timer system (called once at startup)
 fn ensure_initialized() {
-    START_TIME.with(|st| {
-        if st.borrow().is_none() {
-            *st.borrow_mut() = Some(Instant::now());
-        }
-    });
+    let mut st = START_TIME.lock().unwrap();
+    if st.is_none() {
+        *st = Some(Instant::now());
+    }
 }
 
 /// Get current time in milliseconds since program start
 #[no_mangle]
 pub extern "C" fn js_timer_now() -> f64 {
     ensure_initialized();
-    START_TIME.with(|st| {
-        st.borrow().map(|start| start.elapsed().as_millis() as f64).unwrap_or(0.0)
-    })
+    let st = START_TIME.lock().unwrap();
+    st.map(|start| start.elapsed().as_millis() as f64).unwrap_or(0.0)
 }
 
 /// Schedule a timer that resolves a promise after delay_ms milliseconds
@@ -50,12 +54,10 @@ pub extern "C" fn js_set_timeout(delay_ms: f64) -> *mut Promise {
     let delay = Duration::from_millis(delay_ms.max(0.0) as u64);
     let deadline = Instant::now() + delay;
 
-    TIMER_QUEUE.with(|q| {
-        q.borrow_mut().push(Timer {
-            deadline,
-            promise,
-            value: 0.0, // setTimeout resolves with undefined
-        });
+    TIMER_QUEUE.lock().unwrap().push(Timer {
+        deadline,
+        promise,
+        value: 0.0, // setTimeout resolves with undefined
     });
 
     promise
@@ -70,12 +72,10 @@ pub extern "C" fn js_set_timeout_value(delay_ms: f64, value: f64) -> *mut Promis
     let delay = Duration::from_millis(delay_ms.max(0.0) as u64);
     let deadline = Instant::now() + delay;
 
-    TIMER_QUEUE.with(|q| {
-        q.borrow_mut().push(Timer {
-            deadline,
-            promise,
-            value,
-        });
+    TIMER_QUEUE.lock().unwrap().push(Timer {
+        deadline,
+        promise,
+        value,
     });
 
     promise
@@ -89,8 +89,8 @@ pub extern "C" fn js_timer_tick() -> i32 {
     let mut fired = 0;
 
     // Collect expired timers
-    let expired: Vec<Timer> = TIMER_QUEUE.with(|q| {
-        let mut queue = q.borrow_mut();
+    let expired: Vec<Timer> = {
+        let mut queue = TIMER_QUEUE.lock().unwrap();
         let mut expired = Vec::new();
         let mut i = 0;
         while i < queue.len() {
@@ -101,7 +101,7 @@ pub extern "C" fn js_timer_tick() -> i32 {
             }
         }
         expired
-    });
+    };
 
     // Resolve the expired timers' promises
     for timer in expired {
@@ -115,7 +115,7 @@ pub extern "C" fn js_timer_tick() -> i32 {
 /// Check if there are any pending timers
 #[no_mangle]
 pub extern "C" fn js_timer_has_pending() -> i32 {
-    TIMER_QUEUE.with(|q| if q.borrow().is_empty() { 0 } else { 1 })
+    if TIMER_QUEUE.lock().unwrap().is_empty() { 0 } else { 1 }
 }
 
 /// Get the time until the next timer fires (in ms), or -1 if no timers
@@ -123,19 +123,17 @@ pub extern "C" fn js_timer_has_pending() -> i32 {
 pub extern "C" fn js_timer_next_deadline() -> f64 {
     let now = Instant::now();
 
-    TIMER_QUEUE.with(|q| {
-        q.borrow()
-            .iter()
-            .map(|t| {
-                if t.deadline <= now {
-                    0.0
-                } else {
-                    (t.deadline - now).as_millis() as f64
-                }
-            })
-            .min_by(|a, b| a.partial_cmp(b).unwrap())
-            .unwrap_or(-1.0)
-    })
+    TIMER_QUEUE.lock().unwrap()
+        .iter()
+        .map(|t| {
+            if t.deadline <= now {
+                0.0
+            } else {
+                (t.deadline - now).as_millis() as f64
+            }
+        })
+        .min_by(|a, b| a.partial_cmp(b).unwrap())
+        .unwrap_or(-1.0)
 }
 
 /// Sleep for the specified number of milliseconds
@@ -145,42 +143,6 @@ pub extern "C" fn js_sleep_ms(ms: f64) {
     if ms > 0.0 {
         std::thread::sleep(Duration::from_millis(ms as u64));
     }
-}
-
-/// JS-style setTimeout that takes a callback function and delay
-/// The callback is a closure pointer that will be called with no arguments
-/// Returns a timer ID (currently always 0)
-#[no_mangle]
-pub extern "C" fn js_set_timeout_callback(callback: i64, delay_ms: f64) -> i64 {
-    use crate::closure::js_closure_call0;
-
-    ensure_initialized();
-
-    // Schedule the callback to be called after the delay
-    // For now, we create a timer and store the callback
-    // The callback will be invoked when the timer fires
-
-    let delay = Duration::from_millis(delay_ms.max(0.0) as u64);
-    let deadline = Instant::now() + delay;
-
-    let id = NEXT_CALLBACK_TIMER_ID.with(|id_cell| {
-        let mut id = id_cell.borrow_mut();
-        let current = *id;
-        *id += 1;
-        current
-    });
-
-    // Store callback in a special timer structure
-    CALLBACK_TIMERS.with(|q| {
-        q.borrow_mut().push(CallbackTimer {
-            id,
-            deadline,
-            callback,
-            cleared: false,
-        });
-    });
-
-    id
 }
 
 /// A scheduled timer with a callback
@@ -195,10 +157,37 @@ struct CallbackTimer {
     cleared: bool,
 }
 
-thread_local! {
-    static CALLBACK_TIMERS: RefCell<Vec<CallbackTimer>> = RefCell::new(Vec::new());
-    /// Next callback timer ID to assign
-    static NEXT_CALLBACK_TIMER_ID: RefCell<i64> = RefCell::new(1);
+// SAFETY: closure pointers point to global compiled code data
+unsafe impl Send for CallbackTimer {}
+
+static CALLBACK_TIMERS: Mutex<Vec<CallbackTimer>> = Mutex::new(Vec::new());
+static NEXT_CALLBACK_TIMER_ID: Mutex<i64> = Mutex::new(1);
+
+/// JS-style setTimeout that takes a callback function and delay
+/// The callback is a closure pointer that will be called with no arguments
+/// Returns a timer ID
+#[no_mangle]
+pub extern "C" fn js_set_timeout_callback(callback: i64, delay_ms: f64) -> i64 {
+    ensure_initialized();
+
+    let delay = Duration::from_millis(delay_ms.max(0.0) as u64);
+    let deadline = Instant::now() + delay;
+
+    let id = {
+        let mut next = NEXT_CALLBACK_TIMER_ID.lock().unwrap();
+        let current = *next;
+        *next += 1;
+        current
+    };
+
+    CALLBACK_TIMERS.lock().unwrap().push(CallbackTimer {
+        id,
+        deadline,
+        callback,
+        cleared: false,
+    });
+
+    id
 }
 
 /// Process any expired callback timers
@@ -208,11 +197,10 @@ pub extern "C" fn js_callback_timer_tick() -> i32 {
     use crate::closure::js_closure_call0;
 
     let now = Instant::now();
-    let mut fired = 0;
 
     // Collect expired, non-cleared timers
-    let expired: Vec<CallbackTimer> = CALLBACK_TIMERS.with(|q| {
-        let mut queue = q.borrow_mut();
+    let expired: Vec<CallbackTimer> = {
+        let mut queue = CALLBACK_TIMERS.lock().unwrap();
         let mut expired = Vec::new();
         let mut i = 0;
         while i < queue.len() {
@@ -225,13 +213,12 @@ pub extern "C" fn js_callback_timer_tick() -> i32 {
             }
         }
         expired
-    });
+    };
 
+    let mut fired = 0;
     // Call the callbacks
     for timer in expired {
         if !timer.cleared {
-            // Call the closure with no arguments
-            // The closure pointer is an i64 (pointer to ClosureHeader)
             unsafe {
                 js_closure_call0(timer.callback as *const crate::closure::ClosureHeader);
             }
@@ -245,27 +232,21 @@ pub extern "C" fn js_callback_timer_tick() -> i32 {
 /// Check if there are any pending callback timers
 #[no_mangle]
 pub extern "C" fn js_callback_timer_has_pending() -> i32 {
-    CALLBACK_TIMERS.with(|q| {
-        let q = q.borrow();
-        if q.iter().any(|t| !t.cleared) { 1 } else { 0 }
-    })
+    let q = CALLBACK_TIMERS.lock().unwrap();
+    if q.iter().any(|t| !t.cleared) { 1 } else { 0 }
 }
 
 /// Clear a callback timer by ID
-/// After this call, the callback will no longer be invoked
 #[no_mangle]
 pub extern "C" fn clearTimeout(timer_id: i64) {
-    CALLBACK_TIMERS.with(|timers| {
-        let mut timers = timers.borrow_mut();
-        for timer in timers.iter_mut() {
-            if timer.id == timer_id {
-                timer.cleared = true;
-                break;
-            }
+    let mut timers = CALLBACK_TIMERS.lock().unwrap();
+    for timer in timers.iter_mut() {
+        if timer.id == timer_id {
+            timer.cleared = true;
+            break;
         }
-        // Remove cleared timers to prevent memory growth
-        timers.retain(|t| !t.cleared);
-    });
+    }
+    timers.retain(|t| !t.cleared);
 }
 
 // ============================================================================
@@ -286,12 +267,11 @@ struct IntervalTimer {
     cleared: bool,
 }
 
-thread_local! {
-    /// Active interval timers
-    static INTERVAL_TIMERS: RefCell<Vec<IntervalTimer>> = RefCell::new(Vec::new());
-    /// Next interval ID to assign
-    static NEXT_INTERVAL_ID: RefCell<i64> = RefCell::new(1);
-}
+// SAFETY: closure pointers point to global compiled code data
+unsafe impl Send for IntervalTimer {}
+
+static INTERVAL_TIMERS: Mutex<Vec<IntervalTimer>> = Mutex::new(Vec::new());
+static NEXT_INTERVAL_ID: Mutex<i64> = Mutex::new(1);
 
 /// JS-style setInterval that takes a callback function and interval
 /// The callback is a closure pointer that will be called repeatedly
@@ -303,43 +283,35 @@ pub extern "C" fn setInterval(callback: i64, interval_ms: f64) -> i64 {
     let interval = interval_ms.max(0.0) as u64;
     let next_deadline = Instant::now() + Duration::from_millis(interval);
 
-    let id = NEXT_INTERVAL_ID.with(|id_cell| {
-        let mut id = id_cell.borrow_mut();
-        let current = *id;
-        *id += 1;
+    let id = {
+        let mut next = NEXT_INTERVAL_ID.lock().unwrap();
+        let current = *next;
+        *next += 1;
         current
-    });
+    };
 
-    INTERVAL_TIMERS.with(|timers| {
-        timers.borrow_mut().push(IntervalTimer {
-            id,
-            callback,
-            interval_ms: interval,
-            next_deadline,
-            cleared: false,
-        });
+    INTERVAL_TIMERS.lock().unwrap().push(IntervalTimer {
+        id,
+        callback,
+        interval_ms: interval,
+        next_deadline,
+        cleared: false,
     });
 
     id
 }
 
 /// Clear an interval timer by ID
-/// After this call, the callback will no longer be invoked
 #[no_mangle]
 pub extern "C" fn clearInterval(interval_id: i64) {
-    INTERVAL_TIMERS.with(|timers| {
-        let mut timers = timers.borrow_mut();
-        // Mark the interval as cleared instead of removing it
-        // This prevents issues if clearInterval is called from within a callback
-        for timer in timers.iter_mut() {
-            if timer.id == interval_id {
-                timer.cleared = true;
-                break;
-            }
+    let mut timers = INTERVAL_TIMERS.lock().unwrap();
+    for timer in timers.iter_mut() {
+        if timer.id == interval_id {
+            timer.cleared = true;
+            break;
         }
-        // Also remove any already-cleared intervals to prevent memory growth
-        timers.retain(|t| !t.cleared);
-    });
+    }
+    timers.retain(|t| !t.cleared);
 }
 
 /// Process any expired interval timers
@@ -349,28 +321,26 @@ pub extern "C" fn js_interval_timer_tick() -> i32 {
     use crate::closure::js_closure_call0;
 
     let now = Instant::now();
-    let mut fired = 0;
 
     // Collect callbacks to call and update deadlines
-    let callbacks_to_call: Vec<i64> = INTERVAL_TIMERS.with(|timers| {
-        let mut timers = timers.borrow_mut();
+    let callbacks_to_call: Vec<i64> = {
+        let mut timers = INTERVAL_TIMERS.lock().unwrap();
         let mut callbacks = Vec::new();
 
         for timer in timers.iter_mut() {
             if !timer.cleared && timer.next_deadline <= now {
                 callbacks.push(timer.callback);
-                // Schedule the next firing
                 timer.next_deadline = now + Duration::from_millis(timer.interval_ms);
             }
         }
 
-        // Clean up any cleared timers
         timers.retain(|t| !t.cleared);
 
         callbacks
-    });
+    };
 
-    // Call the callbacks outside of the borrow
+    let mut fired = 0;
+    // Call the callbacks outside of the lock
     for callback in callbacks_to_call {
         unsafe {
             js_closure_call0(callback as *const crate::closure::ClosureHeader);
@@ -384,10 +354,8 @@ pub extern "C" fn js_interval_timer_tick() -> i32 {
 /// Check if there are any pending interval timers
 #[no_mangle]
 pub extern "C" fn js_interval_timer_has_pending() -> i32 {
-    INTERVAL_TIMERS.with(|timers| {
-        let timers = timers.borrow();
-        if timers.iter().any(|t| !t.cleared) { 1 } else { 0 }
-    })
+    let timers = INTERVAL_TIMERS.lock().unwrap();
+    if timers.iter().any(|t| !t.cleared) { 1 } else { 0 }
 }
 
 /// Get the time until the next interval timer fires (in ms), or -1 if no timers
@@ -395,27 +363,25 @@ pub extern "C" fn js_interval_timer_has_pending() -> i32 {
 pub extern "C" fn js_interval_timer_next_deadline() -> f64 {
     let now = Instant::now();
 
-    INTERVAL_TIMERS.with(|timers| {
-        timers.borrow()
-            .iter()
-            .filter(|t| !t.cleared)
-            .map(|t| {
-                if t.next_deadline <= now {
-                    0.0
-                } else {
-                    (t.next_deadline - now).as_millis() as f64
-                }
-            })
-            .min_by(|a, b| a.partial_cmp(b).unwrap())
-            .unwrap_or(-1.0)
-    })
+    INTERVAL_TIMERS.lock().unwrap()
+        .iter()
+        .filter(|t| !t.cleared)
+        .map(|t| {
+            if t.next_deadline <= now {
+                0.0
+            } else {
+                (t.next_deadline - now).as_millis() as f64
+            }
+        })
+        .min_by(|a, b| a.partial_cmp(b).unwrap())
+        .unwrap_or(-1.0)
 }
 
 /// GC root scanner: mark all values reachable from timer queues
 pub fn scan_timer_roots(mark: &mut dyn FnMut(f64)) {
     // Scan promise-based timers
-    TIMER_QUEUE.with(|q| {
-        let q = q.borrow();
+    {
+        let q = TIMER_QUEUE.lock().unwrap();
         for timer in q.iter() {
             if !timer.promise.is_null() {
                 let boxed = f64::from_bits(0x7FFD_0000_0000_0000 | (timer.promise as u64 & 0x0000_FFFF_FFFF_FFFF));
@@ -423,27 +389,27 @@ pub fn scan_timer_roots(mark: &mut dyn FnMut(f64)) {
             }
             mark(timer.value);
         }
-    });
+    }
 
     // Scan callback timers (closure pointers stored as i64)
-    CALLBACK_TIMERS.with(|q| {
-        let q = q.borrow();
+    {
+        let q = CALLBACK_TIMERS.lock().unwrap();
         for timer in q.iter() {
             if !timer.cleared && timer.callback != 0 {
                 let boxed = f64::from_bits(0x7FFD_0000_0000_0000 | (timer.callback as u64 & 0x0000_FFFF_FFFF_FFFF));
                 mark(boxed);
             }
         }
-    });
+    }
 
     // Scan interval timers
-    INTERVAL_TIMERS.with(|q| {
-        let q = q.borrow();
+    {
+        let q = INTERVAL_TIMERS.lock().unwrap();
         for timer in q.iter() {
             if !timer.cleared && timer.callback != 0 {
                 let boxed = f64::from_bits(0x7FFD_0000_0000_0000 | (timer.callback as u64 & 0x0000_FFFF_FFFF_FFFF));
                 mark(boxed);
             }
         }
-    });
+    }
 }

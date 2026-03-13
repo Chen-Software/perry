@@ -1072,16 +1072,13 @@ fn lower_module_decl(
                                 }
                             }
 
-                            // Track exported values that need cross-module access
-                            // Include: object literals, call expressions (e.g., Router()), array literals,
-                            // new expressions (e.g., new Router()), and arrow functions (e.g., () => {})
-                            let needs_export_global = matches!(init.as_ref(),
-                                ast::Expr::Object(_) |
-                                ast::Expr::Call(_) |
-                                ast::Expr::Array(_) |
-                                ast::Expr::New(_) |
-                                ast::Expr::Arrow(_)
-                            );
+                            // Track exported values that need cross-module access.
+                            // Any exported const/let with an initializer needs a global data slot
+                            // so that importing modules can read its value at runtime.
+                            // Previously this only matched Object/Call/Array/New/Arrow expressions,
+                            // which caused exported string, number, bigint, and boolean constants
+                            // to be undefined when imported by other modules.
+                            let needs_export_global = true;
 
                             // Check if this is a Widget({...}) call from perry/widget
                             if let ast::Expr::Call(call_expr) = init.as_ref() {
@@ -4018,23 +4015,18 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             comparator: Box::new(args.into_iter().next().unwrap()),
                                         });
                                     }
-                                    // join/indexOf/includes are ambiguous with string methods,
-                                    // but if the receiver is a known array-returning expression,
-                                    // we can safely create the array version directly.
+                                    // .join() is exclusively an Array method (strings don't have it),
+                                    // so we can always safely lower to ArrayJoin regardless of the
+                                    // receiver expression type. Previously this only matched specific
+                                    // array-returning expressions, which caused .split().join() chains
+                                    // to fall through to generic dispatch and produce wrong results.
                                     "join" if args.len() <= 1 => {
                                         let array_expr = lower_expr(ctx, &member.obj)?;
-                                        if matches!(&array_expr,
-                                            Expr::ArrayMap { .. } | Expr::ArrayFilter { .. } | Expr::ArraySort { .. } |
-                                            Expr::ArraySlice { .. } | Expr::Array(_) |
-                                            Expr::ArrayFrom(_) | Expr::StringSplit(_, _) |
-                                            Expr::ObjectKeys(_) | Expr::ObjectValues(_)
-                                        ) {
-                                            let separator = if args.is_empty() { None } else { Some(Box::new(args.into_iter().next().unwrap())) };
-                                            return Ok(Expr::ArrayJoin {
-                                                array: Box::new(array_expr),
-                                                separator,
-                                            });
-                                        }
+                                        let separator = if args.is_empty() { None } else { Some(Box::new(args.into_iter().next().unwrap())) };
+                                        return Ok(Expr::ArrayJoin {
+                                            array: Box::new(array_expr),
+                                            separator,
+                                        });
                                     }
                                     "indexOf" if args.len() >= 1 => {
                                         let array_expr = lower_expr(ctx, &member.obj)?;
