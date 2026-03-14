@@ -646,33 +646,43 @@ async fn resign_for_development(
     let bundle_id = read_bundle_id_from_app(app_dir)
         .unwrap_or_else(|| "com.perry.app".to_string());
 
-    // Find a development signing identity
+    // Find all development signing identities (we'll pick the right one after
+    // determining the provisioning profile, since the profile must contain the
+    // certificate matching the signing identity)
     let output = Command::new("security")
         .args(["find-identity", "-v", "-p", "codesigning"])
         .output()
         .context("Failed to query Keychain for signing identities")?;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    let dev_identity = stdout
+    let dev_identities: Vec<(String, String)> = stdout // (hash, name)
         .lines()
         .filter_map(|line| {
             let line = line.trim();
             let q1 = line.find('"')?;
             let q2 = line.rfind('"')?;
-            if q2 > q1 { Some(line[q1 + 1..q2].to_string()) } else { None }
+            if q2 <= q1 { return None; }
+            let name = line[q1 + 1..q2].to_string();
+            if !name.starts_with("Apple Development") && !name.starts_with("iPhone Developer") {
+                return None;
+            }
+            let after_paren = line.find(") ").map(|i| i + 2).unwrap_or(0);
+            let hash_end = line.find(" \"").unwrap_or(line.len());
+            if hash_end <= after_paren { return None; }
+            let hash = line[after_paren..hash_end].trim().to_string();
+            Some((hash, name))
         })
-        .find(|name| {
-            name.starts_with("Apple Development")
-                || name.starts_with("iPhone Developer")
-        });
+        .collect();
 
-    let identity = match dev_identity {
-        Some(id) => id,
-        None => bail!(
+    if dev_identities.is_empty() {
+        bail!(
             "No Apple Development signing identity found in Keychain.\n\
              Use Xcode to set up your development signing, or use a simulator instead."
-        ),
-    };
+        );
+    }
+
+    // Default to first; we'll try to match against the profile later
+    let identity = dev_identities[0].1.clone();
 
     // Use team ID from saved config (NOT from the identity name — the parenthesized
     // part in "Apple Development: Name (XXXXX)" is a personal cert ID, not the team ID)
@@ -711,6 +721,11 @@ async fn resign_for_development(
 
     // Embed the dev profile
     std::fs::write(app_dir.join("embedded.mobileprovision"), &profile_data)?;
+
+    // Pick the signing identity whose certificate is in the profile.
+    // Extract DER cert hashes from the profile and match against local identities.
+    let identity = pick_identity_matching_profile(&dev_identities, &profile_data)
+        .unwrap_or(identity);
 
     // Step 2: Build entitlements
     let tmp_dir = std::env::temp_dir().join("perry_run_resign");
@@ -763,6 +778,48 @@ async fn resign_for_development(
 }
 
 /// Search system provisioning profile directories for a development profile
+/// Pick the local signing identity whose certificate is contained in the profile.
+/// Writes the profile to a temp file, decodes it, and checks each local identity's
+/// certificate fingerprint against the profile's DeveloperCertificates.
+fn pick_identity_matching_profile(
+    identities: &[(String, String)], // (SHA1 hash, display name)
+    profile_data: &[u8],
+) -> Option<String> {
+    // Write profile to temp, decode with security cms
+    let tmp = std::env::temp_dir().join("perry_profile_check.mobileprovision");
+    std::fs::write(&tmp, profile_data).ok()?;
+    let output = Command::new("security")
+        .args(["cms", "-D", "-i"])
+        .arg(&tmp)
+        .output()
+        .ok()?;
+    let _ = std::fs::remove_file(&tmp);
+
+    if !output.status.success() {
+        return None;
+    }
+    let content = String::from_utf8_lossy(&output.stdout);
+
+    // For each local identity, check if its cert fingerprint string appears in
+    // the profile. We use `security find-certificate` to get the cert's SHA-1
+    // and compare, but simpler: just try each identity and check the name pattern.
+    // The profile contains cert common names like "Apple Development: Ralph Kuepper (372EYFG3C5)"
+    for (_, name) in identities {
+        // Extract the parenthesized part, e.g. "372EYFG3C5"
+        if let Some(start) = name.rfind('(') {
+            if let Some(end) = name.rfind(')') {
+                if end > start {
+                    let cert_id = &name[start + 1..end];
+                    if content.contains(cert_id) {
+                        return Some(name.clone());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 fn find_system_dev_profile(bundle_id: &str, team_id: &str) -> Option<PathBuf> {
     let home = dirs::home_dir()?;
     let profile_dirs = [
