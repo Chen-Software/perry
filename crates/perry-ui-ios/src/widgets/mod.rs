@@ -129,18 +129,13 @@ type CGFloat = f64;
 
 extern "C" {
     fn CGColorRelease(color: *mut c_void);
+    fn CGColorCreateSRGB(red: CGFloat, green: CGFloat, blue: CGFloat, alpha: CGFloat) -> *mut c_void;
 }
 
-/// Create a CGColor from RGBA via UIColor (iOS doesn't have CGColorCreateGenericRGB).
+/// Create a retained CGColor from RGBA using CGColorCreateSRGB (iOS 14+).
+/// Returns a +1 retained CGColorRef that must be released with CGColorRelease.
 pub unsafe fn create_cg_color(r: f64, g: f64, b: f64, a: f64) -> *mut c_void {
-    let ui_color: *mut AnyObject = objc2::msg_send![
-        AnyClass::get(c"UIColor").unwrap(),
-        colorWithRed: r,
-        green: g,
-        blue: b,
-        alpha: a
-    ];
-    objc2::msg_send![ui_color, CGColor]
+    CGColorCreateSRGB(r, g, b, a)
 }
 
 /// Set a solid background color on any widget.
@@ -159,53 +154,123 @@ pub fn set_background_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
     }
 }
 
-/// Set a linear gradient background on any widget via CAGradientLayer.
+/// Register a dynamic UIView subclass whose `layoutSubviews` keeps all sublayers
+/// sized to the view's layer bounds. Created once via ObjC runtime.
+fn gradient_bg_class() -> &'static AnyClass {
+    use std::sync::Once;
+    static REGISTER: Once = Once::new();
+    REGISTER.call_once(|| {
+        unsafe {
+            extern "C" {
+                fn objc_allocateClassPair(
+                    superclass: *const AnyClass, name: *const std::ffi::c_char, extra: usize
+                ) -> *mut AnyClass;
+                fn objc_registerClassPair(cls: *mut AnyClass);
+                fn class_addMethod(
+                    cls: *mut AnyClass, sel: objc2::runtime::Sel,
+                    imp: *const std::ffi::c_void, types: *const std::ffi::c_char,
+                ) -> bool;
+            }
+            let superclass = AnyClass::get(c"UIView").unwrap();
+            let cls = objc_allocateClassPair(superclass, c"PerryGradientBGView".as_ptr(), 0);
+            assert!(!cls.is_null(), "Failed to allocate PerryGradientBGView class");
+
+            // Override layoutSubviews to resize all sublayers to layer.bounds
+            extern "C" fn layout_subviews(this: &AnyObject, _cmd: objc2::runtime::Sel) {
+                unsafe {
+                    // Call [super layoutSubviews]
+                    let sup = AnyClass::get(c"UIView").unwrap();
+                    let _: () = objc2::msg_send![super(this, sup), layoutSubviews];
+                    // Resize all sublayers to match layer bounds
+                    let layer: *mut AnyObject = objc2::msg_send![this, layer];
+                    if layer.is_null() { return; }
+                    let bounds: objc2_core_foundation::CGRect = objc2::msg_send![layer, bounds];
+                    let sublayers: *mut AnyObject = objc2::msg_send![layer, sublayers];
+                    if !sublayers.is_null() {
+                        let count: usize = objc2::msg_send![sublayers, count];
+                        for i in 0..count {
+                            let sub: *mut AnyObject = objc2::msg_send![sublayers, objectAtIndex: i];
+                            let _: () = objc2::msg_send![sub, setFrame: bounds];
+                        }
+                    }
+                }
+            }
+            class_addMethod(
+                cls,
+                objc2::sel!(layoutSubviews),
+                layout_subviews as *const std::ffi::c_void,
+                c"v@:".as_ptr(),
+            );
+            objc_registerClassPair(cls);
+        }
+    });
+    AnyClass::get(c"PerryGradientBGView").unwrap()
+}
+
+/// Set a linear gradient background on any widget.
+/// Uses a background UIView subclass (with layoutSubviews override) pinned via Auto Layout.
+/// This ensures the CAGradientLayer always matches the view bounds, even when the
+/// parent starts at zero size (common during init before Auto Layout resolves).
 pub fn set_background_gradient(
     handle: i64, r1: f64, g1: f64, b1: f64, a1: f64,
     r2: f64, g2: f64, b2: f64, a2: f64, direction: f64,
 ) {
     if let Some(view) = get_widget(handle) {
         unsafe {
-            let layer: *mut AnyObject = objc2::msg_send![&*view, layer];
-            if layer.is_null() { return; }
-
-            // Remove any existing gradient sublayer (tagged by name "PerryGradient")
-            let sublayers: *mut AnyObject = objc2::msg_send![layer, sublayers];
-            if !sublayers.is_null() {
-                let count: usize = objc2::msg_send![sublayers, count];
-                let mut i = count;
-                while i > 0 {
-                    i -= 1;
-                    let sub: *mut AnyObject = objc2::msg_send![sublayers, objectAtIndex: i];
-                    let name: *mut AnyObject = objc2::msg_send![sub, name];
-                    if !name.is_null() {
-                        let is_ours: bool = objc2::msg_send![name, isEqualToString:
-                            &*objc2_foundation::NSString::from_str("PerryGradient")];
-                        if is_ours {
-                            let _: () = objc2::msg_send![sub, removeFromSuperlayer];
-                        }
-                    }
+            // Remove any existing gradient background view (tagged 9999)
+            let subviews: Retained<AnyObject> = objc2::msg_send![&*view, subviews];
+            let count: usize = objc2::msg_send![&*subviews, count];
+            let mut i = count;
+            while i > 0 {
+                i -= 1;
+                let sub: *mut AnyObject = objc2::msg_send![&*subviews, objectAtIndex: i];
+                let tag: isize = objc2::msg_send![sub, tag];
+                if tag == 9999 {
+                    let _: () = objc2::msg_send![sub, removeFromSuperview];
                 }
             }
 
-            // Create CAGradientLayer
+            // Create PerryGradientBGView (overrides layoutSubviews to resize sublayers)
+            let bg_cls = gradient_bg_class();
+            let bg_view: *mut AnyObject = objc2::msg_send![bg_cls, new];
+            let _: () = objc2::msg_send![bg_view, setTag: 9999isize];
+            let _: () = objc2::msg_send![bg_view, setTranslatesAutoresizingMaskIntoConstraints: false];
+            let _: () = objc2::msg_send![bg_view, setUserInteractionEnabled: false];
+
+            // Insert as subview at index 0 (behind arranged subviews / content)
+            let _: () = objc2::msg_send![&*view, insertSubview: bg_view, atIndex: 0isize];
+
+            // Pin bg_view to parent edges via Auto Layout
+            let bg_leading: *mut AnyObject = objc2::msg_send![bg_view, leadingAnchor];
+            let bg_trailing: *mut AnyObject = objc2::msg_send![bg_view, trailingAnchor];
+            let bg_top: *mut AnyObject = objc2::msg_send![bg_view, topAnchor];
+            let bg_bottom: *mut AnyObject = objc2::msg_send![bg_view, bottomAnchor];
+
+            let p_leading: *mut AnyObject = objc2::msg_send![&*view, leadingAnchor];
+            let p_trailing: *mut AnyObject = objc2::msg_send![&*view, trailingAnchor];
+            let p_top: *mut AnyObject = objc2::msg_send![&*view, topAnchor];
+            let p_bottom: *mut AnyObject = objc2::msg_send![&*view, bottomAnchor];
+
+            let c1: *mut AnyObject = objc2::msg_send![bg_leading, constraintEqualToAnchor: p_leading];
+            let c2: *mut AnyObject = objc2::msg_send![bg_trailing, constraintEqualToAnchor: p_trailing];
+            let c3: *mut AnyObject = objc2::msg_send![bg_top, constraintEqualToAnchor: p_top];
+            let c4: *mut AnyObject = objc2::msg_send![bg_bottom, constraintEqualToAnchor: p_bottom];
+
+            let _: () = objc2::msg_send![c1, setActive: true];
+            let _: () = objc2::msg_send![c2, setActive: true];
+            let _: () = objc2::msg_send![c3, setActive: true];
+            let _: () = objc2::msg_send![c4, setActive: true];
+
+            // Create CAGradientLayer on the background view
+            let bg_layer: *mut AnyObject = objc2::msg_send![bg_view, layer];
             let gradient_cls = AnyClass::get(c"CAGradientLayer")
                 .expect("CAGradientLayer class not found");
             let gradient: *mut AnyObject = objc2::msg_send![gradient_cls, layer];
 
-            // Set name for later removal
-            let name = objc2_foundation::NSString::from_str("PerryGradient");
-            let _: () = objc2::msg_send![gradient, setName: &*name];
-
-            // Set frame to match layer bounds
-            let bounds: objc2_core_foundation::CGRect = objc2::msg_send![layer, bounds];
-            let _: () = objc2::msg_send![gradient, setFrame: bounds];
-
-            // Create colors via UIColor → CGColor
+            // Create colors
             let color1 = create_cg_color(r1, g1, b1, a1);
             let color2 = create_cg_color(r2, g2, b2, a2);
 
-            // Wrap in NSArray
             let colors: Retained<AnyObject> = {
                 let arr_cls = AnyClass::get(c"NSMutableArray").unwrap();
                 let arr: *mut AnyObject = objc2::msg_send![arr_cls, arrayWithCapacity: 2usize];
@@ -213,30 +278,25 @@ pub fn set_background_gradient(
                 let _: () = objc2::msg_send![arr, addObject: color2 as *mut AnyObject];
                 Retained::retain(arr).unwrap()
             };
-
             let _: () = objc2::msg_send![gradient, setColors: &*colors];
+            CGColorRelease(color1);
+            CGColorRelease(color2);
 
             // Set direction
             if direction < 0.5 {
-                // Vertical: top to bottom
                 let start = objc2_core_foundation::CGPoint::new(0.5, 0.0);
                 let end = objc2_core_foundation::CGPoint::new(0.5, 1.0);
                 let _: () = objc2::msg_send![gradient, setStartPoint: start];
                 let _: () = objc2::msg_send![gradient, setEndPoint: end];
             } else {
-                // Horizontal: left to right
                 let start = objc2_core_foundation::CGPoint::new(0.0, 0.5);
                 let end = objc2_core_foundation::CGPoint::new(1.0, 0.5);
                 let _: () = objc2::msg_send![gradient, setStartPoint: start];
                 let _: () = objc2::msg_send![gradient, setEndPoint: end];
             }
 
-            // Insert at index 0 (behind other sublayers)
-            let _: () = objc2::msg_send![layer, insertSublayer: gradient, atIndex: 0u32];
-
-            // Auto-resize gradient with the layer
-            let mask: u32 = (1 << 1) | (1 << 4); // kCALayerWidthSizable | kCALayerHeightSizable
-            let _: () = objc2::msg_send![gradient, setAutoresizingMask: mask];
+            // Add gradient to the background view's layer
+            let _: () = objc2::msg_send![bg_layer, addSublayer: gradient];
         }
     }
 }

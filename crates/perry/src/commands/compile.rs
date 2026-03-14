@@ -3383,7 +3383,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
            .arg("-framework").arg("QuartzCore")
            .arg("-liconv")
            .arg("-lresolv")
-           .arg("-ldispatch");
+           .arg("-lSystem");
     } else if is_android {
         // Android system libraries
         cmd.arg("-Wl,--allow-multiple-definition")

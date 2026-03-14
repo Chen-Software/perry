@@ -53,15 +53,21 @@ pub fn create_file(path_ptr: *const u8) -> i64 {
         let ns_path = NSString::from_str(&resolved);
         let image_cls = objc2::runtime::AnyClass::get(c"UIImage").unwrap();
         let image: *mut AnyObject = msg_send![image_cls, imageWithContentsOfFile: &*ns_path];
+        if image.is_null() {
+            eprintln!("[perry-ui-ios] ImageFile: failed to load image at path: {}", resolved);
+        }
         let iv_cls = objc2::runtime::AnyClass::get(c"UIImageView").unwrap();
         let obj: *mut AnyObject = msg_send![iv_cls, alloc];
         let obj: *mut AnyObject = msg_send![obj, initWithImage: image];
         if obj.is_null() {
             // Image not found — create an empty UIImageView instead of crashing
+            eprintln!("[perry-ui-ios] ImageFile: initWithImage returned nil for path: {}", resolved);
             let obj: *mut AnyObject = msg_send![iv_cls, new];
             let image_view: Retained<UIView> = Retained::retain(obj as *mut UIView).unwrap();
             return super::register_widget(image_view);
         }
+        // Set content mode to ScaleAspectFit so the image scales properly with constraints
+        let _: () = msg_send![obj, setContentMode: 1i64]; // UIViewContentModeScaleAspectFit
         let image_view: Retained<UIView> = Retained::retain(obj as *mut UIView).unwrap();
         super::register_widget(image_view)
     }

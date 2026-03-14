@@ -938,6 +938,8 @@ pub extern "C" fn perry_ui_widget_set_border_color(handle: i64, r: f64, g: f64, 
             if !layer.is_null() {
                 let cg_color = widgets::create_cg_color(r, g, b, a);
                 let _: () = objc2::msg_send![layer, setBorderColor: cg_color];
+                extern "C" { fn CGColorRelease(color: *mut std::ffi::c_void); }
+                CGColorRelease(cg_color);
             }
         }
     }
