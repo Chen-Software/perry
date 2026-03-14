@@ -27,6 +27,22 @@ perry app.ts -o app --target ios
 
 This produces an ARM64 binary for physical iOS devices. You'll need to code sign and package it in an `.app` bundle for deployment.
 
+## Running with `perry run`
+
+The easiest way to build and run on iOS is `perry run`:
+
+```bash
+perry run --ios              # Auto-detect device/simulator
+perry run --ios --console    # Stream live stdout/stderr
+perry run --ios --remote     # Use Perry Hub build server
+```
+
+Perry auto-discovers available simulators (via `simctl`) and physical devices (via `devicectl`). When multiple targets are found, an interactive prompt lets you choose.
+
+For physical devices, Perry handles code signing automatically — it reads your signing identity and team ID from `~/.perry/config.toml` (set up via `perry setup ios`), embeds the provisioning profile, and signs the `.app` before installing.
+
+If you don't have the iOS cross-compilation toolchain installed locally, `perry run --ios` automatically falls back to Perry Hub's remote build server.
+
 ## UI Toolkit
 
 Perry maps UI widgets to UIKit controls:
@@ -98,6 +114,14 @@ The image is centered at 128x128pt with `scaleAspectFit`. You can provide a cust
 ```
 
 See [Project Configuration](../getting-started/project-config.md#splash) for the full config reference.
+
+## Resource Bundling
+
+Perry automatically bundles `logo/` and `assets/` directories from your project root into the `.app` bundle. These resources are available at runtime via standard file APIs relative to the app bundle path.
+
+## Keyboard Avoidance
+
+Perry apps automatically handle keyboard avoidance on iOS. When the keyboard appears, the root view adjusts its bottom constraint with an animated layout transition, and focused TextFields are auto-scrolled into view above the keyboard.
 
 ## Differences from macOS
 

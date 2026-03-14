@@ -18,7 +18,7 @@ Hello from Perry!
 - **Native performance** — Compiles to machine code via Cranelift. Integer-heavy code like Fibonacci runs 2x faster than Node.js.
 - **Small binaries** — A hello world is ~300KB. Perry detects what runtime features you use and only links what's needed.
 - **Native UI** — Build desktop and mobile apps with declarative TypeScript that compiles to real AppKit, UIKit, GTK4, Win32, or DOM widgets.
-- **6 platforms** — macOS, iOS, Android, Windows, Linux, and Web from the same source code.
+- **7 targets** — macOS, iOS, Android, Windows, Linux, Web, and WebAssembly from the same source code.
 - **Familiar ecosystem** — Use npm packages like `fastify`, `mysql2`, `redis`, `bcrypt`, `lodash`, and more — compiled natively.
 - **Zero config** — Point Perry at a `.ts` file and get a binary. No `tsconfig.json` required.
 

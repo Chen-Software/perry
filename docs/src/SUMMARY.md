@@ -31,6 +31,7 @@
 - [Table](ui/table.md)
 - [Animation](ui/animation.md)
 - [Multi-Window](ui/multi-window.md)
+- [Theming](ui/theming.md)
 
 # Platforms
 
@@ -41,6 +42,7 @@
 - [Windows](platforms/windows.md)
 - [Linux (GTK4)](platforms/linux.md)
 - [Web](platforms/web.md)
+- [WebAssembly](platforms/wasm.md)
 
 # Standard Library
 

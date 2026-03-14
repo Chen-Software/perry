@@ -1,6 +1,6 @@
 # CLI Commands
 
-Perry provides 8 commands for compiling, checking, publishing, and managing your projects.
+Perry provides 9 commands for compiling, checking, running, publishing, and managing your projects.
 
 ## compile
 
@@ -22,6 +22,7 @@ perry main.ts -o app
 | `--keep-intermediates` | Keep `.o` and `.asm` files |
 | `--enable-js-runtime` | Enable V8 JavaScript runtime fallback |
 | `--type-check` | Enable type checking via tsgo |
+| `--minify` | Minify and obfuscate output (auto-enabled for `--target web`) |
 | `--app-bundle-id <ID>` | Bundle ID (required for widget targets) |
 | `--bundle-extensions <DIR>` | Bundle TypeScript extensions from directory |
 
@@ -40,6 +41,54 @@ perry compile app.ts --print-hir
 
 # Build an iOS widget
 perry compile widget.ts --target ios-widget --app-bundle-id com.myapp.widget
+```
+
+## run
+
+Compile and launch your app in one step.
+
+```bash
+perry run                          # Auto-detect entry file
+perry run --ios                    # Run on iOS device/simulator
+perry run --android                # Run on Android device
+perry run -- --port 3000           # Forward args to your program
+```
+
+| Flag | Description |
+|------|-------------|
+| `--ios` | Target iOS (device or simulator) |
+| `--macos` | Target macOS (default on macOS host) |
+| `--web` | Target web (opens in browser) |
+| `--android` | Target Android device |
+| `--simulator <UDID>` | Specify iOS simulator by UDID |
+| `--device <UDID>` | Specify iOS physical device by UDID |
+| `--local` | Force local compilation (no remote fallback) |
+| `--remote` | Force remote build via Perry Hub |
+| `--enable-js-runtime` | Enable V8 JavaScript runtime |
+| `--type-check` | Enable type checking via tsgo |
+| `--` | Separator for program arguments |
+
+**Entry file detection** (checked in order):
+1. `perry.toml` → `[project] entry` field
+2. `src/main.ts`
+3. `main.ts`
+
+**Device detection**: When targeting iOS, Perry auto-discovers available simulators (via `simctl`) and physical devices (via `devicectl`). For Android, it uses `adb`. When multiple targets are found, an interactive prompt lets you choose.
+
+**Remote build fallback**: If cross-compilation toolchains aren't installed locally (e.g., iOS targets on a machine without Xcode), `perry run --ios` automatically falls back to Perry Hub's build server — it packages your project, uploads it, streams build progress via WebSocket, downloads the `.ipa`, and installs it on your device. Use `--local` or `--remote` to force either path.
+
+```bash
+# Run a CLI program
+perry run
+
+# Run on a specific simulator
+perry run --ios --simulator 12345-ABCDE
+
+# Force remote build
+perry run --ios --remote
+
+# Run web target
+perry run --web
 ```
 
 ## check

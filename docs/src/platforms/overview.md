@@ -12,6 +12,7 @@ Perry compiles TypeScript to native executables for 6 platforms from the same so
 | Windows | `--target windows` | Win32 | Full support (112/112) |
 | Linux | `--target linux` | GTK4 | Full support (112/112) |
 | Web | `--target web` | DOM/CSS | Full support (127/127) |
+| WebAssembly | `--target wasm` | — | Core language (no UI) |
 
 ## Cross-Compilation
 
@@ -25,6 +26,7 @@ perry app.ts -o app --target web
 perry app.ts -o app --target windows
 perry app.ts -o app --target linux
 perry app.ts -o app --target android
+perry app.ts -o app --target wasm
 ```
 
 ## Platform Detection
@@ -54,14 +56,14 @@ if (__platform__ === 0) {
 
 ## Platform Feature Matrix
 
-| Feature | macOS | iOS | Android | Windows | Linux | Web |
-|---------|-------|-----|---------|---------|-------|-----|
-| CLI programs | Yes | — | — | Yes | Yes | — |
-| Native UI | Yes | Yes | Yes | Yes | Yes | Yes |
-| File system | Yes | Sandboxed | Sandboxed | Yes | Yes | — |
-| Networking | Yes | Yes | Yes | Yes | Yes | Fetch |
-| System APIs | Yes | Partial | Partial | Yes | Yes | Partial |
-| Widgets (WidgetKit) | — | Yes | — | — | — | — |
+| Feature | macOS | iOS | Android | Windows | Linux | Web | WASM |
+|---------|-------|-----|---------|---------|-------|-----|------|
+| CLI programs | Yes | — | — | Yes | Yes | — | Yes |
+| Native UI | Yes | Yes | Yes | Yes | Yes | Yes | — |
+| File system | Yes | Sandboxed | Sandboxed | Yes | Yes | — | — |
+| Networking | Yes | Yes | Yes | Yes | Yes | Fetch | — |
+| System APIs | Yes | Partial | Partial | Yes | Yes | Partial | — |
+| Widgets (WidgetKit) | — | Yes | — | — | — | — | — |
 
 ## Next Steps
 
@@ -71,3 +73,4 @@ if (__platform__ === 0) {
 - [Windows](windows.md)
 - [Linux (GTK4)](linux.md)
 - [Web](web.md)
+- [WebAssembly](wasm.md)

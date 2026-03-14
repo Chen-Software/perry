@@ -25,6 +25,7 @@ Use `--target` to cross-compile:
 | `android` | Android | ARM64/ARMv7 |
 | `ios-widget` | iOS Widget | WidgetKit extension (requires `--app-bundle-id`) |
 | `ios-widget-simulator` | iOS Widget (Sim) | Widget for simulator |
+| `wasm` | WebAssembly | Self-contained HTML with WASM or raw `.wasm` binary |
 | `web` | Web | Outputs HTML file with JS |
 | `windows` | Windows | Win32 executable |
 | `linux` | Linux | GTK4 executable |
@@ -45,6 +46,14 @@ Use `--output-type` to change what's produced:
 | `--print-hir` | Print HIR (intermediate representation) to stdout |
 | `--no-link` | Produce `.o` object file only, skip linking |
 | `--keep-intermediates` | Keep `.o` and `.asm` intermediate files |
+
+## Output Optimization
+
+| Flag | Description |
+|------|-------------|
+| `--minify` | Minify and obfuscate output (auto-enabled for `--target web`) |
+
+Minification strips comments, collapses whitespace, and mangles local variable/parameter/non-exported function names for smaller output.
 
 ## Runtime Flags
 
@@ -140,6 +149,12 @@ perry compile app.ts -o app -vvv
 
 # Type-checked compilation
 perry app.ts -o app --type-check
+
+# WebAssembly
+perry app.ts -o app --target wasm
+
+# Minified web output
+perry app.ts -o app --target web --minify
 ```
 
 ## Next Steps

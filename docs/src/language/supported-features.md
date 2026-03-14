@@ -452,6 +452,16 @@ console.time("label");
 console.timeEnd("label");
 ```
 
+## Garbage Collection
+
+Perry includes a mark-sweep garbage collector. It runs automatically when memory pressure is detected (~8MB arena blocks), but you can also trigger it manually:
+
+```typescript
+gc(); // Explicit garbage collection
+```
+
+The GC uses conservative stack scanning to find roots and supports arena-allocated objects (arrays, objects) and malloc-allocated objects (strings, closures, promises, BigInts, errors).
+
 ## JSX/TSX
 
 Perry supports JSX syntax for UI component composition:

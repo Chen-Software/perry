@@ -53,6 +53,16 @@ Perry widgets map to HTML elements:
 - **Keyboard shortcuts**: DOM keyboard event listeners
 - **Multi-window**: Floating `<div>` panels
 
+## Minification and Obfuscation
+
+Web output is automatically minified. Perry's Rust-native JS minifier:
+
+- Strips comments and collapses whitespace
+- Mangles local variable, parameter, and non-exported function names (e.g., `myVariable` → `a`)
+- Compresses the web runtime from ~3,337 lines to ~177
+
+This is enabled by default for `--target web`. You can also use `--minify` explicitly with other targets.
+
 ## Limitations
 
 - No file system access (browser sandbox)
