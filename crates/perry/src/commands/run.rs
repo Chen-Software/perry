@@ -681,9 +681,6 @@ async fn resign_for_development(
         );
     }
 
-    // Default to first; we'll try to match against the profile later
-    let identity = dev_identities[0].1.clone();
-
     // Use team ID from saved config (NOT from the identity name — the parenthesized
     // part in "Apple Development: Name (XXXXX)" is a personal cert ID, not the team ID)
     let team_id = config.apple.as_ref()
@@ -691,6 +688,19 @@ async fn resign_for_development(
         .ok_or_else(|| anyhow!(
             "No Apple team ID in ~/.perry/config.toml — run `perry setup ios` first"
         ))?;
+
+    // Pick the identity that belongs to our team by checking TeamIdentifier
+    // via a test codesign. The cert ID in the name (e.g. RY57F22743) is NOT
+    // the team ID — we must verify which hash produces the right TeamIdentifier.
+    let identity_hash = find_identity_for_team(&dev_identities, &team_id)
+        .ok_or_else(|| anyhow!(
+            "No Apple Development certificate for team {team_id} found in Keychain.\n\
+             Use Xcode to set up development signing for this team."
+        ))?;
+    let identity = dev_identities.iter()
+        .find(|(h, _)| h == &identity_hash)
+        .map(|(_, n)| n.clone())
+        .unwrap_or_else(|| identity_hash.clone());
 
     if let OutputFormat::Text = format {
         println!(
@@ -722,10 +732,7 @@ async fn resign_for_development(
     // Embed the dev profile
     std::fs::write(app_dir.join("embedded.mobileprovision"), &profile_data)?;
 
-    // Pick the signing identity whose certificate is in the profile.
-    // Extract DER cert hashes from the profile and match against local identities.
-    let identity = pick_identity_matching_profile(&dev_identities, &profile_data)
-        .unwrap_or(identity);
+    // identity was already selected by team ID matching above
 
     // Step 2: Build entitlements
     let tmp_dir = std::env::temp_dir().join("perry_run_resign");
@@ -761,7 +768,7 @@ async fn resign_for_development(
     let _ = std::fs::remove_dir_all(app_dir.join("_CodeSignature"));
 
     let status = Command::new("codesign")
-        .args(["--force", "--sign", &identity, "--entitlements"])
+        .args(["--force", "--sign", &identity_hash, "--entitlements"])
         .arg(&entitlements)
         .arg("--generate-entitlement-der")
         .arg(app_dir)
@@ -778,45 +785,34 @@ async fn resign_for_development(
 }
 
 /// Search system provisioning profile directories for a development profile
-/// Pick the local signing identity whose certificate is contained in the profile.
-/// Writes the profile to a temp file, decodes it, and checks each local identity's
-/// certificate fingerprint against the profile's DeveloperCertificates.
-fn pick_identity_matching_profile(
-    identities: &[(String, String)], // (SHA1 hash, display name)
-    profile_data: &[u8],
-) -> Option<String> {
-    // Write profile to temp, decode with security cms
-    let tmp = std::env::temp_dir().join("perry_profile_check.mobileprovision");
-    std::fs::write(&tmp, profile_data).ok()?;
-    let output = Command::new("security")
-        .args(["cms", "-D", "-i"])
-        .arg(&tmp)
-        .output()
-        .ok()?;
-    let _ = std::fs::remove_file(&tmp);
+/// Find the signing identity hash that belongs to the given team ID.
+/// Signs a temp file with each identity and checks the resulting TeamIdentifier.
+fn find_identity_for_team(identities: &[(String, String)], team_id: &str) -> Option<String> {
+    let tmp = std::env::temp_dir().join("perry_team_check");
+    let _ = std::fs::write(&tmp, b"x");
 
-    if !output.status.success() {
-        return None;
-    }
-    let content = String::from_utf8_lossy(&output.stdout);
-
-    // For each local identity, check if its cert fingerprint string appears in
-    // the profile. We use `security find-certificate` to get the cert's SHA-1
-    // and compare, but simpler: just try each identity and check the name pattern.
-    // The profile contains cert common names like "Apple Development: Ralph Kuepper (372EYFG3C5)"
-    for (_, name) in identities {
-        // Extract the parenthesized part, e.g. "372EYFG3C5"
-        if let Some(start) = name.rfind('(') {
-            if let Some(end) = name.rfind(')') {
-                if end > start {
-                    let cert_id = &name[start + 1..end];
-                    if content.contains(cert_id) {
-                        return Some(name.clone());
+    for (hash, _name) in identities {
+        let sign = Command::new("codesign")
+            .args(["--force", "--sign", hash])
+            .arg(&tmp)
+            .output();
+        if sign.map(|o| o.status.success()).unwrap_or(false) {
+            let verify = Command::new("codesign")
+                .args(["-dvv"])
+                .arg(&tmp)
+                .output();
+            if let Ok(v) = verify {
+                let stderr = String::from_utf8_lossy(&v.stderr);
+                if let Some(line) = stderr.lines().find(|l| l.starts_with("TeamIdentifier=")) {
+                    if line.trim_start_matches("TeamIdentifier=") == team_id {
+                        let _ = std::fs::remove_file(&tmp);
+                        return Some(hash.clone());
                     }
                 }
             }
         }
     }
+    let _ = std::fs::remove_file(&tmp);
     None
 }
 
