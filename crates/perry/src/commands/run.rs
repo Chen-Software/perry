@@ -1829,6 +1829,123 @@ fn launch_ios_device(
     Ok(())
 }
 
+/// Sign an unsigned APK with the Android debug keystore for local testing.
+/// Creates the debug keystore if it doesn't exist.
+fn debug_sign_apk(apk_path: &Path, format: OutputFormat) -> Result<PathBuf> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let debug_keystore = PathBuf::from(&home).join(".android/debug.keystore");
+
+    // Create debug keystore if it doesn't exist
+    if !debug_keystore.exists() {
+        if let Some(parent) = debug_keystore.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let status = Command::new("keytool")
+            .args([
+                "-genkeypair", "-v",
+                "-keystore", &debug_keystore.to_string_lossy(),
+                "-storepass", "android",
+                "-alias", "androiddebugkey",
+                "-keypass", "android",
+                "-keyalg", "RSA",
+                "-keysize", "2048",
+                "-validity", "10000",
+                "-dname", "CN=Android Debug,O=Android,C=US",
+            ])
+            .status()
+            .map_err(|e| anyhow!("keytool not found: {}", e))?;
+        if !status.success() {
+            bail!("Failed to create debug keystore");
+        }
+    }
+
+    if let OutputFormat::Text = format {
+        println!("Signing APK with debug key...");
+    }
+
+    // Find apksigner from the Android SDK
+    let android_home = std::env::var("ANDROID_HOME")
+        .or_else(|_| std::env::var("ANDROID_SDK_ROOT"))
+        .unwrap_or_else(|_| format!("{}/Library/Android/sdk", home));
+
+    let apksigner = find_apksigner(&android_home);
+
+    // zipalign first (required before signing)
+    let aligned_path = apk_path.with_extension("aligned.apk");
+    let zipalign = PathBuf::from(&android_home).join("build-tools");
+    if let Some(zipalign_bin) = find_latest_build_tool(&zipalign, "zipalign") {
+        let status = Command::new(&zipalign_bin)
+            .args(["4"])
+            .arg(apk_path)
+            .arg(&aligned_path)
+            .status();
+        if let Ok(s) = status {
+            if s.success() {
+                std::fs::rename(&aligned_path, apk_path).ok();
+            }
+        }
+    }
+
+    // Sign with apksigner
+    if let Some(signer) = apksigner {
+        let status = Command::new(&signer)
+            .args([
+                "sign",
+                "--ks", &debug_keystore.to_string_lossy(),
+                "--ks-pass", "pass:android",
+                "--ks-key-alias", "androiddebugkey",
+                "--key-pass", "pass:android",
+            ])
+            .arg(apk_path)
+            .status()
+            .map_err(|e| anyhow!("apksigner failed: {}", e))?;
+        if !status.success() {
+            bail!("Failed to sign APK with debug keystore");
+        }
+    } else {
+        // Fallback: use jarsigner
+        let status = Command::new("jarsigner")
+            .args([
+                "-keystore", &debug_keystore.to_string_lossy(),
+                "-storepass", "android",
+                "-keypass", "android",
+                "-signedjar",
+            ])
+            .arg(apk_path)
+            .arg(apk_path)
+            .arg("androiddebugkey")
+            .status()
+            .map_err(|e| anyhow!("jarsigner not found: {}", e))?;
+        if !status.success() {
+            bail!("Failed to sign APK with debug keystore");
+        }
+    }
+
+    Ok(apk_path.to_path_buf())
+}
+
+/// Find apksigner in the Android SDK build-tools
+fn find_apksigner(android_home: &str) -> Option<PathBuf> {
+    find_latest_build_tool(&PathBuf::from(android_home).join("build-tools"), "apksigner")
+}
+
+/// Find the latest version of a build tool
+fn find_latest_build_tool(build_tools_dir: &Path, tool_name: &str) -> Option<PathBuf> {
+    let mut versions: Vec<_> = std::fs::read_dir(build_tools_dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .collect();
+    versions.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+    for v in versions {
+        let tool = v.path().join(tool_name);
+        if tool.exists() {
+            return Some(tool);
+        }
+    }
+    None
+}
+
 /// Install and launch an APK on an Android device/emulator via adb
 fn install_and_launch_android(
     apk_path: &Path,
@@ -1836,6 +1953,9 @@ fn install_and_launch_android(
     serial: &str,
     format: OutputFormat,
 ) -> Result<()> {
+    // Debug-sign the APK if unsigned (Android requires signatures for install)
+    debug_sign_apk(apk_path, format)?;
+
     if let OutputFormat::Text = format {
         println!();
         println!("Installing on {}...", serial);
@@ -1844,11 +1964,17 @@ fn install_and_launch_android(
     let install = Command::new("adb")
         .args(["-s", serial, "install", "-r"])
         .arg(apk_path)
-        .status()
+        .output()
         .map_err(|e| anyhow!("Failed to run adb install: {}", e))?;
 
-    if !install.success() {
-        return Err(anyhow!("Failed to install APK on device {}", serial));
+    if !install.status.success() {
+        let stderr = String::from_utf8_lossy(&install.stderr);
+        let stdout = String::from_utf8_lossy(&install.stdout);
+        return Err(anyhow!("Failed to install APK on device {}: {}{}", serial, stderr, stdout));
+    }
+
+    if let OutputFormat::Text = format {
+        println!("Installed successfully.");
     }
 
     if let OutputFormat::Text = format {
@@ -1873,28 +1999,47 @@ fn install_and_launch_android(
         println!();
     }
 
-    // Stream logcat filtered to the app's PID
-    let _ = Command::new("adb")
-        .args(["-s", serial, "logcat", "--pid"])
-        .arg(get_android_pid(serial, bundle_id))
-        .status();
+    // Stream logcat filtered to the app's package
+    // Use logcat's --pid if we can find the PID, otherwise fall back to grep
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+    let pid = get_android_pid(serial, bundle_id);
+
+    if !pid.is_empty() && pid != "0" {
+        let _ = Command::new("adb")
+            .args(["-s", serial, "logcat", "--pid", &pid])
+            .status();
+    } else {
+        // Fallback: clear logcat and show all (app may not have started yet)
+        let _ = Command::new("adb")
+            .args(["-s", serial, "logcat", "-c"])
+            .status();
+        let _ = Command::new("adb")
+            .args(["-s", serial, "logcat"])
+            .status();
+    }
 
     Ok(())
 }
 
 /// Get the PID of a running Android app
 fn get_android_pid(serial: &str, bundle_id: &str) -> String {
-    // Give the app a moment to start
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    let output = Command::new("adb")
-        .args(["-s", serial, "shell", "pidof", bundle_id])
-        .output();
-    match output {
-        Ok(o) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout).trim().to_string()
+    // Try a few times since the app may still be starting
+    for _ in 0..3 {
+        let output = Command::new("adb")
+            .args(["-s", serial, "shell", "pidof", "-s", bundle_id])
+            .output();
+        match output {
+            Ok(o) if o.status.success() => {
+                let pid = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if !pid.is_empty() {
+                    return pid;
+                }
+            }
+            _ => {}
         }
-        _ => "0".to_string(), // fallback: show all logs
+        std::thread::sleep(std::time::Duration::from_millis(500));
     }
+    String::new()
 }
 
 /// Launch a web build: open HTML in browser
