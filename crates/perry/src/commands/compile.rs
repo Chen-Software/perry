@@ -3988,7 +3988,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     }
 
     // Strip debug symbols from the final binary (reduces size significantly)
-    if !is_dylib && !is_ios {
+    // Skip for iOS/Android cross-compilation — host strip can't handle foreign architectures
+    if !is_dylib && !is_ios && target.as_deref() != Some("android") {
         let _ = std::process::Command::new("strip").arg(&exe_path).status();
     }
 
