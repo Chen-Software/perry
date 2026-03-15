@@ -14216,6 +14216,15 @@ pub(crate) fn compile_expr(
                         // Property access might return a string - treat as dynamic
                         true
                     }
+                    // Array element access: keys[0], cols[i] — string arrays return strings
+                    Expr::IndexGet { object, .. } => {
+                        match object.as_ref() {
+                            Expr::LocalGet(id) => locals.get(id).map(|i| i.is_array || i.is_string).unwrap_or(false),
+                            // Object.keys() etc. always return string arrays
+                            Expr::ObjectKeys(_) => true,
+                            _ => false,
+                        }
+                    }
                     _ => false,
                 }
             }

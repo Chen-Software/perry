@@ -903,6 +903,20 @@ pub extern "C" fn js_number_coerce(value: f64) -> f64 {
                 if trimmed.is_empty() {
                     return 0.0;
                 }
+                // Handle hex strings (0x/0X prefix) — JavaScript Number() supports these
+                if trimmed.starts_with("0x") || trimmed.starts_with("0X") {
+                    return match u64::from_str_radix(&trimmed[2..], 16) {
+                        Ok(n) => n as f64,
+                        Err(_) => f64::NAN,
+                    };
+                }
+                // Handle negative hex
+                if trimmed.starts_with("-0x") || trimmed.starts_with("-0X") {
+                    return match u64::from_str_radix(&trimmed[3..], 16) {
+                        Ok(n) => -(n as f64),
+                        Err(_) => f64::NAN,
+                    };
+                }
                 match trimmed.parse::<f64>() {
                     Ok(n) => n,
                     Err(_) => f64::NAN,
