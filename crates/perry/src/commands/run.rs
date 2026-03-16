@@ -58,6 +58,11 @@ pub struct RunArgs {
     #[arg(long)]
     pub enable_geisterhand: bool,
 
+    /// Port for the geisterhand HTTP server (default: 7676).
+    /// Implies --enable-geisterhand.
+    #[arg(long)]
+    pub geisterhand_port: Option<u16>,
+
     /// Arguments passed to the compiled program
     #[arg(last = true)]
     pub program_args: Vec<String>,
@@ -106,7 +111,8 @@ pub fn run(args: RunArgs, format: OutputFormat, use_color: bool, verbose: u8) ->
             target_str,
             device_udid.as_deref(),
             &args.program_args,
-            args.enable_geisterhand,
+            args.enable_geisterhand || args.geisterhand_port.is_some(),
+            args.geisterhand_port,
             format,
         ));
         return result;
@@ -127,7 +133,8 @@ pub fn run(args: RunArgs, format: OutputFormat, use_color: bool, verbose: u8) ->
         type_check: args.type_check,
         minify: target.as_deref() == Some("web"),
         features: None,
-        enable_geisterhand: args.enable_geisterhand,
+        enable_geisterhand: args.enable_geisterhand || args.geisterhand_port.is_some(),
+        geisterhand_port: args.geisterhand_port,
     };
 
     let result = super::compile::run(compile_args, format, use_color, verbose)?;
@@ -163,6 +170,7 @@ async fn remote_build_and_launch(
     device_udid: Option<&str>,
     program_args: &[String],
     enable_geisterhand: bool,
+    geisterhand_port: Option<u16>,
     format: OutputFormat,
 ) -> Result<()> {
     use super::publish::{
@@ -264,6 +272,7 @@ async fn remote_build_and_launch(
         "targets": [build_target],
         "ios_distribute": ios_distribute,
         "enable_geisterhand": enable_geisterhand,
+        "geisterhand_port": geisterhand_port.unwrap_or(7676),
     });
 
     // Build credentials — device builds need signing

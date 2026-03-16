@@ -64,6 +64,20 @@ Perry maps UI widgets to GTK4 widgets:
 
 GTK4 styling uses CSS under the hood. Perry's styling methods (colors, fonts, corner radius) are translated to CSS properties applied via `CssProvider`.
 
+## Testing with Geisterhand
+
+Perry's built-in UI fuzzer works on Linux/GTK4. Screenshots use `WidgetPaintable` + `GskRenderer` for pixel-accurate capture.
+
+```bash
+perry app.ts -o app --target linux --enable-geisterhand
+./app
+# In another terminal:
+curl http://127.0.0.1:7676/widgets
+curl http://127.0.0.1:7676/screenshot -o screenshot.png
+```
+
+See [Geisterhand](../testing/geisterhand.md) for full API reference.
+
 ## Next Steps
 
 - [Platform Overview](overview.md) — All platforms

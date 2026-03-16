@@ -205,7 +205,7 @@ impl crate::codegen::Compiler {
                     gh_sig.params.push(AbiParam::new(types::I32)); // port
                     if let Ok(gh_func_id) = self.module.declare_function("perry_geisterhand_start", Linkage::Import, &gh_sig) {
                         let gh_func_ref = self.module.declare_func_in_func(gh_func_id, builder.func);
-                        let port_val = builder.ins().iconst(types::I32, 7676);
+                        let port_val = builder.ins().iconst(types::I32, self.geisterhand_port as i64);
                         builder.ins().call(gh_func_ref, &[port_val]);
                     }
                 }

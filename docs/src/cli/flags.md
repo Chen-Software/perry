@@ -55,6 +55,13 @@ Use `--output-type` to change what's produced:
 
 Minification strips comments, collapses whitespace, and mangles local variable/parameter/non-exported function names for smaller output.
 
+## Testing Flags
+
+| Flag | Description |
+|------|-------------|
+| `--enable-geisterhand` | Embed the [Geisterhand](../testing/geisterhand.md) HTTP server for programmatic UI testing (default port 7676) |
+| `--geisterhand-port <PORT>` | Set a custom port for the Geisterhand server (implies `--enable-geisterhand`) |
+
 ## Runtime Flags
 
 | Flag | Description |

@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.191
+**Current Version:** 0.2.192
 
 ## Workflow Requirements
 
@@ -152,6 +152,10 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - `CGPoint`/`CGSize`/`CGRect` in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.192
+- **Configurable geisterhand port**: `--geisterhand-port <PORT>` CLI flag for both `perry compile` and `perry run` (implies `--enable-geisterhand`); port propagated through CompilationContext → Compiler → Cranelift codegen; default remains 7676; also forwarded in remote build manifests
+- **Geisterhand docs update**: all 5 native platforms documented (added Linux/GTK4 and Windows sections); custom port usage; testing flags section added to CLI reference
 
 ### v0.2.191
 - **Geisterhand: in-process input fuzzer for Perry UI**: `--enable-geisterhand` flag embeds HTTP server (port 7676) for programmatic widget interaction; `perry-ui-geisterhand` crate (tiny-http server, chaos mode); global callback registry + main-thread dispatch queue in `perry-runtime/geisterhand_registry.rs` behind `#[cfg(feature = "geisterhand")]`; widget registration in all 5 native platform crates (macOS/iOS/Android/GTK4/Windows) for button, textfield, slider, toggle, picker, menu, click/hover/doubleclick; pump integration in each platform's timer; HTTP endpoints: `/widgets`, `/click/:h`, `/type/:h`, `/slide/:h`, `/toggle/:h`, `/state/:h`, `/hover/:h`, `/doubleclick/:h`, `/screenshot`, `/chaos/start|stop|status`; cross-thread screenshot via Condvar sync; built via `CARGO_TARGET_DIR=target/geisterhand`

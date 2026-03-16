@@ -82,9 +82,14 @@ pub struct CompileArgs {
     pub features: Option<String>,
 
     /// Enable geisterhand in-process input fuzzer (debug/testing).
-    /// Starts an HTTP server on port 7676 for programmatic UI interaction.
+    /// Starts an HTTP server for programmatic UI interaction.
     #[arg(long)]
     pub enable_geisterhand: bool,
+
+    /// Port for the geisterhand HTTP server (default: 7676).
+    /// Implies --enable-geisterhand.
+    #[arg(long)]
+    pub geisterhand_port: Option<u16>,
 }
 
 /// Information about a JavaScript module that will be interpreted at runtime
@@ -132,6 +137,8 @@ pub struct CompilationContext {
     pub node_modules_cache: HashMap<PathBuf, Option<PathBuf>>,
     /// Whether geisterhand (in-process input fuzzer) is enabled
     pub needs_geisterhand: bool,
+    /// Port for geisterhand HTTP server (default 7676)
+    pub geisterhand_port: u16,
 }
 
 impl std::fmt::Debug for CompilationContext {
@@ -163,6 +170,7 @@ impl CompilationContext {
             resolve_cache: HashMap::new(),
             node_modules_cache: HashMap::new(),
             needs_geisterhand: false,
+            geisterhand_port: 7676,
         }
     }
 }
@@ -2186,8 +2194,11 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         OutputFormat::Json => {}
     }
 
-    if args.enable_geisterhand {
+    if args.enable_geisterhand || args.geisterhand_port.is_some() {
         ctx.needs_geisterhand = true;
+        if let Some(port) = args.geisterhand_port {
+            ctx.geisterhand_port = port;
+        }
     }
 
     // --- Web target: emit JavaScript instead of native code ---
@@ -2954,6 +2965,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         // Tell codegen whether stdlib functions are available
         compiler.set_needs_stdlib(ctx.needs_stdlib);
         compiler.set_needs_geisterhand(ctx.needs_geisterhand);
+        compiler.set_geisterhand_port(ctx.geisterhand_port);
 
         // Pass external native library FFI functions to codegen
         if !ctx.native_libraries.is_empty() {
@@ -3153,6 +3165,13 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         if ctx.needs_ui {
             if let Some(ui_lib) = find_ui_library(target.as_deref()) {
                 all_scan_paths.push(ui_lib);
+            }
+        }
+        // Mark native library FFI functions as defined so we don't generate stubs
+        // that would shadow the real implementations in the native library .a/.so
+        for native_lib in &ctx.native_libraries {
+            for func in &native_lib.functions {
+                defined_syms.insert(func.name.clone());
             }
         }
         // Find the nm tool: use system `nm` on macOS/Linux, or `llvm-nm` from Rust toolchain on Windows

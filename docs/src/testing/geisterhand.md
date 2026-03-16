@@ -2,7 +2,7 @@
 
 Geisterhand embeds a lightweight HTTP server inside your Perry app that lets you interact with every widget programmatically. Click buttons, type into text fields, drag sliders, toggle switches, capture screenshots, and run chaos-mode random input — all via simple HTTP calls.
 
-It works on **macOS, iOS, and Android** with zero external dependencies. The server starts automatically when you compile with `--enable-geisterhand`.
+It works on **macOS, iOS, Android, Linux (GTK4), and Windows** with zero external dependencies. The server starts automatically when you compile with `--enable-geisterhand`.
 
 ## Quick Start
 
@@ -18,6 +18,20 @@ perry app.ts -o app --enable-geisterhand
 curl http://127.0.0.1:7676/widgets          # List all widgets
 curl -X POST http://127.0.0.1:7676/click/3   # Click a button
 curl http://127.0.0.1:7676/screenshot -o s.png  # Capture window
+```
+
+### Custom Port
+
+By default geisterhand listens on port **7676**. Use `--geisterhand-port` to pick a different port:
+
+```bash
+# Compile with a custom port
+perry app.ts -o app --geisterhand-port 9090
+
+# Or with perry run
+perry run --geisterhand-port 9090
+
+# --geisterhand-port implies --enable-geisterhand, so you don't need both
 ```
 
 ## API Reference
@@ -128,6 +142,8 @@ Returns a PNG image of the app window. Works on all platforms:
 - **macOS**: `CGWindowListCreateImage` (retina resolution)
 - **iOS**: `UIGraphicsImageRenderer` + `drawViewHierarchyInRect`
 - **Android**: `View.draw()` on Canvas + `Bitmap.compress(PNG)`
+- **Linux (GTK4)**: `WidgetPaintable` + `GskRenderer.render_texture` + `GdkTexture.save_to_png_bytes`
+- **Windows**: `PrintWindow` + `GetDIBits` + inline PNG encoder
 
 ```bash
 curl http://127.0.0.1:7676/screenshot -o screenshot.png
@@ -207,6 +223,27 @@ adb forward tcp:7676 tcp:7676
 curl http://127.0.0.1:7676/widgets
 ```
 
+### Linux (Ubuntu / GTK4)
+
+Install GTK4 development libraries, then compile as usual.
+
+```bash
+# Install GTK4 (Ubuntu/Debian)
+sudo apt install libgtk-4-dev libcairo2-dev
+
+perry app.ts -o app --target linux --enable-geisterhand
+./app
+curl http://127.0.0.1:7676/widgets
+```
+
+### Windows
+
+```bash
+perry app.ts -o app --target windows --enable-geisterhand
+./app.exe
+curl http://127.0.0.1:7676/widgets
+```
+
 ## Example App
 
 ```typescript
@@ -262,4 +299,4 @@ These are built into a separate target directory (`target/geisterhand/`) to avoi
 
 ## Security
 
-Geisterhand binds to `0.0.0.0:7676` — it's accessible from the local network. **Do not ship geisterhand-enabled binaries to production.** It is a debug/testing tool only.
+Geisterhand binds to `0.0.0.0` on the configured port (default 7676) — it's accessible from the local network. **Do not ship geisterhand-enabled binaries to production.** It is a debug/testing tool only.

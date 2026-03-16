@@ -123,6 +123,8 @@ pub struct Compiler {
     pub(crate) enabled_features: HashSet<String>,
     /// Whether geisterhand is enabled (starts HTTP server on startup)
     pub(crate) needs_geisterhand: bool,
+    /// Port for geisterhand HTTP server (default 7676)
+    pub(crate) geisterhand_port: u16,
 }
 
 impl Compiler {
@@ -255,6 +257,7 @@ impl Compiler {
             compile_target,
             enabled_features: HashSet::new(),
             needs_geisterhand: false,
+            geisterhand_port: 7676,
         })
     }
 
@@ -305,6 +308,11 @@ impl Compiler {
     /// Set whether geisterhand (in-process input fuzzer) is enabled
     pub fn set_needs_geisterhand(&mut self, needs: bool) {
         self.needs_geisterhand = needs;
+    }
+
+    /// Set the port for geisterhand HTTP server
+    pub fn set_geisterhand_port(&mut self, port: u16) {
+        self.geisterhand_port = port;
     }
 
     /// Register a bundled extension for static plugin registration in the entry module init.
