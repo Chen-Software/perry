@@ -4145,44 +4145,25 @@ pub(crate) fn compile_expr(
                             // Use js_string_append for in-place appending
 
                             // Helper to check if expression is a string
-                            fn is_string_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>, frt: &BTreeMap<u32, perry_types::Type>) -> bool {
+                            fn is_string_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                                 match expr {
                                     Expr::String(_) => true,
                                     Expr::StringFromCharCode(_) => true,
                                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
                                     Expr::Binary { op: BinaryOp::Add, left, right } => {
-                                        is_string_operand(left, locals, frt) || is_string_operand(right, locals, frt)
+                                        is_string_operand(left, locals) || is_string_operand(right, locals)
                                     }
                                     Expr::FsReadFileSync(_) |
                                     Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
                                     Expr::PathExtname(_) | Expr::PathResolve(_) | Expr::FileURLToPath(_) | Expr::JsonStringify(_) => true,
                                     Expr::Conditional { then_expr, else_expr, .. } => {
-                                        is_string_operand(then_expr, locals, frt) && is_string_operand(else_expr, locals, frt)
+                                        is_string_operand(then_expr, locals) && is_string_operand(else_expr, locals)
                                     }
                                     Expr::Call { callee, .. } => {
-                                        // Check if calling a function that returns string
-                                        match callee.as_ref() {
-                                            Expr::FuncRef(id) => {
-                                                if matches!(frt.get(id), Some(perry_types::Type::String)) {
-                                                    return true;
-                                                }
-                                            }
-                                            Expr::ExternFuncRef { return_type, name, .. } => {
-                                                if matches!(return_type, perry_types::Type::String) {
-                                                    return true;
-                                                }
-                                                let is_imported_string = IMPORTED_FUNC_RETURN_TYPES.with(|p| {
-                                                    matches!(p.borrow().get(name), Some(perry_types::Type::String))
-                                                });
-                                                if is_imported_string { return true; }
-                                            }
-                                            _ => {}
-                                        }
                                         if let Expr::PropertyGet { object, property } = callee.as_ref() {
                                             if property == "slice" || property == "substring" || property == "trim"
                                                || property == "toLowerCase" || property == "toUpperCase" || property == "replace"
-                                               || property == "padStart" || property == "padEnd" || property == "repeat" || property == "charAt"
-                                               || property == "toString" || property == "toFixed" || property == "toLocaleString" {
+                                               || property == "padStart" || property == "padEnd" || property == "repeat" || property == "charAt" {
                                                 if let Expr::LocalGet(id) = object.as_ref() {
                                                     return locals.get(id).map(|i| i.is_string).unwrap_or(true);
                                                 }
@@ -4215,7 +4196,7 @@ pub(crate) fn compile_expr(
 
                             // Convert to string pointer if needed
                             let rhs_type = builder.func.dfg.value_type(rhs_val);
-                            let rhs_ptr = if is_string_operand(right, locals, func_hir_return_types) || rhs_type == types::I64 {
+                            let rhs_ptr = if is_string_operand(right, locals) || rhs_type == types::I64 {
                                 // String operand or already a raw i64 pointer (e.g., from function call returning string)
                                 if rhs_type == types::I64 {
                                     // Already a raw pointer
@@ -4618,7 +4599,7 @@ pub(crate) fn compile_expr(
 
             // Check if this is string concatenation (recursively for nested binary expressions)
             // Note: EnvGet is NOT included because it can return undefined (handled as union type)
-            fn is_string_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>, frt: &BTreeMap<u32, perry_types::Type>) -> bool {
+            fn is_string_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
                     Expr::StringFromCharCode(_) => true,
@@ -4627,38 +4608,19 @@ pub(crate) fn compile_expr(
                     Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
                     Expr::PathExtname(_) | Expr::PathResolve(_) | Expr::FileURLToPath(_) | Expr::JsonStringify(_) => true,
                     Expr::Binary { op: BinaryOp::Add, left, right } => {
-                        is_string_operand(left, locals, frt) || is_string_operand(right, locals, frt)
+                        is_string_operand(left, locals) || is_string_operand(right, locals)
                     }
                     // Conditional expressions with string branches (from template literals)
                     Expr::Conditional { then_expr, else_expr, .. } => {
-                        is_string_operand(then_expr, locals, frt) && is_string_operand(else_expr, locals, frt)
+                        is_string_operand(then_expr, locals) && is_string_operand(else_expr, locals)
                     }
-                    // Function calls — check return type and string methods
+                    // String method calls (substring, slice, trim, etc.)
                     Expr::Call { callee, .. } => {
-                        // Check if calling a function that returns string
-                        match callee.as_ref() {
-                            Expr::FuncRef(id) => {
-                                if matches!(frt.get(id), Some(perry_types::Type::String)) {
-                                    return true;
-                                }
-                            }
-                            Expr::ExternFuncRef { return_type, name, .. } => {
-                                if matches!(return_type, perry_types::Type::String) {
-                                    return true;
-                                }
-                                let is_imported_string = IMPORTED_FUNC_RETURN_TYPES.with(|p| {
-                                    matches!(p.borrow().get(name), Some(perry_types::Type::String))
-                                });
-                                if is_imported_string { return true; }
-                            }
-                            _ => {}
-                        }
-                        // String method calls
                         if let Expr::PropertyGet { property, .. } = callee.as_ref() {
+                            // These methods only exist on strings and always return strings
                             if property == "slice" || property == "substring" || property == "trim"
                                || property == "toLowerCase" || property == "toUpperCase" || property == "replace"
-                               || property == "padStart" || property == "padEnd" || property == "repeat" || property == "charAt"
-                               || property == "toString" || property == "toFixed" || property == "toLocaleString" {
+                               || property == "padStart" || property == "padEnd" || property == "repeat" || property == "charAt" {
                                 return true;
                             }
                         }
@@ -4669,10 +4631,10 @@ pub(crate) fn compile_expr(
             }
 
             // Check if an expression produces a NaN-boxed string (from Conditional)
-            fn is_nanboxed_string_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>, frt: &BTreeMap<u32, perry_types::Type>) -> bool {
+            fn is_nanboxed_string_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::Conditional { then_expr, else_expr, .. } => {
-                        is_string_operand(then_expr, locals, frt) && is_string_operand(else_expr, locals, frt)
+                        is_string_operand(then_expr, locals) && is_string_operand(else_expr, locals)
                     }
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_union && i.is_string).unwrap_or(false),
                     _ => false,
@@ -4701,10 +4663,10 @@ pub(crate) fn compile_expr(
                 }
             }
 
-            let is_string_left = is_string_operand(left, locals, func_hir_return_types);
-            let is_string_right = is_string_operand(right, locals, func_hir_return_types);
-            let is_nanboxed_left = is_nanboxed_string_operand(left, locals, func_hir_return_types);
-            let is_nanboxed_right = is_nanboxed_string_operand(right, locals, func_hir_return_types);
+            let is_string_left = is_string_operand(left, locals);
+            let is_string_right = is_string_operand(right, locals);
+            let is_nanboxed_left = is_nanboxed_string_operand(left, locals);
+            let is_nanboxed_right = is_nanboxed_string_operand(right, locals);
             let is_union_left = is_union_operand(left, locals);
             let is_union_right = is_union_operand(right, locals);
 
@@ -5963,19 +5925,14 @@ pub(crate) fn compile_expr(
                     let lhs_type = builder.func.dfg.value_type(lhs);
 
                     // Check if lhs is null/undefined
-                    // Must check for specific null/undefined tags, NOT generic NaN,
-                    // because NaN-boxed strings and pointers are also NaN values.
+                    // For i64: null/undefined is 0
+                    // For f64: undefined is NaN (TAG_UNDEFINED is NaN when bitcast to f64)
                     let is_null = if lhs_type == types::I64 {
                         let zero_i64 = builder.ins().iconst(types::I64, 0);
                         builder.ins().icmp(IntCC::Equal, lhs, zero_i64)
                     } else {
-                        // Bitcast to i64 and check for TAG_NULL or TAG_UNDEFINED
-                        let val_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), lhs);
-                        let null_const = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0002u64 as i64);
-                        let is_null_tag = builder.ins().icmp(IntCC::Equal, val_i64, null_const);
-                        let undef_const = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0001u64 as i64);
-                        let is_undef_tag = builder.ins().icmp(IntCC::Equal, val_i64, undef_const);
-                        builder.ins().bor(is_null_tag, is_undef_tag)
+                        // NaN check: fcmp Unordered with itself is true iff NaN
+                        builder.ins().fcmp(FloatCC::Unordered, lhs, lhs)
                     };
 
                     // Short-circuit: if lhs is null, evaluate rhs
@@ -6495,7 +6452,7 @@ pub(crate) fn compile_expr(
                         if args.len() > 1 {
                             if let Some(spread_func) = extern_funcs.get("js_console_log_spread") {
                                 // Helper to check if an expression produces a string
-                                fn is_string_expr_for_multi(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>, frt: &BTreeMap<u32, perry_types::Type>) -> bool {
+                                fn is_string_expr_for_multi(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
                                     match expr {
                                         Expr::String(_) => true,
                                         Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) => true,
@@ -6510,39 +6467,19 @@ pub(crate) fn compile_expr(
                                         // Prioritize is_string over is_union (is_union can be set for Any-typed vars)
                                         Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
                                         Expr::Binary { op: BinaryOp::Add, left, right } => {
-                                            is_string_expr_for_multi(left, locals, frt) || is_string_expr_for_multi(right, locals, frt)
+                                            is_string_expr_for_multi(left, locals) || is_string_expr_for_multi(right, locals)
                                         }
-                                        // Function calls — check return type and string methods
+                                        // String method calls on string variables
                                         Expr::Call { callee, .. } => {
-                                            // Check function return type
-                                            match callee.as_ref() {
-                                                Expr::FuncRef(id) => {
-                                                    if matches!(frt.get(id), Some(perry_types::Type::String)) {
-                                                        return true;
-                                                    }
-                                                }
-                                                Expr::ExternFuncRef { return_type, name, .. } => {
-                                                    if matches!(return_type, perry_types::Type::String) {
-                                                        return true;
-                                                    }
-                                                    let is_imported_string = IMPORTED_FUNC_RETURN_TYPES.with(|p| {
-                                                        matches!(p.borrow().get(name), Some(perry_types::Type::String))
-                                                    });
-                                                    if is_imported_string { return true; }
-                                                }
-                                                _ => {}
-                                            }
-                                            // String method calls
                                             if let Expr::PropertyGet { object, property } = callee.as_ref() {
                                                 if property == "slice" || property == "substring" || property == "trim"
                                                     || property == "toLowerCase" || property == "toUpperCase"
                                                     || property == "charAt" || property == "padStart" || property == "padEnd"
-                                                    || property == "repeat" || property == "replace"
-                                                    || property == "toString" || property == "toFixed" || property == "toLocaleString" {
+                                                    || property == "repeat" || property == "replace" {
+                                                    // Check if object is a string
                                                     if let Expr::LocalGet(id) = object.as_ref() {
-                                                        return locals.get(id).map(|i| i.is_string).unwrap_or(true);
+                                                        return locals.get(id).map(|i| i.is_string).unwrap_or(false);
                                                     }
-                                                    return true;
                                                 }
                                             }
                                             false
@@ -6630,7 +6567,7 @@ pub(crate) fn compile_expr(
                                     let val = arg_vals[i];
 
                                     // Determine how to encode this value for the spread array
-                                    let val_f64 = if is_string_expr_for_multi(arg, locals, func_hir_return_types) {
+                                    let val_f64 = if is_string_expr_for_multi(arg, locals) {
                                         // Raw string - needs NaN-boxing
                                         // The value might be i64 (from closure params) or f64 (from string literals)
                                         let ptr = ensure_i64(builder, val);
@@ -7691,15 +7628,10 @@ pub(crate) fn compile_expr(
                                         let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
                                         return Ok(builder.inst_results(nanbox_call)[0]);
                                     }
-                                    "trim" | "trimStart" | "trimEnd" | "trimLeft" | "trimRight" => {
-                                        // str.trim/trimStart/trimEnd - whitespace removal
-                                        let func_name = match property.as_str() {
-                                            "trimStart" | "trimLeft" => "js_string_trim_start",
-                                            "trimEnd" | "trimRight" => "js_string_trim_end",
-                                            _ => "js_string_trim",
-                                        };
-                                        let trim_func = extern_funcs.get(func_name)
-                                            .ok_or_else(|| anyhow!("{} not declared", func_name))?;
+                                    "trim" => {
+                                        // str.trim() - remove whitespace from both ends
+                                        let trim_func = extern_funcs.get("js_string_trim")
+                                            .ok_or_else(|| anyhow!("js_string_trim not declared"))?;
                                         let func_ref = module.declare_func_in_func(*trim_func, builder.func);
 
                                         let call = builder.ins().call(func_ref, &[str_ptr]);
@@ -8124,24 +8056,6 @@ pub(crate) fn compile_expr(
                                         let call = builder.ins().call(func_ref, &[buf_ptr, fill_val]);
                                         let result_ptr = builder.inst_results(call)[0];
                                         return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr));
-                                    }
-                                    "set" => {
-                                        // buf.set(source, offset?) — copy from source buffer
-                                        if !arg_vals.is_empty() {
-                                            let source_ptr = ensure_i64(builder, arg_vals[0]);
-                                            let offset = if arg_vals.len() > 1 {
-                                                let off_f64 = ensure_f64(builder, arg_vals[1]);
-                                                builder.ins().fcvt_to_sint_sat(types::I32, off_f64)
-                                            } else {
-                                                builder.ins().iconst(types::I32, 0)
-                                            };
-                                            let func = extern_funcs.get("js_buffer_set_from")
-                                                .ok_or_else(|| anyhow!("js_buffer_set_from not declared"))?;
-                                            let func_ref = module.declare_func_in_func(*func, builder.func);
-                                            builder.ins().call(func_ref, &[buf_ptr, source_ptr, offset]);
-                                        }
-                                        // .set() returns undefined
-                                        return Ok(builder.ins().f64const(f64::NAN));
                                     }
                                     _ => {}
                                 }
@@ -10119,23 +10033,8 @@ pub(crate) fn compile_expr(
                     }
 
                     // Fallback: If js_native_call_method is available (JS runtime enabled),
-                    // use dynamic JS interop for unknown method calls.
-                    // IMPORTANT: Only use JS interop for actual JS handle objects (JS_HANDLE_TAG).
-                    // Native objects with dynamically-stored closures must use the closure fallback below.
-                    // Check: is the object a known JS handle? (only class_name-less, non-pointer, non-array locals
-                    // that aren't in any other category could be handles)
-                    let is_js_handle = if let Expr::LocalGet(id) = object.as_ref() {
-                        locals.get(id).map(|i| {
-                            // JS handles are f64 with JS_HANDLE_TAG — not pointer, not string, not array, etc.
-                            !i.is_pointer && !i.is_string && !i.is_array && !i.is_map && !i.is_set
-                            && !i.is_buffer && !i.is_bigint && !i.is_closure
-                            && i.class_name.is_some()
-                            && !matches!(i.class_name.as_deref(), Some("Uint8Array") | Some("Buffer") | Some("Date"))
-                        }).unwrap_or(false)
-                    } else {
-                        false
-                    };
-                    if is_js_handle && extern_funcs.contains_key("js_native_call_method") {
+                    // use dynamic JS interop for unknown method calls
+                    if extern_funcs.contains_key("js_native_call_method") {
                         // Compile object expression
                         let obj_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
                         // js_native_call_method expects f64 (NaN-boxed) for object.
@@ -10294,8 +10193,7 @@ pub(crate) fn compile_expr(
                                 for &arg_val in arg_vals.iter() {
                                     let arg_type = builder.func.dfg.value_type(arg_val);
                                     let arg_f64 = if arg_type == types::I64 {
-                                        // NaN-box with POINTER_TAG for correct typeof in closure
-                                        inline_nanbox_pointer(builder, arg_val)
+                                        builder.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), arg_val)
                                     } else if arg_type == types::I32 {
                                         builder.ins().fcvt_from_sint(types::F64, arg_val)
                                     } else {
@@ -10352,9 +10250,7 @@ pub(crate) fn compile_expr(
                         for &arg_val in arg_vals.iter() {
                             let arg_type = builder.func.dfg.value_type(arg_val);
                             let arg_f64 = if arg_type == types::I64 {
-                                // NaN-box with POINTER_TAG so typeof inside closure returns 'object'
-                                // Raw bitcast would produce subnormal float that typeof sees as 'number'
-                                inline_nanbox_pointer(builder, arg_val)
+                                builder.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), arg_val)
                             } else if arg_type == types::I32 {
                                 builder.ins().fcvt_from_sint(types::F64, arg_val)
                             } else {
