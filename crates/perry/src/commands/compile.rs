@@ -3324,9 +3324,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     if !is_windows {
         if is_android || is_linux {
             cmd.arg("-Wl,--gc-sections");
-        } else if !ctx.needs_plugins {
-            // Skip dead_strip when plugins are enabled — dlopen'd plugins need
-            // to resolve Perry runtime symbols (js_*, perry_*) from the main binary.
+        } else {
             cmd.arg("-Wl,-dead_strip");
         }
     }
@@ -3390,13 +3388,47 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     }
 
     // For plugin hosts, export symbols so dlopen'd plugins can resolve them.
-    // Plugins are dylibs loaded via dlopen — they need to resolve hone_host_api_* and
-    // hone_plugin_* symbols from the main executable at load time.
+    // Plugins are dylibs loaded via dlopen — they need to resolve:
+    //   1. hone_host_api_* (plugin→host calls)
+    //   2. js_*/perry_* (Perry runtime used by compiled plugin code)
+    // We use -u to prevent dead_strip from removing these, keeping binary size small.
     if ctx.needs_plugins && !is_windows {
-        // Dead-stripping is already disabled (above) when needs_plugins is true.
-        // Plugin dylibs use flat_namespace + dynamic_lookup, so all symbols from
-        // the main binary (Perry runtime, host API) are resolvable at dlopen time.
-        // strip -x (below) preserves global symbols in the export trie.
+        #[cfg(target_os = "macos")]
+        {
+            // Force-keep all functions from plugin-related native libraries
+            for native_lib in &ctx.native_libraries {
+                if native_lib.module.contains("plugin") {
+                    for func in &native_lib.functions {
+                        cmd.arg(format!("-Wl,-u,_{}", func.name));
+                    }
+                }
+            }
+            // Force-keep Perry runtime symbols that plugin dylibs reference.
+            // These are collected from the Perry runtime's public API.
+            // Using -u tells the linker "treat as referenced" so dead_strip keeps them.
+            let runtime_syms = [
+                "js_array_alloc",
+                "js_array_from_f64", "js_array_push_f64",
+                "js_bigint_is_zero",
+                "js_closure_alloc",
+                "js_console_log_spread",
+                "js_dynamic_object_get_property",
+                "js_dynamic_string_equals",
+                "js_gc_register_global_root",
+                "js_is_truthy",
+                "js_jsvalue_compare", "js_jsvalue_equals",
+                "js_nanbox_get_pointer", "js_nanbox_pointer", "js_nanbox_string",
+                "js_native_call_method",
+                "js_object_alloc_class_with_keys", "js_object_alloc_with_shape",
+                "js_register_class_method",
+                "js_string_char_code_at", "js_string_from_bytes", "js_string_length",
+                "perry_debug_trace_init", "perry_debug_trace_init_done",
+                "perry_init_guard_check_and_set",
+            ];
+            for sym in &runtime_syms {
+                cmd.arg(format!("-Wl,-u,_{}", sym));
+            }
+        }
         #[cfg(target_os = "linux")]
         {
             cmd.arg("-rdynamic");
