@@ -5496,9 +5496,8 @@ pub(crate) fn compile_expr(
             let lhs_type = builder.func.dfg.value_type(lhs);
             let rhs_type = builder.func.dfg.value_type(rhs);
 
-            // Use NaN-boxed TAG_TRUE/TAG_FALSE so comparisons print as true/false
-            let one = builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0004u64));  // TAG_TRUE
-            let zero = builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0003u64)); // TAG_FALSE
+            let one = builder.ins().f64const(1.0);
+            let zero = builder.ins().f64const(0.0);
 
             if is_static_string_compare && (*op == CompareOp::Eq || *op == CompareOp::Ne) {
                 // Static string comparison: use js_string_equals
