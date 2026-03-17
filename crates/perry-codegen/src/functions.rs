@@ -675,6 +675,29 @@ impl crate::codegen::Compiler {
                 for stmt in &func.body {
                     compile_stmt(&mut builder, &mut self.module, &self.func_ids, &self.closure_func_ids, &self.func_wrapper_ids, &self.extern_funcs, &self.async_func_ids, &self.closure_returning_funcs, &self.classes, &self.enums, &self.func_param_types, &self.func_union_params, &self.func_return_types, &self.func_hir_return_types, &self.func_rest_param_index, &self.imported_func_param_counts, &mut locals, &mut next_var, stmt, None, None, &boxed_vars, None)
                         .map_err(|e| anyhow!("In function '{}': {}", func.name, e))?;
+
+                    // Reload module-level variables from their global slots.
+                    // Function calls may have modified module variables via LocalSet write-back.
+                    // The function's Cranelift locals are stale unless we reload from global slots.
+                    if !self.module_var_data_ids.is_empty() {
+                        let current_block = builder.current_block().unwrap();
+                        if !is_block_filled(&builder, current_block) {
+                            let vars_to_reload: Vec<(Variable, cranelift::prelude::types::Type, cranelift_module::DataId)> = locals.iter()
+                                .filter(|(_, info)| !info.is_boxed && info.module_var_data_id.is_some())
+                                .map(|(_, info)| {
+                                    let val = builder.use_var(info.var);
+                                    let var_type = builder.func.dfg.value_type(val);
+                                    (info.var, var_type, info.module_var_data_id.unwrap())
+                                })
+                                .collect();
+                            for (var, var_type, data_id) in vars_to_reload {
+                                let global_val = self.module.declare_data_in_func(data_id, builder.func);
+                                let ptr = builder.ins().global_value(types::I64, global_val);
+                                let loaded = builder.ins().load(var_type, MemFlags::new(), ptr, 0);
+                                builder.def_var(var, loaded);
+                            }
+                        }
+                    }
                 }
 
                 // If no explicit return, return 0 with the correct type
@@ -822,13 +845,13 @@ impl crate::codegen::Compiler {
 
             let i64_func_ref = self.module.declare_func_in_func(i64_func_id, builder.func);
 
-            // Convert f64 params to i64 via bitcast (NOT fcvt_to_sint which destroys NaN-boxed values)
-            // NaN-boxed strings/pointers/bigints are IEEE NaN values — fcvt_to_sint_sat converts
-            // NaN to 0, destroying the pointer. Bitcast preserves the raw bits.
+            // Convert f64 params to i64 via fcvt_to_sint_sat.
+            // Integer-specialized functions only accept Number params (no NaN-boxed values),
+            // so fcvt_to_sint_sat is correct: 5.0f64 → 5i64.
             let mut i64_args = Vec::new();
             for i in 0..func.params.len() {
                 let f64_val = builder.block_params(entry_block)[i];
-                let i64_val = builder.ins().bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), f64_val);
+                let i64_val = builder.ins().fcvt_to_sint_sat(types::I64, f64_val);
                 i64_args.push(i64_val);
             }
 
@@ -836,8 +859,10 @@ impl crate::codegen::Compiler {
             let call = builder.ins().call(i64_func_ref, &i64_args);
             let i64_result = builder.inst_results(call)[0];
 
-            // Convert i64 result back to f64 via bitcast (preserve NaN-boxing)
-            let f64_result = builder.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), i64_result);
+            // Convert i64 result back to f64 via fcvt_from_sint.
+            // Integer-specialized functions always return plain integers,
+            // so fcvt_from_sint is correct: 8i64 → 8.0f64.
+            let f64_result = builder.ins().fcvt_from_sint(types::F64, i64_result);
             builder.ins().return_(&[f64_result]);
 
             builder.finalize();

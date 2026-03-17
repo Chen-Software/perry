@@ -866,6 +866,36 @@ pub(crate) fn compile_stmt(
                                 (None, false, false, false, false, false, false, false, false, false)
                             }
                         } else if let Expr::PropertyGet { object, property } = callee.as_ref() {
+                            // Check if this is an instance method call on a known class
+                            let class_method_result = if let Expr::LocalGet(obj_id) = object.as_ref() {
+                                if let Some(obj_info) = locals.get(obj_id) {
+                                    if let Some(ref obj_class) = obj_info.class_name {
+                                        if let Some(class_meta) = classes.get(obj_class) {
+                                            if let Some(ret_type) = class_meta.method_return_types.get(property.as_str()) {
+                                                match ret_type {
+                                                    perry_types::Type::Named(name) => {
+                                                        Some((Some(name.clone()), true, false, false, false, false, false, false, false, false))
+                                                    }
+                                                    perry_types::Type::Generic { base, .. } => {
+                                                        Some((Some(base.clone()), true, false, false, false, false, false, false, false, false))
+                                                    }
+                                                    perry_types::Type::String => {
+                                                        Some((None, false, false, true, false, false, false, false, false, false))
+                                                    }
+                                                    perry_types::Type::Array(_) => {
+                                                        Some((None, true, true, false, false, false, false, false, false, false))
+                                                    }
+                                                    _ => None,
+                                                }
+                                            } else { None }
+                                        } else { None }
+                                    } else { None }
+                                } else { None }
+                            } else { None };
+
+                            if let Some(result) = class_method_result {
+                                result
+                            } else
                             // Check for array methods that return arrays
                             if property == "slice" {
                                 // slice could be array or string method - check the object
