@@ -1354,6 +1354,41 @@ impl Compiler {
                 }
             }
 
+            // Collect all LocalIds that are class-internal parameters (constructor params,
+            // method params, getter/setter params). These should NOT be promoted — they
+            // are local to the class method, not outer-scope captures.
+            // This is needed because function inlining (e.g., assertEq calls inlined at
+            // HIR level) can create LocalIds in function bodies that collide with class
+            // constructor param IDs, causing incorrect promotion of unrelated variables.
+            let mut class_own_param_ids: std::collections::HashSet<LocalId> = std::collections::HashSet::new();
+            for class in &hir.classes {
+                if let Some(ctor) = &class.constructor {
+                    for p in &ctor.params {
+                        class_own_param_ids.insert(p.id);
+                    }
+                }
+                for method in &class.methods {
+                    for p in &method.params {
+                        class_own_param_ids.insert(p.id);
+                    }
+                }
+                for (_, getter) in &class.getters {
+                    for p in &getter.params {
+                        class_own_param_ids.insert(p.id);
+                    }
+                }
+                for (_, setter) in &class.setters {
+                    for p in &setter.params {
+                        class_own_param_ids.insert(p.id);
+                    }
+                }
+                for method in &class.static_methods {
+                    for p in &method.params {
+                        class_own_param_ids.insert(p.id);
+                    }
+                }
+            }
+
             // Find which of these references are NOT already module-level variables
             // (i.e., they're function-local variables that need to be promoted)
             let class_ref_set: std::collections::HashSet<LocalId> = class_refs.into_iter().collect();
@@ -1361,6 +1396,10 @@ impl Compiler {
             for id in &class_ref_set {
                 if self.module_var_data_ids.contains_key(id) {
                     continue; // Already a module-level variable
+                }
+                // Skip class-internal parameters — they are NOT outer-scope captures
+                if class_own_param_ids.contains(id) {
+                    continue;
                 }
                 // Check if this ID exists in module_level_locals (function params/body vars)
                 if !self.module_level_locals.contains_key(id) {
@@ -1392,60 +1431,6 @@ impl Compiler {
             if promoted_count > 0 {
                 eprintln!("[CLASS_CAPTURE] Promoted {} function-local variables to module-level for class method access", promoted_count);
             }
-            // Debug: print all class refs with source info
-            for id in &class_ref_set {
-                let name = self.module_level_locals.get(id)
-                    .and_then(|info| info.name.clone())
-                    .unwrap_or_else(|| format!("unknown_{}", id));
-                let is_already_module = self.module_var_data_ids.contains_key(id);
-                let is_known = self.module_level_locals.contains_key(id);
-                eprintln!("[CLASS_DEBUG] class_ref LocalId={} name={} already_module={} known={}", id, name, is_already_module, is_known);
-            }
-            // Debug: find WHERE each class_ref comes from
-            for class in &hir.classes {
-                let mut per_class_refs: Vec<LocalId> = Vec::new();
-                let mut visited2 = std::collections::HashSet::new();
-                for method in &class.methods {
-                    let mut method_refs: Vec<LocalId> = Vec::new();
-                    for stmt in &method.body {
-                        perry_hir::collect_local_refs_stmt(stmt, &mut method_refs, &mut visited2);
-                    }
-                    if !method_refs.is_empty() {
-                        eprintln!("[CLASS_DEBUG]   class={} method={} refs={:?}", class.name, method.name, method_refs);
-                    }
-                    per_class_refs.extend(method_refs);
-                }
-                if let Some(ctor) = &class.constructor {
-                    let mut ctor_refs: Vec<LocalId> = Vec::new();
-                    for stmt in &ctor.body {
-                        perry_hir::collect_local_refs_stmt(stmt, &mut ctor_refs, &mut visited2);
-                    }
-                    if !ctor_refs.is_empty() {
-                        eprintln!("[CLASS_DEBUG]   class={} constructor refs={:?}", class.name, ctor_refs);
-                    }
-                    per_class_refs.extend(ctor_refs);
-                }
-                for (gname, getter) in &class.getters {
-                    let mut getter_refs: Vec<LocalId> = Vec::new();
-                    for stmt in &getter.body {
-                        perry_hir::collect_local_refs_stmt(stmt, &mut getter_refs, &mut visited2);
-                    }
-                    if !getter_refs.is_empty() {
-                        eprintln!("[CLASS_DEBUG]   class={} getter={} refs={:?}", class.name, gname, getter_refs);
-                    }
-                    per_class_refs.extend(getter_refs);
-                }
-                for (sname, setter) in &class.setters {
-                    let mut setter_refs: Vec<LocalId> = Vec::new();
-                    for stmt in &setter.body {
-                        perry_hir::collect_local_refs_stmt(stmt, &mut setter_refs, &mut visited2);
-                    }
-                    if !setter_refs.is_empty() {
-                        eprintln!("[CLASS_DEBUG]   class={} setter={} refs={:?}", class.name, sname, setter_refs);
-                    }
-                    per_class_refs.extend(setter_refs);
-                }
-            }
         }
 
         // Now compile closures (after wrappers are created and module vars are registered)
@@ -1456,14 +1441,6 @@ impl Compiler {
         // Compile class constructors and methods
         for class in &hir.classes {
             if let Some(ref ctor) = class.constructor {
-                eprintln!("[CTOR_DEBUG] class={} ctor params:", class.name);
-                for p in &ctor.params {
-                    eprintln!("[CTOR_DEBUG]   param id={} name={}", p.id, p.name);
-                }
-                eprintln!("[CTOR_DEBUG] class={} ctor body:", class.name);
-                for (i, stmt) in ctor.body.iter().enumerate() {
-                    eprintln!("[CTOR_DEBUG]   stmt[{}]: {:?}", i, stmt);
-                }
                 self.compile_class_constructor(class, ctor)?;
             }
             for method in &class.methods {
