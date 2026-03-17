@@ -1423,6 +1423,91 @@ impl crate::codegen::Compiler {
                 });
             }
 
+            // Generate default parameter checks for closure parameters.
+            // When closures are called with fewer arguments than declared parameters,
+            // the missing params receive whatever value was in the register (undefined behavior).
+            // For params with default values, check if the value is TAG_UNDEFINED and substitute.
+            for (i, param) in params.iter().enumerate() {
+                if let Some(default_expr) = &param.default {
+                    if let Some(info) = locals.get(&param.id) {
+                        let var = info.var;
+                        // Only handle simple literal defaults that can be compiled inline
+                        let default_val_opt: Option<Value> = match default_expr {
+                            perry_hir::Expr::Number(n) => {
+                                Some(builder.ins().f64const(*n))
+                            }
+                            perry_hir::Expr::Integer(n) => {
+                                Some(builder.ins().f64const(*n as f64))
+                            }
+                            perry_hir::Expr::Bool(b) => {
+                                Some(builder.ins().f64const(if *b { 1.0 } else { 0.0 }))
+                            }
+                            perry_hir::Expr::String(s) => {
+                                // Create string default value
+                                if let Some(func_id) = self.extern_funcs.get("js_string_from_bytes") {
+                                    let func_ref = self.module.declare_func_in_func(*func_id, builder.func);
+                                    let bytes = s.as_bytes();
+                                    if let Ok(data_id) = self.module.declare_anonymous_data(false, false) {
+                                        let mut data_desc = cranelift_module::DataDescription::new();
+                                        data_desc.define(bytes.to_vec().into_boxed_slice());
+                                        if self.module.define_data(data_id, &data_desc).is_ok() {
+                                            let data_val = self.module.declare_data_in_func(data_id, builder.func);
+                                            let ptr = builder.ins().global_value(types::I64, data_val);
+                                            let len = builder.ins().iconst(types::I32, bytes.len() as i64);
+                                            let call = builder.ins().call(func_ref, &[ptr, len]);
+                                            // String pointer needs to be stored as I64 if param is pointer-typed
+                                            let str_ptr = builder.inst_results(call)[0];
+                                            if info.is_pointer {
+                                                Some(str_ptr)
+                                            } else {
+                                                // For f64-typed params, NaN-box the string pointer
+                                                Some(builder.ins().bitcast(types::F64, MemFlags::new(), str_ptr))
+                                            }
+                                        } else { None }
+                                    } else { None }
+                                } else { None }
+                            }
+                            perry_hir::Expr::Undefined => None, // Default is undefined, no check needed
+                            _ => None, // Complex defaults not handled inline
+                        };
+
+                        if let Some(default_val) = default_val_opt {
+                            let param_val = builder.use_var(var);
+                            let var_type = builder.func.dfg.value_type(param_val);
+                            let is_undefined = if var_type == types::I64 {
+                                let zero = builder.ins().iconst(types::I64, 0);
+                                builder.ins().icmp(IntCC::Equal, param_val, zero)
+                            } else {
+                                // For f64 params: check if bits equal TAG_UNDEFINED (0x7FFC_0000_0000_0001)
+                                // Also check for NaN (missing args may arrive as NaN on some platforms)
+                                let raw_bits = builder.ins().bitcast(types::I64, MemFlags::new(), param_val);
+                                let tag_undefined = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0001u64 as i64);
+                                let is_tag_undef = builder.ins().icmp(IntCC::Equal, raw_bits, tag_undefined);
+                                // Also check: if param val is 0.0 and the f64 bits are 0 (missing ABI arg)
+                                let zero_bits = builder.ins().iconst(types::I64, 0);
+                                let is_zero_bits = builder.ins().icmp(IntCC::Equal, raw_bits, zero_bits);
+                                // Check for canonical NaN (when closure called with fewer args, registers may be NaN)
+                                let is_nan = builder.ins().fcmp(FloatCC::Unordered, param_val, param_val);
+                                // Undefined if TAG_UNDEFINED or NaN (but not 0.0 bits, since 0.0 is valid)
+                                builder.ins().bor(is_tag_undef, is_nan)
+                            };
+
+                            let default_block = builder.create_block();
+                            let continue_block = builder.create_block();
+                            builder.ins().brif(is_undefined, default_block, &[], continue_block, &[]);
+
+                            builder.switch_to_block(default_block);
+                            builder.seal_block(default_block);
+                            builder.def_var(var, default_val);
+                            builder.ins().jump(continue_block, &[]);
+
+                            builder.switch_to_block(continue_block);
+                            builder.seal_block(continue_block);
+                        }
+                    }
+                }
+            }
+
             // Load captured variables from the closure object
             // Each capture is stored as f64 in the closure object
             // For mutable captures, the f64 is actually a bitcast of a box pointer

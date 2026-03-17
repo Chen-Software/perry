@@ -3964,12 +3964,18 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                     }
                                     "map" if args.len() >= 1 => {
                                         // Skip if receiver is a known class instance (e.g., Box.map())
-                                        let is_class_instance = if let ast::Expr::Ident(ident) = member.obj.as_ref() {
-                                            ctx.lookup_local_type(&ident.sym.to_string())
-                                                .map(|ty| matches!(ty, Type::Named(_) | Type::Generic { .. }) && !matches!(ty, Type::Array(_)))
-                                                .unwrap_or(false)
-                                        } else {
-                                            false
+                                        // Check both local variables with class types AND new expressions
+                                        let is_class_instance = match member.obj.as_ref() {
+                                            ast::Expr::Ident(ident) => {
+                                                ctx.lookup_local_type(&ident.sym.to_string())
+                                                    .map(|ty| matches!(ty, Type::Named(_) | Type::Generic { .. }) && !matches!(ty, Type::Array(_)))
+                                                    .unwrap_or(false)
+                                            }
+                                            ast::Expr::New(_) => {
+                                                // new ClassName(...).map() - always a class instance, not an array
+                                                true
+                                            }
+                                            _ => false,
                                         };
                                         if !is_class_instance {
                                             let array_expr = lower_expr(ctx, &member.obj)?;

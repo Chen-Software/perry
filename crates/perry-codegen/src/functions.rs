@@ -110,6 +110,12 @@ impl crate::codegen::Compiler {
         }
         // Must not be async
         if func.is_async { return false; }
+        // Must not have default or optional parameters — the i64 wrapper uses
+        // fcvt_to_sint_sat which converts NaN-boxed undefined (missing arg) to 0
+        // instead of triggering the default-value logic in compile_function_inner.
+        if func.params.iter().any(|p| p.default.is_some()) {
+            return false;
+        }
         // Body must only contain integer-compatible operations
         fn is_integer_expr(expr: &Expr, func_id: u32) -> bool {
             match expr {

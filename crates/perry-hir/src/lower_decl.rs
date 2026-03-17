@@ -292,6 +292,44 @@ pub(crate) fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::Clas
         }
     }
 
+    // Detect fields from TypeScript parameter properties (e.g., constructor(public name: string)).
+    // SWC represents these as TsParamProp in the AST. They must be registered as class fields
+    // so that `this.name` access in methods can find them by field index.
+    {
+        let declared_field_names: std::collections::HashSet<String> = fields.iter().map(|f| f.name.clone()).collect();
+        for member in &class_decl.class.body {
+            if let ast::ClassMember::Constructor(ctor) = member {
+                for param in &ctor.params {
+                    if let ast::ParamOrTsParamProp::TsParamProp(ts_prop) = param {
+                        let (param_name, param_type) = match &ts_prop.param {
+                            ast::TsParamPropParam::Ident(ident) => {
+                                let pname = ident.id.sym.to_string();
+                                let ty = ident.type_ann.as_ref()
+                                    .map(|ann| extract_ts_type_with_ctx(&ann.type_ann, Some(ctx)))
+                                    .unwrap_or(Type::Any);
+                                (pname, ty)
+                            }
+                            ast::TsParamPropParam::Assign(assign) => {
+                                let pname = get_pat_name(&assign.left).unwrap_or_default();
+                                let ty = extract_param_type_with_ctx(&assign.left, Some(ctx));
+                                (pname, ty)
+                            }
+                        };
+                        if !param_name.is_empty() && !declared_field_names.contains(&param_name) {
+                            fields.push(ClassField {
+                                name: param_name,
+                                ty: param_type,
+                                init: None,
+                                is_private: false,
+                                is_readonly: ts_prop.readonly,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Detect fields from constructor body `this.xxx = ...` assignments.
     // JavaScript classes (e.g., transpiled from TypeScript) often don't have ClassProp
     // declarations; instead they assign to `this` in the constructor body.
@@ -731,6 +769,8 @@ pub(crate) fn lower_constructor(ctx: &mut LoweringContext, class_name: &str, cto
 
     // Lower parameters with type extraction (using context for class type param resolution)
     let mut params = Vec::new();
+    // Track TsParamProp params so we can synthesize `this.field = param` assignments
+    let mut param_prop_assignments: Vec<(LocalId, String)> = Vec::new();
     for param in &ctor.params {
         match param {
             ast::ParamOrTsParamProp::Param(p) => {
@@ -764,6 +804,8 @@ pub(crate) fn lower_constructor(ctx: &mut LoweringContext, class_name: &str, cto
                     }
                 };
                 let param_id = ctx.define_local(param_name.clone(), param_type.clone());
+                // Record this param for synthesizing `this.field = param` assignment
+                param_prop_assignments.push((param_id, param_name.clone()));
                 params.push(Param {
                     id: param_id,
                     name: param_name,
@@ -776,11 +818,28 @@ pub(crate) fn lower_constructor(ctx: &mut LoweringContext, class_name: &str, cto
     }
 
     // Lower body
-    let body = if let Some(ref block) = ctor.body {
+    let mut body = if let Some(ref block) = ctor.body {
         lower_block_stmt(ctx, block)?
     } else {
         Vec::new()
     };
+
+    // Synthesize `this.field = param` assignments for parameter properties.
+    // In TypeScript, `constructor(public name: string)` automatically assigns
+    // `this.name = name` at the start of the constructor body.
+    if !param_prop_assignments.is_empty() {
+        let mut synthetic_stmts: Vec<Stmt> = Vec::new();
+        for (param_id, field_name) in &param_prop_assignments {
+            synthetic_stmts.push(Stmt::Expr(Expr::PropertySet {
+                object: Box::new(Expr::This),
+                property: field_name.clone(),
+                value: Box::new(Expr::LocalGet(*param_id)),
+            }));
+        }
+        // Prepend synthetic assignments before the user-written constructor body
+        synthetic_stmts.append(&mut body);
+        body = synthetic_stmts;
+    }
 
     ctx.exit_scope(scope_mark);
 

@@ -2262,8 +2262,13 @@ pub(crate) fn compile_expr(
                     let delete_ref = module.declare_func_in_func(*delete_func, builder.func);
                     let call = builder.ins().call(delete_ref, &[obj_ptr, prop_str_ptr]);
                     let result = builder.inst_results(call)[0];
-                    // Convert i32 (0 or 1) to f64 boolean
-                    Ok(builder.ins().fcvt_from_sint(types::F64, result))
+                    // Convert i32 (0 or 1) to NaN-boxed boolean (TAG_TRUE or TAG_FALSE)
+                    let is_true = builder.ins().icmp_imm(IntCC::NotEqual, result, 0);
+                    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+                    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+                    let true_val = builder.ins().f64const(f64::from_bits(TAG_TRUE));
+                    let false_val = builder.ins().f64const(f64::from_bits(TAG_FALSE));
+                    Ok(builder.ins().select(is_true, true_val, false_val))
                 }
                 Expr::IndexGet { object, index } => {
                     // delete obj["prop"] or delete arr[index]
@@ -2288,8 +2293,13 @@ pub(crate) fn compile_expr(
                     let delete_ref = module.declare_func_in_func(*delete_func, builder.func);
                     let call = builder.ins().call(delete_ref, &[obj_ptr, key_f64]);
                     let result = builder.inst_results(call)[0];
-                    // Convert i32 (0 or 1) to f64 boolean
-                    Ok(builder.ins().fcvt_from_sint(types::F64, result))
+                    // Convert i32 (0 or 1) to NaN-boxed boolean (TAG_TRUE or TAG_FALSE)
+                    let is_true = builder.ins().icmp_imm(IntCC::NotEqual, result, 0);
+                    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+                    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+                    let true_val = builder.ins().f64const(f64::from_bits(TAG_TRUE));
+                    let false_val = builder.ins().f64const(f64::from_bits(TAG_FALSE));
+                    Ok(builder.ins().select(is_true, true_val, false_val))
                 }
                 _ => {
                     // delete on non-member/index always returns true in non-strict mode
@@ -6078,24 +6088,41 @@ pub(crate) fn compile_expr(
                     }
 
                     // Helper to check if argument expression is a string
-                    fn is_string_arg_expr(arg: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+                    // Detects string literals, local variables known to be strings,
+                    // template literals, and function calls that return String type
+                    fn is_string_arg_expr(arg: &Expr, locals: &BTreeMap<LocalId, LocalInfo>, func_hir_return_types: &BTreeMap<u32, perry_types::Type>) -> bool {
                         match arg {
                             Expr::String(_) => true,
+                            // Template literals are lowered to string concat, not a separate variant
                             Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
+                            Expr::Call { callee, .. } => {
+                                // Check if callee function returns String
+                                if let Expr::FuncRef(callee_id) = callee.as_ref() {
+                                    matches!(func_hir_return_types.get(callee_id), Some(perry_types::Type::String))
+                                } else {
+                                    false
+                                }
+                            }
+                            Expr::Binary { op, .. } if matches!(op, BinaryOp::Add) => {
+                                // String concatenation produces strings, but we can't always tell
+                                // at compile time. Be conservative.
+                                false
+                            }
                             _ => false,
                         }
                     }
 
                     // Convert arguments to match expected parameter types
-                    // For union-typed parameters, NaN-box strings with STRING_TAG
+                    // For union/any-typed parameters, NaN-box strings with STRING_TAG
+                    // and other pointers with POINTER_TAG
                     let union_params = func_union_params.get(func_id);
                     let converted_args: Vec<Value> = if let Some(param_types) = func_param_types.get(func_id) {
                         final_args.iter().enumerate().map(|(i, &val)| {
-                            // Check if this parameter is a union type
+                            // Check if this parameter is a union type or Any type
                             let is_union_param = union_params.and_then(|p| p.get(i).copied()).unwrap_or(false);
 
-                            if is_union_param && i < args.len() && is_string_arg_expr(&args[i], locals) {
-                                // String being passed to union-typed parameter: NaN-box with STRING_TAG
+                            if i < param_types.len() && param_types[i] == types::F64 && i < args.len() && is_string_arg_expr(&args[i], locals, func_hir_return_types) {
+                                // String being passed to F64 parameter (any/union): NaN-box with STRING_TAG
                                 let ptr = ensure_i64(builder, val);
                                 let nanbox_func = extern_funcs.get("js_nanbox_string")
                                     .expect("js_nanbox_string not declared");
@@ -6119,10 +6146,10 @@ pub(crate) fn compile_expr(
                             } else if i < param_types.len() && param_types[i] == types::F64 {
                                 // Parameter expects f64 - ensure we have f64
                                 let val_type = builder.func.dfg.value_type(val);
-                                if is_union_param && val_type == types::I64 {
-                                    // Pointer (object/array/closure) being passed to a union/any
-                                    // typed F64 parameter. NaN-box with POINTER_TAG so that
-                                    // runtime typeof checks (js_value_typeof) work correctly.
+                                if val_type == types::I64 {
+                                    // I64 pointer (object/array/closure) being passed to an F64
+                                    // parameter. NaN-box with POINTER_TAG so that runtime typeof
+                                    // checks (js_value_typeof) work correctly.
                                     // String pointers are handled above by is_string_arg_expr.
                                     inline_nanbox_pointer(builder, val)
                                 } else {
@@ -8709,6 +8736,66 @@ pub(crate) fn compile_expr(
                         }
                     }
 
+                    // Handle method calls on `new ClassName(...)` expressions
+                    // e.g., new Box(5).map(fn) → compile new Box(5), then call Box::map
+                    if let Expr::New { class_name, .. } = object.as_ref() {
+                        if let Some(class_meta) = classes.get(class_name) {
+                            if let Some(&method_id) = class_meta.method_ids.get(property) {
+                                // Compile the new expression to get the object pointer
+                                let obj_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
+                                let obj_ptr = ensure_i64(builder, obj_val);
+
+                                // Build args: [this, ...args]
+                                let mut call_args = vec![obj_ptr];
+                                for arg in &arg_vals {
+                                    call_args.push(ensure_f64(builder, *arg));
+                                }
+
+                                let func_ref = module.declare_func_in_func(method_id, builder.func);
+
+                                // Get expected parameter count and types from the function signature
+                                let actual_sig = module.declarations().get_function_decl(method_id);
+                                let expected_param_count = actual_sig.signature.params.len();
+
+                                // Convert arguments to match expected types
+                                let mut final_call_args: Vec<Value> = call_args.iter().enumerate()
+                                    .map(|(i, &val)| {
+                                        if i < actual_sig.signature.params.len() {
+                                            let expected_type = actual_sig.signature.params[i].value_type;
+                                            let actual_type = builder.func.dfg.value_type(val);
+                                            if expected_type == types::I64 && actual_type == types::F64 {
+                                                ensure_i64(builder, val)
+                                            } else if expected_type == types::F64 && actual_type == types::I64 {
+                                                inline_nanbox_pointer(builder, val)
+                                            } else if expected_type == types::F64 && actual_type == types::I32 {
+                                                builder.ins().fcvt_from_sint(types::F64, val)
+                                            } else if expected_type == types::I64 && actual_type == types::I32 {
+                                                builder.ins().sextend(types::I64, val)
+                                            } else {
+                                                val
+                                            }
+                                        } else {
+                                            val
+                                        }
+                                    })
+                                    .collect();
+
+                                while final_call_args.len() < expected_param_count {
+                                    let expected_type = actual_sig.signature.params[final_call_args.len()].value_type;
+                                    if expected_type == types::I64 {
+                                        final_call_args.push(builder.ins().iconst(types::I64, 0));
+                                    } else {
+                                        final_call_args.push(builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001u64)));
+                                    }
+                                }
+                                final_call_args.truncate(expected_param_count);
+
+                                let call = builder.ins().call(func_ref, &final_call_args);
+                                return Ok(builder.inst_results(call)[0]);
+                            }
+                        }
+                    }
+
                     // Handle method calls on 'this' (e.g., this.emit())
                     if matches!(object.as_ref(), Expr::This) {
                         // In static methods, `this` refers to the class itself.
@@ -10380,9 +10467,24 @@ pub(crate) fn compile_expr(
                                 arg_vals.to_vec()
                             };
 
-                            // Select the appropriate js_closure_call* function based on arg count
+                            // Determine the closure's declared parameter count from its signature.
+                            // If the closure was compiled with N params, we must pass exactly N args
+                            // (plus the closure_ptr). Missing args get TAG_UNDEFINED.
+                            let declared_param_count = info.closure_func_id
+                                .and_then(|cfid| closure_func_ids.get(&cfid))
+                                .map(|&clif_id| {
+                                    let decl = module.declarations().get_function_decl(clif_id);
+                                    // Subtract 1 for the closure_ptr parameter
+                                    decl.signature.params.len().saturating_sub(1)
+                                })
+                                .unwrap_or(effective_args.len());
+
+                            // Pad missing arguments with TAG_UNDEFINED to match declared param count
+                            let actual_arg_count = declared_param_count.max(effective_args.len());
+
+                            // Select the appropriate js_closure_call* function based on actual arg count
                             let call_func_name_owned;
-                            let call_func_name: &str = match effective_args.len() {
+                            let call_func_name: &str = match actual_arg_count {
                                 0 => "js_closure_call0",
                                 1 => "js_closure_call1",
                                 2 => "js_closure_call2",
@@ -10441,6 +10543,12 @@ pub(crate) fn compile_expr(
                                     arg_val
                                 };
                                 call_args.push(arg_f64);
+                            }
+
+                            // Pad missing arguments with TAG_UNDEFINED
+                            const TAG_UNDEFINED_CLOSURE: u64 = 0x7FFC_0000_0000_0001;
+                            while call_args.len() < actual_arg_count + 1 { // +1 for closure_ptr
+                                call_args.push(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED_CLOSURE)));
                             }
 
                             let call = builder.ins().call(call_ref, &call_args);

@@ -925,24 +925,27 @@ pub extern "C" fn js_object_entries(obj: *const ObjectHeader) -> *mut ArrayHeade
 }
 
 /// Check if a property exists in an object by its string key name
-/// Returns 1.0 if the property exists, 0.0 otherwise
+/// Returns NaN-boxed true if the property exists, NaN-boxed false otherwise
 /// This implements the JavaScript 'in' operator: "key" in obj
 #[no_mangle]
 pub extern "C" fn js_object_has_property(obj: f64, key: f64) -> f64 {
+    let nanbox_false = f64::from_bits(0x7FFC_0000_0000_0003u64); // TAG_FALSE
+    let nanbox_true = f64::from_bits(0x7FFC_0000_0000_0004u64);  // TAG_TRUE
+
     let obj_val = JSValue::from_bits(obj.to_bits());
     let key_val = JSValue::from_bits(key.to_bits());
 
     if !obj_val.is_pointer() {
-        return 0.0;
+        return nanbox_false;
     }
 
     let obj_ptr = obj_val.as_pointer::<ObjectHeader>();
     if obj_ptr.is_null() {
-        return 0.0;
+        return nanbox_false;
     }
 
     if !key_val.is_string() {
-        return 0.0;
+        return nanbox_false;
     }
 
     let key_str = key_val.as_string_ptr();
@@ -950,7 +953,7 @@ pub extern "C" fn js_object_has_property(obj: f64, key: f64) -> f64 {
     unsafe {
         let keys = (*obj_ptr).keys_array;
         if keys.is_null() {
-            return 0.0;
+            return nanbox_false;
         }
 
         let key_count = crate::array::js_array_length(keys) as usize;
@@ -962,14 +965,14 @@ pub extern "C" fn js_object_has_property(obj: f64, key: f64) -> f64 {
                     // Check if the field was deleted (set to undefined by delete operator)
                     let field_val = js_object_get_field(obj_ptr, i as u32);
                     if field_val.is_undefined() {
-                        return 0.0;
+                        return nanbox_false;
                     }
-                    return 1.0;
+                    return nanbox_true;
                 }
             }
         }
 
-        0.0
+        nanbox_false
     }
 }
 
