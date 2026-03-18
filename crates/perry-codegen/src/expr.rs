@@ -15144,10 +15144,27 @@ pub(crate) fn compile_expr(
                 let key_ptr = builder.inst_results(str_call)[0];
 
                 // Convert value to f64 for the runtime function.
-                // NaN-box I64 pointers with POINTER_TAG so closures/objects are stored correctly.
+                // NaN-box I64 values with the correct tag:
+                // - Strings need STRING_TAG for proper typeof and concatenation
+                // - Other pointers (closures, objects) need POINTER_TAG
                 let val_type = builder.func.dfg.value_type(val);
                 let val_f64 = if val_type == types::I64 {
-                    inline_nanbox_pointer(builder, val)
+                    // Detect if the value is a string
+                    fn is_string_value_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+                        match expr {
+                            Expr::String(_) => true,
+                            Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
+                            Expr::Binary { op: BinaryOp::Add, left, right } => {
+                                is_string_value_expr(left, locals) || is_string_value_expr(right, locals)
+                            }
+                            _ => false,
+                        }
+                    }
+                    if is_string_value_expr(value, locals) {
+                        inline_nanbox_string(builder, val)
+                    } else {
+                        inline_nanbox_pointer(builder, val)
+                    }
                 } else {
                     ensure_f64(builder, val)
                 };
