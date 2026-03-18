@@ -2,6 +2,8 @@
 
 Perry provides 9 commands for compiling, checking, running, publishing, and managing your projects.
 
+See also: [perry.toml Reference](perry-toml.md) for project configuration.
+
 ## compile
 
 Compile TypeScript to a native executable.

@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.194
+**Current Version:** 0.2.195
 
 ## Workflow Requirements
 
@@ -152,6 +152,10 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - `CGPoint`/`CGSize`/`CGRect` in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.195
+- **Documentation: comprehensive perry.toml reference**: `docs/src/cli/perry-toml.md` — every section (`[project]`, `[app]`, `[build]`, `[macos]`, `[ios]`, `[android]`, `[linux]`, `[publish]`, `[audit]`, `[verify]`), all fields with types/defaults, bundle ID resolution order, entry file resolution, build number auto-increment, distribution modes, environment variables, global config (`~/.perry/config.toml`), CI/CD example; linked from SUMMARY.md, project-config.md, and commands.md
+- **Documentation: comprehensive geisterhand reference**: rewrote `docs/src/testing/geisterhand.md` — full API reference (all 14 HTTP endpoints with request/response formats), widget type and callback kind tables, platform setup for all 5 platforms + iOS device, test automation patterns (shell scripts, Python, CI pipelines, visual regression, chaos stress testing), architecture diagram, thread safety model, NaN-boxing bridge details, build system (auto-build, feature flags, manual cross-compilation, separate target dir), troubleshooting guide
 
 ### v0.2.194
 - **CLI: platform as positional arg for `run` and `publish`**: `perry run ios`, `perry publish macos` instead of `--ios`/`--macos` flags — platform is the primary selector, not a composable modifier; shared `Platform` ValueEnum (macos/ios/android/linux/windows/web); `perry compile --target` unchanged (file is the primary arg there); updated docs and error messages

@@ -82,6 +82,7 @@
 
 - [Commands](cli/commands.md)
 - [Compiler Flags](cli/flags.md)
+- [perry.toml Reference](cli/perry-toml.md)
 
 ---
 
