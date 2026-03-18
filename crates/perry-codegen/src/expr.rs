@@ -4178,7 +4178,7 @@ pub(crate) fn compile_expr(
                                         if let Expr::PropertyGet { object, property } = callee.as_ref() {
                                             if property == "slice" || property == "substring" || property == "trim"
                                                || property == "toLowerCase" || property == "toUpperCase" || property == "replace"
-                                               || property == "padStart" || property == "padEnd" || property == "repeat" || property == "charAt" {
+                                               || property == "padStart" || property == "padEnd" || property == "repeat" || property == "charAt" || property == "toString" {
                                                 if let Expr::LocalGet(id) = object.as_ref() {
                                                     return locals.get(id).map(|i| i.is_string).unwrap_or(true);
                                                 }
@@ -4646,7 +4646,7 @@ pub(crate) fn compile_expr(
                             // These methods only exist on strings and always return strings
                             if property == "slice" || property == "substring" || property == "trim"
                                || property == "toLowerCase" || property == "toUpperCase" || property == "replace"
-                               || property == "padStart" || property == "padEnd" || property == "repeat" || property == "charAt" {
+                               || property == "padStart" || property == "padEnd" || property == "repeat" || property == "charAt" || property == "toString" {
                                 return true;
                             }
                         }
@@ -6272,7 +6272,15 @@ pub(crate) fn compile_expr(
                     if async_func_ids.contains(func_id) {
                         Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result))
                     } else {
-                        Ok(result)
+                        // NaN-box string return values so callers detect them for concatenation
+                        let result_type = builder.func.dfg.value_type(result);
+                        if result_type == types::I64 && func_hir_return_types.get(func_id)
+                            .map(|t| matches!(t, perry_types::Type::String)).unwrap_or(false)
+                        {
+                            Ok(inline_nanbox_string(builder, result))
+                        } else {
+                            Ok(result)
+                        }
                     }
                 }
                 Expr::PropertyGet { object, property } => {

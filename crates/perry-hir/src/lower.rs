@@ -5925,7 +5925,28 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                         .map(|arg| lower_expr(ctx, &arg.expr))
                         .collect::<Result<Vec<_>>>()?;
 
-                    let callee_expr = lower_expr(ctx, callee)?;
+                    // Lower callee as plain MemberExpr, unwrapping inner OptChain.
+                    // SWC may wrap the callee member access in an OptChain too.
+                    // We must NOT re-lower via lower_expr which would nest Conditionals.
+                    let (check_expr, callee_expr) = {
+                        let mut lower_member_flat = |member: &ast::MemberExpr| -> Result<(Expr, Expr)> {
+                            let obj = lower_expr(ctx, &member.obj)?;
+                            let prop = match &member.prop {
+                                ast::MemberProp::Ident(id) => Expr::PropertyGet { object: Box::new(obj.clone()), property: id.sym.to_string() },
+                                ast::MemberProp::Computed(c) => { let idx = lower_expr(ctx, &c.expr)?; Expr::IndexGet { object: Box::new(obj.clone()), index: Box::new(idx) } },
+                                _ => return Err(anyhow!("Unsupported optional chain member")),
+                            };
+                            Ok((obj, prop))
+                        };
+                        match &**callee {
+                            ast::Expr::Member(m) => lower_member_flat(m)?,
+                            ast::Expr::OptChain(inner) => match &*inner.base {
+                                ast::OptChainBase::Member(m) => lower_member_flat(m)?,
+                                _ => { let ce = lower_expr(ctx, callee)?; (ce.clone(), ce) }
+                            },
+                            _ => { let ce = lower_expr(ctx, callee)?; (ce.clone(), ce) }
+                        }
+                    };
 
                     // Build the call expression
                     let call_expr = if has_spread {
@@ -5948,18 +5969,6 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                             callee: Box::new(callee_expr),
                             args,
                             type_args: Vec::new(),
-                        }
-                    };
-
-                    // Extract the object to null-check from the callee
-                    // For method calls (obj.method), check the object
-                    // For plain calls (fn), check the function itself
-                    let check_expr = match &**callee {
-                        ast::Expr::Member(member) => {
-                            lower_expr(ctx, &member.obj)?
-                        }
-                        _ => {
-                            lower_expr(ctx, callee)?
                         }
                     };
 
