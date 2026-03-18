@@ -6198,11 +6198,22 @@ pub(crate) fn compile_expr(
                                 // Parameter expects f64 - ensure we have f64
                                 let val_type = builder.func.dfg.value_type(val);
                                 if val_type == types::I64 {
-                                    // I64 pointer (object/array/closure) being passed to an F64
-                                    // parameter. NaN-box with POINTER_TAG so that runtime typeof
-                                    // checks (js_value_typeof) work correctly.
-                                    // String pointers are handled above by is_string_arg_expr.
-                                    inline_nanbox_pointer(builder, val)
+                                    // I64 value being passed to an F64 parameter.
+                                    // BigInt pointers must use BIGINT_TAG, others use POINTER_TAG.
+                                    let is_bigint = i < args.len() && (
+                                        matches!(&args[i], Expr::BigInt(_) | Expr::BigIntCoerce(_)) ||
+                                        matches!(&args[i], Expr::LocalGet(id) if locals.get(id).map(|li| li.is_bigint).unwrap_or(false)) ||
+                                        matches!(&args[i], Expr::Binary { .. } if func_hir_return_types.get(func_id).map(|t| matches!(t, perry_types::Type::BigInt)).unwrap_or(false))
+                                    );
+                                    if is_bigint {
+                                        let nanbox_func = extern_funcs.get("js_nanbox_bigint")
+                                            .expect("js_nanbox_bigint not declared");
+                                        let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                                        let call = builder.ins().call(nanbox_ref, &[val]);
+                                        builder.inst_results(call)[0]
+                                    } else {
+                                        inline_nanbox_pointer(builder, val)
+                                    }
                                 } else {
                                     ensure_f64(builder, val)
                                 }
@@ -10785,16 +10796,28 @@ pub(crate) fn compile_expr(
 
                     // Build call args: [0 (closure_ptr), ...args as f64]
                     let mut call_args = vec![builder.ins().iconst(types::I64, 0)];
-                    for &arg_val in arg_vals.iter() {
+                    for (idx, &arg_val) in arg_vals.iter().enumerate() {
                         let arg_type = builder.func.dfg.value_type(arg_val);
                         let arg_f64 = if arg_type == types::I64 {
-                            // Properly NaN-box i64 pointers for cross-module calls
-                            // (simple bitcast doesn't add the NaN-box tag bits)
-                            let nanbox_func = extern_funcs.get("js_nanbox_pointer")
-                                .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
-                            let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
-                            let call = builder.ins().call(nanbox_ref, &[arg_val]);
-                            builder.inst_results(call)[0]
+                            // I64 value: could be BigInt pointer or object/array pointer.
+                            // Must NaN-box with the correct tag so the callee recognizes the type.
+                            let is_bigint_arg = idx < args.len() && matches!(args[idx],
+                                Expr::BigInt(_) | Expr::BigIntCoerce(_));
+                            let is_bigint_local = idx < args.len() && matches!(&args[idx],
+                                Expr::LocalGet(id) if locals.get(id).map(|i| i.is_bigint).unwrap_or(false));
+                            if is_bigint_arg || is_bigint_local {
+                                let nanbox_func = extern_funcs.get("js_nanbox_bigint")
+                                    .ok_or_else(|| anyhow!("js_nanbox_bigint not declared"))?;
+                                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                                let call = builder.ins().call(nanbox_ref, &[arg_val]);
+                                builder.inst_results(call)[0]
+                            } else {
+                                let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                                    .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                                let call = builder.ins().call(nanbox_ref, &[arg_val]);
+                                builder.inst_results(call)[0]
+                            }
                         } else if arg_type == types::I32 {
                             // i32 (from loop counter optimization) -> f64
                             builder.ins().fcvt_from_sint(types::F64, arg_val)
