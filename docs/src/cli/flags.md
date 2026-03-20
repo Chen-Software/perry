@@ -25,6 +25,10 @@ Use `--target` to cross-compile:
 | `android` | Android | ARM64/ARMv7 |
 | `ios-widget` | iOS Widget | WidgetKit extension (requires `--app-bundle-id`) |
 | `ios-widget-simulator` | iOS Widget (Sim) | Widget for simulator |
+| `watchos-widget` | watchOS Complication | WidgetKit extension for Apple Watch |
+| `watchos-widget-simulator` | watchOS Widget (Sim) | Widget for watchOS simulator |
+| `android-widget` | Android Widget | Android App Widget (AppWidgetProvider) |
+| `wearos-tile` | Wear OS Tile | Wear OS Tile (TileService) |
 | `wasm` | WebAssembly | Self-contained HTML with WASM or raw `.wasm` binary |
 | `web` | Web | Outputs HTML file with JS |
 | `windows` | Windows | Win32 executable |

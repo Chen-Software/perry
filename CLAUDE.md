@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.197
+**Current Version:** 0.2.198
 
 ## Workflow Requirements
 
@@ -152,6 +152,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - `CGPoint`/`CGSize`/`CGRect` in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.198
+- **Widget: full iOS + Android + watchOS + Wear OS support**: WidgetDecl extended with `config_params` (AppIntent), `provider_func_name` (native Cranelift provider), `placeholder`, `family_param_name` (family-specific rendering), `app_group` (shared storage), `reload_after_seconds`; new WidgetNode variants: ForEach, Divider, Label, FamilySwitch, Gauge (watchOS); new WidgetModifier variants: MinimumScaleFactor, ContainerBackground, FrameMaxWidth, WidgetURL, PaddingEdge; WidgetFieldType extended with Array/Optional/Object for nested entry structs; new `perry-codegen-glance` crate (Android Glance widgets: GlanceAppWidget, Receiver, ConfigActivity, widget_info XML, manifest snippet); new `perry-codegen-wear-tiles` crate (Wear OS Tiles: TileService, JNI bridge, manifest); SwiftUI codegen enhanced with AppIntentConfiguration, native provider glue (FFI bridge), nested Codable structs, Gauge emission, family switch; 4 new compile targets: `--target watchos-widget`, `--target android-widget`, `--target wearos-tile`, `--target watchos-widget-simulator`; lowering: parse `config`, `provider`, `placeholder`, `appGroup` properties, family-switch detection from if/else on family param, ForEach/Label/Gauge/Divider node parsing, recursive WidgetFieldType parsing (arrays, optionals, nested objects)
 
 ### v0.2.197
 - **Cross-platform `menuClear` + `menuAddStandardAction` + Windows RefCell fix**: add `perry_ui_menu_clear` and `perry_ui_menu_add_standard_action` FFI to all 6 platforms (were macOS-only); fix `dispatch_menu_item` RefCell re-entrancy panic on Windows (extract callback before calling, matching macOS fix from v0.2.196); update web/WASM runtimes and feature parity test matrix

@@ -62,11 +62,16 @@
 - [Notifications](system/notifications.md)
 - [Other](system/other.md)
 
-# Widgets (WidgetKit)
+# Widgets
 
-- [Overview](widgets/overview.md)
-- [Creating Widgets](widgets/creating-widgets.md)
-- [Components](widgets/components.md)
+- [Widgets](widgets/overview.md)
+  - [Creating Widgets](widgets/creating-widgets.md)
+  - [Components & Modifiers](widgets/components.md)
+  - [Configuration](widgets/configuration.md)
+  - [Data Fetching](widgets/data-fetching.md)
+  - [Cross-Platform Reference](widgets/platforms.md)
+  - [watchOS Complications](widgets/watchos.md)
+  - [Wear OS Tiles](widgets/wearos.md)
 
 # Plugins
 

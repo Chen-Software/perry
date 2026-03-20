@@ -1940,6 +1940,258 @@ fn compile_for_ios_widget(ctx: &CompilationContext, args: &CompileArgs, format: 
     })
 }
 
+/// Compile for watchOS widget target: emit SwiftUI + native timeline (accessory families)
+fn compile_for_watchos_widget(ctx: &CompilationContext, args: &CompileArgs, format: OutputFormat) -> Result<CompileResult> {
+    let app_bundle_id = args.app_bundle_id.as_deref()
+        .ok_or_else(|| anyhow!("--app-bundle-id is required for watchos-widget target"))?;
+
+    let mut widgets: Vec<&perry_hir::ir::WidgetDecl> = Vec::new();
+    for (_, hir_module) in &ctx.native_modules {
+        for widget in &hir_module.widgets {
+            widgets.push(widget);
+        }
+    }
+
+    if widgets.is_empty() {
+        return Err(anyhow!("No Widget() declarations found. Import {{ Widget }} from 'perry/widget' and call Widget({{...}})."));
+    }
+
+    match format {
+        OutputFormat::Text => println!("Generating watchOS WidgetKit extension ({} complication{})...",
+            widgets.len(), if widgets.len() == 1 { "" } else { "s" }),
+        OutputFormat::Json => {}
+    }
+
+    let output_dir = if let Some(ref out) = args.output {
+        out.clone()
+    } else {
+        let stem = args.input.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("widget");
+        PathBuf::from(format!("{}_watchos_widget", stem))
+    };
+
+    fs::create_dir_all(&output_dir)?;
+
+    let mut all_swift_files: Vec<(String, String)> = Vec::new();
+
+    for widget in &widgets {
+        let bundle = perry_codegen_swiftui::compile_widget(widget, app_bundle_id)?;
+
+        for (filename, source) in &bundle.swift_files {
+            let swift_path = output_dir.join(filename);
+            fs::write(&swift_path, source)?;
+            all_swift_files.push((filename.clone(), source.clone()));
+        }
+
+        let plist_path = output_dir.join("Info.plist");
+        fs::write(&plist_path, &bundle.info_plist)?;
+    }
+
+    let total_size: usize = all_swift_files.iter().map(|(_, s)| s.len()).sum();
+
+    match format {
+        OutputFormat::Text => {
+            println!("watchOS complication generated: {}/", output_dir.display());
+            for (name, source) in &all_swift_files {
+                println!("  {} ({:.1} KB)", name, source.len() as f64 / 1024.0);
+            }
+            println!("  Info.plist");
+            println!("Total: {:.1} KB SwiftUI source", total_size as f64 / 1024.0);
+            println!();
+            println!("To build the watchOS widget extension:");
+            let sdk = if args.target.as_deref() == Some("watchos-widget-simulator") {
+                "watchsimulator"
+            } else {
+                "watchos"
+            };
+            println!("  xcrun --sdk {} swiftc -target arm64-apple-watchos9.0 \\", sdk);
+            for (name, _) in &all_swift_files {
+                println!("    {}/{} \\", output_dir.display(), name);
+            }
+            println!("    -framework WidgetKit -framework SwiftUI \\");
+            println!("    -o {}/WidgetExtension", output_dir.display());
+        }
+        OutputFormat::Json => {
+            println!("{{\"output\": \"{}\", \"widgets\": {}, \"size\": {}, \"target\": \"watchos-widget\"}}",
+                output_dir.display(), widgets.len(), total_size);
+        }
+    }
+
+    let target_str = args.target.as_deref().unwrap_or("watchos-widget").to_string();
+    Ok(CompileResult {
+        output_path: output_dir,
+        target: target_str,
+        bundle_id: Some(app_bundle_id.to_string()),
+        is_dylib: false,
+    })
+}
+
+/// Compile for Android widget target: emit Kotlin/Glance source + JNI bridge
+fn compile_for_android_widget(ctx: &CompilationContext, args: &CompileArgs, format: OutputFormat) -> Result<CompileResult> {
+    let mut widgets: Vec<&perry_hir::ir::WidgetDecl> = Vec::new();
+    for (_, hir_module) in &ctx.native_modules {
+        for widget in &hir_module.widgets {
+            widgets.push(widget);
+        }
+    }
+
+    if widgets.is_empty() {
+        return Err(anyhow!("No Widget() declarations found. Import {{ Widget }} from 'perry/widget' and call Widget({{...}})."));
+    }
+
+    let app_package = args.app_bundle_id.as_deref().unwrap_or("com.perry.widget");
+
+    match format {
+        OutputFormat::Text => println!("Generating Android Glance widget ({} widget{})...",
+            widgets.len(), if widgets.len() == 1 { "" } else { "s" }),
+        OutputFormat::Json => {}
+    }
+
+    let output_dir = if let Some(ref out) = args.output {
+        out.clone()
+    } else {
+        let stem = args.input.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("widget");
+        PathBuf::from(format!("{}_android_widget", stem))
+    };
+
+    fs::create_dir_all(&output_dir)?;
+    fs::create_dir_all(output_dir.join("xml"))?;
+
+    let mut all_kotlin_files: Vec<(String, String)> = Vec::new();
+
+    for widget in &widgets {
+        let bundle = perry_codegen_glance::compile_widget_glance(widget, app_package)?;
+
+        for (filename, source) in &bundle.kotlin_files {
+            let kt_path = output_dir.join(filename);
+            fs::write(&kt_path, source)?;
+            all_kotlin_files.push((filename.clone(), source.clone()));
+        }
+
+        // Write widget_info XML
+        let safe_name = widget.kind.rsplit('.').next().unwrap_or("widget").to_lowercase();
+        let xml_path = output_dir.join("xml").join(format!("widget_info_{}.xml", safe_name));
+        fs::write(&xml_path, &bundle.widget_info_xml)?;
+
+        // Write manifest snippet
+        let manifest_path = output_dir.join("AndroidManifest_snippet.xml");
+        fs::write(&manifest_path, &bundle.manifest_snippet)?;
+    }
+
+    let total_size: usize = all_kotlin_files.iter().map(|(_, s)| s.len()).sum();
+
+    match format {
+        OutputFormat::Text => {
+            println!("Android Glance widget generated: {}/", output_dir.display());
+            for (name, source) in &all_kotlin_files {
+                println!("  {} ({:.1} KB)", name, source.len() as f64 / 1024.0);
+            }
+            println!("  xml/widget_info_*.xml");
+            println!("  AndroidManifest_snippet.xml");
+            println!("Total: {:.1} KB Kotlin source", total_size as f64 / 1024.0);
+            println!();
+            println!("Add the generated files to your Android/Gradle project:");
+            println!("  1. Copy *.kt files to app/src/main/java/{}/", app_package.replace('.', "/"));
+            println!("  2. Copy xml/ to app/src/main/res/xml/");
+            println!("  3. Merge AndroidManifest_snippet.xml into your AndroidManifest.xml");
+            println!("  4. Add Glance dependency: implementation \"androidx.glance:glance-appwidget:1.1.0\"");
+        }
+        OutputFormat::Json => {
+            println!("{{\"output\": \"{}\", \"widgets\": {}, \"size\": {}, \"target\": \"android-widget\"}}",
+                output_dir.display(), widgets.len(), total_size);
+        }
+    }
+
+    Ok(CompileResult {
+        output_path: output_dir,
+        target: "android-widget".to_string(),
+        bundle_id: Some(app_package.to_string()),
+        is_dylib: false,
+    })
+}
+
+/// Compile for Wear OS tile target: emit Kotlin Tiles source + JNI bridge
+fn compile_for_wearos_tile(ctx: &CompilationContext, args: &CompileArgs, format: OutputFormat) -> Result<CompileResult> {
+    let mut widgets: Vec<&perry_hir::ir::WidgetDecl> = Vec::new();
+    for (_, hir_module) in &ctx.native_modules {
+        for widget in &hir_module.widgets {
+            widgets.push(widget);
+        }
+    }
+
+    if widgets.is_empty() {
+        return Err(anyhow!("No Widget() declarations found. Import {{ Widget }} from 'perry/widget' and call Widget({{...}})."));
+    }
+
+    let app_package = args.app_bundle_id.as_deref().unwrap_or("com.perry.tile");
+
+    match format {
+        OutputFormat::Text => println!("Generating Wear OS tile ({} tile{})...",
+            widgets.len(), if widgets.len() == 1 { "" } else { "s" }),
+        OutputFormat::Json => {}
+    }
+
+    let output_dir = if let Some(ref out) = args.output {
+        out.clone()
+    } else {
+        let stem = args.input.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("tile");
+        PathBuf::from(format!("{}_wearos_tile", stem))
+    };
+
+    fs::create_dir_all(&output_dir)?;
+
+    let mut all_kotlin_files: Vec<(String, String)> = Vec::new();
+
+    for widget in &widgets {
+        let bundle = perry_codegen_wear_tiles::compile_widget_wear_tile(widget, app_package)?;
+
+        for (filename, source) in &bundle.kotlin_files {
+            let kt_path = output_dir.join(filename);
+            fs::write(&kt_path, source)?;
+            all_kotlin_files.push((filename.clone(), source.clone()));
+        }
+
+        let manifest_path = output_dir.join("AndroidManifest_snippet.xml");
+        fs::write(&manifest_path, &bundle.manifest_snippet)?;
+    }
+
+    let total_size: usize = all_kotlin_files.iter().map(|(_, s)| s.len()).sum();
+
+    match format {
+        OutputFormat::Text => {
+            println!("Wear OS tile generated: {}/", output_dir.display());
+            for (name, source) in &all_kotlin_files {
+                println!("  {} ({:.1} KB)", name, source.len() as f64 / 1024.0);
+            }
+            println!("  AndroidManifest_snippet.xml");
+            println!("Total: {:.1} KB Kotlin source", total_size as f64 / 1024.0);
+            println!();
+            println!("Add the generated files to your Wear OS/Gradle project:");
+            println!("  1. Copy *.kt files to app/src/main/java/{}/", app_package.replace('.', "/"));
+            println!("  2. Merge AndroidManifest_snippet.xml into your AndroidManifest.xml");
+            println!("  3. Add dependencies:");
+            println!("     implementation \"com.google.android.horologist:horologist-tiles:0.6.5\"");
+            println!("     implementation \"androidx.wear.tiles:tiles-material:1.4.0\"");
+        }
+        OutputFormat::Json => {
+            println!("{{\"output\": \"{}\", \"widgets\": {}, \"size\": {}, \"target\": \"wearos-tile\"}}",
+                output_dir.display(), widgets.len(), total_size);
+        }
+    }
+
+    Ok(CompileResult {
+        output_path: output_dir,
+        target: "wearos-tile".to_string(),
+        bundle_id: Some(app_package.to_string()),
+        is_dylib: false,
+    })
+}
+
 /// Compile for web target: emit JavaScript + HTML instead of native code
 fn compile_for_web(ctx: &CompilationContext, args: &CompileArgs, format: OutputFormat) -> Result<CompileResult> {
     match format {
@@ -2364,9 +2616,18 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         return compile_for_wasm(&ctx, &args, format);
     }
 
-    // --- iOS Widget target: emit SwiftUI + native timeline ---
+    // --- Widget targets: emit platform-specific source + optional native provider ---
     if matches!(args.target.as_deref(), Some("ios-widget") | Some("ios-widget-simulator")) {
         return compile_for_ios_widget(&ctx, &args, format);
+    }
+    if matches!(args.target.as_deref(), Some("watchos-widget") | Some("watchos-widget-simulator")) {
+        return compile_for_watchos_widget(&ctx, &args, format);
+    }
+    if args.target.as_deref() == Some("android-widget") {
+        return compile_for_android_widget(&ctx, &args, format);
+    }
+    if args.target.as_deref() == Some("wearos-tile") {
+        return compile_for_wearos_tile(&ctx, &args, format);
     }
 
     // Transform JS imports into runtime calls

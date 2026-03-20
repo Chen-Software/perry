@@ -1,0 +1,10 @@
+[package]
+name = "perry-codegen-wear-tiles"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Wear OS Tiles code generation for Perry (--target wearos-tile)"
+
+[dependencies]
+perry-hir.workspace = true
+anyhow.workspace = true

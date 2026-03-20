@@ -1,6 +1,6 @@
-# Widget Components
+# Widget Components & Modifiers
 
-Available components and modifiers for WidgetKit widgets.
+Available components and modifiers for widgets.
 
 ## Text
 
@@ -69,6 +69,50 @@ Image("star.fill")           // SF Symbol
 Image("cloud.sun.rain.fill") // SF Symbol
 ```
 
+## ForEach
+
+Iterate over array entry fields to render a list of components:
+
+```typescript
+ForEach(entry.items, (item) =>
+  HStack([
+    Text(item.name),
+    Spacer(),
+    Text(`${item.value}`),
+  ])
+)
+```
+
+## Divider
+
+A visual separator line:
+
+```typescript
+VStack([
+  Text("Above"),
+  Divider(),
+  Text("Below"),
+])
+```
+
+## Label
+
+A label with text and an SF Symbol icon:
+
+```typescript
+Label("Downloads", "arrow.down.circle")
+Label(`${entry.count} items`, "folder.fill")
+```
+
+## Gauge
+
+A circular or linear progress indicator:
+
+```typescript
+Gauge(entry.progress, 0, 100)       // value, min, max
+Gauge(entry.battery, 0, 1.0)
+```
+
 ## Modifiers
 
 Widget components support SwiftUI-style modifiers:
@@ -98,6 +142,45 @@ VStack([...]).padding(16)
 
 ```typescript
 widget.frame(width, height)
+```
+
+### Max Width
+
+```typescript
+widget.maxWidth("infinity")   // Expand to fill available width
+```
+
+### Minimum Scale Factor
+
+Allow text to shrink to fit:
+
+```typescript
+Text("Long text").minimumScaleFactor(0.5)
+```
+
+### Container Background
+
+Set background color for the widget container:
+
+```typescript
+VStack([...]).containerBackground("blue")
+```
+
+### Widget URL
+
+Make the widget tappable with a deep link:
+
+```typescript
+VStack([...]).url("myapp://detail/123")
+```
+
+### Edge-Specific Padding
+
+Apply padding to specific edges:
+
+```typescript
+VStack([...]).paddingEdge("top", 8)
+VStack([...]).paddingEdge("horizontal", 16)
 ```
 
 ## Conditionals

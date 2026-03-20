@@ -6169,6 +6169,12 @@ fn try_lower_widget_decl(
     let mut entry_fields: Vec<(String, WidgetFieldType)> = Vec::new();
     let mut render_body: Vec<WidgetNode> = Vec::new();
     let mut entry_param_name = "entry".to_string();
+    let mut config_params: Vec<WidgetConfigParam> = Vec::new();
+    let mut provider_func_name: Option<String> = None;
+    let mut placeholder: Option<Vec<(String, WidgetPlaceholderValue)>> = None;
+    let mut family_param_name: Option<String> = None;
+    let mut app_group: Option<String> = None;
+    let mut reload_after_seconds: Option<u32> = None;
 
     for prop in &config_obj.props {
         let kv = match prop {
@@ -6183,24 +6189,27 @@ fn try_lower_widget_decl(
                                 entry_param_name = ident.id.sym.to_string();
                             }
                         }
+                        // Check for 2nd parameter (family)
+                        if let Some(param) = method.function.params.get(1) {
+                            if let ast::Pat::Ident(ident) = &param.pat {
+                                family_param_name = Some(ident.id.sym.to_string());
+                            }
+                        }
                         // Extract type annotation for entry fields (only if not already specified via entryFields)
                         if entry_fields.is_empty() {
                             if let Some(param) = method.function.params.first() {
                                 extract_entry_fields_from_param(&param.pat, &mut entry_fields);
                             }
                         }
-                        // Parse render body
+                        // Parse render body — detect family switches
                         if let Some(body) = &method.function.body {
-                            for stmt in &body.stmts {
-                                if let ast::Stmt::Return(ret) = stmt {
-                                    if let Some(arg) = &ret.arg {
-                                        if let Some(node) = parse_widget_node(arg) {
-                                            render_body.push(node);
-                                        }
-                                    }
-                                }
-                            }
+                            let nodes = parse_render_body_stmts(&body.stmts, &family_param_name);
+                            render_body = nodes;
                         }
+                    } else if key == "provider" {
+                        // Provider as method: provider(config) { ... }
+                        let func_name = format!("__widget_provider_{}", kind);
+                        provider_func_name = Some(func_name);
                     }
                     continue;
                 }
@@ -6237,6 +6246,56 @@ fn try_lower_widget_decl(
                     }
                 }
             }
+            "appGroup" => {
+                if let ast::Expr::Lit(ast::Lit::Str(s)) = kv.value.as_ref() {
+                    app_group = Some(s.value.as_str().unwrap_or("").to_string());
+                }
+            }
+            "config" => {
+                // Parse config object → Vec<WidgetConfigParam>
+                if let ast::Expr::Object(obj) = kv.value.as_ref() {
+                    for field_prop in &obj.props {
+                        if let ast::PropOrSpread::Prop(p) = field_prop {
+                            if let ast::Prop::KeyValue(field_kv) = p.as_ref() {
+                                let param_name = prop_name_to_string(&field_kv.key);
+                                if let Some(param) = parse_widget_config_param(&param_name, &field_kv.value) {
+                                    config_params.push(param);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "provider" => {
+                // Arrow function provider: provider: async (config) => { ... }
+                match kv.value.as_ref() {
+                    ast::Expr::Arrow(_arrow) => {
+                        let func_name = if kind.is_empty() {
+                            "__widget_provider_widget".to_string()
+                        } else {
+                            let safe = kind.rsplit('.').next().unwrap_or(&kind);
+                            format!("__widget_provider_{}", safe)
+                        };
+                        provider_func_name = Some(func_name);
+                    }
+                    _ => {}
+                }
+            }
+            "placeholder" => {
+                if let ast::Expr::Object(obj) = kv.value.as_ref() {
+                    let mut fields = Vec::new();
+                    for field_prop in &obj.props {
+                        if let ast::PropOrSpread::Prop(p) = field_prop {
+                            if let ast::Prop::KeyValue(field_kv) = p.as_ref() {
+                                let field_name = prop_name_to_string(&field_kv.key);
+                                let val = parse_placeholder_value(&field_kv.value);
+                                fields.push((field_name, val));
+                            }
+                        }
+                    }
+                    placeholder = Some(fields);
+                }
+            }
             "entryFields" => {
                 // Allow explicit entry field declarations
                 if let ast::Expr::Object(obj) = kv.value.as_ref() {
@@ -6270,6 +6329,12 @@ fn try_lower_widget_decl(
                                 entry_param_name = ident.id.sym.to_string();
                             }
                         }
+                        // Check for 2nd parameter (family)
+                        if let Some(param) = arrow.params.get(1) {
+                            if let ast::Pat::Ident(ident) = param {
+                                family_param_name = Some(ident.id.sym.to_string());
+                            }
+                        }
                         // Extract entry fields from type annotation (only if not already specified via entryFields)
                         if entry_fields.is_empty() {
                             if let Some(param) = arrow.params.first() {
@@ -6284,15 +6349,8 @@ fn try_lower_widget_decl(
                                 }
                             }
                             ast::BlockStmtOrExpr::BlockStmt(block) => {
-                                for stmt in &block.stmts {
-                                    if let ast::Stmt::Return(ret) = stmt {
-                                        if let Some(arg) = &ret.arg {
-                                            if let Some(node) = parse_widget_node(arg) {
-                                                render_body.push(node);
-                                            }
-                                        }
-                                    }
-                                }
+                                let nodes = parse_render_body_stmts(&block.stmts, &family_param_name);
+                                render_body = nodes;
                             }
                         }
                     }
@@ -6307,6 +6365,14 @@ fn try_lower_widget_decl(
         kind = "com.perry.widget".to_string();
     }
 
+    // Fix provider func name if kind was set after provider was parsed
+    if let Some(ref mut pfn) = provider_func_name {
+        if pfn == "__widget_provider_widget" && kind != "com.perry.widget" {
+            let safe = kind.rsplit('.').next().unwrap_or(&kind);
+            *pfn = format!("__widget_provider_{}", safe);
+        }
+    }
+
     Some(WidgetDecl {
         kind,
         display_name,
@@ -6315,6 +6381,12 @@ fn try_lower_widget_decl(
         entry_fields,
         render_body,
         entry_param_name,
+        config_params,
+        provider_func_name,
+        placeholder,
+        family_param_name,
+        app_group,
+        reload_after_seconds,
     })
 }
 
@@ -6335,23 +6407,84 @@ fn extract_entry_fields_from_param(pat: &ast::Pat, fields: &mut Vec<(String, Wid
                         if field_name == "date" {
                             continue;
                         }
+                        let is_optional = prop.optional;
                         let field_type = if let Some(ann) = &prop.type_ann {
-                            match ann.type_ann.as_ref() {
-                                ast::TsType::TsKeywordType(kw) => match kw.kind {
-                                    ast::TsKeywordTypeKind::TsNumberKeyword => WidgetFieldType::Number,
-                                    ast::TsKeywordTypeKind::TsBooleanKeyword => WidgetFieldType::Boolean,
-                                    _ => WidgetFieldType::String,
-                                },
-                                _ => WidgetFieldType::String,
-                            }
+                            parse_widget_field_type(ann.type_ann.as_ref())
                         } else {
                             WidgetFieldType::String
+                        };
+                        let field_type = if is_optional {
+                            WidgetFieldType::Optional(Box::new(field_type))
+                        } else {
+                            field_type
                         };
                         fields.push((field_name, field_type));
                     }
                 }
             }
         }
+    }
+}
+
+/// Recursively parse a TypeScript type annotation into a WidgetFieldType
+fn parse_widget_field_type(ts_type: &ast::TsType) -> WidgetFieldType {
+    match ts_type {
+        ast::TsType::TsKeywordType(kw) => match kw.kind {
+            ast::TsKeywordTypeKind::TsNumberKeyword => WidgetFieldType::Number,
+            ast::TsKeywordTypeKind::TsBooleanKeyword => WidgetFieldType::Boolean,
+            ast::TsKeywordTypeKind::TsStringKeyword => WidgetFieldType::String,
+            _ => WidgetFieldType::String,
+        },
+        ast::TsType::TsArrayType(arr) => {
+            let inner = parse_widget_field_type(arr.elem_type.as_ref());
+            WidgetFieldType::Array(Box::new(inner))
+        }
+        ast::TsType::TsTypeLit(lit) => {
+            // Nested object type: { url: string, clicks: number }
+            let mut obj_fields = Vec::new();
+            for member in &lit.members {
+                if let ast::TsTypeElement::TsPropertySignature(prop) = member {
+                    if let ast::Expr::Ident(ident) = prop.key.as_ref() {
+                        let name = ident.sym.to_string();
+                        let inner = if let Some(ann) = &prop.type_ann {
+                            parse_widget_field_type(ann.type_ann.as_ref())
+                        } else {
+                            WidgetFieldType::String
+                        };
+                        let inner = if prop.optional {
+                            WidgetFieldType::Optional(Box::new(inner))
+                        } else {
+                            inner
+                        };
+                        obj_fields.push((name, inner));
+                    }
+                }
+            }
+            WidgetFieldType::Object(obj_fields)
+        }
+        ast::TsType::TsUnionOrIntersectionType(ast::TsUnionOrIntersectionType::TsUnionType(union)) => {
+            // Check for T | null or T | undefined → Optional(T)
+            let mut non_null_types: Vec<&ast::TsType> = Vec::new();
+            let mut has_null = false;
+            for member in &union.types {
+                match member.as_ref() {
+                    ast::TsType::TsKeywordType(kw) if matches!(kw.kind,
+                        ast::TsKeywordTypeKind::TsNullKeyword | ast::TsKeywordTypeKind::TsUndefinedKeyword
+                    ) => {
+                        has_null = true;
+                    }
+                    other => non_null_types.push(other),
+                }
+            }
+            if has_null && non_null_types.len() == 1 {
+                WidgetFieldType::Optional(Box::new(parse_widget_field_type(non_null_types[0])))
+            } else if !non_null_types.is_empty() {
+                parse_widget_field_type(non_null_types[0])
+            } else {
+                WidgetFieldType::String
+            }
+        }
+        _ => WidgetFieldType::String,
     }
 }
 
@@ -6390,6 +6523,18 @@ fn parse_widget_node(expr: &ast::Expr) -> Option<WidgetNode> {
                 }
                 "Spacer" => {
                     Some(WidgetNode::Spacer)
+                }
+                "Divider" => {
+                    Some(WidgetNode::Divider)
+                }
+                "ForEach" => {
+                    parse_foreach_node(&call.args)
+                }
+                "Label" => {
+                    parse_label_node(&call.args)
+                }
+                "Gauge" => {
+                    parse_gauge_node(&call.args)
                 }
                 _ => None,
             }
@@ -6701,7 +6846,452 @@ fn parse_single_modifier(key: &str, value: &ast::Expr) -> Option<WidgetModifier>
                 None
             }
         }
+        "minimumScaleFactor" => {
+            if let ast::Expr::Lit(ast::Lit::Num(n)) = value {
+                Some(WidgetModifier::MinimumScaleFactor(n.value))
+            } else {
+                None
+            }
+        }
+        "containerBackground" => {
+            if let ast::Expr::Lit(ast::Lit::Str(s)) = value {
+                Some(WidgetModifier::ContainerBackground(s.value.as_str().unwrap_or("").to_string()))
+            } else {
+                None
+            }
+        }
+        "maxWidth" => {
+            // maxWidth: true or maxWidth: "infinity"
+            Some(WidgetModifier::FrameMaxWidth)
+        }
+        "url" => {
+            if let ast::Expr::Lit(ast::Lit::Str(s)) = value {
+                Some(WidgetModifier::WidgetURL(s.value.as_str().unwrap_or("").to_string()))
+            } else {
+                None
+            }
+        }
         _ => None,
+    }
+}
+
+/// Parse a ForEach node: ForEach(entry.items, (item) => HStack([...]))
+fn parse_foreach_node(args: &[ast::ExprOrSpread]) -> Option<WidgetNode> {
+    // First arg: entry.items (member expression)
+    let collection_field = match args.first()?.expr.as_ref() {
+        ast::Expr::Member(member) => {
+            if let ast::MemberProp::Ident(prop) = &member.prop {
+                prop.sym.to_string()
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    };
+
+    // Second arg: arrow function (item) => ...
+    let arrow = match args.get(1)?.expr.as_ref() {
+        ast::Expr::Arrow(arrow) => arrow,
+        _ => return None,
+    };
+
+    let item_param = if let Some(param) = arrow.params.first() {
+        if let ast::Pat::Ident(ident) = param {
+            ident.id.sym.to_string()
+        } else {
+            "item".to_string()
+        }
+    } else {
+        "item".to_string()
+    };
+
+    let body = match arrow.body.as_ref() {
+        ast::BlockStmtOrExpr::Expr(expr) => parse_widget_node(expr)?,
+        ast::BlockStmtOrExpr::BlockStmt(block) => {
+            for stmt in &block.stmts {
+                if let ast::Stmt::Return(ret) = stmt {
+                    if let Some(arg) = &ret.arg {
+                        if let Some(node) = parse_widget_node(arg) {
+                            return Some(WidgetNode::ForEach {
+                                collection_field,
+                                item_param,
+                                body: Box::new(node),
+                            });
+                        }
+                    }
+                }
+            }
+            return None;
+        }
+    };
+
+    Some(WidgetNode::ForEach {
+        collection_field,
+        item_param,
+        body: Box::new(body),
+    })
+}
+
+/// Parse a Label node: Label("text", { systemImage: "star.fill" })
+fn parse_label_node(args: &[ast::ExprOrSpread]) -> Option<WidgetNode> {
+    let text = args.first()
+        .map(|arg| parse_text_content(&arg.expr))
+        .unwrap_or(WidgetTextContent::Literal(String::new()));
+
+    let mut system_image = String::new();
+    let mut modifiers = Vec::new();
+
+    // Second arg: { systemImage: "star.fill", font: "caption" }
+    if let Some(arg) = args.get(1) {
+        if let ast::Expr::Object(obj) = arg.expr.as_ref() {
+            for prop in &obj.props {
+                if let ast::PropOrSpread::Prop(p) = prop {
+                    if let ast::Prop::KeyValue(kv) = p.as_ref() {
+                        let key = prop_name_to_string(&kv.key);
+                        if key == "systemImage" {
+                            if let ast::Expr::Lit(ast::Lit::Str(s)) = kv.value.as_ref() {
+                                system_image = s.value.as_str().unwrap_or("").to_string();
+                            }
+                        } else if let Some(m) = parse_single_modifier(&key, &kv.value) {
+                            modifiers.push(m);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Some(WidgetNode::Label { text, system_image, modifiers })
+}
+
+/// Parse a Gauge node: Gauge(value, { label: "Clicks", style: "circular" })
+fn parse_gauge_node(args: &[ast::ExprOrSpread]) -> Option<WidgetNode> {
+    // First arg: value expression (entry.field / entry.field, or numeric expression)
+    let value_expr = match args.first()?.expr.as_ref() {
+        ast::Expr::Member(member) => {
+            if let ast::MemberProp::Ident(prop) = &member.prop {
+                prop.sym.to_string()
+            } else {
+                return None;
+            }
+        }
+        ast::Expr::Bin(bin) => {
+            // entry.totalClicks / entry.clicksGoal
+            let left = match bin.left.as_ref() {
+                ast::Expr::Member(m) => {
+                    if let ast::MemberProp::Ident(p) = &m.prop {
+                        p.sym.to_string()
+                    } else { return None; }
+                }
+                _ => return None,
+            };
+            let right = match bin.right.as_ref() {
+                ast::Expr::Member(m) => {
+                    if let ast::MemberProp::Ident(p) = &m.prop {
+                        p.sym.to_string()
+                    } else { return None; }
+                }
+                ast::Expr::Lit(ast::Lit::Num(n)) => format!("{}", n.value),
+                _ => return None,
+            };
+            let op = match bin.op {
+                ast::BinaryOp::Div => "/",
+                ast::BinaryOp::Mul => "*",
+                ast::BinaryOp::Sub => "-",
+                ast::BinaryOp::Add => "+",
+                _ => return None,
+            };
+            format!("{} {} {}", left, op, right)
+        }
+        _ => return None,
+    };
+
+    let mut label = String::new();
+    let mut style = GaugeStyle::Circular;
+    let mut modifiers = Vec::new();
+
+    // Second arg: config object
+    if let Some(arg) = args.get(1) {
+        if let ast::Expr::Object(obj) = arg.expr.as_ref() {
+            for prop in &obj.props {
+                if let ast::PropOrSpread::Prop(p) = prop {
+                    if let ast::Prop::KeyValue(kv) = p.as_ref() {
+                        let key = prop_name_to_string(&kv.key);
+                        match key.as_str() {
+                            "label" => {
+                                if let ast::Expr::Lit(ast::Lit::Str(s)) = kv.value.as_ref() {
+                                    label = s.value.as_str().unwrap_or("").to_string();
+                                }
+                            }
+                            "style" => {
+                                if let ast::Expr::Lit(ast::Lit::Str(s)) = kv.value.as_ref() {
+                                    style = match s.value.as_str().unwrap_or("") {
+                                        "linear" | "linearCapacity" => GaugeStyle::LinearCapacity,
+                                        _ => GaugeStyle::Circular,
+                                    };
+                                }
+                            }
+                            _ => {
+                                if let Some(m) = parse_single_modifier(&key, &kv.value) {
+                                    modifiers.push(m);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Some(WidgetNode::Gauge { value_expr, label, style, modifiers })
+}
+
+/// Parse render body statements, detecting family-switch patterns (if/else on family param)
+fn parse_render_body_stmts(stmts: &[ast::Stmt], family_param: &Option<String>) -> Vec<WidgetNode> {
+    let mut nodes = Vec::new();
+
+    // Check for if (family === "systemSmall") { ... } else if ... pattern
+    if let Some(family_name) = family_param {
+        if let Some(family_switch) = try_parse_family_switch(stmts, family_name) {
+            nodes.push(family_switch);
+            return nodes;
+        }
+    }
+
+    // Fall back to regular return-based parsing
+    for stmt in stmts {
+        if let ast::Stmt::Return(ret) = stmt {
+            if let Some(arg) = &ret.arg {
+                if let Some(node) = parse_widget_node(arg) {
+                    nodes.push(node);
+                }
+            }
+        }
+    }
+    nodes
+}
+
+/// Try to parse a series of if (family === "X") { return ... } statements into a FamilySwitch
+fn try_parse_family_switch(stmts: &[ast::Stmt], family_name: &str) -> Option<WidgetNode> {
+    let mut cases: Vec<(String, WidgetNode)> = Vec::new();
+    let mut default_node: Option<Box<WidgetNode>> = None;
+
+    for stmt in stmts {
+        match stmt {
+            ast::Stmt::If(if_stmt) => {
+                // Check: if (family === "systemSmall") { return VStack([...]) }
+                if let Some((family_value, node)) = try_parse_family_case(&if_stmt.test, &if_stmt.cons, family_name) {
+                    cases.push((family_value, node));
+                }
+                // Check else branch for more cases or default
+                if let Some(alt) = &if_stmt.alt {
+                    match alt.as_ref() {
+                        ast::Stmt::Block(block) => {
+                            // else { return ... } — this is the default
+                            for s in &block.stmts {
+                                if let ast::Stmt::Return(ret) = s {
+                                    if let Some(arg) = &ret.arg {
+                                        if let Some(node) = parse_widget_node(arg) {
+                                            default_node = Some(Box::new(node));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        ast::Stmt::If(nested_if) => {
+                            // else if — extract more cases
+                            if let Some((family_value, node)) = try_parse_family_case(&nested_if.test, &nested_if.cons, family_name) {
+                                cases.push((family_value, node));
+                            }
+                        }
+                        ast::Stmt::Return(ret) => {
+                            if let Some(arg) = &ret.arg {
+                                if let Some(node) = parse_widget_node(arg) {
+                                    default_node = Some(Box::new(node));
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            ast::Stmt::Return(ret) => {
+                // Trailing return is the default case
+                if let Some(arg) = &ret.arg {
+                    if let Some(node) = parse_widget_node(arg) {
+                        if cases.is_empty() {
+                            // No family switch, just a regular return
+                            return None;
+                        }
+                        default_node = Some(Box::new(node));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if cases.is_empty() {
+        return None;
+    }
+
+    Some(WidgetNode::FamilySwitch { cases, default: default_node })
+}
+
+/// Try to parse a single if (family === "value") { return node } case
+fn try_parse_family_case(test: &ast::Expr, cons: &ast::Stmt, family_name: &str) -> Option<(String, WidgetNode)> {
+    // Check: family === "systemSmall"
+    let family_value = match test {
+        ast::Expr::Bin(bin) if matches!(bin.op, ast::BinaryOp::EqEqEq | ast::BinaryOp::EqEq) => {
+            let is_family_left = match bin.left.as_ref() {
+                ast::Expr::Ident(ident) => ident.sym.as_ref() == family_name,
+                _ => false,
+            };
+            if !is_family_left {
+                return None;
+            }
+            match bin.right.as_ref() {
+                ast::Expr::Lit(ast::Lit::Str(s)) => s.value.as_str().unwrap_or("").to_string(),
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+
+    // Extract return value from consequent block
+    let node = match cons {
+        ast::Stmt::Block(block) => {
+            let mut result = None;
+            for s in &block.stmts {
+                if let ast::Stmt::Return(ret) = s {
+                    if let Some(arg) = &ret.arg {
+                        result = parse_widget_node(arg);
+                    }
+                }
+            }
+            result?
+        }
+        ast::Stmt::Return(ret) => {
+            if let Some(arg) = &ret.arg {
+                parse_widget_node(arg)?
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    };
+
+    Some((family_value, node))
+}
+
+/// Parse a WidgetConfigParam from a config field value
+fn parse_widget_config_param(name: &str, value: &ast::Expr) -> Option<WidgetConfigParam> {
+    if let ast::Expr::Object(obj) = value {
+        let mut param_type_str = String::new();
+        let mut title = name.to_string();
+        let mut values: Vec<String> = Vec::new();
+        let mut default_str = String::new();
+        let mut default_bool = false;
+
+        for prop in &obj.props {
+            if let ast::PropOrSpread::Prop(p) = prop {
+                if let ast::Prop::KeyValue(kv) = p.as_ref() {
+                    let key = prop_name_to_string(&kv.key);
+                    match key.as_str() {
+                        "type" => {
+                            if let ast::Expr::Lit(ast::Lit::Str(s)) = kv.value.as_ref() {
+                                param_type_str = s.value.as_str().unwrap_or("").to_string();
+                            }
+                        }
+                        "title" => {
+                            if let ast::Expr::Lit(ast::Lit::Str(s)) = kv.value.as_ref() {
+                                title = s.value.as_str().unwrap_or("").to_string();
+                            }
+                        }
+                        "default" => {
+                            match kv.value.as_ref() {
+                                ast::Expr::Lit(ast::Lit::Str(s)) => {
+                                    default_str = s.value.as_str().unwrap_or("").to_string();
+                                }
+                                ast::Expr::Lit(ast::Lit::Bool(b)) => {
+                                    default_bool = b.value;
+                                }
+                                _ => {}
+                            }
+                        }
+                        "values" => {
+                            if let ast::Expr::Array(arr) = kv.value.as_ref() {
+                                for elem in &arr.elems {
+                                    if let Some(ast::ExprOrSpread { expr, .. }) = elem {
+                                        if let ast::Expr::Lit(ast::Lit::Str(s)) = expr.as_ref() {
+                                            values.push(s.value.as_str().unwrap_or("").to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        let param_type = match param_type_str.as_str() {
+            "enum" => WidgetConfigParamType::Enum {
+                values,
+                default: if default_str.is_empty() { "".to_string() } else { default_str },
+            },
+            "bool" | "boolean" => WidgetConfigParamType::Bool { default: default_bool },
+            "string" => WidgetConfigParamType::String { default: default_str },
+            _ => WidgetConfigParamType::String { default: default_str },
+        };
+
+        Some(WidgetConfigParam {
+            name: name.to_string(),
+            title,
+            param_type,
+        })
+    } else {
+        None
+    }
+}
+
+/// Parse a placeholder value from an expression
+fn parse_placeholder_value(expr: &ast::Expr) -> WidgetPlaceholderValue {
+    match expr {
+        ast::Expr::Lit(ast::Lit::Str(s)) => {
+            WidgetPlaceholderValue::String(s.value.as_str().unwrap_or("").to_string())
+        }
+        ast::Expr::Lit(ast::Lit::Num(n)) => {
+            WidgetPlaceholderValue::Number(n.value)
+        }
+        ast::Expr::Lit(ast::Lit::Bool(b)) => {
+            WidgetPlaceholderValue::Bool(b.value)
+        }
+        ast::Expr::Lit(ast::Lit::Null(_)) => {
+            WidgetPlaceholderValue::Null
+        }
+        ast::Expr::Array(arr) => {
+            let items: Vec<WidgetPlaceholderValue> = arr.elems.iter()
+                .filter_map(|e| e.as_ref())
+                .map(|e| parse_placeholder_value(&e.expr))
+                .collect();
+            WidgetPlaceholderValue::Array(items)
+        }
+        ast::Expr::Object(obj) => {
+            let mut fields = Vec::new();
+            for prop in &obj.props {
+                if let ast::PropOrSpread::Prop(p) = prop {
+                    if let ast::Prop::KeyValue(kv) = p.as_ref() {
+                        let name = prop_name_to_string(&kv.key);
+                        let val = parse_placeholder_value(&kv.value);
+                        fields.push((name, val));
+                    }
+                }
+            }
+            WidgetPlaceholderValue::Object(fields)
+        }
+        _ => WidgetPlaceholderValue::Null,
     }
 }
 

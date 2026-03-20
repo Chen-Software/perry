@@ -1,0 +1,10 @@
+[package]
+name = "perry-codegen-glance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Android Glance widget code generation for Perry (--target android-widget)"
+
+[dependencies]
+perry-hir.workspace = true
+anyhow.workspace = true

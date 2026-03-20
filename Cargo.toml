@@ -20,6 +20,8 @@ members = [
     "crates/perry-ui-geisterhand",
     "crates/perry-codegen-js",
     "crates/perry-codegen-swiftui",
+    "crates/perry-codegen-glance",
+    "crates/perry-codegen-wear-tiles",
     "crates/perry-codegen-wasm",
     "crates/perry-ui-test",
 ]
@@ -40,6 +42,8 @@ default-members = [
     "crates/perry-ui",
     "crates/perry-codegen-js",
     "crates/perry-codegen-swiftui",
+    "crates/perry-codegen-glance",
+    "crates/perry-codegen-wear-tiles",
     "crates/perry-codegen-wasm",
 ]
 
@@ -75,7 +79,7 @@ opt-level = "s"       # Optimize for size in stdlib
 opt-level = 3
 
 [workspace.package]
-version = "0.2.197"
+version = "0.2.198"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/PerryTS/perry"
@@ -151,4 +155,6 @@ perry-diagnostics = { path = "crates/perry-diagnostics" }
 perry-jsruntime = { path = "crates/perry-jsruntime" }
 perry-codegen-js = { path = "crates/perry-codegen-js" }
 perry-codegen-swiftui = { path = "crates/perry-codegen-swiftui" }
+perry-codegen-glance = { path = "crates/perry-codegen-glance" }
+perry-codegen-wear-tiles = { path = "crates/perry-codegen-wear-tiles" }
 perry-codegen-wasm = { path = "crates/perry-codegen-wasm" }

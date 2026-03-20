@@ -101,3 +101,11 @@ mod init_guard {
         if prev & mask != 0 { 1 } else { 0 }
     }
 }
+
+/// Lightweight runtime init for widget extensions.
+/// Sets up GC, arena, and string interning without starting tokio or the full async runtime.
+/// Called from generated Swift/Kotlin glue before invoking the native provider function.
+#[no_mangle]
+pub extern "C" fn perry_runtime_widget_init() {
+    gc::js_gc_init();
+}
