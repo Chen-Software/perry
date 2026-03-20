@@ -4022,6 +4022,37 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         return Err(anyhow!("Linking failed"));
     }
 
+    // For Android, copy companion shared libraries (.so) next to the output binary
+    // so that perry-builder can pick them up and include them in the APK/AAB.
+    if is_android {
+        if let Some(output_dir) = exe_path.parent() {
+            for native_lib in &ctx.native_libraries {
+                if let Some(ref target_config) = native_lib.target_config {
+                    let lib_name = &target_config.lib_name;
+                    if lib_name.ends_with(".so") {
+                        let crate_target_dir = target_config.crate_path.join("target");
+                        let candidate = if let Some(triple) = rust_target_triple(target.as_deref()) {
+                            crate_target_dir.join(triple).join("release").join(lib_name)
+                        } else {
+                            crate_target_dir.join("release").join(lib_name)
+                        };
+                        if candidate.exists() {
+                            let dest = output_dir.join(lib_name);
+                            if let Err(e) = fs::copy(&candidate, &dest) {
+                                eprintln!("Warning: failed to copy companion library {}: {}", lib_name, e);
+                            } else {
+                                match format {
+                                    OutputFormat::Text => println!("Copied companion library: {}", lib_name),
+                                    OutputFormat::Json => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Track iOS bundle info for CompileResult
     let mut result_bundle_id: Option<String> = None;
     let mut result_app_dir: Option<PathBuf> = None;
