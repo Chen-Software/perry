@@ -557,13 +557,15 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     } else if interactive {
         prompt_target(saved.default_target.as_deref())
     } else {
-        bail!("No target specified. Use: perry publish <macos|ios|android|linux>");
+        bail!("No target specified. Use: perry publish <macos|ios|android|linux|windows|web>");
     };
 
     let target_display = match target_name.as_str() {
         "ios" => "iOS",
         "android" => "Android",
         "linux" => "Linux",
+        "windows" => "Windows",
+        "web" => "Web",
         _ => "macOS",
     };
     let is_ios = target_name == "ios";
@@ -623,7 +625,9 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     let macos_distribute = config.macos.as_ref().and_then(|m| m.distribute.clone());
 
     // Auto-increment build_number for targets that need monotonic build numbers
-    let is_macos = !is_ios && !is_android && !is_linux;
+    let is_windows = target_name == "windows";
+    let is_web = target_name == "web";
+    let is_macos = !is_ios && !is_android && !is_linux && !is_windows && !is_web;
     let macos_needs_upload = is_macos && matches!(
         macos_distribute.as_deref(),
         Some("appstore") | Some("both")
@@ -1199,7 +1203,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
 
     // Pre-flight credential validation — fail fast before building the tarball
     {
-        let is_macos = !is_android && !is_ios && !is_linux;
+        let is_macos = !is_android && !is_ios && !is_linux && !is_windows && !is_web;
         validate_credentials_for_distribute(
             is_android,
             android_distribute.as_deref(),
