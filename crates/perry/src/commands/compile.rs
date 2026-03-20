@@ -3288,11 +3288,14 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                                 || cn == "js_set_property" || cn == "js_get_export" || cn == "js_await_js_promise") {
                                 undefined_syms.insert(cn.to_string());
                             }
-                            // On Windows (MSVC), the linker resolves ALL symbols in linked .lib
-                            // archives, unlike macOS/Linux which only pull in needed objects.
-                            // When perry/ui is not used, collect UI/system/plugin symbols from
-                            // stdlib so stubs are generated for them.
-                            else if is_windows && !ctx.needs_ui && (
+                            // On Windows (MSVC/lld-link), the linker resolves ALL symbols in
+                            // linked .lib archives, unlike macOS/Linux which only pull in needed
+                            // objects. Collect UI/system/plugin symbols so stubs are generated
+                            // for any that aren't defined in the platform UI lib. This handles
+                            // both the no-UI case and incomplete UI lib implementations (e.g.
+                            // perry_ui_windows.lib may not implement all functions that exist
+                            // on macOS).
+                            else if is_windows && (
                                 cn.starts_with("perry_ui_") || cn.starts_with("perry_system_") ||
                                 cn.starts_with("perry_plugin_") || cn.starts_with("perry_get_")
                             ) {
