@@ -338,15 +338,11 @@ pub(crate) fn inline_nanbox_string(builder: &mut FunctionBuilder, ptr: Value) ->
 /// Equivalent to `js_get_string_pointer_unified(val)` for values known to be NaN-boxed strings.
 /// val must be F64, returns I64.
 pub(crate) fn inline_get_string_pointer(builder: &mut FunctionBuilder, val: Value) -> Value {
-    // Extract raw pointer from NaN-boxed f64 by masking off the top 16 bits.
-    // Returns 0 for null/undefined/boolean values (masked < 0x1000).
+    // For reliability, just mask the lower 48 bits. Don't guard against
+    // small values — callers should check for null before dereferencing.
     let val_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), val);
     let mask = builder.ins().iconst(types::I64, 0x0000_FFFF_FFFF_FFFFi64);
-    let masked = builder.ins().band(val_i64, mask);
-    let threshold = builder.ins().iconst(types::I64, 0x1000i64);
-    let zero = builder.ins().iconst(types::I64, 0i64);
-    let is_small = builder.ins().icmp(IntCC::UnsignedLessThan, masked, threshold);
-    builder.ins().select(is_small, zero, masked)
+    builder.ins().band(val_i64, mask)
 }
 
 /// Get a raw string pointer from a value that may be either:
