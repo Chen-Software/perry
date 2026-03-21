@@ -187,7 +187,7 @@ impl crate::codegen::Compiler {
     /// Maximum top-level statements before a function is split.
     /// Cranelift generates incorrect machine code for very large functions
     /// (>3MB compiled code) on Windows.
-    const LARGE_FUNC_THRESHOLD: usize = 50;
+    const LARGE_FUNC_THRESHOLD: usize = 65;
 
     pub(crate) fn compile_function(&mut self, func: &Function) -> Result<()> {
         // Track current function for self-recursive call optimization
@@ -712,7 +712,7 @@ impl crate::codegen::Compiler {
                 // For large functions on Windows, emit checkpoint calls after each
                 // statement to help diagnose crashes at specific statement indices.
                 // Emit checkpoints for renderWorkbench AND any function it calls
-                let emit_checkpoints = func.body.len() > 100 && self.compile_target == 3;
+                let emit_checkpoints = false;
                 let checkpoint_func_ref = if emit_checkpoints {
                     self.extern_funcs.get("js_checkpoint").map(|&fid| {
                         self.module.declare_func_in_func(fid, builder.func)
@@ -744,7 +744,7 @@ impl crate::codegen::Compiler {
                     // write-back (expr.rs line 4454-4467), so the reload is only needed when
                     // a cross-module call modifies a var that THIS module also reads. This is
                     // rare and the values will be correct on next function-level read.
-                    let skip_reload = self.compile_target == 3 && func.body.len() > 50;
+                    let skip_reload = false;
                     if !skip_reload && !self.module_var_data_ids.is_empty() {
                         let current_block = builder.current_block().unwrap();
                         if !is_block_filled(&builder, current_block) {
@@ -904,6 +904,15 @@ impl crate::codegen::Compiler {
         let chunks: Vec<&[Stmt]> = func.body.chunks(chunk_size).collect();
         let mut chunk_func_ids: Vec<cranelift_module::FuncId> = Vec::new();
 
+        // Track which LocalIds have been DEFINED (via Stmt::Let) in previous chunks.
+        // Only these should be pre-loaded in subsequent chunks. Variables from
+        // LATER chunks haven't been initialized yet → globals are zero → null pointers.
+        let mut defined_in_previous_chunks: HashSet<perry_types::LocalId> = HashSet::new();
+        // Parameters are always defined (set before any chunk runs)
+        for param in &func.params {
+            defined_in_previous_chunks.insert(param.id);
+        }
+
         for (idx, chunk) in chunks.iter().enumerate() {
             let chunk_name = if self.module_symbol_prefix.is_empty() {
                 format!("__{}_chunk{}", func.name, idx)
@@ -936,11 +945,15 @@ impl crate::codegen::Compiler {
                     .filter_map(|s| if let Stmt::Let { id, .. } = s { Some(*id) } else { None })
                     .collect();
 
-                // Pre-create variables for locals from OTHER chunks, loaded from globals.
-                // Use SplitLocalInfo to preserve the correct type flags.
+                // Pre-create variables ONLY from PREVIOUS chunks (already initialized).
+                // Skip: variables defined in THIS chunk (compile_stmt creates them)
+                // Skip: variables from LATER chunks (globals are zero → null crash)
                 for (local_id, data_id) in &all_slots {
                     if chunk_let_ids.contains(local_id) {
                         continue; // Will be created by compile_stmt with correct type
+                    }
+                    if !defined_in_previous_chunks.contains(local_id) {
+                        continue; // Not yet initialized — don't load garbage from global
                     }
                     let ti = local_type_info.get(local_id);
                     let var_type = ti.map(|t| t.abi_type).unwrap_or(types::F64);
@@ -1028,6 +1041,14 @@ impl crate::codegen::Compiler {
                 return self.compile_function_inner(func);
             }
             self.module.clear_context(&mut self.ctx);
+
+            // After compiling this chunk, mark its Let-defined variables as available
+            // for subsequent chunks to pre-load.
+            for stmt in *chunk {
+                if let Stmt::Let { id, .. } = stmt {
+                    defined_in_previous_chunks.insert(*id);
+                }
+            }
         }
 
         // Compile the main function: store params to globals, call chunks
