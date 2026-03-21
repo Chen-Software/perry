@@ -1197,3 +1197,19 @@ pub extern "C" fn perry_ui_widget_set_overlay_frame(_handle: i64, _x: f64, _y: f
 
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_set_edge_insets(_handle: i64, _top: f64, _left: f64, _bottom: f64, _right: f64) {}
+
+// =============================================================================
+// LSP bridge stubs (not yet implemented on Windows)
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn hone_lsp_start(_cmd: i64, _args: i64, _cwd: i64) -> i64 { -1 }
+
+#[no_mangle]
+pub extern "C" fn hone_lsp_poll(_handle: i64) -> i64 { 0 }
+
+#[no_mangle]
+pub extern "C" fn hone_lsp_send(_handle: i64, _msg: i64) {}
+
+#[no_mangle]
+pub extern "C" fn hone_lsp_stop(_handle: i64) {}
