@@ -72,6 +72,18 @@ pub fn start() -> i64 {
         return 1;
     }
 
+    // Request RECORD_AUDIO permission via PerryBridge
+    {
+        let mut env = jni_bridge::get_env();
+        let _ = env.push_local_frame(8);
+        let bridge_class = jni_bridge::with_cache(|c| {
+            env.new_local_ref(c.perry_bridge_class.as_obj()).unwrap()
+        });
+        let bridge_cls: &jni::objects::JClass = (&bridge_class).into();
+        let _ = env.call_static_method(bridge_cls, "requestAudioPermission", "()V", &[]);
+        unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
+    }
+
     // Spawn a background thread that creates AudioRecord via JNI and reads data.
     // JNI calls must happen on a thread attached to the JVM.
     let vm = jni_bridge::get_vm().clone();
@@ -158,17 +170,19 @@ pub fn start() -> i64 {
         // Read loop
         while RUNNING.load(Ordering::Relaxed) {
             // AudioRecord.read(float[], int, int, int) — READ_BLOCKING = 0
+            let float_array_obj = unsafe { JObject::from_raw(float_array.as_raw()) };
             let read_result = env.call_method(
                 &record,
                 "read",
                 "([FIII)I",
                 &[
-                    JValue::Object(&JObject::from_raw(float_array.into_raw())),
+                    JValue::Object(&float_array_obj),
                     JValue::Int(0),
                     JValue::Int(buffer_size_frames),
                     JValue::Int(0), // READ_BLOCKING
                 ],
             );
+            std::mem::forget(float_array_obj); // Don't drop — we still own float_array
 
             let frames_read = match read_result {
                 Ok(v) => v.i().unwrap_or(0),
@@ -182,11 +196,7 @@ pub fn start() -> i64 {
             // Copy float data from Java array to Rust
             let n = frames_read as usize;
             let mut samples = vec![0.0f32; n];
-            let _ = env.get_float_array_region(
-                unsafe { &jni::objects::JFloatArray::from_raw(float_array.into_raw()) },
-                0,
-                &mut samples,
-            );
+            let _ = env.get_float_array_region(&float_array, 0, &mut samples);
 
             // Process: A-weight + RMS + dB
             let mut sum_sq = 0.0f64;

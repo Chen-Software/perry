@@ -585,6 +585,12 @@ fn find_library(name: &str, target: Option<&str>) -> Option<PathBuf> {
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
                 candidates.push(dir.join(name));
+                // Cross-compile targets are in ../../target/<triple>/release/ relative
+                // to the perry binary (which is in target/release/)
+                if let Some(target_dir) = dir.parent() {
+                    candidates.push(target_dir.join(triple).join("release").join(name));
+                    candidates.push(target_dir.join(triple).join("debug").join(name));
+                }
             }
         }
     } else {
@@ -792,7 +798,7 @@ fn build_geisterhand_libs(target: Option<&str>, format: OutputFormat) -> Result<
 }
 
 /// Find the Perry workspace root by searching upward from the executable location.
-fn find_perry_workspace_root() -> Option<PathBuf> {
+pub fn find_perry_workspace_root() -> Option<PathBuf> {
     // First try: relative to the perry executable
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {

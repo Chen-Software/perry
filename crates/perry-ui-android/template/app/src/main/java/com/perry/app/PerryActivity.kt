@@ -63,6 +63,10 @@ class PerryActivity : Activity() {
             val granted = grantResults.isNotEmpty() &&
                 grantResults[0] == PackageManager.PERMISSION_GRANTED
             PerryBridge.onLocationPermissionResult(granted)
+        } else if (requestCode == 44) { // AUDIO_PERMISSION_REQUEST
+            val granted = grantResults.isNotEmpty() &&
+                grantResults[0] == PackageManager.PERMISSION_GRANTED
+            PerryBridge.onAudioPermissionResult(granted)
         }
     }
 

@@ -1701,12 +1701,12 @@ fn launch(
             launch_ios_device(&result.output_path, bundle_id, udid, format)
         }
         "android" => {
-            if let OutputFormat::Text = format {
-                println!();
-                println!("Android .so compiled. Perry produces native libraries, not APKs.");
-                println!("To test, integrate the .so into an Android project.");
-            }
-            Ok(())
+            let bundle_id = result
+                .bundle_id
+                .as_deref()
+                .unwrap_or("com.perry.app");
+            let serial = device_udid.unwrap_or("");
+            build_and_run_android(&result.output_path, bundle_id, serial, format)
         }
         _ => launch_native(&result.output_path, program_args, format),
     }
@@ -1829,6 +1829,118 @@ fn launch_ios_device(
         return Err(anyhow!("App exited with error on device"));
     }
     Ok(())
+}
+
+/// Build an Android APK from the compiled .so and install/launch on a device.
+///
+/// Steps:
+/// 1. Copy the Gradle template from perry-ui-android/template/ to a temp dir
+/// 2. Place the compiled .so in app/src/main/jniLibs/arm64-v8a/
+/// 3. Update the applicationId in build.gradle.kts
+/// 4. Run ./gradlew assembleDebug
+/// 5. Sign and install the resulting APK
+fn build_and_run_android(
+    so_path: &Path,
+    bundle_id: &str,
+    serial: &str,
+    format: OutputFormat,
+) -> Result<()> {
+    // Find the perry workspace root to locate the Android template
+    let workspace_root = super::compile::find_perry_workspace_root()
+        .ok_or_else(|| anyhow!("Cannot find Perry workspace root — needed for Android template"))?;
+    let template_dir = workspace_root.join("crates/perry-ui-android/template");
+    if !template_dir.exists() {
+        bail!("Android template not found at {}", template_dir.display());
+    }
+
+    // Create a build directory alongside the .so
+    let build_dir = so_path.parent().unwrap_or(Path::new(".")).join("android-build");
+    if build_dir.exists() {
+        std::fs::remove_dir_all(&build_dir).ok();
+    }
+
+    if let OutputFormat::Text = format {
+        println!();
+        println!("Building Android APK...");
+    }
+
+    // Copy template to build directory
+    copy_dir_recursive(&template_dir, &build_dir)
+        .map_err(|e| anyhow!("Failed to copy Android template: {}", e))?;
+
+    // Create jniLibs directory and copy .so
+    let jni_dir = build_dir.join("app/src/main/jniLibs/arm64-v8a");
+    std::fs::create_dir_all(&jni_dir)?;
+    std::fs::copy(so_path, jni_dir.join("libperry_app.so"))
+        .map_err(|e| anyhow!("Failed to copy .so to jniLibs: {}", e))?;
+
+    // Update applicationId in build.gradle.kts
+    let gradle_path = build_dir.join("app/build.gradle.kts");
+    if gradle_path.exists() {
+        let content = std::fs::read_to_string(&gradle_path)?;
+        let updated = content.replace(
+            "applicationId = \"com.perry.template\"",
+            &format!("applicationId = \"{}\"", bundle_id),
+        );
+        std::fs::write(&gradle_path, updated)?;
+    }
+
+    // Generate gradle wrapper if not present
+    let gradlew = build_dir.join("gradlew");
+    if !gradlew.exists() {
+        if let OutputFormat::Text = format {
+            println!("Generating Gradle wrapper...");
+        }
+        let wrapper_status = Command::new("gradle")
+            .arg("wrapper")
+            .current_dir(&build_dir)
+            .status();
+        match wrapper_status {
+            Ok(s) if s.success() => {}
+            _ => bail!(
+                "Failed to generate Gradle wrapper. Install Gradle: brew install gradle\n\
+                 Or install Android Studio which includes Gradle."
+            ),
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if gradlew.exists() {
+            let mut perms = std::fs::metadata(&gradlew)?.permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&gradlew, perms)?;
+        }
+    }
+
+    if let OutputFormat::Text = format {
+        println!("Running Gradle assembleDebug...");
+    }
+
+    // Run gradle build
+    let gradle_status = Command::new(&gradlew)
+        .arg("assembleDebug")
+        .current_dir(&build_dir)
+        .status()
+        .map_err(|e| anyhow!("Failed to run Gradle: {}. Is the Android SDK/Gradle installed?", e))?;
+
+    if !gradle_status.success() {
+        bail!("Gradle build failed. Check the output above for errors.");
+    }
+
+    // Find the APK
+    let apk_path = build_dir.join("app/build/outputs/apk/debug/app-debug.apk");
+    if !apk_path.exists() {
+        bail!("APK not found at expected path: {}", apk_path.display());
+    }
+
+    if let OutputFormat::Text = format {
+        println!("APK built: {}", apk_path.display());
+    }
+
+    // Install and launch
+    install_and_launch_android(&apk_path, bundle_id, serial, format)
 }
 
 /// Sign an unsigned APK with the Android debug keystore for local testing.

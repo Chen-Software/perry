@@ -45,6 +45,10 @@ object PerryBridge {
     private var pendingLocationCallbackKey: Long = 0
     private const val LOCATION_PERMISSION_REQUEST = 43
 
+    // Audio permission tracking
+    private const val AUDIO_PERMISSION_REQUEST = 44
+    private var audioPermissionGranted = false
+
     fun init(activity: Activity, rootLayout: FrameLayout) {
         this.activity = activity
         this.rootLayout = rootLayout
@@ -342,6 +346,26 @@ object PerryBridge {
         } else {
             nativeInvokeCallback2(pendingLocationCallbackKey, Double.NaN, Double.NaN)
         }
+    }
+
+    // --- Audio Permission ---
+
+    @JvmStatic
+    fun requestAudioPermission() {
+        if (ContextCompat.checkSelfPermission(activity, Manifest.permission.RECORD_AUDIO)
+            == PackageManager.PERMISSION_GRANTED) {
+            audioPermissionGranted = true
+        } else {
+            ActivityCompat.requestPermissions(
+                activity,
+                arrayOf(Manifest.permission.RECORD_AUDIO),
+                AUDIO_PERMISSION_REQUEST
+            )
+        }
+    }
+
+    fun onAudioPermissionResult(granted: Boolean) {
+        audioPermissionGranted = granted
     }
 
     // --- Timer ---
