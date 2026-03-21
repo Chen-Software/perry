@@ -709,7 +709,34 @@ impl crate::codegen::Compiler {
                 // Return the (now rejected) promise
                 builder.ins().return_(&[promise_ptr]);
             } else {
-                for stmt in &func.body {
+                // For large functions on Windows, emit checkpoint calls after each
+                // statement to help diagnose crashes at specific statement indices.
+                // Emit checkpoints for renderWorkbench AND any function it calls
+                let emit_checkpoints = self.compile_target == 3
+                    && (func.body.len() > 100
+                        || func.name == "initLspBridge"
+                        || func.name == "tryStartServer"
+                        || func.name == "startTypeScriptServer"
+                        || func.name == "setLspWorkspaceRoot"
+                        || func.name == "fileExistsSafe");
+                let checkpoint_func_ref = if emit_checkpoints {
+                    self.extern_funcs.get("js_checkpoint").map(|&fid| {
+                        self.module.declare_func_in_func(fid, builder.func)
+                    })
+                } else {
+                    None
+                };
+
+                for (stmt_idx, stmt) in func.body.iter().enumerate() {
+                    // Emit checkpoint before the statement
+                    if let Some(cp_ref) = checkpoint_func_ref {
+                        let cb = builder.current_block().unwrap();
+                        if !is_block_filled(&builder, cb) {
+                            let idx_val = builder.ins().iconst(types::I32, stmt_idx as i64);
+                            builder.ins().call(cp_ref, &[idx_val]);
+                        }
+                    }
+
                     compile_stmt(&mut builder, &mut self.module, &self.func_ids, &self.closure_func_ids, &self.func_wrapper_ids, &self.extern_funcs, &self.async_func_ids, &self.closure_returning_funcs, &self.classes, &self.enums, &self.func_param_types, &self.func_union_params, &self.func_return_types, &self.func_hir_return_types, &self.func_rest_param_index, &self.imported_func_param_counts, &mut locals, &mut next_var, stmt, None, None, &boxed_vars, None)
                         .map_err(|e| anyhow!("In function '{}': {}", func.name, e))?;
 
