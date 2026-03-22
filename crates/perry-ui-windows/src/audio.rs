@@ -186,10 +186,10 @@ pub fn start() -> i64 {
 
                 // Read all available packets
                 loop {
-                    let mut packet_length: u32 = 0;
-                    if capture_client.GetNextPacketSize(&mut packet_length).is_err() {
-                        break;
-                    }
+                    let packet_length = match capture_client.GetNextPacketSize() {
+                        Ok(len) => len,
+                        Err(_) => break,
+                    };
                     if packet_length == 0 {
                         break;
                     }
@@ -295,19 +295,8 @@ pub fn get_waveform(count: f64) -> f64 {
 pub fn get_device_model() -> i64 {
     #[cfg(target_os = "windows")]
     {
-        // Get computer name
-        let mut buf = [0u16; 256];
-        let mut size = buf.len() as u32;
-        let name = unsafe {
-            if windows::Win32::System::SystemInformation::GetComputerNameW(
-                windows::core::PWSTR(buf.as_mut_ptr()),
-                &mut size,
-            ).is_ok() {
-                String::from_utf16_lossy(&buf[..size as usize])
-            } else {
-                "Windows".to_string()
-            }
-        };
+        // Get computer name via environment variable (avoids Windows API versioning issues)
+        let name = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows".to_string());
         unsafe { js_string_from_bytes(name.as_ptr(), name.len() as i32) }
     }
     #[cfg(not(target_os = "windows"))]

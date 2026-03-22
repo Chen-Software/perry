@@ -65,6 +65,13 @@ pub extern "C" fn js_array_alloc(capacity: u32) -> *mut ArrayHeader {
     ptr
 }
 
+/// Create a new empty array (convenience alias for `js_array_alloc(0)`).
+/// Used by perry-ui audio code.
+#[no_mangle]
+pub extern "C" fn js_array_create() -> i64 {
+    js_array_alloc(0) as i64
+}
+
 /// Allocate a new array with the given capacity AND set length = capacity.
 /// Used for `new Array(n)` which in JavaScript creates an array with length n.
 /// Elements are NOT initialized — caller is expected to fill them before reading.
