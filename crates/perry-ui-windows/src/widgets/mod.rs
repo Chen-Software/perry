@@ -112,6 +112,31 @@ thread_local! {
     static BG_COLORS: RefCell<HashMap<i64, u32>> = RefCell::new(HashMap::new());
 }
 
+/// Mutex-based handle→HWND map (stores HWND as usize for Send safety).
+/// Unlike the RefCell-based WIDGETS vec, this can be accessed during WM_PAINT
+/// even when WIDGETS is borrowed for layout.
+#[cfg(target_os = "windows")]
+static HWND_MAP: std::sync::Mutex<Vec<(i64, usize)>> = std::sync::Mutex::new(Vec::new());
+
+/// Store handle→HWND mapping in the Mutex-based map (called during widget registration).
+#[cfg(target_os = "windows")]
+fn store_hwnd_mapping(handle: i64, hwnd: HWND) {
+    if let Ok(mut map) = HWND_MAP.lock() {
+        map.push((handle, hwnd.0 as usize));
+    }
+}
+
+/// Look up HWND by handle using the Mutex-based map (reentrancy-safe).
+#[cfg(target_os = "windows")]
+pub fn get_hwnd_safe(handle: i64) -> Option<HWND> {
+    if let Ok(map) = HWND_MAP.lock() {
+        for &(h, hwnd_val) in map.iter().rev() {
+            if h == handle { return Some(HWND(hwnd_val as *mut _)); }
+        }
+    }
+    None
+}
+
 /// Convert RGB floats (0.0-1.0) to Win32 COLORREF (0x00BBGGRR)
 #[cfg(target_os = "windows")]
 fn rgb_to_colorref(r: f64, g: f64, b: f64) -> u32 {
@@ -178,7 +203,7 @@ pub fn alloc_control_id() -> u16 {
 /// Register a widget entry and return its 1-based handle.
 #[cfg(target_os = "windows")]
 pub fn register_widget(hwnd: HWND, kind: WidgetKind, control_id: u16) -> i64 {
-    WIDGETS.with(|w| {
+    let handle = WIDGETS.with(|w| {
         let mut widgets = w.borrow_mut();
         widgets.push(WidgetEntry {
             hwnd,
@@ -196,7 +221,9 @@ pub fn register_widget(hwnd: HWND, kind: WidgetKind, control_id: u16) -> i64 {
             detaches_hidden: false,
         });
         widgets.len() as i64
-    })
+    });
+    store_hwnd_mapping(handle, hwnd);
+    handle
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -226,7 +253,7 @@ pub fn register_widget(hwnd: isize, kind: WidgetKind, control_id: u16) -> i64 {
 #[cfg(target_os = "windows")]
 pub fn register_widget_with_layout(hwnd: HWND, kind: WidgetKind, spacing: f64, insets: (f64, f64, f64, f64)) -> i64 {
     let control_id = alloc_control_id();
-    WIDGETS.with(|w| {
+    let handle = WIDGETS.with(|w| {
         let mut widgets = w.borrow_mut();
         widgets.push(WidgetEntry {
             hwnd,
@@ -244,7 +271,9 @@ pub fn register_widget_with_layout(hwnd: HWND, kind: WidgetKind, spacing: f64, i
             detaches_hidden: false,
         });
         widgets.len() as i64
-    })
+    });
+    store_hwnd_mapping(handle, hwnd);
+    handle
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -777,7 +806,12 @@ pub fn set_background_color(handle: i64, r: f64, g: f64, b: f64, _a: f64) {
         let brush = unsafe { CreateSolidBrush(COLORREF(color)) };
         BG_COLORS.with(|c| c.borrow_mut().insert(handle, color));
         BG_BRUSHES.with(|b| b.borrow_mut().insert(handle, brush));
-        if let Some(hwnd) = get_hwnd(handle) {
+        // Use get_hwnd_safe (Mutex-based, reentrancy-safe) to always find the HWND
+        let hwnd_opt = get_hwnd_safe(handle);
+        if let Some(hwnd) = hwnd_opt {
+            // Store color directly on the HWND via SetPropW so WM_PAINT can
+            // retrieve it without any RefCell borrow
+            set_hwnd_bg_color(hwnd, color);
             unsafe { let _ = InvalidateRect(hwnd, None, true); }
         }
     }
@@ -785,6 +819,48 @@ pub fn set_background_color(handle: i64, r: f64, g: f64, b: f64, _a: f64) {
     {
         let _ = (handle, r, g, b, _a);
     }
+}
+
+/// Store a background COLORREF directly on an HWND via SetPropW.
+/// This bypasses the handle lookup chain and survives RefCell reentrancy.
+#[cfg(target_os = "windows")]
+pub fn set_hwnd_bg_color(hwnd: HWND, color: u32) {
+    unsafe {
+        // Store color+1 so we can distinguish "not set" (0) from black (0x000000).
+        let prop_name: Vec<u16> = "PerryBgColor".encode_utf16().chain(std::iter::once(0)).collect();
+        SetPropW(hwnd, windows::core::PCWSTR(prop_name.as_ptr()), HANDLE((color as usize + 1) as *mut _));
+    }
+}
+
+/// Retrieve the background COLORREF stored on an HWND. Returns None if not set.
+#[cfg(target_os = "windows")]
+pub fn get_hwnd_bg_color(hwnd: HWND) -> Option<u32> {
+    unsafe {
+        let prop_name: Vec<u16> = "PerryBgColor".encode_utf16().chain(std::iter::once(0)).collect();
+        let val = GetPropW(hwnd, windows::core::PCWSTR(prop_name.as_ptr()));
+        if val.is_invalid() || val.0.is_null() {
+            None
+        } else {
+            Some(val.0 as u32 - 1) // undo the +1 offset
+        }
+    }
+}
+
+/// Walk the HWND parent chain to find the nearest ancestor with a bg color stored via SetPropW.
+#[cfg(target_os = "windows")]
+pub fn find_ancestor_hwnd_bg_color(mut hwnd: HWND) -> Option<u32> {
+    for _ in 0..10 {
+        if let Ok(parent) = unsafe { GetParent(hwnd) } {
+            if parent.0.is_null() { break; }
+            if let Some(color) = get_hwnd_bg_color(parent) {
+                return Some(color);
+            }
+            hwnd = parent;
+        } else {
+            break;
+        }
+    }
+    None
 }
 
 /// Set the background gradient of a widget.

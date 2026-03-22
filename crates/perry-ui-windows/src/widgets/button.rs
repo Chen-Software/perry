@@ -276,24 +276,16 @@ pub fn handle_draw_item(lparam: LPARAM) -> bool {
         let hdc = dis.hDC;
         let mut rect = dis.rcItem;
 
-        // Fill background with nearest ancestor's bg color (or default)
+        // Fill background: check own HWND, then walk parent chain via HWND props
+        // (bypasses find_handle_by_hwnd which fails under RefCell reentrancy)
+        let bg_color = super::get_hwnd_bg_color(dis.hwndItem)
+            .or_else(|| super::find_ancestor_hwnd_bg_color(dis.hwndItem));
         let mut bg_filled = false;
-        let mut walk_hwnd = dis.hwndItem;
-        for _ in 0..10 {
-            if let Ok(parent_hwnd) = GetParent(walk_hwnd) {
-                if parent_hwnd.0.is_null() { break; }
-                let parent_handle = super::find_handle_by_hwnd(parent_hwnd);
-                if parent_handle > 0 {
-                    if let Some(brush) = super::get_bg_brush(parent_handle) {
-                        FillRect(hdc, &rect, brush);
-                        bg_filled = true;
-                        break;
-                    }
-                }
-                walk_hwnd = parent_hwnd;
-            } else {
-                break;
-            }
+        if let Some(color) = bg_color {
+            let brush = windows::Win32::Graphics::Gdi::CreateSolidBrush(COLORREF(color));
+            FillRect(hdc, &rect, brush);
+            let _ = windows::Win32::Graphics::Gdi::DeleteObject(brush);
+            bg_filled = true;
         }
         if !bg_filled {
             let bg_brush = windows::Win32::Graphics::Gdi::GetSysColorBrush(windows::Win32::Graphics::Gdi::COLOR_BTNFACE);
