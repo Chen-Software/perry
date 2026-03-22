@@ -2,13 +2,181 @@
 
 Detailed changelog for Perry. See CLAUDE.md for concise summaries.
 
+## v0.2.202
+- Fix `perry setup ios` not saving bundle_id to perry.toml — bundle ID was used for provisioning profile creation but never written to `[ios].bundle_id`; `perry publish` fell back to default `com.perry.<name>`, causing profile/bundle mismatch
+
+## v0.2.201
+- `perry setup` improvements: auto-detect signing identity from Keychain when reusing existing certificate; show both global and project config paths; bundle_id lookup checks `[ios]` → `[app]` → `[project]` priority; app name checks `[app]` → `[project]`
+
+## v0.2.200
+- Fix `perry setup` not saving to project perry.toml: all 3 platform wizards silently skipped writing when file didn't exist — now auto-creates it
+- Audio capture API (`perry/system`): `audioStart`, `audioStop`, `audioGetLevel`, `audioGetPeak`, `audioGetWaveformSamples`, `getDeviceModel` — all 6 platforms; A-weighted IIR filter, EMA smoothing, lock-free ring buffer
+- Camera API (`perry/ui`, iOS only): `CameraView`, `cameraStart`/`Stop`/`Freeze`/`Unfreeze`, `cameraSampleColor(x,y)` — AVCaptureSession + AVCaptureVideoPreviewLayer
+
+## v0.2.199
+- Fix `import * as X` namespace function calls: intercept in `Call { PropertyGet { ExternFuncRef } }` path; also handles exported closures via `js_closure_callN` fallback
+- Fix ScrollView invisible inside ZStack: `widgets::add_child` now detects ZStack parents via handle tracking
+- Fix SIGBUS during module init with JS runtime async calls: proper V8 stack limit from `pthread_get_stackaddr_np`; `js_run_stdlib_pump()` in UI pump timer
+- Fix regex test assertions + fastify URL query stripping
+
+## v0.2.198
+- Widget: full iOS + Android + watchOS + Wear OS support: WidgetDecl extended with config_params, provider_func_name, placeholder, family_param_name, app_group, reload_after_seconds
+- New WidgetNode variants: ForEach, Divider, Label, FamilySwitch, Gauge (watchOS)
+- New crates: `perry-codegen-glance` (Android Glance widgets), `perry-codegen-wear-tiles` (Wear OS Tiles)
+- 4 new compile targets: `--target watchos-widget`, `--target android-widget`, `--target wearos-tile`, `--target watchos-widget-simulator`
+
+## v0.2.197
+- Cross-platform `menuClear` + `menuAddStandardAction` FFI to all 6 platforms (were macOS-only)
+- Fix `dispatch_menu_item` RefCell re-entrancy panic on Windows
+
+## v0.2.196
+- Fix `perry publish` showing wrong platform for Windows/Web: `target_display` match was missing cases
+
+## v0.2.195
+- Documentation: comprehensive perry.toml reference (`docs/src/cli/perry-toml.md`)
+- Documentation: comprehensive geisterhand reference rewrite (`docs/src/testing/geisterhand.md`)
+
+## v0.2.194
+- CLI: platform as positional arg for `run` and `publish` (`perry run ios`, `perry publish macos`)
+
+## v0.2.193
+- Fix bundle ID not reading from perry.toml: `AppConfig` struct was missing `bundle_id` field
+
+## v0.2.192
+- Configurable geisterhand port: `--geisterhand-port <PORT>` CLI flag
+
+## v0.2.191
+- Geisterhand: in-process input fuzzer for Perry UI — `--enable-geisterhand` embeds HTTP server (port 7676)
+- Screenshot capture all 5 native platforms
+- Auto-build geisterhand libs when missing
+
+## v0.2.189
+- WASM target: Firefox NaN canonicalization fix — memory-based calling convention for all bridge functions
+
+## v0.2.188
+- WASM target: full perry/ui support — 170+ DOM-based UI functions via JS runtime bridge
+
+## v0.2.187
+- WASM target: class getters/setters, exception propagation, setTimeout/setInterval, Buffer methods, crypto.sha256
+
+## v0.2.186
+- WASM target: full class compilation, try/catch/finally, URL/Buffer bridges, async→JS bridge, 192+ runtime imports
+
+## v0.2.185
+- WASM target: closures, higher-order array methods, classes, JSON/Map/Set/Date/Error/RegExp, 139 bridge imports
+
+## v0.2.184
+- Documentation: WebAssembly platform page, perry-styling/theming page, `perry run` docs, `--minify` docs
+
+## v0.2.183
+- WebAssembly target (`--target wasm`): `perry-codegen-wasm` crate, WASM bytecode via `wasm-encoder`, self-contained HTML output
+
+## v0.2.182
+- Web target minification/obfuscation: Rust-native JS minifier, name mangling, `--minify` CLI flag
+
+## v0.2.181
+- iOS keyboard avoidance, `--console` flag for live stdout/stderr streaming
+- Fix `RefCell already borrowed` panic in state callbacks (GH-4)
+- Fix fetch linker error without stdlib imports (GH-5): `uses_fetch` flag
+
+## v0.2.180
+- `perry run` command: compile and launch in one step, platform-aware device detection
+- Remote build fallback for iOS: auto-detect missing toolchain, build on Perry Hub
+
+## v0.2.179
+- Public beta notice for publish/verify: opt-in error reporting via Chirp telemetry
+
 ## v0.2.178
-- **Splash screen support for iOS and Android**
-  - Parse `perry.splash` config from `package.json` with three tiers: universal (single image + color), per-platform overrides, full custom file override
-  - iOS: auto-generate LaunchScreen.storyboard with centered image (128x128pt, scaleAspectFit) and custom background color; or use a custom storyboard
-  - Android: `Theme.Perry.Splash` style with `windowBackground` layer-list drawable; activity calls `setTheme()` in `onCreate` to switch to normal theme
-  - New template file: `perry-ui-android/template/app/src/main/res/drawable/splash_background.xml`
-  - Modified: `compile.rs` (iOS storyboard generation), `themes.xml`, `AndroidManifest.xml`, `PerryActivity.kt`
+- Fix `--enable-js-runtime` linker error on Linux/WSL: `--allow-multiple-definition` for ELF linker
+- Splash screen support for iOS and Android (parse `perry.splash` config, auto-generate LaunchScreen.storyboard / splash drawable)
+
+## v0.2.177
+- Project-specific provisioning profiles: save as `{bundle_id}.mobileprovision` instead of generic name
+
+## v0.2.176
+- Anonymous telemetry: opt-in usage statistics via Chirp API; opt out via `PERRY_NO_TELEMETRY=1`
+
+## v0.2.175
+- Documentation site: mdBook-based docs (`docs/`), 49 pages, GitHub Pages CI, `llms.txt`
+
+## v0.2.174
+- `perry/widget` module + `--target ios-widget`: compile TS widget declarations to SwiftUI WidgetKit extensions via `perry-codegen-swiftui` crate
+
+## v0.2.173
+- `perry publish` auto-export .p12: auto-detect signing identity from macOS Keychain
+
+## v0.2.172
+- Codebase refactor: split `codegen.rs` (40k→1.6k lines) into 12 modules, `lower.rs` (11k→5.4k lines) into 8 modules
+
+## v0.2.171
+- Auto-update checker: background version check, `perry update` self-update, `perry doctor` update status
+
+## v0.2.170
+- FFI safety: `catch_callback_panic` for all ObjC callbacks
+- BigInt bitwise ops, button enhancements (SF Symbols), ScrollView pull-to-refresh, removeChild/reorderChild, openFolderDialog
+
+## v0.2.169
+- Type inference: `infer_type_from_expr()` eliminates `Type::Any` for common patterns
+- `--type-check` flag: optional tsgo IPC integration
+
+## v0.2.168
+- Native application menu bars: 6 FFI functions across all 6 platforms
+
+## v0.2.167
+- `perry.compilePackages`: compile pure TS/JS npm packages natively, dedup across nested node_modules
+
+## v0.2.166
+- `packages/perry-styling`: design system bridge, token codegen CLI, compile-time `__platform__` constants
+
+## v0.2.165
+- Background process management, `fs.readFileBuffer`, `fs.rmRecursive`, `__platform__` compile-time constant
+
+## v0.2.164
+- `perry publish` auto-register free license; remove debug logging from runtime
+
+## v0.2.163
+- Table widget: NSTableView/DOM `<table>`, column headers/widths, row selection
+
+## v0.2.162
+- Web platform full feature parity: 60 new JS functions (100% coverage across all 6 platforms)
+
+## v0.2.161
+- Android full feature parity: 62 new JNI functions
+
+## v0.2.160
+- Windows full feature parity: 62 new Win32 functions
+
+## v0.2.159
+- GTK4 full feature parity: 62 new functions
+
+## v0.2.158
+- Cross-platform feature parity test suite: `perry-ui-test` crate, 127-entry feature matrix
+
+## v0.2.157
+- 12 new UI/system features: saveFileDialog, Alert, Sheet, Toolbar, LazyVStack, Window, Keychain, notifications
+
+## v0.2.156
+- `--target web`: `perry-codegen-js` crate emits JavaScript from HIR, self-contained HTML files
+
+## v0.2.155
+- 20+ new UI widgets (SecureField, ProgressView, Image, Picker, Form/Section, NavigationStack, ZStack)
+- `perry/system` module: openURL, isDarkMode, preferencesSet/Get
+
+## v0.2.153
+- Automatic binary size reduction: link runtime-only when possible (0.3MB vs 48MB)
+
+## v0.2.151
+- Plugin system v2: hook priority, 3 modes (filter/action/waterfall), event bus, tool invocation, config system
+
+## v0.2.150
+- Native plugin system: `--output-type dylib`, PluginRegistry, dlopen/dlclose
+
+## v0.2.149
+- `string.match()` support, regex.test() verification, object destructuring, method chaining
+
+## v0.2.148
+- `Array.from()`, singleton pattern type inference, multi-module class ID management
+- Array mutation on properties, Map/Set NaN-boxing fixes, native module overridability
 
 ## v0.2.147
 - **Mark-sweep garbage collection** for bounded memory in long-running programs
