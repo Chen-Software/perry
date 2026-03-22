@@ -68,6 +68,11 @@ pub fn create(label_ptr: *const u8, on_change: f64) -> i64 {
             TOGGLE_CALLBACKS.with(|cb| {
                 cb.borrow_mut().insert(handle, callback_ptr);
             });
+            #[cfg(feature = "geisterhand")]
+            {
+                extern "C" { fn perry_geisterhand_register(h: i64, wt: u8, ck: u8, cb: f64, lbl: *const u8); }
+                unsafe { perry_geisterhand_register(handle, 3, 1, on_change, label_ptr); }
+            }
             handle
         }
     }
@@ -79,6 +84,11 @@ pub fn create(label_ptr: *const u8, on_change: f64) -> i64 {
         TOGGLE_CALLBACKS.with(|cb| {
             cb.borrow_mut().insert(handle, callback_ptr);
         });
+        #[cfg(feature = "geisterhand")]
+        {
+            extern "C" { fn perry_geisterhand_register(h: i64, wt: u8, ck: u8, cb: f64, lbl: *const u8); }
+            unsafe { perry_geisterhand_register(handle, 3, 1, on_change, label_ptr); }
+        }
         handle
     }
 }

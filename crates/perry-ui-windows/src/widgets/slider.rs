@@ -87,6 +87,13 @@ pub fn create(min: f64, max: f64, initial: f64, on_change: f64) -> i64 {
             SLIDER_INFO.with(|info| {
                 info.borrow_mut().insert(handle, SliderInfo { min, max, callback_ptr });
             });
+
+            #[cfg(feature = "geisterhand")]
+            {
+                extern "C" { fn perry_geisterhand_register(handle: i64, widget_type: u8, callback_kind: u8, closure_f64: f64, label_ptr: *const u8); }
+                perry_geisterhand_register(handle, 2, 1, on_change, std::ptr::null());
+            }
+
             handle
         }
     }
@@ -97,6 +104,13 @@ pub fn create(min: f64, max: f64, initial: f64, on_change: f64) -> i64 {
         SLIDER_INFO.with(|info| {
             info.borrow_mut().insert(handle, SliderInfo { min, max, callback_ptr });
         });
+
+        #[cfg(feature = "geisterhand")]
+        {
+            extern "C" { fn perry_geisterhand_register(handle: i64, widget_type: u8, callback_kind: u8, closure_f64: f64, label_ptr: *const u8); }
+            unsafe { perry_geisterhand_register(handle, 2, 1, on_change, std::ptr::null()); }
+        }
+
         handle
     }
 }

@@ -985,7 +985,14 @@ pub extern "C" fn perry_ui_widget_set_hugging(handle: i64, priority: f64) {
 
 /// Set on-click callback (stub — not yet implemented on Windows).
 #[no_mangle]
-pub extern "C" fn perry_ui_widget_set_on_click(_handle: i64, _callback: f64) {}
+pub extern "C" fn perry_ui_widget_set_on_click(handle: i64, callback: f64) {
+    let _ = handle;
+    #[cfg(feature = "geisterhand")]
+    {
+        extern "C" { fn perry_geisterhand_register(handle: i64, widget_type: u8, callback_kind: u8, closure_f64: f64, label_ptr: *const u8); }
+        unsafe { perry_geisterhand_register(handle, 0, 0, callback, std::ptr::null()); }
+    }
+}
 
 /// Set widget height (fixed).
 #[no_mangle]
@@ -1139,7 +1146,13 @@ pub extern "C" fn perry_ui_text_set_wraps(_handle: i64, _wraps: i64) {}
 pub extern "C" fn perry_ui_textfield_get_string(_handle: i64) -> i64 { 0 }
 
 #[no_mangle]
-pub extern "C" fn perry_ui_textfield_set_on_submit(_handle: i64, _callback: f64) {}
+pub extern "C" fn perry_ui_textfield_set_on_submit(_handle: i64, _callback: f64) {
+    #[cfg(feature = "geisterhand")]
+    {
+        extern "C" { fn perry_geisterhand_register(h: i64, wt: u8, ck: u8, cb: f64, lbl: *const u8); }
+        unsafe { perry_geisterhand_register(_handle, 1, 2, _callback, std::ptr::null()); }
+    }
+}
 
 #[no_mangle]
 pub extern "C" fn perry_ui_textfield_set_borderless(handle: i64, borderless: f64) {

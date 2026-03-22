@@ -795,17 +795,27 @@ pub fn set_background_gradient(handle: i64, _r1: f64, _g1: f64, _b1: f64, _a1: f
 }
 
 /// Set an on-hover callback for a widget.
-pub fn set_on_hover(handle: i64, _callback: f64) {
+pub fn set_on_hover(handle: i64, callback: f64) {
     // Win32 hover requires SetWindowSubclass + TrackMouseEvent + WM_MOUSEHOVER/LEAVE.
     // Best-effort no-op.
     let _ = handle;
+    #[cfg(feature = "geisterhand")]
+    {
+        extern "C" { fn perry_geisterhand_register(handle: i64, widget_type: u8, callback_kind: u8, closure_f64: f64, label_ptr: *const u8); }
+        unsafe { perry_geisterhand_register(handle, 0, 3, callback, std::ptr::null()); }
+    }
 }
 
 /// Set a double-click callback for a widget.
-pub fn set_on_double_click(handle: i64, _callback: f64) {
+pub fn set_on_double_click(handle: i64, callback: f64) {
     // Win32 double-click requires CS_DBLCLKS style + WM_LBUTTONDBLCLK handling.
     // Best-effort no-op.
     let _ = handle;
+    #[cfg(feature = "geisterhand")]
+    {
+        extern "C" { fn perry_geisterhand_register(handle: i64, widget_type: u8, callback_kind: u8, closure_f64: f64, label_ptr: *const u8); }
+        unsafe { perry_geisterhand_register(handle, 0, 4, callback, std::ptr::null()); }
+    }
 }
 
 /// Animate the opacity of a widget.

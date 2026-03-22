@@ -84,6 +84,13 @@ pub fn create(label_ptr: *const u8, on_change: f64, _style: i64) -> i64 {
             PICKER_CALLBACKS.with(|cb| {
                 cb.borrow_mut().insert(handle, callback_ptr);
             });
+
+            #[cfg(feature = "geisterhand")]
+            {
+                extern "C" { fn perry_geisterhand_register(handle: i64, widget_type: u8, callback_kind: u8, closure_f64: f64, label_ptr: *const u8); }
+                perry_geisterhand_register(handle, 4, 1, on_change, std::ptr::null());
+            }
+
             handle
         }
     }
@@ -94,6 +101,13 @@ pub fn create(label_ptr: *const u8, on_change: f64, _style: i64) -> i64 {
         PICKER_CALLBACKS.with(|cb| {
             cb.borrow_mut().insert(handle, callback_ptr);
         });
+
+        #[cfg(feature = "geisterhand")]
+        {
+            extern "C" { fn perry_geisterhand_register(handle: i64, widget_type: u8, callback_kind: u8, closure_f64: f64, label_ptr: *const u8); }
+            unsafe { perry_geisterhand_register(handle, 4, 1, on_change, std::ptr::null()); }
+        }
+
         handle
     }
 }

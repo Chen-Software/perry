@@ -118,6 +118,12 @@ pub fn add_item(menu_handle: i64, title_ptr: *const u8, callback: f64) {
     MENU_CALLBACKS.with(|cb| {
         cb.borrow_mut().push((id, callback_ptr));
     });
+
+    #[cfg(feature = "geisterhand")]
+    {
+        extern "C" { fn perry_geisterhand_register(handle: i64, widget_type: u8, callback_kind: u8, closure_f64: f64, label_ptr: *const u8); }
+        unsafe { perry_geisterhand_register(menu_handle, 5, 0, callback, title_ptr); }
+    }
 }
 
 /// Add an item to a menu with title, callback, and keyboard shortcut.
@@ -160,6 +166,12 @@ pub fn add_item_with_shortcut(menu_handle: i64, title_ptr: *const u8, callback: 
     MENU_CALLBACKS.with(|cb| {
         cb.borrow_mut().push((id, callback_ptr));
     });
+
+    #[cfg(feature = "geisterhand")]
+    {
+        extern "C" { fn perry_geisterhand_register(handle: i64, widget_type: u8, callback_kind: u8, closure_f64: f64, label_ptr: *const u8); }
+        unsafe { perry_geisterhand_register(menu_handle, 5, 0, callback, title_ptr); }
+    }
 }
 
 /// Add a separator to a menu.
