@@ -15,6 +15,7 @@ use perry_hir::{
     CompareOp,
     UnaryOp,
     BinaryOp, Expr, Function, Stmt,
+    collect_local_refs_stmt,
 };
 use perry_types::LocalId;
 
@@ -23,6 +24,35 @@ use crate::types::{ClassMeta, EnumMemberValue, LocalInfo, ThisContext, LoopConte
 use crate::util::*;
 use crate::stmt::compile_stmt;
 use crate::expr::compile_expr;
+
+/// Check if a statement contains any function calls (direct or nested).
+/// Used to skip module-var reload after simple assignments.
+fn stmt_contains_call(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Expr(expr) => expr_contains_call(expr),
+        Stmt::Let { init, .. } => init.as_ref().map(|e| expr_contains_call(e)).unwrap_or(false),
+        Stmt::Return(Some(expr)) => expr_contains_call(expr),
+        Stmt::If { condition, .. } => expr_contains_call(condition), // conservative: if has a call in condition
+        Stmt::While { condition, .. } => expr_contains_call(condition),
+        Stmt::For { condition, .. } => condition.as_ref().map(|e| expr_contains_call(e)).unwrap_or(false),
+        Stmt::Throw(expr) => expr_contains_call(expr),
+        Stmt::Try { .. } => true, // try blocks likely contain calls
+        Stmt::Switch { discriminant, .. } => expr_contains_call(discriminant),
+        _ => false,
+    }
+}
+
+fn expr_contains_call(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call { .. } | Expr::StaticMethodCall { .. } | Expr::New { .. } => true,
+        Expr::Binary { left, right, .. } => expr_contains_call(left) || expr_contains_call(right),
+        Expr::Unary { operand, .. } => expr_contains_call(operand),
+        Expr::LocalSet(_, e) => expr_contains_call(e),
+        Expr::PropertyGet { object, .. } => expr_contains_call(object),
+        Expr::IndexGet { object, index, .. } => expr_contains_call(object) || expr_contains_call(index),
+        _ => false,
+    }
+}
 
 /// Type information for a local variable in a split function.
 /// Used to preserve correct types across continuation boundaries.
@@ -187,7 +217,7 @@ impl crate::codegen::Compiler {
     /// Maximum top-level statements before a function is split.
     /// Cranelift generates incorrect machine code for very large functions
     /// (>3MB compiled code) on Windows.
-    const LARGE_FUNC_THRESHOLD: usize = 50;
+    const LARGE_FUNC_THRESHOLD: usize = 40;
 
     pub(crate) fn compile_function(&mut self, func: &Function) -> Result<()> {
         // Track current function for self-recursive call optimization
@@ -205,9 +235,7 @@ impl crate::codegen::Compiler {
             && !func.is_async
             && self.compile_target == 3; // Windows only (target 3)
 
-        // Debug: ONLY split renderWorkbench to isolate the crash
-        let only_this_func = func.name == "renderWorkbench";
-        let result = if needs_split && only_this_func {
+        let result = if needs_split {
             self.compile_function_split(func)
         } else if Self::is_integer_only_function(func) && func.params.len() <= 4 {
             self.compile_integer_specialized_function(func)
@@ -723,6 +751,19 @@ impl crate::codegen::Compiler {
                     None
                 };
 
+                // On Windows, pre-compute which LocalIds are referenced in the function body
+                // so the module-var reload only reloads referenced vars (not all 128+).
+                let func_body_refs: HashSet<perry_types::LocalId> = if self.compile_target == 3 {
+                    let mut refs = Vec::new();
+                    let mut visited = HashSet::new();
+                    for s in &func.body {
+                        collect_local_refs_stmt(s, &mut refs, &mut visited);
+                    }
+                    refs.into_iter().collect()
+                } else {
+                    HashSet::new()
+                };
+
                 for (stmt_idx, stmt) in func.body.iter().enumerate() {
                     // Emit checkpoint before the statement
                     if let Some(cp_ref) = checkpoint_func_ref {
@@ -738,20 +779,24 @@ impl crate::codegen::Compiler {
 
                     // Reload module-level variables from their global slots.
                     // Function calls may have modified module variables via LocalSet write-back.
-                    // The function's Cranelift locals are stale unless we reload from global slots.
                     //
-                    // SKIP on Windows for large functions: the reload adds N_vars × N_stmts
-                    // extra load instructions which can make the function too large for correct
-                    // Cranelift codegen. The module vars are already updated via LocalSet
-                    // write-back (expr.rs line 4454-4467), so the reload is only needed when
-                    // a cross-module call modifies a var that THIS module also reads. This is
-                    // rare and the values will be correct on next function-level read.
-                    let skip_reload = self.compile_target == 3 && func.body.len() > 50;
-                    if !skip_reload && !self.module_var_data_ids.is_empty() {
+                    // On Windows, only reload vars that are actually REFERENCED in the function
+                    // body (not all 128+ module vars), and only after statements that contain
+                    // function calls (simple assignments can't modify other module vars).
+                    let stmt_has_call = stmt_contains_call(stmt);
+                    if stmt_has_call && !self.module_var_data_ids.is_empty() {
                         let current_block = builder.current_block().unwrap();
                         if !is_block_filled(&builder, current_block) {
                             let vars_to_reload: Vec<(Variable, cranelift::prelude::types::Type, cranelift_module::DataId)> = locals.iter()
-                                .filter(|(_, info)| !info.is_boxed && info.module_var_data_id.is_some())
+                                .filter(|(local_id, info)| {
+                                    if info.is_boxed || info.module_var_data_id.is_none() { return false; }
+                                    // On Windows, only reload vars referenced in the function body
+                                    if self.compile_target == 3 {
+                                        func_body_refs.contains(local_id)
+                                    } else {
+                                        true
+                                    }
+                                })
                                 .map(|(_, info)| {
                                     let val = builder.use_var(info.var);
                                     let var_type = builder.func.dfg.value_type(val);
@@ -947,39 +992,59 @@ impl crate::codegen::Compiler {
                     .filter_map(|s| if let Stmt::Let { id, .. } = s { Some(*id) } else { None })
                     .collect();
 
-                // Pre-create ALL module-level variables (always available) AND
-                // function-local variables from previous chunks (already initialized).
-                // First: module-level variables from saved_module_vars
+                // Collect LocalIds that are actually REFERENCED in this chunk's statements.
+                // Only pre-load these to keep the chunk function small (avoiding Cranelift
+                // large-function codegen bugs on Windows).
+                let mut chunk_refs_vec = Vec::new();
+                let mut chunk_refs_visited = HashSet::new();
+                for stmt in *chunk {
+                    collect_local_refs_stmt(stmt, &mut chunk_refs_vec, &mut chunk_refs_visited);
+                }
+                let chunk_referenced: HashSet<perry_types::LocalId> = chunk_refs_vec.into_iter().collect();
+                // Pre-create referenced module-level variables AND
+                // function-local variables from previous chunks.
+                // First: module-level variables from saved_module_vars.
+                // Use actual type info from module_level_locals when available,
+                // matching the pattern in normal function compilation (line ~407).
                 for (local_id, data_id) in &saved_module_vars {
                     if chunk_let_ids.contains(local_id) {
                         continue; // Redefined in this chunk
                     }
+                    if !chunk_referenced.contains(local_id) {
+                        continue; // Not used in this chunk — skip to keep function small
+                    }
+                    let (var_type, local_info_template) = if let Some(info) = self.module_level_locals.get(local_id) {
+                        let vt = if info.is_pointer && !info.is_union { types::I64 } else { types::F64 };
+                        (vt, info.clone())
+                    } else {
+                        (types::F64, LocalInfo {
+                            var: Variable::new(0),
+                            name: None, class_name: None, type_args: Vec::new(),
+                            is_pointer: false, is_array: false, is_string: false,
+                            is_bigint: false, is_closure: false, closure_func_id: None,
+                            is_boxed: false, is_map: false, is_set: false,
+                            is_buffer: false, is_event_emitter: false,
+                            is_union: false, is_mixed_array: false, is_integer: false,
+                            is_integer_array: false, is_i32: false, is_boolean: false,
+                            i32_shadow: None, bounded_by_array: None,
+                            bounded_by_constant: None, scalar_fields: None,
+                            squared_cache: None, product_cache: None,
+                            cached_array_ptr: None, const_value: None,
+                            hoisted_element_loads: None, hoisted_i32_products: None,
+                            module_var_data_id: None, class_ref_name: None,
+                        })
+                    };
                     let var = Variable::new(next_var);
                     next_var += 1;
-                    // Module vars use whatever type they have — load as f64 (universal)
-                    builder.declare_var(var, types::F64);
+                    builder.declare_var(var, var_type);
                     let gv = self.module.declare_data_in_func(*data_id, builder.func);
                     let ptr = builder.ins().global_value(types::I64, gv);
-                    let val = builder.ins().load(types::F64, MemFlags::new(), ptr, 0);
+                    let val = builder.ins().load(var_type, MemFlags::new(), ptr, 0);
                     builder.def_var(var, val);
-                    locals.insert(*local_id, LocalInfo {
-                        var,
-                        name: None, class_name: None, type_args: Vec::new(),
-                        is_pointer: false, is_array: false, is_string: false,
-                        is_bigint: false, is_closure: false, closure_func_id: None,
-                        is_boxed: false, is_map: false, is_set: false,
-                        is_buffer: false, is_event_emitter: false,
-                        is_union: true, // treat as union for max compat
-                        is_mixed_array: false, is_integer: false,
-                        is_integer_array: false, is_i32: false, is_boolean: false,
-                        i32_shadow: None, bounded_by_array: None,
-                        bounded_by_constant: None, scalar_fields: None,
-                        squared_cache: None, product_cache: None,
-                        cached_array_ptr: None, const_value: None,
-                        hoisted_element_loads: None, hoisted_i32_products: None,
-                        module_var_data_id: Some(*data_id),
-                        class_ref_name: None,
-                    });
+                    let mut info = local_info_template;
+                    info.var = var;
+                    info.module_var_data_id = Some(*data_id);
+                    locals.insert(*local_id, info);
                 }
 
                 // Then: function-local variables from previous chunks
@@ -987,10 +1052,15 @@ impl crate::codegen::Compiler {
                     if chunk_let_ids.contains(local_id) {
                         continue; // Will be created by compile_stmt with correct type
                     }
-                    // Module-level variables (existed before splitting) are always available.
+                    // Module-level variables were already handled above with correct type info
+                    if saved_module_vars.contains_key(local_id) {
+                        continue;
+                    }
+                    if !chunk_referenced.contains(local_id) {
+                        continue; // Not used in this chunk — skip to keep function small
+                    }
                     // Function-local variables are only available if defined in a previous chunk.
-                    let is_module_var = saved_module_vars.contains_key(local_id);
-                    if !is_module_var && !defined_in_previous_chunks.contains(local_id) {
+                    if !defined_in_previous_chunks.contains(local_id) {
                         continue; // Function-local from a later chunk — not yet initialized
                     }
                     let ti = local_type_info.get(local_id);
@@ -1005,16 +1075,6 @@ impl crate::codegen::Compiler {
                     let ptr = builder.ins().global_value(types::I64, gv);
                     let val = builder.ins().load(var_type, MemFlags::new(), ptr, 0);
                     builder.def_var(var, val);
-
-                    // Debug: log the loaded value if this is renderWorkbench
-                    if func.name == "renderWorkbench" {
-                        if let Some(debug_func) = self.extern_funcs.get("js_debug_val") {
-                            let debug_ref = self.module.declare_func_in_func(*debug_func, builder.func);
-                            let label = builder.ins().iconst(types::I32, (idx * 1000 + *local_id as usize) as i64);
-                            let val_f64 = ensure_f64(&mut builder, val);
-                            builder.ins().call(debug_ref, &[label, val_f64]);
-                        }
-                    }
 
                     let is_str = ti.map(|t| t.is_string).unwrap_or(false);
                     let is_ptr = ti.map(|t| t.is_pointer).unwrap_or(false);
@@ -1045,35 +1105,14 @@ impl crate::codegen::Compiler {
                         // with potentially wrong types (SplitLocalInfo vs actual).
                         // These variables are loaded once at chunk entry and don't
                         // need reloading — they're only read, not written.
-                        module_var_data_id: if is_module_var { Some(*data_id) } else { None },
+                        module_var_data_id: None, // function-local cross-chunk var, not a module var
                         class_ref_name: None,
                     });
                 }
 
-                // Debug: emit checkpoint at chunk start
-                if func.name == "renderWorkbench" {
-                    if let Some(cp_func) = self.extern_funcs.get("js_checkpoint") {
-                        let cp_ref = self.module.declare_func_in_func(*cp_func, builder.func);
-                        let label = builder.ins().iconst(types::I32, (9000 + idx) as i64);
-                        builder.ins().call(cp_ref, &[label]);
-                    }
-                }
 
                 // Compile this chunk's statements
-                let mut stmt_counter = 0usize;
                 for stmt in *chunk {
-                    // Per-statement checkpoint for renderWorkbench
-                    if func.name == "renderWorkbench" {
-                        if let Some(cp_func) = self.extern_funcs.get("js_checkpoint") {
-                            let cb = builder.current_block().unwrap();
-                            if !is_block_filled(&builder, cb) {
-                                let cp_ref = self.module.declare_func_in_func(*cp_func, builder.func);
-                                let label = builder.ins().iconst(types::I32, (idx * 1000 + stmt_counter) as i64);
-                                builder.ins().call(cp_ref, &[label]);
-                            }
-                        }
-                    }
-                    stmt_counter += 1;
                     let cb = builder.current_block().unwrap();
                     if is_block_filled(&builder, cb) { break; }
                     compile_stmt(
@@ -1089,6 +1128,34 @@ impl crate::codegen::Compiler {
                         &mut locals, &mut next_var, stmt,
                         None, None, &boxed_vars, None,
                     ).map_err(|e| anyhow!("In chunk {} of '{}': {}", idx, func.name, e))?;
+
+                    // After Stmt::Let, the new variable was created by compile_stmt
+                    // but may not have module_var_data_id set (because it's new in locals).
+                    // We need to store its initial value to the global slot so the next
+                    // chunk can read it.
+                    if let Stmt::Let { id, name, .. } = stmt {
+                        if let Some(data_id) = all_slots.iter().find(|(lid, _)| lid == id).map(|(_, d)| *d) {
+                            if let Some(info) = locals.get_mut(id) {
+                                let cb = builder.current_block().unwrap();
+                                if !is_block_filled(&builder, cb) {
+                                    // Store value to global slot
+                                    let current = builder.use_var(info.var);
+                                    let val_type = builder.func.dfg.value_type(current);
+                                    let store_val = if val_type == types::I32 {
+                                        builder.ins().fcvt_from_sint(types::F64, current)
+                                    } else {
+                                        current
+                                    };
+                                    let gv = self.module.declare_data_in_func(data_id, builder.func);
+                                    let ptr = builder.ins().global_value(types::I64, gv);
+                                    builder.ins().store(MemFlags::new(), store_val, ptr, 0);
+                                    // Also set module_var_data_id so subsequent writes
+                                    // in the same chunk propagate to the global
+                                    info.module_var_data_id = Some(data_id);
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Return TAG_UNDEFINED sentinel (signals "no return hit, continue")
@@ -1149,14 +1216,15 @@ impl crate::codegen::Compiler {
             builder.switch_to_block(entry);
             builder.seal_block(entry);
 
-            // Store parameters to their global data slots
+            // Store parameters to their global data slots (preserving their actual type)
             for (i, (_param_id, data_id)) in all_slots.iter().enumerate() {
                 if i >= func.params.len() { break; }
                 let param_val = builder.block_params(entry)[i];
-                let val_f64 = ensure_f64(&mut builder, param_val);
                 let gv = self.module.declare_data_in_func(*data_id, builder.func);
                 let ptr = builder.ins().global_value(types::I64, gv);
-                builder.ins().store(MemFlags::new(), val_f64, ptr, 0);
+                // Store with the parameter's actual ABI type (not always f64)
+                // so chunks can load it with the matching type.
+                builder.ins().store(MemFlags::new(), param_val, ptr, 0);
             }
 
             // Call each chunk function. If a chunk returns a non-sentinel
