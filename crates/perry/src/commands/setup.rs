@@ -1728,6 +1728,19 @@ fn update_perry_toml_ios(
         ios.insert("distribute".into(), toml::Value::String("testflight".into()));
     }
 
+    // Ensure [project] has version and build_number — required for App Store uploads.
+    // build_number is auto-incremented by `perry publish` on each upload.
+    let project = doc.entry("project")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("[project] in perry.toml is not a table"))?;
+    if !project.contains_key("version") {
+        project.insert("version".into(), toml::Value::String("1.0.0".into()));
+    }
+    if !project.contains_key("build_number") {
+        project.insert("build_number".into(), toml::Value::Integer(0));
+    }
+
     let new_content = toml::to_string_pretty(&doc)
         .context("Failed to serialize perry.toml")?;
     std::fs::write(perry_toml_path, new_content)?;
@@ -1789,6 +1802,19 @@ fn update_perry_toml_android(
     }
     if !android.contains_key("distribute") {
         android.insert("distribute".into(), toml::Value::String("playstore".into()));
+    }
+
+    // Ensure [project] has version and build_number — required for Play Store uploads.
+    // build_number is auto-incremented by `perry publish` on each upload.
+    let project = doc.entry("project")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("[project] in perry.toml is not a table"))?;
+    if !project.contains_key("version") {
+        project.insert("version".into(), toml::Value::String("1.0.0".into()));
+    }
+    if !project.contains_key("build_number") {
+        project.insert("build_number".into(), toml::Value::Integer(0));
     }
 
     let new_content = toml::to_string_pretty(&doc)
