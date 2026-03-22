@@ -33,6 +33,31 @@ extern "C" {
 /// Timer ID for periodic tick that processes setTimeout/setInterval queues.
 const TICK_TIMER_ID: usize = 9998;
 
+/// Global DPI scale factor (1.0 at 96 DPI, 1.5 at 144 DPI, 2.0 at 192 DPI).
+static DPI_SCALE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Get the system DPI for the primary monitor.
+#[cfg(target_os = "windows")]
+fn get_system_dpi() -> u32 {
+    unsafe {
+        // GetDpiForSystem requires Windows 10 1607+
+        extern "system" { fn GetDpiForSystem() -> u32; }
+        let dpi = GetDpiForSystem();
+        if dpi > 0 { dpi } else { 96 }
+    }
+}
+
+/// Store the DPI scale factor for use by font/widget sizing.
+fn set_dpi_scale(scale: f64) {
+    DPI_SCALE.store(scale.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Get the DPI scale factor. Returns 1.0 if not set.
+pub fn get_dpi_scale() -> f64 {
+    let bits = DPI_SCALE.load(std::sync::atomic::Ordering::Relaxed);
+    if bits == 0 { 1.0 } else { f64::from_bits(bits) }
+}
+
 thread_local! {
     static TIMER_TICK_NEEDED: std::cell::Cell<bool> = std::cell::Cell::new(false);
 }
@@ -118,6 +143,13 @@ pub fn app_create(title_ptr: *const u8, width: f64, height: f64) -> i64 {
         unsafe {
             // Enable DPI awareness
             let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
+            // Scale window size by system DPI (96 = 100%, 144 = 150%, 192 = 200%)
+            let dpi = get_system_dpi();
+            let scale = dpi as f64 / 96.0;
+            let w = (w as f64 * scale) as i32;
+            let h = (h as f64 * scale) as i32;
+            set_dpi_scale(scale);
 
             // Initialize common controls
             let icc = INITCOMMONCONTROLSEX {

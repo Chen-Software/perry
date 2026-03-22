@@ -177,16 +177,16 @@ pub extern "C" fn perry_ui_button_create(label_ptr: i64, on_press: f64) -> i64 {
     widgets::button::create(label_ptr as *const u8, on_press)
 }
 
-/// Create a VStack container.
+/// Create a VStack container (spacing DPI-scaled).
 #[no_mangle]
 pub extern "C" fn perry_ui_vstack_create(spacing: f64) -> i64 {
-    widgets::vstack::create(spacing)
+    widgets::vstack::create(spacing * app::get_dpi_scale())
 }
 
-/// Create an HStack container.
+/// Create an HStack container (spacing DPI-scaled).
 #[no_mangle]
 pub extern "C" fn perry_ui_hstack_create(spacing: f64) -> i64 {
-    widgets::hstack::create(spacing)
+    widgets::hstack::create(spacing * app::get_dpi_scale())
 }
 
 /// Create a Spacer.
@@ -755,16 +755,18 @@ pub extern "C" fn perry_ui_widget_animate_position(handle: i64, dx: f64, dy: f64
 // Layout
 // =============================================================================
 
-/// Create a VStack with custom insets.
+/// Create a VStack with custom insets (DPI-scaled).
 #[no_mangle]
 pub extern "C" fn perry_ui_vstack_create_with_insets(spacing: f64, top: f64, left: f64, bottom: f64, right: f64) -> i64 {
-    widgets::vstack::create_with_insets(spacing, top, left, bottom, right)
+    let s = app::get_dpi_scale();
+    widgets::vstack::create_with_insets(spacing * s, top * s, left * s, bottom * s, right * s)
 }
 
-/// Create an HStack with custom insets.
+/// Create an HStack with custom insets (DPI-scaled).
 #[no_mangle]
 pub extern "C" fn perry_ui_hstack_create_with_insets(spacing: f64, top: f64, left: f64, bottom: f64, right: f64) -> i64 {
-    widgets::hstack::create_with_insets(spacing, top, left, bottom, right)
+    let s = app::get_dpi_scale();
+    widgets::hstack::create_with_insets(spacing * s, top * s, left * s, bottom * s, right * s)
 }
 
 // =============================================================================
@@ -971,10 +973,11 @@ pub extern "C" fn perry_ui_button_set_text_color(handle: i64, r: f64, g: f64, b:
     widgets::button::set_text_color(handle, r, g, b, a);
 }
 
-/// Set widget width.
+/// Set widget width (DPI-scaled).
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_set_width(handle: i64, width: f64) {
-    widgets::set_fixed_width(handle, width as i32);
+    let scaled = (width * app::get_dpi_scale()) as i32;
+    widgets::set_fixed_width(handle, scaled);
 }
 
 /// Set widget hugging priority.
@@ -994,10 +997,11 @@ pub extern "C" fn perry_ui_widget_set_on_click(handle: i64, callback: f64) {
     }
 }
 
-/// Set widget height (fixed).
+/// Set widget height (fixed, DPI-scaled).
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_set_height(handle: i64, height: f64) {
-    widgets::set_fixed_height(handle, height as i32);
+    let scaled = (height * app::get_dpi_scale()) as i32;
+    widgets::set_fixed_height(handle, scaled);
 }
 
 /// Match parent height — marks the widget to stretch vertically to fill its parent.
