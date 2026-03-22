@@ -687,17 +687,31 @@ fn find_ui_library(target: Option<&str>) -> Option<PathBuf> {
 /// Search for a geisterhand library by name, checking both cross-compilation
 /// target dirs (target/geisterhand/{triple}/release/) and host dir (target/geisterhand/release/).
 fn find_geisterhand_lib(name: &str, target: Option<&str>) -> Option<PathBuf> {
-    // Cross-compilation target dir first
-    if let Some(triple) = rust_target_triple(target) {
-        let path = PathBuf::from(format!("target/geisterhand/{}/release/{}", triple, name));
-        if path.exists() {
-            return Some(path);
+    // Search relative to CWD first, then relative to the Perry workspace root.
+    // Check both target/geisterhand/ (separate build dir) and target/ (shared build dir)
+    // to support both build workflows.
+    let search_roots: Vec<PathBuf> = {
+        let mut roots = vec![PathBuf::from(".")];
+        if let Some(ws) = find_perry_workspace_root() {
+            roots.push(ws);
         }
-    }
-    // Host build dir
-    let path = PathBuf::from(format!("target/geisterhand/release/{}", name));
-    if path.exists() {
-        return Some(path);
+        roots
+    };
+    for root in &search_roots {
+        // Cross-compilation target dir first
+        if let Some(triple) = rust_target_triple(target) {
+            // Separate geisterhand build dir
+            let path = root.join(format!("target/geisterhand/{}/release/{}", triple, name));
+            if path.exists() { return Some(path); }
+            // Shared release dir (when built with --features geisterhand in normal target)
+            let path = root.join(format!("target/{}/release/{}", triple, name));
+            if path.exists() { return Some(path); }
+        }
+        // Host build dir
+        let path = root.join(format!("target/geisterhand/release/{}", name));
+        if path.exists() { return Some(path); }
+        let path = root.join(format!("target/release/{}", name));
+        if path.exists() { return Some(path); }
     }
     None
 }
@@ -4256,8 +4270,28 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                     cmd.arg("-Wl,--allow-multiple-definition");
                 }
             }
-            // Note: geisterhand-enabled UI lib is already linked above via
-            // the needs_ui block (find_geisterhand_ui preferred over find_ui_library)
+            // On Windows, re-link the stdlib after geisterhand to resolve
+            // forward references to geisterhand registry functions.
+            // lld-link scans archives left-to-right once, so the stdlib
+            // must appear after the geisterhand lib that references it.
+            // On Windows, force-include geisterhand registry symbols from stdlib.
+            // lld-link scans archives left-to-right once, so the stdlib's
+            // geisterhand objects are skipped on first scan (no references yet).
+            // /INCLUDE forces the linker to pull in the specific symbols.
+            if is_windows {
+                cmd.arg("/INCLUDE:perry_geisterhand_queue_action");
+                cmd.arg("/INCLUDE:perry_geisterhand_queue_action1");
+                cmd.arg("/INCLUDE:perry_geisterhand_queue_state_set");
+                cmd.arg("/INCLUDE:perry_geisterhand_request_screenshot");
+                cmd.arg("/INCLUDE:perry_geisterhand_register");
+                cmd.arg("/INCLUDE:perry_geisterhand_pump");
+                cmd.arg("/INCLUDE:perry_geisterhand_start");
+                cmd.arg("/INCLUDE:perry_geisterhand_free_string");
+                cmd.arg("/INCLUDE:perry_geisterhand_get_closure");
+                cmd.arg("/INCLUDE:perry_geisterhand_get_registry_json");
+                // Allow duplicate symbols from re-linked stdlib objects
+                cmd.arg("/FORCE:MULTIPLE");
+            }
             match format {
                 OutputFormat::Text => println!("Linking geisterhand (in-process fuzzer)"),
                 OutputFormat::Json => {}
