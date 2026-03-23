@@ -970,10 +970,33 @@ pub extern "C" fn js_jsvalue_equals(a: f64, b: f64) -> i32 {
         return if crate::string::js_string_equals(a_str, b_str) { 1 } else { 0 };
     }
 
+    // Helper: check if bits represent a plain IEEE 754 number (not a NaN-boxed tagged value).
+    // NaN-boxing uses tags 0x7FF8-0x7FFF in the upper 16 bits. Regular numbers (positive,
+    // negative, zero, infinities) have upper16 outside this range. Negative numbers have
+    // sign bit set (upper16 >= 0x8000), so the old check `bits < 0x7FF8...` missed them.
+    #[inline(always)]
+    fn is_plain_number(bits: u64) -> bool {
+        let tag = bits >> 48;
+        tag < 0x7FF8 || tag > 0x7FFF
+    }
+
+    // INT32 comparison: one or both operands may be NaN-boxed INT32 (0x7FFE tag).
+    // Convert INT32 to f64 for numeric comparison (e.g., INT32(5) === 5.0 should be true).
+    // This mirrors the conversion in js_jsvalue_compare.
+    if a_val.is_int32() || b_val.is_int32() {
+        let af = if a_val.is_int32() { a_val.as_int32() as f64 }
+                 else if is_plain_number(abits) { a }
+                 else { return 0; }; // non-numeric type → not equal
+        let bf = if b_val.is_int32() { b_val.as_int32() as f64 }
+                 else if is_plain_number(bbits) { b }
+                 else { return 0; }; // non-numeric type → not equal
+        return if af == bf { 1 } else { 0 };
+    }
+
     // Regular f64 numbers (not NaN-boxed): use IEEE 754 equality
     // This handles -0.0 === 0.0 correctly (both are equal per IEEE 754)
     // Also correctly handles NaN !== NaN (IEEE 754 NaN comparison returns false)
-    if abits < 0x7FF8_0000_0000_0000 && bbits < 0x7FF8_0000_0000_0000 {
+    if is_plain_number(abits) && is_plain_number(bbits) {
         return if a == b { 1 } else { 0 };
     }
 
@@ -1029,14 +1052,18 @@ pub extern "C" fn js_jsvalue_compare(a: f64, b: f64) -> i32 {
 
     // Convert to f64 for numeric comparison (handles Number, INT32 mixed with Number, etc.)
     // Return 2 (sentinel) for undefined/null — makes all comparisons false
+    // Convert to f64 — use tag check that correctly handles negative numbers
+    // (sign bit set → upper16 >= 0x8000, which is > 0x7FFF, not a NaN-box tag)
+    let a_tag = abits >> 48;
+    let b_tag = bbits >> 48;
     let af = if a_val.is_int32() { a_val.as_int32() as f64 }
              else if a_val.is_bigint() { crate::bigint::js_bigint_to_f64(a_val.as_bigint_ptr()) }
-             else if abits < 0x7FF8_0000_0000_0000 { a }
-             else { return 2; }; // undefined/null → incomparable sentinel
+             else if a_tag < 0x7FF8 || a_tag > 0x7FFF { a }
+             else { return 2; }; // undefined/null/boolean → incomparable sentinel
     let bf = if b_val.is_int32() { b_val.as_int32() as f64 }
              else if b_val.is_bigint() { crate::bigint::js_bigint_to_f64(b_val.as_bigint_ptr()) }
-             else if bbits < 0x7FF8_0000_0000_0000 { b }
-             else { return 2; }; // undefined/null → incomparable sentinel
+             else if b_tag < 0x7FF8 || b_tag > 0x7FFF { b }
+             else { return 2; }; // undefined/null/boolean → incomparable sentinel
 
     if af < bf { -1 } else if af > bf { 1 } else { 0 }
 }
@@ -1719,5 +1746,58 @@ mod tests {
         assert!(JSValue::number(1.0).to_bool());
         assert!(JSValue::number(-1.0).to_bool());
         assert!(!JSValue::number(f64::NAN).to_bool());
+    }
+
+    #[test]
+    fn test_jsvalue_equals_booleans() {
+        let t = f64::from_bits(TAG_TRUE);
+        let f = f64::from_bits(TAG_FALSE);
+        // Same boolean values
+        assert_eq!(js_jsvalue_equals(t, t), 1);
+        assert_eq!(js_jsvalue_equals(f, f), 1);
+        // Different boolean values
+        assert_eq!(js_jsvalue_equals(t, f), 0);
+        assert_eq!(js_jsvalue_equals(f, t), 0);
+        // Boolean vs number (strict equality: different types)
+        assert_eq!(js_jsvalue_equals(t, 1.0), 0);
+        assert_eq!(js_jsvalue_equals(f, 0.0), 0);
+    }
+
+    #[test]
+    fn test_jsvalue_equals_int32() {
+        let int5 = f64::from_bits(INT32_TAG | 5);
+        let float5 = 5.0f64;
+        let int0 = f64::from_bits(INT32_TAG | 0);
+        let float0 = 0.0f64;
+        let int_neg = f64::from_bits(INT32_TAG | ((-3i32 as u32) as u64));
+        let float_neg = -3.0f64;
+        // INT32 vs f64 with same numeric value
+        assert_eq!(js_jsvalue_equals(int5, float5), 1);
+        assert_eq!(js_jsvalue_equals(float5, int5), 1);
+        assert_eq!(js_jsvalue_equals(int0, float0), 1);
+        assert_eq!(js_jsvalue_equals(int_neg, float_neg), 1);
+        // INT32 vs INT32
+        assert_eq!(js_jsvalue_equals(int5, int5), 1);
+        // INT32 vs different f64
+        assert_eq!(js_jsvalue_equals(int5, 6.0), 0);
+        assert_eq!(js_jsvalue_equals(int5, 4.0), 0);
+    }
+
+    #[test]
+    fn test_jsvalue_equals_numbers() {
+        // Same numbers
+        assert_eq!(js_jsvalue_equals(42.0, 42.0), 1);
+        assert_eq!(js_jsvalue_equals(0.0, 0.0), 1);
+        // -0 === 0 is true in JS
+        assert_eq!(js_jsvalue_equals(-0.0, 0.0), 1);
+        // Different numbers
+        assert_eq!(js_jsvalue_equals(1.0, 2.0), 0);
+        // null/undefined
+        let null = f64::from_bits(TAG_NULL);
+        let undef = f64::from_bits(TAG_UNDEFINED);
+        assert_eq!(js_jsvalue_equals(null, null), 1);
+        assert_eq!(js_jsvalue_equals(undef, undef), 1);
+        assert_eq!(js_jsvalue_equals(null, undef), 0); // strict: null !== undefined
+        assert_eq!(js_jsvalue_equals(null, 0.0), 0);
     }
 }

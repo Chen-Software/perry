@@ -6035,12 +6035,14 @@ pub(crate) fn compile_expr(
                     let is_bool_compare = is_bool_expr(left) || is_bool_expr(right);
 
                     if is_bool_compare && (*op == CompareOp::Eq || *op == CompareOp::Ne) {
-                        // Boolean comparison: NaN-boxed booleans must be compared by bit pattern
-                        // Bitcast f64 to i64 and do integer comparison
+                        // Boolean comparison: NaN-boxed booleans must be compared by bit pattern.
+                        // Use raw bitcast (NOT ensure_i64 which strips top 16 tag bits and
+                        // collapses values < 0x1000 to 0 — both TAG_TRUE and TAG_FALSE have
+                        // payloads 4 and 3 which are < 0x1000, so ensure_i64 makes them equal).
                         let lhs_f64 = ensure_f64(builder, lhs);
                         let rhs_f64 = ensure_f64(builder, rhs);
-                        let lhs_i64 = ensure_i64(builder, lhs_f64);
-                        let rhs_i64 = ensure_i64(builder, rhs_f64);
+                        let lhs_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), lhs_f64);
+                        let rhs_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), rhs_f64);
                         let icc = match op {
                             CompareOp::Eq => IntCC::Equal,
                             CompareOp::Ne => IntCC::NotEqual,
