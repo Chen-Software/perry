@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.3.0
+**Current Version:** 0.3.2
 
 ## Workflow Requirements
 
@@ -152,6 +152,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - `CGPoint`/`CGSize`/`CGRect` in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.3.2
+- watchOS native app support (`--target watchos`/`--target watchos-simulator`): data-driven SwiftUI renderer, `perry-ui-watchos` crate with full `perry_ui_*` FFI surface, fixed PerryWatchApp.swift runtime, `perry setup watchos`, `perry run watchos`, `[watchos]` config in perry.toml
 
 ### v0.3.0
 - Compile-time i18n system (`perry/i18n` module): zero-ceremony localization for UI strings, `[i18n]` config in perry.toml, embedded 2D string table, native locale detection (all 6 platforms via OS APIs), `{param}` interpolation, CLDR plural rules (30+ locales), format wrappers (`Currency`, `Percent`, `ShortDate`, `LongDate`, `FormatNumber`, `FormatTime`, `Raw`), `perry i18n extract` CLI, iOS `.lproj` + Android `values-xx/` generation, compile-time validation

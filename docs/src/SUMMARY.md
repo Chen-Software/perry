@@ -39,6 +39,7 @@
 - [Overview](platforms/overview.md)
 - [macOS](platforms/macos.md)
 - [iOS](platforms/ios.md)
+- [watchOS](platforms/watchos.md)
 - [Android](platforms/android.md)
 - [Windows](platforms/windows.md)
 - [Linux (GTK4)](platforms/linux.md)

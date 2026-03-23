@@ -1,0 +1,332 @@
+// Perry watchOS Runtime — fixed SwiftUI renderer
+// Auto-shipped with Perry compiler. DO NOT EDIT.
+//
+// Queries a native UI tree (built by Cranelift-compiled TypeScript code)
+// via FFI and renders it as SwiftUI views reactively.
+
+import SwiftUI
+
+// MARK: - FFI declarations
+
+@_silgen_name("perry_main_init") func perry_main_init()
+
+// Tree query
+@_silgen_name("perry_watchos_root_node") func perry_watchos_root_node() -> Int64
+@_silgen_name("perry_watchos_tree_version") func perry_watchos_tree_version() -> UInt64
+@_silgen_name("perry_watchos_node_kind") func perry_watchos_node_kind(_ id: Int64) -> Int32
+@_silgen_name("perry_watchos_node_text") func perry_watchos_node_text(_ id: Int64) -> UnsafePointer<CChar>?
+@_silgen_name("perry_watchos_node_child_count") func perry_watchos_node_child_count(_ id: Int64) -> Int32
+@_silgen_name("perry_watchos_node_child") func perry_watchos_node_child(_ id: Int64, _ idx: Int32) -> Int64
+@_silgen_name("perry_watchos_node_hidden") func perry_watchos_node_hidden(_ id: Int64) -> Bool
+@_silgen_name("perry_watchos_node_enabled") func perry_watchos_node_enabled(_ id: Int64) -> Bool
+@_silgen_name("perry_watchos_node_opacity") func perry_watchos_node_opacity(_ id: Int64) -> Double
+@_silgen_name("perry_watchos_node_spacing") func perry_watchos_node_spacing(_ id: Int64) -> Double
+
+// Actions
+@_silgen_name("perry_watchos_node_has_action") func perry_watchos_node_has_action(_ id: Int64) -> Bool
+@_silgen_name("perry_watchos_handle_action") func perry_watchos_handle_action(_ id: Int64)
+
+// Style
+@_silgen_name("perry_watchos_node_font_size") func perry_watchos_node_font_size(_ id: Int64) -> Double
+@_silgen_name("perry_watchos_node_font_weight") func perry_watchos_node_font_weight(_ id: Int64) -> Double
+@_silgen_name("perry_watchos_node_has_color") func perry_watchos_node_has_color(_ id: Int64) -> Bool
+@_silgen_name("perry_watchos_node_color") func perry_watchos_node_color(_ id: Int64, _ c: Int32) -> Double
+@_silgen_name("perry_watchos_node_has_bg_color") func perry_watchos_node_has_bg_color(_ id: Int64) -> Bool
+@_silgen_name("perry_watchos_node_bg_color") func perry_watchos_node_bg_color(_ id: Int64, _ c: Int32) -> Double
+@_silgen_name("perry_watchos_node_corner_radius") func perry_watchos_node_corner_radius(_ id: Int64) -> Double
+@_silgen_name("perry_watchos_node_frame_width") func perry_watchos_node_frame_width(_ id: Int64) -> Double
+@_silgen_name("perry_watchos_node_frame_height") func perry_watchos_node_frame_height(_ id: Int64) -> Double
+@_silgen_name("perry_watchos_node_padding") func perry_watchos_node_padding(_ id: Int64) -> Double
+@_silgen_name("perry_watchos_node_text_wraps") func perry_watchos_node_text_wraps(_ id: Int64) -> Bool
+
+// Slider
+@_silgen_name("perry_watchos_node_slider_value") func perry_watchos_node_slider_value(_ id: Int64) -> Double
+@_silgen_name("perry_watchos_node_slider_min") func perry_watchos_node_slider_min(_ id: Int64) -> Double
+@_silgen_name("perry_watchos_node_slider_max") func perry_watchos_node_slider_max(_ id: Int64) -> Double
+@_silgen_name("perry_watchos_slider_changed") func perry_watchos_slider_changed(_ id: Int64, _ value: Double)
+
+// Toggle
+@_silgen_name("perry_watchos_node_toggle_on") func perry_watchos_node_toggle_on(_ id: Int64) -> Bool
+@_silgen_name("perry_watchos_toggle_changed") func perry_watchos_toggle_changed(_ id: Int64, _ on: Bool)
+
+// ProgressView
+@_silgen_name("perry_watchos_node_progress_value") func perry_watchos_node_progress_value(_ id: Int64) -> Double
+
+// Picker
+@_silgen_name("perry_watchos_node_picker_count") func perry_watchos_node_picker_count(_ id: Int64) -> Int32
+@_silgen_name("perry_watchos_node_picker_item") func perry_watchos_node_picker_item(_ id: Int64, _ idx: Int32) -> UnsafePointer<CChar>?
+@_silgen_name("perry_watchos_node_picker_selected") func perry_watchos_node_picker_selected(_ id: Int64) -> Int64
+@_silgen_name("perry_watchos_picker_changed") func perry_watchos_picker_changed(_ id: Int64, _ idx: Int64)
+
+// Image
+@_silgen_name("perry_watchos_node_image_width") func perry_watchos_node_image_width(_ id: Int64) -> Double
+@_silgen_name("perry_watchos_node_image_height") func perry_watchos_node_image_height(_ id: Int64) -> Double
+@_silgen_name("perry_watchos_node_has_image_tint") func perry_watchos_node_has_image_tint(_ id: Int64) -> Bool
+@_silgen_name("perry_watchos_node_image_tint") func perry_watchos_node_image_tint(_ id: Int64, _ c: Int32) -> Double
+
+// Edge insets
+@_silgen_name("perry_watchos_node_has_edge_insets") func perry_watchos_node_has_edge_insets(_ id: Int64) -> Bool
+@_silgen_name("perry_watchos_node_edge_inset") func perry_watchos_node_edge_inset(_ id: Int64, _ side: Int32) -> Double
+
+// MARK: - Observable bridge
+
+class PerryBridge: ObservableObject {
+    @Published var version: UInt64 = 0
+    private var timer: Timer?
+
+    func start() {
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            let v = perry_watchos_tree_version()
+            if v != self?.version {
+                self?.version = v
+            }
+        }
+    }
+}
+
+// MARK: - Recursive SwiftUI renderer
+
+struct NodeView: View {
+    let nodeId: Int64
+    @ObservedObject var bridge: PerryBridge
+
+    var body: some View {
+        if perry_watchos_node_hidden(nodeId) {
+            EmptyView()
+        } else {
+            nodeContent
+                .modifier(CommonModifiers(nodeId: nodeId))
+        }
+    }
+
+    @ViewBuilder var nodeContent: some View {
+        switch perry_watchos_node_kind(nodeId) {
+        case 0: textView
+        case 1: buttonView
+        case 2: VStack(spacing: spacingValue) { children }
+        case 3: HStack(spacing: spacingValue) { children }
+        case 4: ZStack { children }
+        case 5: Spacer()
+        case 6: Divider()
+        case 7: toggleView
+        case 8: sliderView
+        case 9: imageView
+        case 10: ScrollView { children }
+        case 11: progressView
+        case 12: pickerView
+        case 13: List { children }
+        case 14: NavigationStack { children }
+        default: EmptyView()
+        }
+    }
+
+    // MARK: Widget implementations
+
+    @ViewBuilder var textView: some View {
+        let t = nodeText
+        let fontSize = perry_watchos_node_font_size(nodeId)
+        let fontWeight = perry_watchos_node_font_weight(nodeId)
+
+        if fontSize > 0 {
+            if fontWeight >= 0 {
+                Text(t).font(.system(size: fontSize, weight: swiftWeight(fontWeight)))
+            } else {
+                Text(t).font(.system(size: fontSize))
+            }
+        } else {
+            Text(t)
+        }
+    }
+
+    var buttonView: some View {
+        Button(nodeText) {
+            perry_watchos_handle_action(nodeId)
+        }
+    }
+
+    var toggleView: some View {
+        Toggle(nodeText, isOn: Binding(
+            get: { perry_watchos_node_toggle_on(nodeId) },
+            set: { perry_watchos_toggle_changed(nodeId, $0) }
+        ))
+    }
+
+    var sliderView: some View {
+        Slider(
+            value: Binding(
+                get: { perry_watchos_node_slider_value(nodeId) },
+                set: { perry_watchos_slider_changed(nodeId, $0) }
+            ),
+            in: perry_watchos_node_slider_min(nodeId)...perry_watchos_node_slider_max(nodeId)
+        )
+    }
+
+    @ViewBuilder var imageView: some View {
+        let name = nodeText
+        let w = perry_watchos_node_image_width(nodeId)
+        let h = perry_watchos_node_image_height(nodeId)
+        let img = Image(systemName: name)
+            .resizable()
+            .aspectRatio(contentMode: .fit)
+
+        if w > 0 && h > 0 {
+            img.frame(width: w, height: h)
+        } else if w > 0 {
+            img.frame(width: w)
+        } else if h > 0 {
+            img.frame(height: h)
+        } else {
+            Image(systemName: name)
+        }
+    }
+
+    var progressView: some View {
+        ProgressView(value: perry_watchos_node_progress_value(nodeId))
+    }
+
+    var pickerView: some View {
+        let count = Int(perry_watchos_node_picker_count(nodeId))
+        Picker(nodeText, selection: Binding(
+            get: { Int(perry_watchos_node_picker_selected(nodeId)) },
+            set: { perry_watchos_picker_changed(nodeId, Int64($0)) }
+        )) {
+            ForEach(0..<count, id: \.self) { i in
+                if let ptr = perry_watchos_node_picker_item(nodeId, Int32(i)) {
+                    Text(String(cString: ptr)).tag(i)
+                }
+            }
+        }
+    }
+
+    // MARK: Helpers
+
+    var nodeText: String {
+        if let ptr = perry_watchos_node_text(nodeId) {
+            return String(cString: ptr)
+        }
+        return ""
+    }
+
+    var spacingValue: CGFloat? {
+        let s = perry_watchos_node_spacing(nodeId)
+        return s > 0 ? s : nil
+    }
+
+    var children: some View {
+        let count = perry_watchos_node_child_count(nodeId)
+        ForEach(0..<Int(count), id: \.self) { i in
+            NodeView(nodeId: perry_watchos_node_child(nodeId, Int32(i)), bridge: bridge)
+        }
+    }
+
+    func swiftWeight(_ w: Double) -> Font.Weight {
+        switch Int(w) {
+        case 1: return .ultraLight
+        case 2: return .thin
+        case 3: return .light
+        case 4: return .regular
+        case 5: return .medium
+        case 6: return .semibold
+        case 7: return .bold
+        case 8: return .heavy
+        case 9: return .black
+        default: return .regular
+        }
+    }
+}
+
+// MARK: - Common modifiers
+
+struct CommonModifiers: ViewModifier {
+    let nodeId: Int64
+
+    func body(content: Content) -> some View {
+        var view = AnyView(content)
+
+        // Foreground color
+        if perry_watchos_node_has_color(nodeId) {
+            let r = perry_watchos_node_color(nodeId, 0)
+            let g = perry_watchos_node_color(nodeId, 1)
+            let b = perry_watchos_node_color(nodeId, 2)
+            let a = perry_watchos_node_color(nodeId, 3)
+            view = AnyView(view.foregroundColor(Color(red: r, green: g, blue: b, opacity: a)))
+        }
+
+        // Background color
+        if perry_watchos_node_has_bg_color(nodeId) {
+            let r = perry_watchos_node_bg_color(nodeId, 0)
+            let g = perry_watchos_node_bg_color(nodeId, 1)
+            let b = perry_watchos_node_bg_color(nodeId, 2)
+            let a = perry_watchos_node_bg_color(nodeId, 3)
+            view = AnyView(view.background(Color(red: r, green: g, blue: b, opacity: a)))
+        }
+
+        // Corner radius
+        let cr = perry_watchos_node_corner_radius(nodeId)
+        if cr >= 0 {
+            view = AnyView(view.cornerRadius(cr))
+        }
+
+        // Frame
+        let fw = perry_watchos_node_frame_width(nodeId)
+        let fh = perry_watchos_node_frame_height(nodeId)
+        if fw >= 0 && fh >= 0 {
+            view = AnyView(view.frame(width: fw, height: fh))
+        } else if fw >= 0 {
+            view = AnyView(view.frame(width: fw))
+        } else if fh >= 0 {
+            view = AnyView(view.frame(height: fh))
+        }
+
+        // Padding
+        if perry_watchos_node_has_edge_insets(nodeId) {
+            let top = perry_watchos_node_edge_inset(nodeId, 0)
+            let left = perry_watchos_node_edge_inset(nodeId, 1)
+            let bottom = perry_watchos_node_edge_inset(nodeId, 2)
+            let right = perry_watchos_node_edge_inset(nodeId, 3)
+            view = AnyView(view.padding(EdgeInsets(top: top, leading: left, bottom: bottom, trailing: right)))
+        } else {
+            let p = perry_watchos_node_padding(nodeId)
+            if p >= 0 {
+                view = AnyView(view.padding(p))
+            }
+        }
+
+        // Opacity
+        let opacity = perry_watchos_node_opacity(nodeId)
+        if opacity < 1.0 {
+            view = AnyView(view.opacity(opacity))
+        }
+
+        // Disabled
+        if !perry_watchos_node_enabled(nodeId) {
+            view = AnyView(view.disabled(true))
+        }
+
+        return view
+    }
+}
+
+// MARK: - App entry point
+
+@main
+struct PerryApp: App {
+    @StateObject private var bridge = PerryBridge()
+
+    init() {
+        perry_main_init()
+    }
+
+    var body: some Scene {
+        WindowGroup {
+            let rootId = perry_watchos_root_node()
+            if rootId > 0 {
+                NodeView(nodeId: rootId, bridge: bridge)
+                    .onAppear { bridge.start() }
+            } else {
+                Text("Perry watchOS App")
+                    .onAppear { bridge.start() }
+            }
+        }
+    }
+}

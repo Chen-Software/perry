@@ -119,6 +119,7 @@ struct PerryToml {
     app: Option<AppConfig>,
     macos: Option<MacosConfig>,
     ios: Option<IosConfig>,
+    watchos: Option<WatchosConfig>,
     android: Option<AndroidConfig>,
     linux: Option<LinuxConfig>,
     build: Option<BuildConfig>,
@@ -217,6 +218,16 @@ struct AndroidConfig {
     key_alias: Option<String>,
     google_play_key: Option<String>,
     entry: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WatchosConfig {
+    bundle_id: Option<String>,
+    deployment_target: Option<String>,
+    encryption_exempt: Option<bool>,
+    info_plist: Option<std::collections::HashMap<String, String>>,
+    team_id: Option<String>,
+    signing_identity: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -553,6 +564,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         match p {
             Platform::Macos => "macos".to_string(),
             Platform::Ios => "ios".to_string(),
+            Platform::Watchos => "watchos".to_string(),
             Platform::Android => "android".to_string(),
             Platform::Linux => "linux".to_string(),
             Platform::Windows => "windows".to_string(),

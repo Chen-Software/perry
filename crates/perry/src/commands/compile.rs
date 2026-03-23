@@ -211,6 +211,8 @@ fn rust_target_triple(target: Option<&str>) -> Option<&'static str> {
     match target {
         Some("ios-simulator") | Some("ios-widget-simulator") => Some("aarch64-apple-ios-sim"),
         Some("ios") | Some("ios-widget") => Some("aarch64-apple-ios"),
+        Some("watchos-simulator") => Some("aarch64-apple-watchos-sim"),
+        Some("watchos") => Some("aarch64-apple-watchos"),
         Some("android") => Some("aarch64-linux-android"),
         Some("linux") => Some("x86_64-unknown-linux-gnu"),
         Some("windows") => Some("x86_64-pc-windows-msvc"),
@@ -592,6 +594,14 @@ fn find_library(name: &str, target: Option<&str>) -> Option<PathBuf> {
                     } else {
                         let ios_name = name.replace(".a", "_ios.a");
                         candidates.push(dir.join(&ios_name));
+                    }
+                }
+                if matches!(target, Some("watchos") | Some("watchos-simulator")) {
+                    if name.contains("_watchos") {
+                        candidates.push(dir.join(name));
+                    } else {
+                        let watchos_name = name.replace(".a", "_watchos.a");
+                        candidates.push(dir.join(&watchos_name));
                     }
                 }
                 // Cross-compile targets are in ../../target/<triple>/release/ relative
@@ -2056,6 +2066,56 @@ fn compile_for_watchos_widget(ctx: &CompilationContext, args: &CompileArgs, form
     })
 }
 
+/// Find the PerryWatchApp.swift runtime file.
+fn find_watchos_swift_runtime() -> Option<PathBuf> {
+    // 1. Check next to the perry binary
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("swift").join("PerryWatchApp.swift");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+            // Also check ../lib/perry/swift/
+            if let Some(prefix) = dir.parent() {
+                let candidate = prefix.join("lib").join("perry").join("swift").join("PerryWatchApp.swift");
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    // 2. Check in the source tree (development builds)
+    let source_candidate = PathBuf::from("crates/perry-ui-watchos/swift/PerryWatchApp.swift");
+    if source_candidate.exists() {
+        return Some(source_candidate);
+    }
+
+    None
+}
+
+/// Look up bundle_id from perry.toml for a specific section (e.g., "watchos", "ios", "app")
+fn lookup_bundle_id_from_toml(input: &std::path::Path, section: &str) -> Option<String> {
+    let mut dir = input.canonicalize().ok()?;
+    for _ in 0..5 {
+        dir = dir.parent()?.to_path_buf();
+        let toml_path = dir.join("perry.toml");
+        if toml_path.exists() {
+            let data = fs::read_to_string(&toml_path).ok()?;
+            let doc: toml::Table = data.parse().ok()?;
+            let bid = doc.get(section)
+                .and_then(|s| s.get("bundle_id"))
+                .or_else(|| doc.get("bundle_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            if bid.is_some() {
+                return bid;
+            }
+        }
+    }
+    None
+}
+
 /// Compile for Android widget target: emit Kotlin/Glance source + JNI bridge
 fn compile_for_android_widget(ctx: &CompilationContext, args: &CompileArgs, format: OutputFormat) -> Result<CompileResult> {
     let mut widgets: Vec<&perry_hir::ir::WidgetDecl> = Vec::new();
@@ -3506,7 +3566,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 }
             }
             // Auto-disable plugins on mobile targets (App Store policies)
-            let is_mobile = matches!(target.as_deref(), Some("ios") | Some("ios-simulator") | Some("android"));
+            let is_mobile = matches!(target.as_deref(), Some("ios") | Some("ios-simulator") | Some("android") | Some("watchos") | Some("watchos-simulator"));
             if is_mobile {
                 features.retain(|f| f != "plugins");
             }
@@ -3914,6 +3974,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     let is_windows = matches!(target.as_deref(), Some("windows"))
         || (target.is_none() && cfg!(target_os = "windows"));
     let is_cross_windows = is_windows && !cfg!(target_os = "windows");
+    // Note: is_watchos was already defined earlier near jsruntime_lib
 
     // For dylib output, skip runtime/stdlib linking — symbols resolve from host at dlopen time
     if is_dylib {
@@ -3975,7 +4036,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         find_runtime_library(target.as_deref())?
     };
     let stdlib_lib = find_stdlib_library(target.as_deref());
-    let jsruntime_lib = if !is_ios && !is_android && (ctx.needs_js_runtime || args.enable_js_runtime) {
+    let is_watchos = matches!(target.as_deref(), Some("watchos") | Some("watchos-simulator"));
+    let jsruntime_lib = if !is_ios && !is_android && !is_watchos && (ctx.needs_js_runtime || args.enable_js_runtime) {
         match find_jsruntime_library(target.as_deref()) {
             Some(lib) => {
                 match format {
@@ -3998,7 +4060,32 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     };
 
     // For cross-compilation targets, use the appropriate toolchain
-    let mut cmd = if is_ios {
+    let mut cmd = if is_watchos {
+        // watchOS uses swiftc to compile the PerryWatchApp.swift runtime alongside linking
+        let sdk = if target.as_deref() == Some("watchos-simulator") { "watchsimulator" } else { "watchos" };
+        let swiftc = String::from_utf8(
+            Command::new("xcrun").args(["--sdk", sdk, "--find", "swiftc"]).output()?.stdout
+        )?.trim().to_string();
+        let sysroot = String::from_utf8(
+            Command::new("xcrun").args(["--sdk", sdk, "--show-sdk-path"]).output()?.stdout
+        )?.trim().to_string();
+        let triple = if target.as_deref() == Some("watchos-simulator") {
+            "arm64-apple-watchos10.0-simulator"
+        } else {
+            "arm64-apple-watchos10.0"
+        };
+
+        let swift_runtime = find_watchos_swift_runtime()
+            .ok_or_else(|| anyhow!(
+                "PerryWatchApp.swift not found. Expected next to perry binary or in source tree."
+            ))?;
+
+        let mut c = Command::new(swiftc);
+        c.arg("-target").arg(triple)
+         .arg("-sdk").arg(&sysroot)
+         .arg(&swift_runtime);
+        c
+    } else if is_ios {
         let sdk = if target.as_deref() == Some("ios-simulator") { "iphonesimulator" } else { "iphoneos" };
         let clang = String::from_utf8(
             Command::new("xcrun").args(["--sdk", sdk, "--find", "clang"]).output()?.stdout
@@ -4217,7 +4304,16 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         }
     }
 
-    if is_ios {
+    if is_watchos {
+        // watchOS frameworks (swiftc auto-links Swift stdlib)
+        cmd.arg("-framework").arg("SwiftUI")
+           .arg("-framework").arg("WatchKit")
+           .arg("-framework").arg("Foundation")
+           .arg("-framework").arg("CoreFoundation")
+           .arg("-framework").arg("Security")
+           .arg("-lSystem")
+           .arg("-lresolv");
+    } else if is_ios {
         // iOS frameworks
         cmd.arg("-framework").arg("UIKit")
            .arg("-framework").arg("Foundation")
@@ -4336,7 +4432,9 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             };
             cmd.arg(&ui_lib);
 
-            if is_ios {
+            if is_watchos {
+                // SwiftUI/WatchKit already linked above
+            } else if is_ios {
                 // UIKit already linked above
             } else if is_android {
                 // Allow multiple definitions from perry-runtime in both UI lib and native libs
@@ -4375,7 +4473,9 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 OutputFormat::Json => {}
             }
         } else {
-            let (lib_name, build_cmd) = if is_ios {
+            let (lib_name, build_cmd) = if is_watchos {
+                ("libperry_ui_watchos.a", "cargo build --release -p perry-ui-watchos --target aarch64-apple-watchos")
+            } else if is_ios {
                 ("libperry_ui_ios.a", "cargo build --release -p perry-ui-ios --target aarch64-apple-ios-sim")
             } else if is_android {
                 ("libperry_ui_android.a", "cargo build --release -p perry-ui-android --target aarch64-linux-android")
@@ -5020,6 +5120,70 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 println!("Wrote iOS app bundle: {}", app_dir.display());
                 println!();
                 println!("To run on iOS Simulator:");
+                println!("  xcrun simctl install booted {}", app_dir.display());
+                println!("  xcrun simctl launch booted {}", bundle_id);
+            }
+            OutputFormat::Json => {
+                let result = serde_json::json!({
+                    "success": true,
+                    "output": app_dir.to_string_lossy(),
+                    "bundle_id": bundle_id,
+                    "native_modules": ctx.native_modules.len(),
+                    "js_modules": ctx.js_modules.len(),
+                });
+                println!("{}", serde_json::to_string(&result)?);
+            }
+        }
+    } else if is_watchos {
+        // Create watchOS .app bundle
+        let app_dir = exe_path.with_extension("app");
+        let _ = fs::create_dir_all(&app_dir);
+        let bundle_exe = app_dir.join(exe_path.file_name().unwrap_or_default());
+        fs::copy(&exe_path, &bundle_exe)?;
+        let _ = fs::remove_file(&exe_path);
+
+        let exe_stem = exe_path.file_stem().and_then(|s| s.to_str()).unwrap_or(stem);
+        let bundle_id = lookup_bundle_id_from_toml(&args.input, "watchos")
+            .or_else(|| lookup_bundle_id_from_toml(&args.input, "app"))
+            .unwrap_or_else(|| format!("com.perry.{}", exe_stem));
+        result_bundle_id = Some(bundle_id.clone());
+        result_app_dir = Some(app_dir.clone());
+
+        let info_plist = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>{exe_stem}</string>
+    <key>CFBundleIdentifier</key>
+    <string>{bundle_id}</string>
+    <key>CFBundleName</key>
+    <string>{exe_stem}</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>MinimumOSVersion</key>
+    <string>10.0</string>
+    <key>UIDeviceFamily</key>
+    <array>
+        <integer>4</integer>
+    </array>
+    <key>WKApplication</key>
+    <true/>
+    <key>WKWatchOnly</key>
+    <true/>
+</dict>
+</plist>"#
+        );
+        fs::write(app_dir.join("Info.plist"), info_plist)?;
+
+        match format {
+            OutputFormat::Text => {
+                println!("Wrote watchOS app bundle: {}", app_dir.display());
+                println!();
+                println!("To run on Apple Watch Simulator:");
                 println!("  xcrun simctl install booted {}", app_dir.display());
                 println!("  xcrun simctl launch booted {}", bundle_id);
             }

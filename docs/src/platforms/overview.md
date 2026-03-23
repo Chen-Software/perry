@@ -8,6 +8,7 @@ Perry compiles TypeScript to native executables for 6 platforms from the same so
 |----------|-------------|------------|--------|
 | macOS | *(default)* | AppKit | Full support (127/127 FFI functions) |
 | iOS | `--target ios` / `--target ios-simulator` | UIKit | Full support (127/127) |
+| watchOS | `--target watchos` / `--target watchos-simulator` | SwiftUI (data-driven) | Core support (15 widgets) |
 | Android | `--target android` | JNI/Android SDK | Full support (112/112) |
 | Windows | `--target windows` | Win32 | Full support (112/112) |
 | Linux | `--target linux` | GTK4 | Full support (112/112) |
@@ -22,6 +23,7 @@ perry app.ts -o app
 
 # Compile for a specific target
 perry app.ts -o app --target ios-simulator
+perry app.ts -o app --target watchos-simulator
 perry app.ts -o app --target web
 perry app.ts -o app --target windows
 perry app.ts -o app --target linux
@@ -42,6 +44,7 @@ declare const __platform__: number;
 // 2 = Android
 // 3 = Windows
 // 4 = Linux
+// 5 = watchOS
 
 if (__platform__ === 0) {
   console.log("Running on macOS");
@@ -56,19 +59,20 @@ if (__platform__ === 0) {
 
 ## Platform Feature Matrix
 
-| Feature | macOS | iOS | Android | Windows | Linux | Web | WASM |
-|---------|-------|-----|---------|---------|-------|-----|------|
-| CLI programs | Yes | — | — | Yes | Yes | — | Yes |
-| Native UI | Yes | Yes | Yes | Yes | Yes | Yes | — |
-| File system | Yes | Sandboxed | Sandboxed | Yes | Yes | — | — |
-| Networking | Yes | Yes | Yes | Yes | Yes | Fetch | — |
-| System APIs | Yes | Partial | Partial | Yes | Yes | Partial | — |
-| Widgets (WidgetKit) | — | Yes | — | — | — | — | — |
+| Feature | macOS | iOS | watchOS | Android | Windows | Linux | Web | WASM |
+|---------|-------|-----|---------|---------|---------|-------|-----|------|
+| CLI programs | Yes | — | — | — | Yes | Yes | — | Yes |
+| Native UI | Yes | Yes | Yes | Yes | Yes | Yes | Yes | — |
+| File system | Yes | Sandboxed | — | Sandboxed | Yes | Yes | — | — |
+| Networking | Yes | Yes | Yes | Yes | Yes | Yes | Fetch | — |
+| System APIs | Yes | Partial | Minimal | Partial | Yes | Yes | Partial | — |
+| Widgets (WidgetKit) | — | Yes | Yes | — | — | — | — | — |
 
 ## Next Steps
 
 - [macOS](macos.md)
 - [iOS](ios.md)
+- [watchOS](watchos.md)
 - [Android](android.md)
 - [Windows](windows.md)
 - [Linux (GTK4)](linux.md)

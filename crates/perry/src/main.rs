@@ -47,6 +47,7 @@ pub enum OutputFormat {
 pub enum Platform {
     Macos,
     Ios,
+    Watchos,
     Android,
     Linux,
     Windows,

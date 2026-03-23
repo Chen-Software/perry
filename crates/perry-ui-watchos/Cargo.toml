@@ -1,0 +1,16 @@
+[package]
+name = "perry-ui-watchos"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[features]
+default = []
+plugins = []
+geisterhand = []
+
+[dependencies]
+perry-ui = { path = "../perry-ui" }
+perry-runtime = { path = "../perry-runtime", default-features = false }
