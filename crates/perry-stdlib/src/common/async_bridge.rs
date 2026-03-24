@@ -70,6 +70,7 @@ pub fn spawn<F>(future: F)
 where
     F: Future<Output = ()> + Send + 'static,
 {
+    ensure_pump_registered();
     RUNTIME.spawn(future);
 }
 
