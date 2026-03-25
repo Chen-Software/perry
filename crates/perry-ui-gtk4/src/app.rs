@@ -332,6 +332,30 @@ pub fn set_max_size(app_handle: i64, w: f64, h: f64) {
     });
 }
 
+/// Resize the main app window dynamically.
+/// Stores the size and applies if the window exists (realized via connect_activate).
+pub fn app_set_size(app_handle: i64, width: f64, height: f64) {
+    // On GTK4, the window is realized during app_run. If we're called after that,
+    // we need to resize the actual window. Try the stored APP_WINDOW first.
+    APP_WINDOW.with(|aw| {
+        if let Some(ref window) = *aw.borrow() {
+            window.set_default_size(width as i32, height as i32);
+            // queue_resize ensures the window manager processes the change
+            window.queue_resize();
+            return;
+        }
+    });
+    // If window not yet realized, update the stored dimensions
+    APPS.with(|a| {
+        let mut apps = a.borrow_mut();
+        let idx = (app_handle - 1) as usize;
+        if idx < apps.len() {
+            apps[idx].width = width;
+            apps[idx].height = height;
+        }
+    });
+}
+
 /// Set frameless window mode (no titlebar/decorations).
 /// `value` is a NaN-boxed boolean — TAG_TRUE = 0x7FFC_0000_0000_0004.
 pub fn app_set_frameless(app_handle: i64, value: f64) {

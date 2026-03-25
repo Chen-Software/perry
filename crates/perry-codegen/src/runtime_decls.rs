@@ -8111,6 +8111,16 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("perry_ui_app_set_activation_policy"), func_id);
         }
 
+        // perry_ui_app_set_size(app_handle: i64, width: f64, height: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // app handle
+            sig.params.push(AbiParam::new(types::F64)); // width
+            sig.params.push(AbiParam::new(types::F64)); // height
+            let func_id = self.module.declare_function("perry_ui_app_set_size", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("perry_ui_app_set_size"), func_id);
+        }
+
         // perry_ui_poll_open_file() -> i64 (returns NaN-boxed string)
         {
             let mut sig = self.module.make_signature();

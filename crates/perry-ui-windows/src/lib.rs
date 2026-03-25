@@ -103,6 +103,12 @@ pub extern "C" fn perry_ui_app_run(app_handle: i64) {
     app::app_run(app_handle);
 }
 
+/// Resize the main app window.
+#[no_mangle]
+pub extern "C" fn perry_ui_app_set_size(app_handle: i64, width: f64, height: f64) {
+    app::app_set_size(app_handle, width, height);
+}
+
 /// Set minimum window size.
 #[no_mangle]
 pub extern "C" fn perry_ui_app_set_min_size(app_handle: i64, w: f64, h: f64) {

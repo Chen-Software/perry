@@ -454,6 +454,32 @@ pub fn set_max_size(app_handle: i64, w: f64, h: f64) {
     });
 }
 
+/// Resize the main app window dynamically.
+pub fn app_set_size(app_handle: i64, width: f64, height: f64) {
+    #[cfg(target_os = "windows")]
+    {
+        APPS.with(|apps| {
+            let apps = apps.borrow();
+            let idx = (app_handle - 1) as usize;
+            if idx < apps.len() {
+                let hwnd = apps[idx].hwnd;
+                unsafe {
+                    let _ = SetWindowPos(
+                        hwnd, None,
+                        0, 0,
+                        width as i32, height as i32,
+                        SWP_NOMOVE | SWP_NOZORDER,
+                    );
+                }
+            }
+        });
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app_handle, width, height);
+    }
+}
+
 /// Set frameless window mode (no titlebar).
 /// `value` is a NaN-boxed boolean — TAG_TRUE = 0x7FFC_0000_0000_0004.
 pub fn app_set_frameless(app_handle: i64, value: f64) {
@@ -481,6 +507,24 @@ pub fn app_set_frameless(app_handle: i64, value: f64) {
                         None,
                         0, 0, 0, 0,
                         SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
+                    );
+
+                    // Request rounded corners on Windows 11+ via DWM
+                    // DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2
+                    extern "system" {
+                        fn DwmSetWindowAttribute(
+                            hwnd: isize,
+                            attr: u32,
+                            value: *const i32,
+                            size: u32,
+                        ) -> i32;
+                    }
+                    let corner_pref: i32 = 2; // DWMWCP_ROUND
+                    let _ = DwmSetWindowAttribute(
+                        hwnd.0 as isize,
+                        33, // DWMWA_WINDOW_CORNER_PREFERENCE
+                        &corner_pref,
+                        std::mem::size_of::<i32>() as u32,
                     );
                 }
             }

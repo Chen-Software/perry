@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.11
+**Current Version:** 0.4.12
 
 ## Workflow Requirements
 
@@ -139,6 +139,11 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.12
+- fix: `getAppIcon` crash during UI callbacks — retain autoreleased NSImage immediately to survive autorelease pool drains
+- feat: `appSetSize(width, height)` — dynamically resize the main app window (macOS/Windows/GTK4)
+- fix: rounded corners on frameless+vibrancy windows — deferred corner radius to `app_run` after vibrancy/body setup, added Windows 11 `DWMWA_WINDOW_CORNER_PREFERENCE`
 
 ### v0.4.11
 - feat: `registerGlobalHotkey` — system-wide hotkey via NSEvent global/local monitors (macOS), Win32 RegisterHotKey+WM_HOTKEY (Windows), stub with warning (Linux)

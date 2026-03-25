@@ -605,6 +605,7 @@ pub extern "C" fn perry_ui_hstack_create_with_insets(spacing: f64, top: f64, lef
 #[no_mangle] pub extern "C" fn perry_ui_app_on_terminate(_cb: f64) {}
 #[no_mangle] pub extern "C" fn perry_ui_app_on_activate(_cb: f64) {}
 #[no_mangle] pub extern "C" fn perry_ui_app_set_icon(_path: i64) {}
+#[no_mangle] pub extern "C" fn perry_ui_app_set_size(_app: i64, _w: f64, _h: f64) {}
 #[no_mangle] pub extern "C" fn perry_ui_app_set_frameless(_app: i64, _val: f64) {}
 #[no_mangle] pub extern "C" fn perry_ui_app_set_level(_app: i64, _ptr: i64) {}
 #[no_mangle] pub extern "C" fn perry_ui_app_set_transparent(_app: i64, _val: f64) {}

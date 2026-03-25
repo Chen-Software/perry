@@ -1385,6 +1385,9 @@ pub extern "C" fn perry_ui_app_on_activate(_callback: f64) {}
 pub extern "C" fn perry_ui_app_set_icon(_path_ptr: i64) {}
 
 #[no_mangle]
+pub extern "C" fn perry_ui_app_set_size(_app: i64, _w: f64, _h: f64) {}
+
+#[no_mangle]
 pub extern "C" fn perry_ui_app_set_frameless(_app_handle: i64, _value: f64) {}
 
 #[no_mangle]

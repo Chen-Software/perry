@@ -18718,6 +18718,8 @@ pub(crate) fn compile_expr(
                 ("perry/ui", false, "onWindowFocusLost") => "perry_ui_window_on_focus_lost",
                 // Global hotkey (system-wide, works when app is not focused)
                 ("perry/ui", false, "registerGlobalHotkey") => "perry_ui_register_global_hotkey",
+                // Resize main app window
+                ("perry/ui", false, "appSetSize") => "perry_ui_app_set_size",
                 ("perry/ui", true, "updateCount") => "perry_ui_lazyvstack_update",
                 ("perry/ui", true, "setColumnHeader") => "perry_ui_table_set_column_header",
                 ("perry/ui", true, "setColumnWidth") => "perry_ui_table_set_column_width",
@@ -20822,6 +20824,19 @@ pub(crate) fn compile_expr(
                     // perry/ui standalone functions (windowHide, windowSetSize, onWindowFocusLost)
                     // First arg is a NaN-boxed window handle — extract via js_nanbox_get_pointer
                     match method.as_str() {
+                        "appSetSize" => {
+                            // appSetSize(width, height) — targets main app window (handle 1)
+                            let mut args = Vec::new();
+                            let one = builder.ins().iconst(types::I64, 1); // app handle = 1
+                            args.push(one);
+                            if !arg_vals.is_empty() {
+                                args.push(ensure_f64(builder, arg_vals[0])); // width
+                            }
+                            if arg_vals.len() >= 2 {
+                                args.push(ensure_f64(builder, arg_vals[1])); // height
+                            }
+                            args
+                        }
                         "registerGlobalHotkey" => {
                             // registerGlobalHotkey(key, modifiers, callback)
                             // Same arg pattern as addKeyboardShortcut

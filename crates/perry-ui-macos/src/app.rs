@@ -34,6 +34,8 @@ thread_local! {
     static PENDING_OPEN_FILES: RefCell<Vec<String>> = RefCell::new(Vec::new());
     /// Pending activation policy: "regular", "accessory", or "background".
     static PENDING_ACTIVATION_POLICY: RefCell<Option<String>> = RefCell::new(None);
+    /// Whether the window needs rounded corners (set by frameless, applied in app_run).
+    static PENDING_ROUNDED_CORNERS: std::cell::Cell<bool> = std::cell::Cell::new(false);
 }
 
 pub(crate) struct WindowEntry {
@@ -388,6 +390,21 @@ pub fn app_run(_app_handle: i64) {
                 }
             }
 
+            // Apply deferred rounded corners on the final content view (after vibrancy/body setup)
+            if PENDING_ROUNDED_CORNERS.with(|c| c.get()) {
+                unsafe {
+                    let content_view: *mut AnyObject = msg_send![&*entry.window, contentView];
+                    if !content_view.is_null() {
+                        let _: () = msg_send![content_view, setWantsLayer: true];
+                        let layer: *mut AnyObject = msg_send![content_view, layer];
+                        if !layer.is_null() {
+                            let _: () = msg_send![layer, setCornerRadius: 12.0_f64];
+                            let _: () = msg_send![layer, setMasksToBounds: true];
+                        }
+                    }
+                }
+            }
+
             entry.window.makeKeyAndOrderFront(None);
         }
     });
@@ -476,6 +493,25 @@ pub fn set_max_size(app_handle: i64, w: f64, h: f64) {
     });
 }
 
+/// Resize the main app window dynamically.
+pub fn app_set_size(app_handle: i64, width: f64, height: f64) {
+    APPS.with(|a| {
+        let apps = a.borrow();
+        let idx = (app_handle - 1) as usize;
+        if idx < apps.len() {
+            let window = &apps[idx].window;
+            unsafe {
+                let frame: CGRect = msg_send![window, frame];
+                let new_frame = CGRect::new(
+                    frame.origin,
+                    CGSize::new(width, height),
+                );
+                let _: () = msg_send![window, setFrame: new_frame display: true animate: true];
+            }
+        }
+    });
+}
+
 // ============================================
 // Keyboard Shortcuts
 // ============================================
@@ -555,6 +591,46 @@ pub fn app_set_frameless(app_handle: i64, value: f64) {
                 let _: () = msg_send![window, setStyleMask: NSWindowStyleMask::Borderless.0];
                 // Allow dragging by the window background
                 let _: () = msg_send![window, setMovableByWindowBackground: true];
+                // Borderless NSWindows don't become key by default.
+                // Force the window to accept key status so text fields work.
+                // Use raw ObjC runtime C calls to create a subclass.
+                extern "C" {
+                    fn objc_allocateClassPair(superclass: *const std::ffi::c_void, name: *const i8, extra: usize) -> *mut std::ffi::c_void;
+                    fn objc_registerClassPair(cls: *mut std::ffi::c_void);
+                    fn class_addMethod(cls: *mut std::ffi::c_void, sel: *const std::ffi::c_void, imp: extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void) -> i8, types: *const i8) -> i8;
+                    fn object_setClass(obj: *mut std::ffi::c_void, cls: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+                    fn sel_registerName(name: *const i8) -> *mut std::ffi::c_void;
+                    fn object_getClass(obj: *const std::ffi::c_void) -> *mut std::ffi::c_void;
+                }
+                extern "C" fn can_become_key(_this: *mut std::ffi::c_void, _sel: *mut std::ffi::c_void) -> i8 { 1 }
+                let window_ptr = &**window as *const NSWindow as *mut std::ffi::c_void;
+                let parent_class = object_getClass(window_ptr);
+                let subclass_name = std::ffi::CString::new(format!("PerryKeyableWindow_{}", app_handle)).unwrap();
+                let existing = objc2::runtime::AnyClass::get(&subclass_name);
+                let new_class = if existing.is_some() {
+                    existing.unwrap() as *const _ as *mut std::ffi::c_void
+                } else {
+                    let cls = objc_allocateClassPair(parent_class, subclass_name.as_ptr(), 0);
+                    if !cls.is_null() {
+                        let sel = sel_registerName(c"canBecomeKeyWindow".as_ptr());
+                        class_addMethod(cls, sel, can_become_key, c"B@:".as_ptr());
+                        objc_registerClassPair(cls);
+                    }
+                    cls
+                };
+                if !new_class.is_null() {
+                    object_setClass(window_ptr, new_class);
+                    let _: () = msg_send![window, makeKeyAndOrderFront: std::ptr::null::<AnyObject>()];
+                }
+                // Make window transparent so rounded corners show through
+                let _: () = msg_send![window, setOpaque: false];
+                let clear_color: *const AnyObject = msg_send![
+                    objc2::class!(NSColor), clearColor
+                ];
+                let _: () = msg_send![window, setBackgroundColor: clear_color];
+                let _: () = msg_send![window, setHasShadow: true];
+                // Defer rounded corners to app_run, after vibrancy/body are set up
+                PENDING_ROUNDED_CORNERS.with(|c| c.set(true));
             }
         }
     });
@@ -1142,8 +1218,28 @@ pub fn window_hide(window_handle: i64) {
     });
 }
 
-/// Set window size.
+/// Set window size. handle=0 targets the main app window.
 pub fn window_set_size(window_handle: i64, width: f64, height: f64) {
+    // Handle 0 = main app window
+    if window_handle == 0 {
+        APPS.with(|a| {
+            let apps = a.borrow();
+            if !apps.is_empty() {
+                let window = &apps[0].window;
+                unsafe {
+                    let frame: CGRect = objc2::msg_send![window, frame];
+                    // Keep top-left anchored: adjust origin.y by height difference
+                    let dy = frame.size.height - height;
+                    let new_frame = CGRect::new(
+                        CGPoint::new(frame.origin.x, frame.origin.y + dy),
+                        CGSize::new(width, height),
+                    );
+                    let _: () = objc2::msg_send![window, setFrame: new_frame display: true animate: false];
+                }
+            }
+        });
+        return;
+    }
     WINDOWS.with(|w| {
         let windows = w.borrow();
         let idx = (window_handle - 1) as usize;
@@ -1151,8 +1247,9 @@ pub fn window_set_size(window_handle: i64, width: f64, height: f64) {
             let window = &windows[idx].window;
             unsafe {
                 let frame: CGRect = objc2::msg_send![window, frame];
+                let dy = frame.size.height - height;
                 let new_frame = CGRect::new(
-                    frame.origin,
+                    CGPoint::new(frame.origin.x, frame.origin.y + dy),
                     CGSize::new(width, height),
                 );
                 let _: () = objc2::msg_send![window, setFrame: new_frame display: true animate: true];
@@ -1208,31 +1305,40 @@ pub fn window_on_focus_lost(window_handle: i64, callback: f64) {
 
 /// Get the icon for a file/application at the given path, returned as an NSImageView widget handle.
 /// Uses NSWorkspace.iconForFile: to retrieve the system icon.
+///
+/// Safe to call during UI callbacks — the autoreleased NSImage from iconForFile: is retained
+/// immediately to prevent use-after-free when AppKit drains the autorelease pool between dispatches.
 pub fn get_app_icon(path_ptr: *const u8) -> i64 {
     let path = str_from_header(path_ptr);
     if path.is_empty() { return 0; }
 
-    let _mtm = MainThreadMarker::new().expect("perry/ui must run on the main thread");
-
     unsafe {
         let ns_path = NSString::from_str(path);
 
-        // NSWorkspace.sharedWorkspace.iconForFile:
+        // NSWorkspace.sharedWorkspace is a singleton — always valid on the main thread.
         let workspace: *const AnyObject = msg_send![
             objc2::class!(NSWorkspace), sharedWorkspace
         ];
-        let icon: *const AnyObject = msg_send![
+        if workspace.is_null() { return 0; }
+
+        // iconForFile: returns an autoreleased NSImage.
+        // Retain it immediately so it survives autorelease pool drains during UI callbacks.
+        let icon_raw: *const AnyObject = msg_send![
             workspace, iconForFile: &*ns_path
         ];
-        if icon.is_null() { return 0; }
+        if icon_raw.is_null() { return 0; }
+        let icon: Retained<AnyObject> = match Retained::retain(icon_raw as *mut AnyObject) {
+            Some(r) => r,
+            None => return 0,
+        };
 
         // Set icon size to 32x32 (reasonable default)
         let size = CGSize::new(32.0, 32.0);
-        let _: () = msg_send![icon, setSize: size];
+        let _: () = msg_send![&*icon, setSize: size];
 
-        // Create an NSImageView with the icon
+        // Create an NSImageView with the retained icon
         let image_view: Retained<AnyObject> = msg_send![
-            objc2::class!(NSImageView), imageViewWithImage: icon
+            objc2::class!(NSImageView), imageViewWithImage: &*icon
         ];
 
         // Set a default frame size
