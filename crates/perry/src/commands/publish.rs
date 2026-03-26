@@ -1915,7 +1915,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     let mut artifact_name: Option<String> = None;
     let mut build_success = false;
     let mut ws_retries = 0u32;
-    let max_ws_retries = 10u32;
+    let max_ws_retries = 60u32; // ~10 minutes with backoff
 
     use futures_util::StreamExt;
     'ws_loop: loop {
@@ -1924,33 +1924,35 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
             Ok(m) => m,
             Err(e) => {
                 // WebSocket dropped — try to reconnect and re-subscribe
-                ws_retries += 1;
-                if ws_retries > max_ws_retries {
-                    if let Some(ref pb) = pb {
-                        pb.abandon_with_message(format!("WebSocket error after {max_ws_retries} retries: {e}"));
-                    }
-                    bail!("WebSocket error after {max_ws_retries} retries: {e}");
-                }
-                if let OutputFormat::Text = format {
-                    if let Some(ref pb) = pb {
-                        pb.println(format!("    {} Connection lost, reconnecting ({ws_retries}/{max_ws_retries})...", style("!").yellow()));
-                    }
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                match tokio_tungstenite::connect_async(&ws_url).await {
-                    Ok((new_ws, _)) => {
-                        let (mut new_write, new_read) = new_ws.split();
-                        let _ = new_write.send(Message::Text(
-                            format!(r#"{{"type":"subscribe","job_id":"{}"}}"#, build_resp.job_id).into(),
-                        )).await;
-                        read = new_read;
-                        continue 'ws_loop;
-                    }
-                    Err(re) => {
+                loop {
+                    ws_retries += 1;
+                    if ws_retries > max_ws_retries {
                         if let Some(ref pb) = pb {
-                            pb.abandon_with_message(format!("Reconnect failed: {re}"));
+                            pb.abandon_with_message(format!("WebSocket error after {max_ws_retries} retries: {e}"));
                         }
-                        bail!("WebSocket reconnect failed: {re}");
+                        bail!("WebSocket error after {max_ws_retries} retries: {e}");
+                    }
+                    let delay = std::cmp::min(ws_retries as u64 * 2, 30);
+                    if let OutputFormat::Text = format {
+                        if let Some(ref pb) = pb {
+                            pb.println(format!("    {} Connection lost, reconnecting in {delay}s ({ws_retries}/{max_ws_retries})...", style("!").yellow()));
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                    match tokio_tungstenite::connect_async(&ws_url).await {
+                        Ok((new_ws, _)) => {
+                            let (mut new_write, new_read) = new_ws.split();
+                            let _ = new_write.send(Message::Text(
+                                format!(r#"{{"type":"subscribe","job_id":"{}"}}"#, build_resp.job_id).into(),
+                            )).await;
+                            read = new_read;
+                            ws_retries = 0; // reset on successful reconnect
+                            continue 'ws_loop;
+                        }
+                        Err(_re) => {
+                            // Keep retrying — don't bail on reconnect failure
+                            continue;
+                        }
                     }
                 }
             }
