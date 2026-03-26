@@ -334,13 +334,16 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
         .and_then(|f| f.to_str())
         .unwrap_or("");
 
-    // Filter: keep only members unique to this lib
+    // Filter: remove only perry_runtime/perry_stdlib objects (known to cause
+    // conflicts). All other duplicates are handled by /FORCE:MULTIPLE.
+    // We used to also exclude by .lib member set comparison, but that strips
+    // objects with identical filenames that contain different monomorphizations
+    // needed by this lib (e.g. alloc::raw_vec::grow_one with different type params).
     let mut excluded_by_set = 0usize;
     let mut excluded_by_pattern = 0usize;
     let ui_only_deps: Vec<&String> = staticlib_members.iter().filter(|m| {
         if m.ends_with(".dll") { return false; }
         if m.contains("compiler_builtins") { excluded_by_pattern += 1; return false; }
-        if exclude_members.contains(m.as_str()) { excluded_by_set += 1; return false; }
         if has_rlib {
             if let Some(prefix) = rlib_objects.first()
                 .and_then(|o| o.split('.').next())
@@ -351,9 +354,6 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
         }
         if m.contains("perry_runtime-") { excluded_by_pattern += 1; return false; }
         if m.contains("perry_stdlib-") { excluded_by_pattern += 1; return false; }
-        // Note: we used to also strip std-/core-/alloc- by name pattern, but that's
-        // too aggressive — it catches windows_core, serde_core, etc. which are needed.
-        // /FORCE:MULTIPLE handles any remaining duplicates from Rust std objects.
         true
     }).collect();
 
