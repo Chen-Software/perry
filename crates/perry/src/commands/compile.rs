@@ -323,8 +323,13 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
                 if m.starts_with(&format!("{}-", prefix)) { return false; }
             }
         }
-        // Skip perry_runtime objects embedded in the UI staticlib
+        // Skip perry_runtime and perry_stdlib objects embedded in any staticlib
         if m.contains("perry_runtime-") { return false; }
+        if m.contains("perry_stdlib-") { return false; }
+        // Skip Rust std/core/alloc objects that are already in perry-stdlib
+        if m.contains("std-") && m.contains(".rcgu.o") { return false; }
+        if m.contains("core-") && m.contains(".rcgu.o") { return false; }
+        if m.contains("alloc-") && m.contains(".rcgu.o") && !m.contains(&ui_crate_name) { return false; }
         true
     }).collect();
 
