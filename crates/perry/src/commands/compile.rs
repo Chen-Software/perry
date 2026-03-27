@@ -2681,8 +2681,20 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     let mut i18n_config: Option<perry_transform::i18n::I18nConfig> = None;
     let mut i18n_translations: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
 
-    {
-        let toml_path = project_root.join("perry.toml");
+    // Walk up from project_root to find perry.toml (it may be in parent of src/)
+    let toml_root = {
+        let mut dir = project_root.clone();
+        loop {
+            if dir.join("perry.toml").exists() {
+                break Some(dir);
+            }
+            if !dir.pop() {
+                break None;
+            }
+        }
+    };
+    if let Some(ref toml_dir) = toml_root {
+        let toml_path = toml_dir.join("perry.toml");
         if toml_path.exists() {
             if let Ok(content) = fs::read_to_string(&toml_path) {
                 if let Ok(doc) = content.parse::<toml::Table>() {
@@ -2717,7 +2729,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                             }
 
                             // Load locale files
-                            let locales_dir = project_root.join("locales");
+                            let locales_dir = toml_dir.join("locales");
                             for locale in &locales {
                                 let locale_file = locales_dir.join(format!("{}.json", locale));
                                 if locale_file.exists() {
@@ -4068,6 +4080,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     let is_windows = matches!(target.as_deref(), Some("windows"))
         || (target.is_none() && cfg!(target_os = "windows"));
     let is_cross_windows = is_windows && !cfg!(target_os = "windows");
+    let is_cross_ios = is_ios && !cfg!(target_os = "macos");
+    let is_cross_macos = matches!(target.as_deref(), Some("macos")) && !cfg!(target_os = "macos");
     // Note: is_watchos and is_tvos were already defined earlier near jsruntime_lib
 
     // For dylib output, skip runtime/stdlib linking — symbols resolve from host at dlopen time
@@ -4195,6 +4209,34 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
          .arg("-sdk").arg(&sysroot)
          .arg("-parse-as-library")
          .arg(&swift_runtime);
+        c
+    } else if is_ios && is_cross_ios {
+        // Cross-compile iOS from Linux using ld64.lld + Apple SDK sysroot
+        let ld64 = find_llvm_tool("ld64.lld")
+            .or_else(|| {
+                // Check common paths
+                for p in &["/usr/local/bin/ld64.lld", "/usr/bin/ld64.lld-18", "/usr/bin/ld64.lld"] {
+                    if std::path::Path::new(p).exists() { return Some(PathBuf::from(p)); }
+                }
+                None
+            })
+            .unwrap_or_else(|| {
+                eprintln!("Warning: ld64.lld not found for iOS cross-compilation. Install lld.");
+                PathBuf::from("ld64.lld")
+            });
+        let sysroot = std::env::var("PERRY_IOS_SYSROOT")
+            .unwrap_or_else(|_| "/opt/apple-sysroot/ios".to_string());
+        eprintln!("[cross-ios] Using ld64.lld: {}", ld64.display());
+        eprintln!("[cross-ios] Sysroot: {sysroot}");
+
+        let mut c = Command::new(&ld64);
+        c.arg("-arch").arg("arm64")
+         .arg("-platform_version").arg("ios").arg("17.0.0").arg("17.0.0")
+         .arg("-syslibroot").arg(&sysroot)
+         .arg("-L").arg(format!("{}/usr/lib", sysroot))
+         .arg("-L").arg(format!("{}/usr/lib/swift", sysroot))
+         .arg("-lSystem")
+         .arg("-dead_strip");
         c
     } else if is_ios {
         let sdk = if target.as_deref() == Some("ios-simulator") { "iphonesimulator" } else { "iphoneos" };
