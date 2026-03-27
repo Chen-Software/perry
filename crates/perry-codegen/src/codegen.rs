@@ -192,6 +192,16 @@ impl Compiler {
                     .finish(settings::Flags::new(flag_builder))
                     .map_err(|e| anyhow!("{}", e))?
             }
+            Some("macos") => {
+                // Cross-compile for aarch64-apple-darwin (Mach-O)
+                let triple = target_lexicon::Triple::from_str("aarch64-apple-darwin")
+                    .map_err(|e| anyhow!("Bad triple: {}", e))?;
+                let isa_builder = cranelift::codegen::isa::lookup(triple)
+                    .map_err(|e| anyhow!("Failed to create macOS ISA: {}", e))?;
+                isa_builder
+                    .finish(settings::Flags::new(flag_builder))
+                    .map_err(|e| anyhow!("{}", e))?
+            }
             Some("windows") => {
                 // Cross-compile for x86_64-windows (PE/COFF)
                 let triple = target_lexicon::Triple::from_str("x86_64-pc-windows-msvc")

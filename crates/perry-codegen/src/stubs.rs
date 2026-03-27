@@ -30,6 +30,13 @@ pub fn generate_stub_object(missing_data_symbols: &[String], missing_func_symbol
                 .map_err(|e| anyhow!("Failed to create Android ISA: {}", e))?;
             isa_builder.finish(settings::Flags::new(flag_builder)).map_err(|e| anyhow!("{}", e))?
         }
+        Some("macos") => {
+            let triple = target_lexicon::Triple::from_str("aarch64-apple-darwin")
+                .map_err(|e| anyhow!("Bad triple: {}", e))?;
+            let isa_builder = cranelift::codegen::isa::lookup(triple)
+                .map_err(|e| anyhow!("Failed to create macOS ISA: {}", e))?;
+            isa_builder.finish(settings::Flags::new(flag_builder)).map_err(|e| anyhow!("{}", e))?
+        }
         Some("windows") => {
             let triple = target_lexicon::Triple::from_str("x86_64-pc-windows-msvc")
                 .map_err(|e| anyhow!("Bad triple: {}", e))?;

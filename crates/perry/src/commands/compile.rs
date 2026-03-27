@@ -4247,6 +4247,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
          .arg("-syslibroot").arg(&sysroot)
          .arg("-L").arg(format!("{}/usr/lib", sysroot))
          .arg("-L").arg(format!("{}/usr/lib/swift", sysroot))
+         .arg("-F").arg(format!("{}/System/Library/Frameworks", sysroot))
          .arg("-lSystem")
          .arg("-dead_strip");
         c
@@ -4395,6 +4396,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
          .arg("-syslibroot").arg(&sysroot)
          .arg("-L").arg(format!("{}/usr/lib", sysroot))
          .arg("-L").arg(format!("{}/usr/lib/swift", sysroot))
+         .arg("-F").arg(format!("{}/System/Library/Frameworks", sysroot))
          .arg("-lSystem")
          .arg("-dead_strip");
         c
