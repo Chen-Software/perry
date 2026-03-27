@@ -201,7 +201,7 @@ async fn remote_build_and_launch(
     format: OutputFormat,
 ) -> Result<()> {
     use super::publish::{
-        auto_register_license, create_project_tarball, load_config, save_config,
+        auto_register_license, create_project_tarball_with_excludes, load_config, save_config,
     };
     use base64::Engine;
     use futures_util::{SinkExt, StreamExt};
@@ -275,7 +275,14 @@ async fn remote_build_and_launch(
         std::io::stdout().flush().ok();
     }
 
-    let tarball = create_project_tarball(&project_root).context("Failed to create project tarball")?;
+    // Read [publish].exclude from perry.toml so `run` excludes the same dirs as `publish`
+    let publish_excludes = std::fs::read_to_string(project_root.join("perry.toml"))
+        .ok()
+        .and_then(|s| s.parse::<toml::Value>().ok())
+        .and_then(|v| v.get("publish")?.get("exclude")?.as_array().cloned())
+        .map(|arr| arr.into_iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let tarball = create_project_tarball_with_excludes(&project_root, &publish_excludes).context("Failed to create project tarball")?;
 
     if let OutputFormat::Text = format {
         println!(

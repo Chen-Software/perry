@@ -2287,7 +2287,16 @@ pub(crate) fn create_project_tarball_with_excludes(project_dir: &Path, extra_exc
             if builtin_exclude_dirs.iter().any(|ex| name == *ex) {
                 return false;
             }
-            if extra_excludes.iter().any(|ex| name == *ex) {
+            if extra_excludes.iter().any(|ex| {
+                if ex.contains('/') {
+                    // Path-based exclude: match against relative path from project root
+                    e.path().strip_prefix(project_dir)
+                        .map(|rel| rel.starts_with(ex))
+                        .unwrap_or(false)
+                } else {
+                    name == *ex
+                }
+            }) {
                 return false;
             }
             if name.ends_with(".app") {
