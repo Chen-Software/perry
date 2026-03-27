@@ -114,10 +114,12 @@ impl PerryTabBarDelegate {
 }
 
 unsafe extern "C" fn tab_callback_trampoline(context: *mut std::ffi::c_void) {
-    let packed = Box::from_raw(context as *mut (f64, i64));
-    let (closure_f64, tab_index) = *packed;
-    let closure_ptr = js_nanbox_get_pointer(closure_f64);
-    js_closure_call1(closure_ptr as *const u8, tab_index as f64);
+    let _ = std::panic::catch_unwind(|| {
+        let packed = Box::from_raw(context as *mut (f64, i64));
+        let (closure_f64, tab_index) = *packed;
+        let closure_ptr = js_nanbox_get_pointer(closure_f64);
+        js_closure_call1(closure_ptr as *const u8, tab_index as f64);
+    });
 }
 
 // ── Public API ────────────────────────────────────────────────

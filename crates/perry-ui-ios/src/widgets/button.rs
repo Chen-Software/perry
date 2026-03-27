@@ -23,9 +23,11 @@ extern "C" {
 }
 
 unsafe extern "C" fn button_callback_trampoline(context: *mut std::ffi::c_void) {
-    let closure_f64 = f64::from_bits(context as u64);
-    let closure_ptr = js_nanbox_get_pointer(closure_f64);
-    js_closure_call0(closure_ptr as *const u8);
+    let _ = std::panic::catch_unwind(|| {
+        let closure_f64 = f64::from_bits(context as u64);
+        let closure_ptr = js_nanbox_get_pointer(closure_f64);
+        js_closure_call0(closure_ptr as *const u8);
+    });
 }
 
 pub struct PerryButtonTargetIvars {

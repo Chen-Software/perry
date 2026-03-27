@@ -46,7 +46,7 @@ pub mod redis_client;
 pub mod plugin;
 pub mod thread;
 pub mod geisterhand_registry;
-#[cfg(any(target_os = "ios", target_os = "tvos"))]
+#[cfg(all(any(target_os = "ios", target_os = "tvos"), feature = "ios-game-loop"))]
 pub mod ios_game_loop;
 
 pub use value::JSValue;

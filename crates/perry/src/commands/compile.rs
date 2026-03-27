@@ -709,6 +709,10 @@ fn find_library(name: &str, target: Option<&str>) -> Option<PathBuf> {
                     candidates.push(target_dir.join(triple).join("release").join(name));
                     candidates.push(target_dir.join(triple).join("debug").join(name));
                 }
+                // When cargo install'd, check the original source tree's target dir
+                let source_target = Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../target").join(triple).join("release").join(name);
+                candidates.push(source_target);
             }
         }
     } else {

@@ -19,13 +19,19 @@ use std::sync::Mutex;
 use once_cell::sync::Lazy;
 use tokio::runtime::Runtime;
 
-/// Global tokio runtime for all async stdlib operations
+/// Global tokio runtime for all async stdlib operations.
+/// Falls back to current-thread runtime if multi-thread fails (e.g. on iOS).
 pub static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
         .build()
-        .expect("Failed to create tokio runtime")
+        .unwrap_or_else(|_| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create tokio runtime")
+        })
 });
 
 /// Pending promise resolutions

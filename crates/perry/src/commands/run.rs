@@ -143,16 +143,22 @@ pub fn run(args: RunArgs, format: OutputFormat, use_color: bool, verbose: u8) ->
         return result;
     }
 
+    // Read app metadata from perry.toml / package.json
+    let project_dir = input.parent().unwrap_or(Path::new("."))
+        .canonicalize().unwrap_or_else(|_| PathBuf::from("."));
+    let project_root = find_project_root(&project_dir);
+    let (app_name, bundle_id) = read_app_metadata(&project_root, &input);
+
     // Local compile path
     let compile_args = CompileArgs {
         input: input.clone(),
-        output: None,
+        output: Some(PathBuf::from(&app_name)),
         keep_intermediates: false,
         print_hir: false,
         no_link: false,
         enable_js_runtime: args.enable_js_runtime,
         target: target.clone(),
-        app_bundle_id: None,
+        app_bundle_id: Some(bundle_id),
         output_type: "executable".to_string(),
         bundle_extensions: None,
         type_check: args.type_check,
@@ -163,17 +169,35 @@ pub fn run(args: RunArgs, format: OutputFormat, use_color: bool, verbose: u8) ->
     };
 
     let result = super::compile::run(compile_args, format, use_color, verbose)?;
+
+    // Local iOS device builds need code signing before install
+    if target.as_deref() == Some("ios") {
+        if let Some(udid) = device_udid.as_deref() {
+            let config = super::publish::load_config();
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(resign_for_development(&result.output_path, &config, udid, format))?;
+        }
+    }
+
     launch(&result, device_udid.as_deref(), &args.program_args, format)
 }
 
-/// Check if we have the cross-compiled runtime libraries for a target
+/// Check if we have the cross-compiled runtime libraries for a target.
+/// Uses the same search logic as compile.rs find_library().
 fn can_compile_locally(target: Option<&str>) -> bool {
     let triple = match rust_target_triple(target) {
         Some(t) => t,
         None => return true, // host build, always available
     };
-    let runtime_path = format!("target/{triple}/release/libperry_runtime.a");
-    Path::new(&runtime_path).exists()
+    // Check CWD (running from source tree)
+    let cwd_path = format!("target/{triple}/release/libperry_runtime.a");
+    if Path::new(&cwd_path).exists() {
+        return true;
+    }
+    // Check original source tree (when cargo install'd)
+    let source_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target").join(triple).join("release/libperry_runtime.a");
+    source_path.exists()
 }
 
 /// Map perry target names to Rust target triples

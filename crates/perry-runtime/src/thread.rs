@@ -710,8 +710,9 @@ unsafe fn parallel_map_impl(
 
         // Collect results in order
         for handle in handles {
-            let (idx, results) = handle.join().expect("Worker thread panicked");
-            all_results[idx] = results;
+            if let Ok((idx, results)) = handle.join() {
+                all_results[idx] = results;
+            }
         }
     });
 
@@ -898,8 +899,9 @@ unsafe fn parallel_filter_impl(
         }
 
         for handle in handles {
-            let (idx, kept) = handle.join().expect("Worker thread panicked");
-            all_results[idx] = kept;
+            if let Ok((idx, kept)) = handle.join() {
+                all_results[idx] = kept;
+            }
         }
     });
 
@@ -1028,19 +1030,23 @@ unsafe fn spawn_impl(
                 as *const ClosureHeader
         };
 
-        // Call the function
-        let call_fn: ClosureCall0Fn = unsafe { std::mem::transmute(func_usize) };
-        let result = unsafe { call_fn(local_closure) };
+        // Call the function — catch panics to avoid aborting across FFI boundary
+        let call_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let call_fn: ClosureCall0Fn = unsafe { std::mem::transmute(func_usize) };
+            unsafe { call_fn(local_closure) }
+        }));
 
-        // Serialize result for transfer back to main thread
-        let serialized_result = unsafe { serialize_jsvalue(result.to_bits()) };
-
-        // Queue resolution — the converter runs on the main thread
-        // via js_stdlib_process_pending(), deserializing into the main arena.
-        //
-        // We use the same mechanism as async I/O (MySQL, fetch, etc.)
-        // so no new infrastructure is needed.
-        queue_thread_result(promise_usize, serialized_result);
+        match call_result {
+            Ok(result) => {
+                // Serialize result for transfer back to main thread
+                let serialized_result = unsafe { serialize_jsvalue(result.to_bits()) };
+                queue_thread_result(promise_usize, serialized_result);
+            }
+            Err(_) => {
+                // Thread panicked — resolve with undefined to avoid hanging promise
+                queue_thread_result(promise_usize, SerializedValue::Inline(TAG_UNDEFINED));
+            }
+        }
     });
 
     promise
@@ -1059,7 +1065,10 @@ fn queue_thread_result(promise_usize: usize, result: SerializedValue) {
     // Thread results are stored in a global Mutex queue. The main thread's
     // pump function (js_thread_process_pending) drains this queue and resolves
     // the promises.
-    let mut pending = PENDING_THREAD_RESULTS.lock().unwrap();
+    let mut pending = match PENDING_THREAD_RESULTS.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
     pending.push(PendingThreadResult {
         promise_ptr: promise_usize,
         result,
@@ -1089,7 +1098,10 @@ static PENDING_THREAD_RESULTS: std::sync::Mutex<Vec<PendingThreadResult>> =
 /// Number of results processed.
 #[no_mangle]
 pub extern "C" fn js_thread_process_pending() -> i32 {
-    let mut pending = PENDING_THREAD_RESULTS.lock().unwrap();
+    let mut pending = match PENDING_THREAD_RESULTS.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
     let count = pending.len() as i32;
 
     for item in pending.drain(..) {
