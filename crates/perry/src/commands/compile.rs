@@ -4714,8 +4714,12 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             } else {
                 if cfg!(target_os = "macos") || is_cross_macos {
                     cmd.arg("-framework").arg("AppKit");
-                    cmd.arg("-framework").arg("QuartzCore"); // CAGradientLayer, CALayer
-                    cmd.arg("-framework").arg("AVFoundation"); // AVAudioEngine for audio capture
+                    cmd.arg("-framework").arg("CoreGraphics");
+                    cmd.arg("-framework").arg("QuartzCore");
+                    cmd.arg("-framework").arg("AVFoundation");
+                    cmd.arg("-framework").arg("Metal");
+                    cmd.arg("-framework").arg("IOKit");
+                    cmd.arg("-framework").arg("DiskArbitration"); // needed by CoreGraphics
                 }
             }
 
