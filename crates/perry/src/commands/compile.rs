@@ -5064,8 +5064,32 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     <string>1.0</string>
     <key>CFBundleShortVersionString</key>
     <string>1.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
     <key>MinimumOSVersion</key>
     <string>17.0</string>
+    <key>CFBundleSupportedPlatforms</key>
+    <array><string>iPhoneOS</string></array>
+    <key>DTPlatformName</key>
+    <string>iphoneos</string>
+    <key>DTPlatformVersion</key>
+    <string>26.2</string>
+    <key>DTSDKName</key>
+    <string>iphoneos26.2</string>
+    <key>DTSDKBuild</key>
+    <string>17E187</string>
+    <key>DTXcode</key>
+    <string>2630</string>
+    <key>DTXcodeBuild</key>
+    <string>17E187</string>
+    <key>DTCompiler</key>
+    <string>com.apple.compilers.llvm.clang.1_0</string>
+    <key>UIRequiredDeviceCapabilities</key>
+    <array><string>arm64</string></array>
     <key>UIDeviceFamily</key>
     <array>
         <integer>1</integer>
@@ -5073,11 +5097,12 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     </array>
     <key>UILaunchStoryboardName</key>
     <string>LaunchScreen</string>
-    <key>UIRequiresFullScreen</key>
-    <true/>
     <key>UISupportedInterfaceOrientations</key>
     <array>
         <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationPortraitUpsideDown</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
     </array>
     <key>UISupportedInterfaceOrientations~ipad</key>
     <array>
