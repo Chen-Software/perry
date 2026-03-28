@@ -15866,19 +15866,13 @@ pub(crate) fn compile_expr(
                         true
                     }
                     Expr::IndexGet { object, .. } => {
-                        // Array element access like names[i] — if the array is a string array,
-                        // the element is a string. Treat as string since
-                        // js_get_string_pointer_unified handles numeric fallback.
+                        // Array element access like names[i] — if the array is a known string
+                        // array, the element is a string key. Only activate for string arrays.
                         if let Expr::LocalGet(id) = object.as_ref() {
-                            locals.get(id).map(|i| i.is_string || i.is_array || i.is_mixed_array).unwrap_or(false)
+                            locals.get(id).map(|i| i.is_string).unwrap_or(false)
                         } else {
-                            true // Conservative: assume string for dynamic index expressions
+                            false
                         }
-                    }
-                    Expr::Call { .. } => {
-                        // Function calls may return strings (e.g., getString(), etc.)
-                        // Treat as potential string — js_get_string_pointer_unified handles it
-                        true
                     }
                     _ => false,
                 }
