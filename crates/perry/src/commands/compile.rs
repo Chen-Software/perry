@@ -3282,6 +3282,18 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         }
     }
 
+    // Collect all non-generic type aliases from all modules.
+    // These are passed to each module's compiler so type_to_abi can resolve
+    // Named("BlockTag") -> Union([...]) for correct ABI types in function signatures.
+    let mut all_type_aliases: std::collections::BTreeMap<String, perry_types::Type> = std::collections::BTreeMap::new();
+    for (_path, hir_module) in &ctx.native_modules {
+        for ta in &hir_module.type_aliases {
+            if ta.type_params.is_empty() {
+                all_type_aliases.insert(ta.name.clone(), ta.ty.clone());
+            }
+        }
+    }
+
     // Build a map of all exported classes from all modules
     // Key: (resolved_path, class_name) -> Class reference
     let mut exported_classes: BTreeMap<(String, String), &perry_hir::Class> = BTreeMap::new();
@@ -3752,6 +3764,13 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 for specifier in &js_module_specifiers {
                     compiler.add_js_module(specifier.clone());
                 }
+            }
+
+            // Register all type aliases so type_to_abi can resolve Named types.
+            // Type aliases may come from any module (e.g., `type BlockTag = ... | number`)
+            // and affect function parameter ABI when used across modules.
+            for (name, ty) in &all_type_aliases {
+                compiler.register_type_alias(name.clone(), ty.clone());
             }
 
             // Register imported classes from other native modules

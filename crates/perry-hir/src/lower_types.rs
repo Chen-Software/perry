@@ -431,6 +431,17 @@ pub(crate) fn extract_ts_type_with_ctx(ts_type: &ast::TsType, ctx: Option<&Lower
                 }
             }
 
+            // Check if this is a type alias — resolve to the underlying type
+            // so the codegen sees Union/String/Number instead of Named("BlockTag").
+            // Without this, `type BlockTag = 'latest' | number | string` stays as
+            // Named("BlockTag") which the codegen treats as I64 (object pointer),
+            // causing ABI mismatch when the actual value is a NaN-boxed union.
+            if let Some(context) = ctx {
+                if let Some(resolved) = context.resolve_type_alias(&name) {
+                    return resolved;
+                }
+            }
+
             Type::Named(name)
         }
 

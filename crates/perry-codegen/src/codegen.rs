@@ -128,6 +128,10 @@ pub struct Compiler {
     pub(crate) needs_geisterhand: bool,
     /// Port for geisterhand HTTP server (default 7676)
     pub(crate) geisterhand_port: u16,
+    /// Type alias map: alias name -> resolved type.
+    /// Collected from all modules' type_aliases during compile_module,
+    /// used in type_to_abi to resolve Named("BlockTag") to its underlying type.
+    pub(crate) type_alias_map: HashMap<String, perry_types::Type>,
 }
 
 impl Compiler {
@@ -295,6 +299,7 @@ impl Compiler {
             enabled_features: HashSet::new(),
             needs_geisterhand: false,
             geisterhand_port: 7676,
+            type_alias_map: HashMap::new(),
         })
     }
 
@@ -362,6 +367,13 @@ impl Compiler {
     /// `module_prefix` is the sanitized module prefix for resolving the extension's default export.
     pub fn add_bundled_extension(&mut self, source_path: String, module_prefix: String) {
         self.bundled_extensions.push((source_path, module_prefix));
+    }
+
+    /// Register a type alias from another module.
+    /// This allows `type_to_abi` to resolve cross-module type aliases like
+    /// `type BlockTag = 'latest' | number | string` when used in function parameters.
+    pub fn register_type_alias(&mut self, name: String, ty: perry_types::Type) {
+        self.type_alias_map.insert(name, ty);
     }
 
     /// Register an imported function's parameter count.
@@ -665,6 +677,12 @@ impl Compiler {
             Type::Promise(_) => types::I64,
             // Named types: most are pointers, but some are stored as f64
             Type::Named(name) => {
+                // First check if this is a type alias — resolve to the underlying type.
+                // E.g., `type BlockTag = 'latest' | number | string` should resolve to
+                // Union([String, Number, String]) -> F64 (NaN-boxed), not I64 (object pointer).
+                if let Some(resolved) = self.type_alias_map.get(name) {
+                    return self.type_to_abi(resolved);
+                }
                 match name.as_str() {
                     "Date" => types::F64,  // Date is stored as f64 timestamp in runtime
                     // Fastify handles are NaN-boxed f64 values (not raw I64 pointers).
@@ -1067,6 +1085,15 @@ impl Compiler {
             self.process_enum(en)?;
         }
 
+        // Collect type aliases from this module into the type alias map.
+        // This allows type_to_abi to resolve Named("BlockTag") -> Union([...])
+        // so the correct ABI type (F64 for unions) is used for parameters.
+        for ta in &hir.type_aliases {
+            if ta.type_params.is_empty() {
+                self.type_alias_map.insert(ta.name.clone(), ta.ty.clone());
+            }
+        }
+
         // Build function parameter and return types map for proper call-site type conversion
         for func in &hir.functions {
             let param_types: Vec<types::Type> = func.params.iter()
@@ -1085,9 +1112,21 @@ impl Compiler {
             // Store full HIR return type for detecting Map, Set, etc. at call sites
             self.func_hir_return_types.insert(func.id, func.return_type.clone());
 
-            // Track which parameters are union types (for proper NaN-boxing at call sites)
+            // Track which parameters are union types (for proper NaN-boxing at call sites).
+            // Also resolve type aliases: Named("BlockTag") -> Union([...]) is a union param.
             let union_params: Vec<bool> = func.params.iter()
-                .map(|p| matches!(p.ty, perry_types::Type::Union(_)))
+                .map(|p| {
+                    if matches!(p.ty, perry_types::Type::Union(_)) {
+                        return true;
+                    }
+                    // Check if Named type resolves to a union via type alias
+                    if let perry_types::Type::Named(name) = &p.ty {
+                        if let Some(resolved) = self.type_alias_map.get(name) {
+                            return matches!(resolved, perry_types::Type::Union(_));
+                        }
+                    }
+                    false
+                })
                 .collect();
             self.func_union_params.insert(func.id, union_params);
         }

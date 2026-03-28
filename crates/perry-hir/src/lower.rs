@@ -184,6 +184,16 @@ impl LoweringContext {
         self.type_param_scopes.iter().any(|scope| scope.contains(name))
     }
 
+    /// Look up a type alias by name and return its resolved type (if found).
+    /// This is used during type extraction to resolve type aliases like
+    /// `type BlockTag = 'latest' | number | string` so the compiler sees
+    /// the underlying Union type instead of Named("BlockTag").
+    pub(crate) fn resolve_type_alias(&self, name: &str) -> Option<perry_types::Type> {
+        self.type_aliases.iter()
+            .find(|(alias_name, _, type_params, _)| alias_name == name && type_params.is_empty())
+            .map(|(_, _, _, ty)| ty.clone())
+    }
+
     pub(crate) fn fresh_local(&mut self) -> LocalId {
         let id = self.next_local_id;
         self.next_local_id += 1;
@@ -954,11 +964,14 @@ fn lower_module_decl(
                                         if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
                                             let obj_name = obj_ident.sym.as_ref();
                                             // Check if it's a known native module
-                                            if let Some((module_name, _)) = ctx.lookup_native_module(obj_name) {
+                                            // Clone module_name to avoid borrow conflict with ctx mutation below
+                                            let native_mod = ctx.lookup_native_module(obj_name)
+                                                .map(|(m, _)| m.to_string());
+                                            if let Some(module_name_owned) = native_mod {
                                                 if let ast::MemberProp::Ident(method_ident) = &member.prop {
                                                     let method_name = method_ident.sym.as_ref();
                                                     // Map factory functions to their class names
-                                                    let class_name = match (module_name, method_name) {
+                                                    let class_name = match (module_name_owned.as_str(), method_name) {
                                                         ("mysql2" | "mysql2/promise", "createPool") => Some("Pool"),
                                                         ("mysql2" | "mysql2/promise", "createConnection") => Some("Connection"),
                                                         ("pg", "connect") => Some("Client"),
@@ -966,7 +979,12 @@ fn lower_module_decl(
                                                         _ => None,
                                                     };
                                                     if let Some(class_name) = class_name {
-                                                        ctx.register_native_instance(name.clone(), module_name.to_string(), class_name.to_string());
+                                                        ctx.register_native_instance(name.clone(), module_name_owned.clone(), class_name.to_string());
+                                                        // Also register as module-level native instance so it survives scope exits.
+                                                        // Without this, pool = mysql.createPool() at module top level loses
+                                                        // its native tracking when function scopes are entered/exited,
+                                                        // causing pool.query() inside functions to miss the Pool dispatch.
+                                                        ctx.module_native_instances.push((name.clone(), module_name_owned, class_name.to_string()));
                                                     }
                                                 }
                                             }
