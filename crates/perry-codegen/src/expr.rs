@@ -5906,8 +5906,11 @@ pub(crate) fn compile_expr(
                     // Bitwise NOT: ~x
                     // Unbox NaN-boxed booleans before integer conversion
                     let numeric_val = unbox_bool_to_number(builder, val);
-                    // Convert f64 to i32, apply bnot, convert back to f64
-                    let val_i32 = builder.ins().fcvt_to_sint_sat(types::I32, numeric_val);
+                    // Convert f64 to i32 via i64 to get JS ToInt32 wrapping semantics.
+                    // fcvt_to_sint_sat(I32) saturates at i32::MAX for values >= 2^31,
+                    // but JS wraps: ToInt32(2147483648) = -2147483648.
+                    let val_i64 = builder.ins().fcvt_to_sint_sat(types::I64, numeric_val);
+                    let val_i32 = builder.ins().ireduce(types::I32, val_i64);
                     let result = builder.ins().bnot(val_i32);
                     Ok(builder.ins().fcvt_from_sint(types::F64, result))
                 }
@@ -11340,11 +11343,11 @@ pub(crate) fn compile_expr(
                     Err(anyhow!("Unsupported callee: LocalGet with unknown variable id={}", id))
                 }
                 Expr::ExternFuncRef { name: func_name, param_types, return_type } => {
-                    // Intercept keccakHash: native Rust keccak256 replacing the compiled
-                    // TypeScript version (which has bitwise operation bugs in the
-                    // keccak permutation). keccakHash is the raw bytes-returning function
-                    // in ethkit's crypto/keccak.ts. hash.ts's string-returning keccak256
-                    // calls keccakHash internally and formats the result.
+                    // Intercept keccakHash: use native Rust keccak256 for correct hashing.
+                    // The compiled TypeScript version has subtle bitwise operation differences
+                    // in the keccak permutation that produce wrong hashes.
+                    // NOTE: This requires libperry_stdlib to be linked (full project builds).
+                    // Standalone tests without stdlib will get stubs that return null.
                     if func_name == "keccakHash" {
                         if let Some(&native_func) = extern_funcs.get("js_keccak256_native_bytes") {
                             let func_ref = module.declare_func_in_func(native_func, builder.func);
@@ -15444,12 +15447,14 @@ pub(crate) fn compile_expr(
                         // Property access might return a string - treat as dynamic
                         true
                     }
-                    // Array element access: keys[0], cols[i] — string arrays return strings
+                    // Array element access: keys[0], cols[i], log.topics[0] — string arrays return strings
                     Expr::IndexGet { object, .. } => {
                         match object.as_ref() {
                             Expr::LocalGet(id) => locals.get(id).map(|i| i.is_array || i.is_string).unwrap_or(false),
                             // Object.keys() etc. always return string arrays
                             Expr::ObjectKeys(_) => true,
+                            // Property access returning array (e.g., log.topics[0]) — elements may be strings
+                            Expr::PropertyGet { .. } => true,
                             _ => false,
                         }
                     }
