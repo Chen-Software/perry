@@ -984,8 +984,8 @@ pub extern "C" fn js_array_filter(arr: *const ArrayHeader, callback: *const Clos
         for i in 0..length as usize {
             let element = *elements_ptr.add(i);
             let keep = js_closure_call1(callback, element);
-            // Truthy check: non-zero value
-            if keep != 0.0 {
+            // Proper truthy check: handles NaN-boxed booleans (TAG_FALSE != 0.0 but is falsy)
+            if crate::value::js_is_truthy(keep) != 0 {
                 result = js_array_push_f64(result, element);
                 result_len += 1;
             }
@@ -1008,8 +1008,8 @@ pub extern "C" fn js_array_find(arr: *const ArrayHeader, callback: *const Closur
         for i in 0..length as usize {
             let element = *elements_ptr.add(i);
             let result = js_closure_call1(callback, element);
-            // Truthy check: non-zero value
-            if result != 0.0 {
+            // Proper truthy check: handles NaN-boxed booleans
+            if crate::value::js_is_truthy(result) != 0 {
                 return element;
             }
         }
@@ -1032,14 +1032,101 @@ pub extern "C" fn js_array_findIndex(arr: *const ArrayHeader, callback: *const C
         for i in 0..length as usize {
             let element = *elements_ptr.add(i);
             let result = js_closure_call1(callback, element);
-            // Truthy check: non-zero value
-            if result != 0.0 {
+            // Proper truthy check: handles NaN-boxed booleans
+            if crate::value::js_is_truthy(result) != 0 {
                 return i as i32;
             }
         }
 
         // Not found
         -1
+    }
+}
+
+/// some - returns true if any element matches callback(element) => true
+/// Returns TAG_TRUE or TAG_FALSE as f64
+#[no_mangle]
+pub extern "C" fn js_array_some(arr: *const ArrayHeader, callback: *const ClosureHeader) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+    let arr = clean_arr_ptr(arr);
+    if arr.is_null() { return f64::from_bits(TAG_FALSE); }
+    unsafe {
+        let length = (*arr).length;
+        let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
+
+        for i in 0..length as usize {
+            let element = *elements_ptr.add(i);
+            let result = js_closure_call1(callback, element);
+            if crate::value::js_is_truthy(result) != 0 {
+                return f64::from_bits(TAG_TRUE);
+            }
+        }
+
+        f64::from_bits(TAG_FALSE)
+    }
+}
+
+/// every - returns true if all elements match callback(element) => true
+/// Returns TAG_TRUE or TAG_FALSE as f64
+#[no_mangle]
+pub extern "C" fn js_array_every(arr: *const ArrayHeader, callback: *const ClosureHeader) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+    let arr = clean_arr_ptr(arr);
+    if arr.is_null() { return f64::from_bits(TAG_TRUE); }
+    unsafe {
+        let length = (*arr).length;
+        let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
+
+        for i in 0..length as usize {
+            let element = *elements_ptr.add(i);
+            let result = js_closure_call1(callback, element);
+            if crate::value::js_is_truthy(result) == 0 {
+                return f64::from_bits(TAG_FALSE);
+            }
+        }
+
+        f64::from_bits(TAG_TRUE)
+    }
+}
+
+/// flatMap - map each element to an array, then flatten one level
+/// Returns pointer to new array
+#[no_mangle]
+pub extern "C" fn js_array_flatMap(arr: *const ArrayHeader, callback: *const ClosureHeader) -> *mut ArrayHeader {
+    let arr = clean_arr_ptr(arr);
+    if arr.is_null() { return js_array_alloc(0); }
+    unsafe {
+        let length = (*arr).length;
+        let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
+
+        let mut result = js_array_alloc(length);
+
+        for i in 0..length as usize {
+            let element = *elements_ptr.add(i);
+            let mapped = js_closure_call1(callback, element);
+            // Check if the mapped value is an array (pointer-tagged)
+            let bits = mapped.to_bits();
+            let top16 = bits >> 48;
+            if top16 == 0x7FFD {
+                // NaN-boxed pointer — likely an array
+                let sub_arr = (bits & 0x0000_FFFF_FFFF_FFFF) as *const ArrayHeader;
+                if !sub_arr.is_null() {
+                    let sub_len = (*sub_arr).length;
+                    let sub_elements = (sub_arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
+                    for j in 0..sub_len as usize {
+                        let sub_element = *sub_elements.add(j);
+                        result = js_array_push_f64(result, sub_element);
+                    }
+                }
+            } else {
+                // Not an array — push as single element
+                result = js_array_push_f64(result, mapped);
+            }
+        }
+
+        result
     }
 }
 

@@ -1181,6 +1181,9 @@ pub enum Expr {
     ArrayFilter { array: Box<Expr>, callback: Box<Expr> },   // arr.filter(fn) -> new array
     ArrayFind { array: Box<Expr>, callback: Box<Expr> },     // arr.find(fn) -> element | undefined
     ArrayFindIndex { array: Box<Expr>, callback: Box<Expr> }, // arr.findIndex(fn) -> index | -1
+    ArraySome { array: Box<Expr>, callback: Box<Expr> },     // arr.some(fn) -> boolean
+    ArrayEvery { array: Box<Expr>, callback: Box<Expr> },    // arr.every(fn) -> boolean
+    ArrayFlatMap { array: Box<Expr>, callback: Box<Expr> },  // arr.flatMap(fn) -> new array
     ArraySort { array: Box<Expr>, comparator: Box<Expr> },   // arr.sort(fn) -> same array (in-place)
     ArrayReduce { array: Box<Expr>, callback: Box<Expr>, initial: Option<Box<Expr>> }, // arr.reduce(fn, init?) -> value
     ArrayJoin { array: Box<Expr>, separator: Option<Box<Expr>> }, // arr.join(separator?) -> string

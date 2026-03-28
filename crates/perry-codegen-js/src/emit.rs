@@ -1574,6 +1574,24 @@ impl JsEmitter {
                 self.emit_expr(callback);
                 self.output.push(')');
             }
+            Expr::ArraySome { array, callback } => {
+                self.emit_expr(array);
+                self.output.push_str(".some(");
+                self.emit_expr(callback);
+                self.output.push(')');
+            }
+            Expr::ArrayEvery { array, callback } => {
+                self.emit_expr(array);
+                self.output.push_str(".every(");
+                self.emit_expr(callback);
+                self.output.push(')');
+            }
+            Expr::ArrayFlatMap { array, callback } => {
+                self.emit_expr(array);
+                self.output.push_str(".flatMap(");
+                self.emit_expr(callback);
+                self.output.push(')');
+            }
             Expr::ArraySort { array, comparator } => {
                 self.emit_expr(array);
                 self.output.push_str(".sort(");

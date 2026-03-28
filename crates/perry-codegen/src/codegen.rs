@@ -1727,15 +1727,9 @@ impl Compiler {
         self.generate_exported_closure_wrappers(&hir.init, &hir.exported_objects)?;
 
         // Compile init statements as main (entry) or module init function (non-entry)
-        // For non-entry modules, always generate the init function even if empty,
-        // because the entry module will call it.
-        // For entry module, generate main if there are init statements or other module inits to call.
-        let should_compile_init = self.is_entry_module  // Always generate main for entry module
-            || !hir.init.is_empty()
-            || !self.native_module_inits.is_empty()
-            || self.needs_js_runtime
-            || self.needs_dotenv_init
-            || self.output_type == "dylib";
+        // Non-entry modules always need __perry_init_ generated because the entry module calls it.
+        // Entry module always needs main.
+        let should_compile_init = true;
 
         if should_compile_init {
             self.compile_init(&hir.name, &hir.init, &hir.exported_native_instances, &hir.exported_objects, &hir.exported_functions)?;

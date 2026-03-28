@@ -1208,6 +1208,48 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_dynamic_array_findIndex"), func_id);
         }
 
+        // js_array_some(arr: *const ArrayHeader, callback: *const ClosureHeader) -> f64 (TAG_TRUE/TAG_FALSE)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // array pointer
+            sig.params.push(AbiParam::new(types::I64)); // callback closure pointer
+            sig.returns.push(AbiParam::new(types::F64)); // NaN-boxed boolean
+            let func_id = self.module.declare_function(
+                "js_array_some",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_array_some"), func_id);
+        }
+
+        // js_array_every(arr: *const ArrayHeader, callback: *const ClosureHeader) -> f64 (TAG_TRUE/TAG_FALSE)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // array pointer
+            sig.params.push(AbiParam::new(types::I64)); // callback closure pointer
+            sig.returns.push(AbiParam::new(types::F64)); // NaN-boxed boolean
+            let func_id = self.module.declare_function(
+                "js_array_every",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_array_every"), func_id);
+        }
+
+        // js_array_flatMap(arr: *const ArrayHeader, callback: *const ClosureHeader) -> *mut ArrayHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // array pointer
+            sig.params.push(AbiParam::new(types::I64)); // callback closure pointer
+            sig.returns.push(AbiParam::new(types::I64)); // new array pointer
+            let func_id = self.module.declare_function(
+                "js_array_flatMap",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_array_flatMap"), func_id);
+        }
+
         // js_array_reduce(arr, callback, has_initial, initial) -> f64
         {
             let mut sig = self.module.make_signature();

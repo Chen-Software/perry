@@ -329,6 +329,10 @@ impl crate::codegen::Compiler {
                 self.collect_closures_from_expr(array, closures, enclosing_class);
                 self.collect_closures_from_expr(callback, closures, enclosing_class);
             }
+            Expr::ArraySome { array, callback } | Expr::ArrayEvery { array, callback } | Expr::ArrayFlatMap { array, callback } => {
+                self.collect_closures_from_expr(array, closures, enclosing_class);
+                self.collect_closures_from_expr(callback, closures, enclosing_class);
+            }
             Expr::ArraySort { array, comparator } => {
                 self.collect_closures_from_expr(array, closures, enclosing_class);
                 self.collect_closures_from_expr(comparator, closures, enclosing_class);
@@ -1020,7 +1024,7 @@ impl crate::codegen::Compiler {
                 self.collect_mutable_captures_from_expr(array, captures);
                 self.collect_mutable_captures_from_expr(callback, captures);
             }
-            Expr::ArrayFindIndex { array, callback } => {
+            Expr::ArrayFindIndex { array, callback } | Expr::ArraySome { array, callback } | Expr::ArrayEvery { array, callback } | Expr::ArrayFlatMap { array, callback } => {
                 self.collect_mutable_captures_from_expr(array, captures);
                 self.collect_mutable_captures_from_expr(callback, captures);
             }
@@ -1239,7 +1243,7 @@ impl crate::codegen::Compiler {
             Expr::Closure { func_id, body, .. } => {
                 self.collect_func_refs_needing_wrappers_from_stmts(body, func_refs);
             }
-            Expr::ArrayForEach { array, callback } | Expr::ArrayMap { array, callback } | Expr::ArrayFilter { array, callback } | Expr::ArrayFind { array, callback } | Expr::ArrayFindIndex { array, callback } => {
+            Expr::ArrayForEach { array, callback } | Expr::ArrayMap { array, callback } | Expr::ArrayFilter { array, callback } | Expr::ArrayFind { array, callback } | Expr::ArrayFindIndex { array, callback } | Expr::ArraySome { array, callback } | Expr::ArrayEvery { array, callback } | Expr::ArrayFlatMap { array, callback } => {
                 self.collect_func_refs_from_expr(array, func_refs);
                 match callback.as_ref() {
                     Expr::FuncRef(func_id) => {

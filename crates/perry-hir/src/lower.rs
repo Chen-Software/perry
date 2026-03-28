@@ -3541,6 +3541,30 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                 });
                                             }
                                         }
+                                        "some" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::ArraySome {
+                                                    array: Box::new(Expr::LocalGet(array_id)),
+                                                    callback: Box::new(args.into_iter().next().unwrap()),
+                                                });
+                                            }
+                                        }
+                                        "every" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::ArrayEvery {
+                                                    array: Box::new(Expr::LocalGet(array_id)),
+                                                    callback: Box::new(args.into_iter().next().unwrap()),
+                                                });
+                                            }
+                                        }
+                                        "flatMap" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::ArrayFlatMap {
+                                                    array: Box::new(Expr::LocalGet(array_id)),
+                                                    callback: Box::new(args.into_iter().next().unwrap()),
+                                                });
+                                            }
+                                        }
                                         "sort" => {
                                             if args.len() >= 1 {
                                                 return Ok(Expr::ArraySort {
