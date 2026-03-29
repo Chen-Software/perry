@@ -5133,11 +5133,11 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     <key>DTSDKName</key>
     <string>iphoneos26.2</string>
     <key>DTSDKBuild</key>
-    <string>17E187</string>
+    <string>23C53</string>
     <key>DTXcode</key>
-    <string>2630</string>
+    <string>2620</string>
     <key>DTXcodeBuild</key>
-    <string>17E187</string>
+    <string>17C51</string>
     <key>DTCompiler</key>
     <string>com.apple.compilers.llvm.clang.1_0</string>
     <key>UIRequiredDeviceCapabilities</key>
