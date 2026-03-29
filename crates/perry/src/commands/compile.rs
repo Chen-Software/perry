@@ -4611,6 +4611,39 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
            .arg("-lm")
            .arg("-ldl")
            .arg("-llog");
+
+        // Stub for JNI_GetCreatedJavaVMs: the jni-sys crate declares this extern
+        // symbol, but Android has no libjvm.so and libnativehelper.so is only
+        // available at API 31+. Perry gets the JavaVM from JNI_OnLoad and never
+        // calls this function, so compile a no-op C stub to satisfy the linker.
+        let stub_dir = std::env::temp_dir().join(format!("perry_jni_stub_{}", std::process::id()));
+        std::fs::create_dir_all(&stub_dir).ok();
+        let stub_c = stub_dir.join("jni_stub.c");
+        let stub_o = stub_dir.join("jni_stub.o");
+        std::fs::write(&stub_c, concat!(
+            "typedef int jint;\n",
+            "typedef jint jsize;\n",
+            "jint JNI_GetCreatedJavaVMs(void **vm_buf, jsize buf_len, jsize *n_vms) {\n",
+            "    if (n_vms) *n_vms = 0;\n",
+            "    return 0;\n",
+            "}\n",
+        )).ok();
+        let ndk_home = std::env::var("ANDROID_NDK_HOME").unwrap_or_default();
+        let host_tag = if cfg!(target_os = "macos") { "darwin-x86_64" } else { "linux-x86_64" };
+        let ndk_clang = format!(
+            "{}/toolchains/llvm/prebuilt/{}/bin/aarch64-linux-android24-clang",
+            ndk_home, host_tag
+        );
+        let stub_ok = Command::new(&ndk_clang)
+            .args(["-c", "-fPIC", "-target", "aarch64-linux-android24"])
+            .arg("-o").arg(&stub_o)
+            .arg(&stub_c)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if stub_ok {
+            cmd.arg(&stub_o);
+        }
     } else if is_linux {
         // Linux system libraries (cross-compile target)
         // Allow multiple definitions: perry-jsruntime embeds perry-runtime symbols,

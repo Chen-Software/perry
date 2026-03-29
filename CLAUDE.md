@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.26
+**Current Version:** 0.4.27
 
 ## Workflow Requirements
 
@@ -139,6 +139,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.27
+- fix: Android `JNI_GetCreatedJavaVMs` undefined symbol — `jni-sys` declares extern ref but Android has no `libjvm.so` (`libnativehelper` only at API 31+); Perry's linker step now compiles a C stub `.o` and links it into the `.so`
 
 ### v0.4.26
 - fix: Android UI builds had undefined `js_nanbox_*` symbols — `strip_duplicate_objects_from_lib` removed `perry_runtime-*` objects from the UI lib while `skip_runtime` prevented the standalone runtime from being linked; skip strip-dedup on Android (like Windows) since `--allow-multiple-definition` handles duplicates
