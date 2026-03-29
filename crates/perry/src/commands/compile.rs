@@ -4699,10 +4699,12 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             // The UI staticlib bundles perry_runtime + Rust std. When perry-stdlib
             // is also linked (which bundles the same), duplicate symbols cause
             // crashes (conflicting static state initialization). Strip duplicates
-            // on Apple platforms. On Windows, skip strip-dedup because perry_runtime
-            // objects contain monomorphizations needed by UI code, and /FORCE:MULTIPLE
-            // handles the duplicate symbols safely.
-            let ui_lib = if is_windows {
+            // on Apple platforms. On Windows/Android, skip strip-dedup because
+            // perry_runtime objects contain monomorphizations needed by UI code,
+            // and --allow-multiple-definition (ELF) / /FORCE:MULTIPLE (COFF)
+            // handles duplicate symbols safely. On Android, skip_runtime=true
+            // means the UI lib is the sole provider of perry-runtime symbols.
+            let ui_lib = if is_windows || is_android {
                 ui_lib
             } else {
                 match strip_duplicate_objects_from_lib(&ui_lib) {

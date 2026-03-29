@@ -14100,25 +14100,36 @@ pub(crate) fn compile_expr(
 
                     // Handle array.length
                     if info.is_array && property == "length" {
-                        // Get the array value - for boxed variables (mutable closure captures),
-                        // use js_box_get to extract the actual value from the box first
-                        let arr_f64 = if info.is_boxed {
+                        // Get the array pointer directly as i64 when possible.
+                        // IMPORTANT: Do NOT bitcast to f64 and back — raw pointer values
+                        // are denormalized floats that get flushed to 0.0 on platforms
+                        // with DAZ/FTZ mode (Windows MSVC CRT, some ARM configs).
+                        let arr_ptr = if info.is_boxed {
                             let box_ptr = builder.use_var(info.var);
                             let box_get_func = extern_funcs.get("js_box_get")
                                 .ok_or_else(|| anyhow!("js_box_get not declared"))?;
                             let box_get_ref = module.declare_func_in_func(*box_get_func, builder.func);
                             let call = builder.ins().call(box_get_ref, &[box_ptr]);
-                            builder.inst_results(call)[0]
+                            let arr_f64 = builder.inst_results(call)[0];
+                            let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                            let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                            let ptr_call = builder.ins().call(get_ptr_ref, &[arr_f64]);
+                            builder.inst_results(ptr_call)[0]
                         } else {
                             let arr_val = builder.use_var(info.var);
-                            ensure_f64(builder, arr_val)
+                            let val_type = builder.func.dfg.value_type(arr_val);
+                            if val_type == types::I64 {
+                                arr_val
+                            } else {
+                                let arr_f64 = ensure_f64(builder, arr_val);
+                                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                    .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                                let ptr_call = builder.ins().call(get_ptr_ref, &[arr_f64]);
+                                builder.inst_results(ptr_call)[0]
+                            }
                         };
-                        // Extract pointer from NaN-boxed value (handles both raw and boxed)
-                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
-                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
-                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
-                        let ptr_call = builder.ins().call(get_ptr_ref, &[arr_f64]);
-                        let arr_ptr = builder.inst_results(ptr_call)[0];
 
                         // Inline load: ArrayHeader.length is u32 at offset 0
                         let len_i32 = builder.ins().load(types::I32, MemFlags::new(), arr_ptr, 0);
@@ -15462,15 +15473,23 @@ pub(crate) fn compile_expr(
                             let call = builder.ins().call(get_ptr_ref, &[arr_f64]);
                             builder.inst_results(call)[0]
                         } else {
-                            // Get the array pointer - may be NaN-boxed from await results
+                            // Get the array pointer.
+                            // IMPORTANT: If the value is already I64 (raw pointer from module-level
+                            // variable or function parameter), use it directly. Do NOT bitcast to
+                            // F64 — raw pointer values are denormalized floats that get flushed to
+                            // 0.0 on platforms with DAZ/FTZ mode (Windows MSVC CRT, some ARM configs).
                             let arr_val = builder.use_var(info.var);
-                            let arr_f64 = ensure_f64(builder, arr_val);
-                            // Extract pointer from NaN-boxed value (handles both raw and boxed)
-                            let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
-                                .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
-                            let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
-                            let call = builder.ins().call(get_ptr_ref, &[arr_f64]);
-                            builder.inst_results(call)[0]
+                            let val_type = builder.func.dfg.value_type(arr_val);
+                            if val_type == types::I64 {
+                                arr_val
+                            } else {
+                                let arr_f64 = ensure_f64(builder, arr_val);
+                                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                    .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                                let call = builder.ins().call(get_ptr_ref, &[arr_f64]);
+                                builder.inst_results(call)[0]
+                            }
                         };
                         // OPTIMIZATION: Use native i32 or i32 shadow for integer variables, avoiding f64->i32 conversion
                         let idx_i32 = if let Expr::Integer(n) = index.as_ref() {
