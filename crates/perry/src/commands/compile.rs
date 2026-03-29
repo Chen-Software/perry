@@ -4713,7 +4713,15 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                     }
                 }
             };
-            cmd.arg(&ui_lib);
+            if is_windows {
+                // lld-link scans archives left-to-right once. The UI lib is
+                // linked before user code objects, so UI symbols aren't yet
+                // undefined when the lib is scanned. /WHOLEARCHIVE forces all
+                // objects from the archive to be included unconditionally.
+                cmd.arg(format!("/WHOLEARCHIVE:{}", ui_lib.display()));
+            } else {
+                cmd.arg(&ui_lib);
+            }
 
             if is_watchos {
                 // SwiftUI/WatchKit already linked above
