@@ -53,8 +53,9 @@ thread_local! {
 }
 
 /// Load an image file (PNG, JPEG, etc.) via GDI+ and return as HBITMAP.
+/// `bg_color` is the COLORREF used to fill transparent areas (default: white).
 #[cfg(target_os = "windows")]
-fn load_image_gdiplus(wide_path: &[u16]) -> Option<windows::Win32::Graphics::Gdi::HBITMAP> {
+fn load_image_gdiplus(wide_path: &[u16], bg_color: u32) -> Option<windows::Win32::Graphics::Gdi::HBITMAP> {
     use windows::Win32::Graphics::Gdi::*;
     use windows::Win32::Graphics::GdiPlus::*;
 
@@ -90,16 +91,16 @@ fn load_image_gdiplus(wide_path: &[u16]) -> Option<windows::Win32::Graphics::Gdi
         }
 
         // Create a GDI+ graphics context on a memory DC and draw the image.
-        // Pre-fill with white so PNG transparency composites correctly.
+        // Pre-fill with bg_color so PNG transparency composites against the parent.
         let screen_dc = GetDC(None);
         let mem_dc = CreateCompatibleDC(screen_dc);
         let hbitmap = CreateCompatibleBitmap(screen_dc, width as i32, height as i32);
         let old_bmp = SelectObject(mem_dc, hbitmap);
 
-        // Fill background with white (transparent areas will show as white)
         let bg_rect = RECT { left: 0, top: 0, right: width as i32, bottom: height as i32 };
-        let white_brush = CreateSolidBrush(COLORREF(0x00FFFFFF));
-        FillRect(mem_dc, &bg_rect, white_brush);
+        let bg_brush = CreateSolidBrush(COLORREF(bg_color));
+        FillRect(mem_dc, &bg_rect, bg_brush);
+        let _ = DeleteObject(bg_brush);
 
         let mut graphics: *mut GpGraphics = std::ptr::null_mut();
         GdipCreateFromHDC(mem_dc, &mut graphics);
@@ -119,8 +120,9 @@ fn load_image_gdiplus(wide_path: &[u16]) -> Option<windows::Win32::Graphics::Gdi
 }
 
 /// Load an image scaled to specific dimensions via GDI+.
+/// `bg_color` is the COLORREF used to fill transparent areas.
 #[cfg(target_os = "windows")]
-fn load_image_gdiplus_scaled(wide_path: &[u16], target_w: i32, target_h: i32) -> Option<windows::Win32::Graphics::Gdi::HBITMAP> {
+fn load_image_gdiplus_scaled(wide_path: &[u16], target_w: i32, target_h: i32, bg_color: u32) -> Option<windows::Win32::Graphics::Gdi::HBITMAP> {
     use windows::Win32::Graphics::Gdi::*;
     use windows::Win32::Graphics::GdiPlus::*;
 
@@ -142,10 +144,10 @@ fn load_image_gdiplus_scaled(wide_path: &[u16], target_w: i32, target_h: i32) ->
         let hbitmap = CreateCompatibleBitmap(screen_dc, target_w, target_h);
         let old_bmp = SelectObject(mem_dc, hbitmap);
 
-        // Fill with white for transparency compositing
         let bg_rect = RECT { left: 0, top: 0, right: target_w, bottom: target_h };
-        let white_brush = CreateSolidBrush(COLORREF(0x00FFFFFF));
-        FillRect(mem_dc, &bg_rect, white_brush);
+        let bg_brush = CreateSolidBrush(COLORREF(bg_color));
+        FillRect(mem_dc, &bg_rect, bg_brush);
+        let _ = DeleteObject(bg_brush);
 
         let mut graphics: *mut GpGraphics = std::ptr::null_mut();
         GdipCreateFromHDC(mem_dc, &mut graphics);
@@ -191,9 +193,10 @@ pub fn create_file(path_ptr: *const u8) -> i64 {
             .unwrap();
 
             // Load the image from file — try GDI+ for PNG/JPEG support,
-            // fall back to LoadImageW for BMP/ICO
+            // fall back to LoadImageW for BMP/ICO.
+            // At creation time the widget has no parent yet, so use white fallback.
             let wide_path = to_wide(path);
-            let hbitmap = load_image_gdiplus(&wide_path);
+            let hbitmap = load_image_gdiplus(&wide_path, 0x00FFFFFF);
 
             // Fall back to LoadImageW for BMP/ICO
             let hbitmap_handle = hbitmap.map(|b| b.0 as isize).or_else(|| {
@@ -286,14 +289,17 @@ pub fn create_symbol(name_ptr: *const u8) -> i64 {
 
 /// Reload the bitmap scaled to the given pixel dimensions.
 /// Called by `set_size` and by the layout engine after `MoveWindow`.
+/// Uses the nearest ancestor's background color for transparency compositing
+/// so the image blends with its parent (gradient or solid) instead of showing white.
 #[cfg(target_os = "windows")]
 pub fn reload_bitmap_scaled(handle: i64, w: i32, h: i32) {
     if w <= 0 || h <= 0 { return; }
     let path = IMAGE_PATHS.with(|p| p.borrow().get(&handle).cloned());
     if let Some(path) = path {
         if let Some(hwnd) = super::get_hwnd(handle) {
+            let bg_color = super::find_ancestor_hwnd_bg_color(hwnd).unwrap_or(0x00FFFFFF);
             let wide_path = to_wide(&path);
-            if let Some(hbitmap) = load_image_gdiplus_scaled(&wide_path, w, h) {
+            if let Some(hbitmap) = load_image_gdiplus_scaled(&wide_path, w, h, bg_color) {
                 unsafe {
                     SendMessageW(hwnd, STM_SETIMAGE,
                         WPARAM(IMAGE_BITMAP.0 as usize),

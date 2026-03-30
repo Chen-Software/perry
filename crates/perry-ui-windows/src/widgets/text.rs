@@ -255,6 +255,8 @@ pub fn handle_ctlcolor(hdc: HDC, child_hwnd: HWND) -> Option<LRESULT> {
     // Find the nearest ancestor brush for background
     let ancestor_brush = find_ancestor_brush(child_hwnd);
 
+    let null_brush = LRESULT(unsafe { GetStockObject(NULL_BRUSH) }.0 as isize);
+
     TEXT_STYLES.with(|styles| {
         let styles = styles.borrow();
         if let Some(style) = styles.get(&handle) {
@@ -265,17 +267,17 @@ pub fn handle_ctlcolor(hdc: HDC, child_hwnd: HWND) -> Option<LRESULT> {
             if !style.font.is_invalid() {
                 unsafe { SelectObject(hdc, style.font); }
             }
-            // Return the ancestor's background brush, or NULL_BRUSH as fallback
-            if let Some(brush) = ancestor_brush {
-                Some(LRESULT(brush.0 as isize))
-            } else {
-                Some(LRESULT(unsafe { GetStockObject(NULL_BRUSH) }.0 as isize))
-            }
+            // Return NULL_BRUSH so the parent's background (gradient or solid)
+            // shows through. SetBkMode(TRANSPARENT) already prevents per-glyph
+            // background fill; returning NULL_BRUSH prevents the control from
+            // erasing its area with a solid brush on top of the parent's paint.
+            Some(null_brush)
         } else {
-            // No explicit style — still return ancestor brush for correct background
-            if let Some(brush) = ancestor_brush {
+            // No explicit style — still use transparent background so parent
+            // gradient/solid paints show through correctly
+            if ancestor_brush.is_some() {
                 unsafe { SetBkMode(hdc, TRANSPARENT); }
-                Some(LRESULT(brush.0 as isize))
+                Some(null_brush)
             } else {
                 None
             }

@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.30
+**Current Version:** 0.4.31
 
 ## Workflow Requirements
 
@@ -139,6 +139,10 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.31
+- fix: Windows Text widgets now transparent over gradient backgrounds — `WM_CTLCOLORSTATIC` returns `NULL_BRUSH` instead of ancestor's solid brush, so parent gradient/solid paints show through correctly
+- fix: Windows Image bitmap transparency uses ancestor background color — `reload_bitmap_scaled` fills transparent areas with the nearest ancestor's bg color instead of white, so images blend with gradient/colored containers
 
 ### v0.4.30
 - fix: `arr[i]` in for-loop inside function returned `arr[0]` for every `i` — LICM incorrectly hoisted loop-counter-indexed array reads as invariant when BCE didn't fire (module-level `const` limits like `MAX_COINS` had `is_integer=false` despite having `const_value`); also `collect_assigned_ids` only scanned loop body, missing the `update` expression where the counter is assigned
