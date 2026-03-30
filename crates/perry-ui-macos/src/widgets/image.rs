@@ -51,8 +51,28 @@ pub fn create_file(path_ptr: *const u8) -> i64 {
     let path = str_from_header(path_ptr);
     let mtm = MainThreadMarker::new().expect("perry/ui must run on the main thread");
 
+    // Resolve relative paths against the executable's directory (inside .app bundle)
+    let resolved = if !path.starts_with('/') {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(exe_dir) = exe.parent() {
+                let candidate = exe_dir.join(path);
+                if candidate.exists() {
+                    candidate.to_string_lossy().to_string()
+                } else {
+                    path.to_string()
+                }
+            } else {
+                path.to_string()
+            }
+        } else {
+            path.to_string()
+        }
+    } else {
+        path.to_string()
+    };
+
     unsafe {
-        let ns_path = NSString::from_str(path);
+        let ns_path = NSString::from_str(&resolved);
         let image: Option<Retained<NSImage>> = msg_send![
             NSImage::alloc(), initWithContentsOfFile: &*ns_path
         ];
