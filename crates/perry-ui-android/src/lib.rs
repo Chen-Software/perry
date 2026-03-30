@@ -139,7 +139,7 @@ pub extern "C" fn Java_com_perry_app_PerryBridge_nativeShutdown(
 
 #[cfg(not(test))]
 extern "C" {
-    fn main();
+    fn main() -> i32;
 }
 
 // js_stdlib_init_dispatch and js_stdlib_process_pending — now provided by perry-runtime
@@ -191,8 +191,18 @@ pub extern "C" fn Java_com_perry_app_PerryBridge_nativeMain(
         main();
         __android_log_print(
             3, b"PerryJNI\0".as_ptr(),
-            b"nativeMain: main() returned\0".as_ptr(),
+            b"nativeMain: main() returned, parking thread\0".as_ptr(),
         );
+    }
+
+    // Park this thread forever — do NOT let it exit.
+    // Module-level arrays/objects are allocated on this thread's arena.
+    // If the thread exits, the arena's Drop frees all blocks, turning
+    // every module-level pointer into a dangling reference. The UI thread's
+    // pump ticks call into compiled functions (getLevelInfo etc.) that read
+    // these pointers — segfault if the arena was freed.
+    loop {
+        std::thread::park();
     }
 }
 

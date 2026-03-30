@@ -4352,6 +4352,11 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
          .arg("-target").arg("aarch64-linux-android24")
          .arg("-Wl,-z,max-page-size=16384")
          .arg("-Wl,-z,separate-loadable-segments")
+         // Prevent ELF symbol interposition: bind all symbols within the .so
+         // to the .so's own definitions. Without this, PLT calls (e.g. to "main")
+         // can resolve to symbols from the host process (app_process/zygote),
+         // bypassing perry's module initialization chain.
+         .arg("-Wl,-Bsymbolic")
          // Allow unresolved symbols from namespace imports (import * as X).
          // The codegen emits short-name extern refs (__export_X) for namespace
          // imports that may not have a corresponding definition when the module

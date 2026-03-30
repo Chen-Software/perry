@@ -50,6 +50,8 @@ impl crate::codegen::Compiler {
             self.module.declare_function("_perry_user_main", Linkage::Export, &sig)?
         } else if self.is_entry_module {
             // Entry module: generate "main"
+            // On Android, -Bsymbolic-functions prevents the process's main() from
+            // being called instead of ours via ELF symbol interposition.
             match self.module.declare_function("main", Linkage::Export, &sig) {
                 Ok(id) => id,
                 Err(_) => {
