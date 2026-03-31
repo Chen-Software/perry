@@ -627,6 +627,11 @@ pub extern "C" fn perry_ui_textfield_blur_all() {
 }
 
 #[no_mangle]
+pub extern "C" fn perry_ui_textfield_set_next_key_view(handle: i64, next_handle: i64) {
+    widgets::textfield::set_next_key_view(handle, next_handle);
+}
+
+#[no_mangle]
 pub extern "C" fn perry_ui_textfield_set_borderless(handle: i64, borderless: f64) {
     widgets::textfield::set_borderless(handle, borderless);
 }

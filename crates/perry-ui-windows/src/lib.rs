@@ -1211,6 +1211,11 @@ pub extern "C" fn perry_ui_textfield_set_on_submit(_handle: i64, _callback: f64)
 }
 
 #[no_mangle]
+pub extern "C" fn perry_ui_textfield_set_next_key_view(_handle: i64, _next_handle: i64) {
+    // Win32 handles tab navigation via WS_TABSTOP style (set by default)
+}
+
+#[no_mangle]
 pub extern "C" fn perry_ui_textfield_set_borderless(handle: i64, borderless: f64) {
     widgets::textfield::set_borderless(handle, borderless);
 }

@@ -578,6 +578,11 @@ pub extern "C" fn perry_ui_textfield_blur_all() {
 }
 
 #[no_mangle]
+pub extern "C" fn perry_ui_textfield_set_next_key_view(_handle: i64, _next_handle: i64) {
+    // iOS handles tab navigation automatically
+}
+
+#[no_mangle]
 pub extern "C" fn perry_ui_textfield_set_borderless(handle: i64, borderless: f64) {
     widgets::textfield::set_borderless(handle, borderless);
 }

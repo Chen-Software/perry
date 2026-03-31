@@ -789,6 +789,11 @@ pub extern "C" fn perry_ui_textfield_get_string(handle: i64) -> i64 {
 }
 
 #[no_mangle]
+pub extern "C" fn perry_ui_textfield_set_next_key_view(_handle: i64, _next_handle: i64) {
+    // GTK4 handles tab navigation automatically via the widget tree
+}
+
+#[no_mangle]
 pub extern "C" fn perry_ui_textfield_set_borderless(handle: i64, borderless: f64) {
     widgets::textfield::set_borderless(handle, borderless);
 }

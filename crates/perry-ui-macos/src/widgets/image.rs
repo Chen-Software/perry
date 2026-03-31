@@ -124,6 +124,14 @@ pub fn set_size(handle: i64, width: f64, height: f64) {
             }
             let size = objc2_core_foundation::CGSize::new(width, height);
             let _: () = msg_send![&*view, setFrameSize: size];
+            // Add constraints so stack views respect the size
+            let _: () = msg_send![&*view, setTranslatesAutoresizingMaskIntoConstraints: false];
+            let w_anchor: *mut objc2::runtime::AnyObject = msg_send![&*view, widthAnchor];
+            let w_constraint: *mut objc2::runtime::AnyObject = msg_send![w_anchor, constraintEqualToConstant: width];
+            let _: () = msg_send![w_constraint, setActive: true];
+            let h_anchor: *mut objc2::runtime::AnyObject = msg_send![&*view, heightAnchor];
+            let h_constraint: *mut objc2::runtime::AnyObject = msg_send![h_anchor, constraintEqualToConstant: height];
+            let _: () = msg_send![h_constraint, setActive: true];
         }
     }
 }

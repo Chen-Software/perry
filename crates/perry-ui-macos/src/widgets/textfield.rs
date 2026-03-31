@@ -419,6 +419,18 @@ pub fn set_font_size(handle: i64, size: f64) {
     }
 }
 
+/// Set the next key view for tab navigation.
+/// When the user presses Tab in `handle`, focus moves to `next_handle`.
+pub fn set_next_key_view(handle: i64, next_handle: i64) {
+    if let Some(view) = super::get_widget(handle) {
+        if let Some(next_view) = super::get_widget(next_handle) {
+            unsafe {
+                let _: () = msg_send![&*view, setNextKeyView: &*next_view];
+            }
+        }
+    }
+}
+
 /// Set the text color of the text field.
 pub fn set_text_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
     if let Some(view) = super::get_widget(handle) {

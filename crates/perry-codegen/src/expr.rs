@@ -17977,7 +17977,7 @@ pub(crate) fn compile_expr(
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
                     }
-                    "widgetAddChild" | "widgetRemoveChild" | "widgetAddOverlay" | "frameSplitAddChild" => {
+                    "widgetAddChild" | "widgetRemoveChild" | "widgetAddOverlay" | "frameSplitAddChild" | "textfieldSetNextKeyView" => {
                         // (parent, child) — extract 2 handles
                         let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
                             .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
@@ -17997,6 +17997,8 @@ pub(crate) fn compile_expr(
                             "perry_ui_widget_add_overlay"
                         } else if method == "frameSplitAddChild" {
                             "perry_ui_frame_split_add_child"
+                        } else if method == "textfieldSetNextKeyView" {
+                            "perry_ui_textfield_set_next_key_view"
                         } else {
                             "perry_ui_widget_add_child"
                         };

@@ -1480,6 +1480,11 @@ pub extern "C" fn perry_ui_textfield_set_on_focus(_handle: f64, _callback: f64) 
 }
 
 #[no_mangle]
+pub extern "C" fn perry_ui_textfield_set_next_key_view(_handle: i64, _next_handle: i64) {
+    // Android handles tab/next navigation automatically
+}
+
+#[no_mangle]
 pub extern "C" fn perry_ui_textfield_set_borderless(handle: i64, borderless: f64) {
     widgets::textfield::set_borderless(handle, borderless);
 }

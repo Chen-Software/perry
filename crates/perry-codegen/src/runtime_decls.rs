@@ -8874,6 +8874,15 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("perry_ui_textfield_set_borderless"), func_id);
         }
 
+        // perry_ui_textfield_set_next_key_view(handle: i64, next_handle: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_textfield_set_next_key_view", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("perry_ui_textfield_set_next_key_view"), func_id);
+        }
+
         // perry_ui_textfield_set_background_color(handle: i64, r: f64, g: f64, b: f64, a: f64)
         {
             let mut sig = self.module.make_signature();
