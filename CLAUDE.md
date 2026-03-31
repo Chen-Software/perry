@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.34
+**Current Version:** 0.4.35
 
 ## Workflow Requirements
 
@@ -139,6 +139,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.35
+- fix: Windows Image widget rewritten with GDI+ alpha-blended WM_PAINT — PNG transparency now composites correctly over parent backgrounds (gradients, solid colors). Replaced SS_BITMAP (opaque BitBlt) with custom PerryImage window class that draws via `GdipDrawImageRectI` during paint.
 
 ### v0.4.34
 - fix: Windows VStack/HStack removed `WS_CLIPCHILDREN` — parent gradient/solid backgrounds now paint through child areas so transparent text/images show correctly over gradients
