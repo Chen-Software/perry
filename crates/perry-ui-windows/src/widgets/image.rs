@@ -1,5 +1,5 @@
-//! Image widget — Win32 STATIC control with SS_BITMAP for file images,
-//! or system icon display for symbol images.
+//! Image widget — custom PerryImage window with GDI+ alpha-blended painting
+//! for file images, or STATIC+SS_ICON for symbol images.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -11,7 +11,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 #[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Gdi::InvalidateRect;
 #[cfg(target_os = "windows")]
-use windows::Win32::System::SystemServices::{SS_BITMAP, SS_ICON};
+use windows::Win32::System::SystemServices::{SS_ICON};
 #[cfg(target_os = "windows")]
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 
@@ -48,124 +48,88 @@ struct ImageTint {
 
 thread_local! {
     static IMAGE_TINTS: RefCell<HashMap<i64, ImageTint>> = RefCell::new(HashMap::new());
-    /// Store file paths so we can reload at different sizes
+    /// Store resolved file paths keyed by widget handle
     static IMAGE_PATHS: RefCell<HashMap<i64, String>> = RefCell::new(HashMap::new());
+    /// Map from HWND (as isize) -> resolved file path for WM_PAINT lookup
+    #[cfg(target_os = "windows")]
+    static HWND_TO_PATH: RefCell<HashMap<isize, String>> = RefCell::new(HashMap::new());
 }
 
-/// Load an image file (PNG, JPEG, etc.) via GDI+ and return as HBITMAP.
-/// `bg_color` is the COLORREF used to fill transparent areas (default: white).
+/// WM_PAINT handler for PerryImage windows — draws the image with GDI+ alpha blending
+/// so PNG transparency composites correctly over the parent's background (gradient or solid).
 #[cfg(target_os = "windows")]
-fn load_image_gdiplus(wide_path: &[u16], bg_color: u32) -> Option<windows::Win32::Graphics::Gdi::HBITMAP> {
-    use windows::Win32::Graphics::Gdi::*;
-    use windows::Win32::Graphics::GdiPlus::*;
+unsafe extern "system" fn image_wnd_proc(
+    hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_PAINT => {
+            use windows::Win32::Graphics::Gdi::*;
+            use windows::Win32::Graphics::GdiPlus::*;
 
-    unsafe {
-        // Initialize GDI+
-        let mut token: usize = 0;
-        let input = GdiplusStartupInput {
-            GdiplusVersion: 1,
+            let path = HWND_TO_PATH.with(|m| m.borrow().get(&(hwnd.0 as isize)).cloned());
+
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut ps);
+
+            if let Some(path) = path {
+                let wide_path = to_wide(&path);
+                let mut token: usize = 0;
+                let input = GdiplusStartupInput { GdiplusVersion: 1, ..Default::default() };
+                if GdiplusStartup(&mut token, &input, std::ptr::null_mut()).0 == 0 {
+                    let mut gp_image: *mut GpImage = std::ptr::null_mut();
+                    let status = GdipLoadImageFromFile(
+                        windows::core::PCWSTR(wide_path.as_ptr()), &mut gp_image,
+                    );
+                    if status.0 == 0 && !gp_image.is_null() {
+                        let mut rect = RECT::default();
+                        let _ = GetClientRect(hwnd, &mut rect);
+                        let w = rect.right - rect.left;
+                        let h = rect.bottom - rect.top;
+
+                        let mut graphics: *mut GpGraphics = std::ptr::null_mut();
+                        GdipCreateFromHDC(hdc, &mut graphics);
+                        if !graphics.is_null() {
+                            GdipSetInterpolationMode(graphics, InterpolationMode(7)); // HighQualityBicubic
+                            GdipDrawImageRectI(graphics, gp_image, 0, 0, w, h);
+                            GdipDeleteGraphics(graphics);
+                        }
+                        GdipDisposeImage(gp_image);
+                    }
+                    GdiplusShutdown(token);
+                }
+            }
+
+            EndPaint(hwnd, &ps);
+            LRESULT(0)
+        }
+        WM_ERASEBKGND => {
+            // Don't erase — parent's background (gradient) already painted, and
+            // GDI+ alpha blending in WM_PAINT composites on top of it.
+            LRESULT(1)
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+/// Register the PerryImage window class (idempotent — safe to call multiple times).
+#[cfg(target_os = "windows")]
+fn ensure_image_class_registered() {
+    use std::sync::Once;
+    static REGISTERED: Once = Once::new();
+    REGISTERED.call_once(|| unsafe {
+        let hinstance = GetModuleHandleW(None).unwrap();
+        let class_name = to_wide("PerryImage");
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(image_wnd_proc),
+            hInstance: hinstance.into(),
+            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+            hbrBackground: windows::Win32::Graphics::Gdi::HBRUSH(std::ptr::null_mut()), // transparent
+            lpszClassName: windows::core::PCWSTR(class_name.as_ptr()),
             ..Default::default()
         };
-        let status = GdiplusStartup(&mut token, &input, std::ptr::null_mut());
-        if status.0 != 0 {
-            return None;
-        }
-
-        // Load image from file
-        let mut gp_image: *mut GpImage = std::ptr::null_mut();
-        let status = GdipLoadImageFromFile(windows::core::PCWSTR(wide_path.as_ptr()), &mut gp_image);
-        if status.0 != 0 || gp_image.is_null() {
-            GdiplusShutdown(token);
-            return None;
-        }
-
-        // Get dimensions
-        let mut width: u32 = 0;
-        let mut height: u32 = 0;
-        GdipGetImageWidth(gp_image, &mut width);
-        GdipGetImageHeight(gp_image, &mut height);
-        if width == 0 || height == 0 {
-            GdipDisposeImage(gp_image);
-            GdiplusShutdown(token);
-            return None;
-        }
-
-        // Create a GDI+ graphics context on a memory DC and draw the image.
-        // Pre-fill with bg_color so PNG transparency composites against the parent.
-        let screen_dc = GetDC(None);
-        let mem_dc = CreateCompatibleDC(screen_dc);
-        let hbitmap = CreateCompatibleBitmap(screen_dc, width as i32, height as i32);
-        let old_bmp = SelectObject(mem_dc, hbitmap);
-
-        let bg_rect = RECT { left: 0, top: 0, right: width as i32, bottom: height as i32 };
-        let bg_brush = CreateSolidBrush(COLORREF(bg_color));
-        FillRect(mem_dc, &bg_rect, bg_brush);
-        let _ = DeleteObject(bg_brush);
-
-        let mut graphics: *mut GpGraphics = std::ptr::null_mut();
-        GdipCreateFromHDC(mem_dc, &mut graphics);
-        if !graphics.is_null() {
-            GdipDrawImageRectI(graphics, gp_image, 0, 0, width as i32, height as i32);
-            GdipDeleteGraphics(graphics);
-        }
-
-        SelectObject(mem_dc, old_bmp);
-        DeleteDC(mem_dc);
-        ReleaseDC(None, screen_dc);
-        GdipDisposeImage(gp_image);
-        GdiplusShutdown(token);
-
-        Some(hbitmap)
-    }
-}
-
-/// Load an image scaled to specific dimensions via GDI+.
-/// `bg_color` is the COLORREF used to fill transparent areas.
-#[cfg(target_os = "windows")]
-fn load_image_gdiplus_scaled(wide_path: &[u16], target_w: i32, target_h: i32, bg_color: u32) -> Option<windows::Win32::Graphics::Gdi::HBITMAP> {
-    use windows::Win32::Graphics::Gdi::*;
-    use windows::Win32::Graphics::GdiPlus::*;
-
-    unsafe {
-        let mut token: usize = 0;
-        let input = GdiplusStartupInput { GdiplusVersion: 1, ..Default::default() };
-        let status = GdiplusStartup(&mut token, &input, std::ptr::null_mut());
-        if status.0 != 0 { return None; }
-
-        let mut gp_image: *mut GpImage = std::ptr::null_mut();
-        let status = GdipLoadImageFromFile(windows::core::PCWSTR(wide_path.as_ptr()), &mut gp_image);
-        if status.0 != 0 || gp_image.is_null() {
-            GdiplusShutdown(token);
-            return None;
-        }
-
-        let screen_dc = GetDC(None);
-        let mem_dc = CreateCompatibleDC(screen_dc);
-        let hbitmap = CreateCompatibleBitmap(screen_dc, target_w, target_h);
-        let old_bmp = SelectObject(mem_dc, hbitmap);
-
-        let bg_rect = RECT { left: 0, top: 0, right: target_w, bottom: target_h };
-        let bg_brush = CreateSolidBrush(COLORREF(bg_color));
-        FillRect(mem_dc, &bg_rect, bg_brush);
-        let _ = DeleteObject(bg_brush);
-
-        let mut graphics: *mut GpGraphics = std::ptr::null_mut();
-        GdipCreateFromHDC(mem_dc, &mut graphics);
-        if !graphics.is_null() {
-            // Set high quality interpolation for scaling
-            GdipSetInterpolationMode(graphics, InterpolationMode(7)); // HighQualityBicubic
-            GdipDrawImageRectI(graphics, gp_image, 0, 0, target_w, target_h);
-            GdipDeleteGraphics(graphics);
-        }
-
-        SelectObject(mem_dc, old_bmp);
-        DeleteDC(mem_dc);
-        ReleaseDC(None, screen_dc);
-        GdipDisposeImage(gp_image);
-        GdiplusShutdown(token);
-
-        Some(hbitmap)
-    }
+        RegisterClassExW(&wc);
+    });
 }
 
 /// Resolve a relative asset path against the executable's directory first,
@@ -193,18 +157,17 @@ pub fn create_file(path_ptr: *const u8) -> i64 {
 
     #[cfg(target_os = "windows")]
     {
-        // Resolve relative paths against the exe directory (parity with macOS/GTK)
         let resolved = resolve_asset_path(path);
+        ensure_image_class_registered();
 
-        let class_name = to_wide("STATIC");
-        let window_text = to_wide("");
+        let class_name = to_wide("PerryImage");
         unsafe {
             let hinstance = GetModuleHandleW(None).unwrap();
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 windows::core::PCWSTR(class_name.as_ptr()),
-                windows::core::PCWSTR(window_text.as_ptr()),
-                WINDOW_STYLE(SS_BITMAP.0 | WS_CHILD.0 | WS_VISIBLE.0),
+                None,
+                WS_CHILD | WS_VISIBLE,
                 0, 0, 100, 100,
                 super::get_parking_hwnd(),
                 HMENU(control_id as *mut _),
@@ -213,34 +176,12 @@ pub fn create_file(path_ptr: *const u8) -> i64 {
             )
             .unwrap();
 
-            // Load the image from file — try GDI+ for PNG/JPEG support,
-            // fall back to LoadImageW for BMP/ICO.
-            // At creation time the widget has no parent yet, so use white fallback.
-            let wide_path = to_wide(&resolved);
-            let hbitmap = load_image_gdiplus(&wide_path, 0x00FFFFFF);
-
-            // Fall back to LoadImageW for BMP/ICO
-            let hbitmap_handle = hbitmap.map(|b| b.0 as isize).or_else(|| {
-                LoadImageW(
-                    None,
-                    windows::core::PCWSTR(wide_path.as_ptr()),
-                    IMAGE_BITMAP,
-                    0, 0,
-                    LR_LOADFROMFILE | LR_DEFAULTSIZE,
-                ).ok().map(|h| h.0 as isize)
+            // Store path for WM_PAINT lookup
+            HWND_TO_PATH.with(|m| {
+                m.borrow_mut().insert(hwnd.0 as isize, resolved.clone());
             });
 
-            if let Some(hbmp) = hbitmap_handle {
-                SendMessageW(
-                    hwnd,
-                    STM_SETIMAGE,
-                    WPARAM(IMAGE_BITMAP.0 as usize),
-                    LPARAM(hbmp),
-                );
-            }
-
             let handle = register_widget(hwnd, WidgetKind::Image, control_id);
-            // Store the resolved path so reload_bitmap_scaled can find the file
             IMAGE_PATHS.with(|p| p.borrow_mut().insert(handle, resolved));
             handle
         }
@@ -309,30 +250,18 @@ pub fn create_symbol(name_ptr: *const u8) -> i64 {
     }
 }
 
-/// Reload the bitmap scaled to the given pixel dimensions.
-/// Called by `set_size` and by the layout engine after `MoveWindow`.
-/// Uses the nearest ancestor's background color for transparency compositing
-/// so the image blends with its parent (gradient or solid) instead of showing white.
+/// Invalidate the image so it repaints at the current layout size.
+/// Called by the layout engine after `MoveWindow` for Image widgets.
 #[cfg(target_os = "windows")]
-pub fn reload_bitmap_scaled(handle: i64, w: i32, h: i32) {
-    if w <= 0 || h <= 0 { return; }
-    let path = IMAGE_PATHS.with(|p| p.borrow().get(&handle).cloned());
-    if let Some(path) = path {
-        if let Some(hwnd) = super::get_hwnd(handle) {
-            let bg_color = super::find_ancestor_hwnd_bg_color(hwnd).unwrap_or(0x00FFFFFF);
-            let wide_path = to_wide(&path);
-            if let Some(hbitmap) = load_image_gdiplus_scaled(&wide_path, w, h, bg_color) {
-                unsafe {
-                    SendMessageW(hwnd, STM_SETIMAGE,
-                        WPARAM(IMAGE_BITMAP.0 as usize),
-                        LPARAM(hbitmap.0 as isize));
-                }
-            }
-        }
+pub fn reload_bitmap_scaled(handle: i64, _w: i32, _h: i32) {
+    // With GDI+ alpha-blended WM_PAINT, we just need to invalidate.
+    // The paint handler reads the current client rect and draws at that size.
+    if let Some(hwnd) = super::get_hwnd(handle) {
+        unsafe { let _ = InvalidateRect(hwnd, None, false); }
     }
 }
 
-/// Set the size of an Image widget. Reloads the bitmap scaled to the new size.
+/// Set the size of an Image widget.
 pub fn set_size(handle: i64, width: f64, height: f64) {
     // Also set fixed dimensions so the layout engine uses these
     super::set_fixed_width(handle, width as i32);
@@ -345,8 +274,8 @@ pub fn set_size(handle: i64, width: f64, height: f64) {
             let h = height as i32;
             unsafe {
                 let _ = SetWindowPos(hwnd, None, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER);
+                let _ = InvalidateRect(hwnd, None, false);
             }
-            reload_bitmap_scaled(handle, w, h);
         }
     }
 
