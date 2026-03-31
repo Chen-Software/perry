@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.36
+**Current Version:** 0.4.37
 
 ## Workflow Requirements
 
@@ -139,6 +139,10 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.37
+- fix: `is_string` locals (i64 pointers) passed to functions expecting f64 now NaN-box with STRING_TAG instead of POINTER_TAG — fixes `textfieldGetString` return values becoming `undefined` when used in `encodeURIComponent`, `||`, or cross-module calls (GH-10, GH-12)
+- fix: JS interop fallback (`js_call_function`/`js_native_call_method`) NaN-boxes string args with STRING_TAG instead of raw bitcast — fixes string corruption in native module calls (GH-10, GH-11, GH-12)
 
 ### v0.4.36
 - perf: object field lookup inline cache — FNV-1a hash + 512-entry thread-local direct-mapped cache in `js_object_get_field_by_name`, skips linear key scan on cache hit

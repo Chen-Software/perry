@@ -1406,7 +1406,17 @@ pub(crate) fn compile_stmt(
                 Some(Expr::Unary { op: UnaryOp::Not, .. }) => true,
                 _ => matches!(ty, HirType::Boolean),
             };
-            locals.insert(*id, LocalInfo { var: final_var, name: Some(var_name.clone()), class_name, type_args, is_pointer, is_array, is_string, is_bigint, is_closure, closure_func_id, is_boxed: is_boxed_var, is_map, is_set, is_buffer, is_event_emitter, is_union, is_mixed_array, is_integer, is_integer_array: false, is_i32: should_use_i32, is_boolean, i32_shadow, bounded_by_array: None, bounded_by_constant: None, scalar_fields: None, squared_cache: None, product_cache: None, cached_array_ptr: None, const_value, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: existing_data_id, class_ref_name, object_field_indices: None });
+            // Extract field ordering from object literal for direct offset access
+            let obj_field_indices = if let Some(Expr::Object(props)) = init.as_ref() {
+                let mut indices = std::collections::HashMap::new();
+                for (i, (key, _)) in props.iter().enumerate() {
+                    indices.insert(key.clone(), i as u32);
+                }
+                Some(indices)
+            } else {
+                None
+            };
+            locals.insert(*id, LocalInfo { var: final_var, name: Some(var_name.clone()), class_name, type_args, is_pointer, is_array, is_string, is_bigint, is_closure, closure_func_id, is_boxed: is_boxed_var, is_map, is_set, is_buffer, is_event_emitter, is_union, is_mixed_array, is_integer, is_integer_array: false, is_i32: should_use_i32, is_boolean, i32_shadow, bounded_by_array: None, bounded_by_constant: None, scalar_fields: None, squared_cache: None, product_cache: None, cached_array_ptr: None, const_value, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: existing_data_id, class_ref_name, object_field_indices: obj_field_indices });
 
             // If this variable has a module-level data global (promoted for class capture),
             // write the initial value to the data global so class methods can read it.

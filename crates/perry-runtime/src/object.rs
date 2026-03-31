@@ -1074,19 +1074,20 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
             }
             h
         };
-        let cache_key = ((keys as usize as u64) ^ (key_hash as u64)) as usize;
+        let keys_id = keys as usize;
 
         // Thread-local inline cache: fixed-size direct-mapped cache (no allocation, no HashMap)
-        const FIELD_CACHE_SIZE: usize = 512;
+        // Each entry stores (keys_ptr, key_hash, field_index) for collision-safe validation
+        const FIELD_CACHE_SIZE: usize = 1024;
         thread_local! {
-            static FIELD_CACHE: std::cell::UnsafeCell<[(usize, u32); FIELD_CACHE_SIZE]> =
-                std::cell::UnsafeCell::new([(0usize, 0u32); FIELD_CACHE_SIZE]);
+            static FIELD_CACHE: std::cell::UnsafeCell<[(usize, u32, u32); FIELD_CACHE_SIZE]> =
+                std::cell::UnsafeCell::new([(0usize, 0u32, 0u32); FIELD_CACHE_SIZE]);
         }
-        let cache_idx = cache_key % FIELD_CACHE_SIZE;
+        let cache_idx = (keys_id.wrapping_add(key_hash as usize)) % FIELD_CACHE_SIZE;
         let cached = FIELD_CACHE.with(|c| {
             let cache = &*c.get();
             let entry = cache[cache_idx];
-            if entry.0 == cache_key { Some(entry.1) } else { None }
+            if entry.0 == keys_id && entry.1 == key_hash { Some(entry.2) } else { None }
         });
         if let Some(field_idx) = cached {
             return js_object_get_field(obj, field_idx);
@@ -1110,7 +1111,7 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
                     // Cache this lookup for next time
                     FIELD_CACHE.with(|c| {
                         let cache = &mut *c.get();
-                        cache[cache_idx] = (cache_key, i as u32);
+                        cache[cache_idx] = (keys_id, key_hash, i as u32);
                     });
                     if i < alloc_limit {
                         return js_object_get_field(obj, i as u32);
