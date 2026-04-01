@@ -257,6 +257,11 @@ pub fn handle_ctlcolor(hdc: HDC, child_hwnd: HWND) -> Option<LRESULT> {
 
     let null_brush = LRESULT(unsafe { GetStockObject(NULL_BRUSH) }.0 as isize);
 
+    // With WS_CLIPCHILDREN on parent VStack/HStack, the parent doesn't paint
+    // under child controls. Return the ancestor brush so the Text control fills
+    // its own background with the correct color.
+    let bg_brush = ancestor_brush.map(|b| LRESULT(b.0 as isize)).unwrap_or(null_brush);
+
     TEXT_STYLES.with(|styles| {
         let styles = styles.borrow();
         if let Some(style) = styles.get(&handle) {
@@ -267,17 +272,11 @@ pub fn handle_ctlcolor(hdc: HDC, child_hwnd: HWND) -> Option<LRESULT> {
             if !style.font.is_invalid() {
                 unsafe { SelectObject(hdc, style.font); }
             }
-            // Return NULL_BRUSH so the parent's background (gradient or solid)
-            // shows through. SetBkMode(TRANSPARENT) already prevents per-glyph
-            // background fill; returning NULL_BRUSH prevents the control from
-            // erasing its area with a solid brush on top of the parent's paint.
-            Some(null_brush)
+            Some(bg_brush)
         } else {
-            // No explicit style — still use transparent background so parent
-            // gradient/solid paints show through correctly
             if ancestor_brush.is_some() {
                 unsafe { SetBkMode(hdc, TRANSPARENT); }
-                Some(null_brush)
+                Some(bg_brush)
             } else {
                 None
             }
