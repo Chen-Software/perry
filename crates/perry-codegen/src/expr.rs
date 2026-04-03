@@ -15714,16 +15714,19 @@ pub(crate) fn compile_expr(
                         is_string_index_expr_get(left, locals) || is_string_index_expr_get(right, locals)
                     }
                     Expr::PropertyGet { object, .. } => {
-                        // Only treat as string if the object itself is known to be a string.
-                        // PropertyGet on objects/classes may return numbers (e.g., obj.x where x is number).
-                        // Returning true here caused numeric class fields used as Record keys to go
-                        // through js_get_string_pointer_unified on a number → garbage.
-                        // The fallback path now handles numeric keys on objects correctly.
+                        // PropertyGet result used as an index key — typically string in JS.
+                        // Exception: known class instances with numeric fields (Bug #7: a.x
+                        // where x: number on a class). These have class_name set. For any
+                        // other object (any-typed, union, no class metadata), default to true
+                        // since dynamic property access in JS patterns like c.name returns strings.
                         if let Expr::LocalGet(id) = object.as_ref() {
-                            locals.get(id).map(|i| i.is_string).unwrap_or(false)
-                        } else {
-                            false
+                            if let Some(info) = locals.get(id) {
+                                if info.is_string { return true; }
+                                // Known class instance — field might be numeric, not safe to assume string
+                                if info.class_name.is_some() { return false; }
+                            }
                         }
+                        true
                     }
                     // Array element access: keys[0], cols[i], log.topics[0] — string arrays return strings
                     Expr::IndexGet { object, .. } => {
