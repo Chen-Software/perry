@@ -44,14 +44,33 @@ The WASM binary imports ~25 JavaScript functions for host interop:
 
 Strings are managed via a global string table in JavaScript, with IDs passed as NaN-boxed values to and from WASM.
 
+## FFI Support
+
+The WASM target supports external FFI functions declared with `declare function` (no body). These are compiled as WASM imports under the `"ffi"` namespace, allowing native libraries like [Bloom Engine](https://bloomengine.dev) to provide GPU rendering, audio, and other platform APIs to WASM code.
+
+```typescript
+// These become WASM imports under the "ffi" namespace
+declare function bloom_init_window(w: number, h: number, title: number, fs: number): void;
+declare function bloom_draw_rect(x: number, y: number, w: number, h: number,
+                                  r: number, g: number, b: number, a: number): void;
+```
+
+The host provides these imports when instantiating the WASM module:
+
+```javascript
+// Via __ffiImports global (set before boot)
+globalThis.__ffiImports = { bloom_init_window: ..., bloom_draw_rect: ... };
+
+// Or via bootPerryWasm second argument
+await bootPerryWasm(wasmBase64, { bloom_init_window: ..., bloom_draw_rect: ... });
+```
+
+Void FFI functions automatically push `TAG_UNDEFINED` onto the WASM stack to satisfy expression contexts.
+
 ## Limitations
 
-The WASM target is newer than native and web targets. Current limitations:
+Current limitations:
 
-- No object or array support (in progress)
-- No closures
-- No classes or `instanceof`
-- No async/await or Promises
 - No UI widgets (`perry/ui` is not available)
 - Switch statements use cascading if/else (no WASM table jumps)
 

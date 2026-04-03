@@ -477,6 +477,8 @@ fn map_ui_method(method: &str, class_name: Option<&str>) -> &'static str {
 pub struct WasmCompileOutput {
     pub wasm_bytes: Vec<u8>,
     pub async_js: String,
+    /// FFI function names that must be provided as imports under the "ffi" namespace.
+    pub ffi_imports: Vec<String>,
 }
 
 /// Compile HIR modules to a WebAssembly binary.
@@ -518,6 +520,8 @@ struct WasmModuleEmitter {
     class_static_map: BTreeMap<String, BTreeMap<String, u32>>,
     /// Function name → wasm function index (for cross-module ExternFuncRef resolution)
     func_name_map: BTreeMap<String, u32>,
+    /// FFI imports: (name, param_count, has_return) — registered as WASM imports under "ffi" namespace
+    ffi_imports: Vec<(String, usize, bool)>,
     /// Class parent map: child_class_name → parent_class_name
     class_parent_map: BTreeMap<String, String>,
     /// Enum member values: (enum_name, member_name) → numeric value or string
@@ -548,6 +552,7 @@ impl WasmModuleEmitter {
             class_method_map: BTreeMap::new(),
             class_static_map: BTreeMap::new(),
             func_name_map: BTreeMap::new(),
+            ffi_imports: Vec::new(),
             class_parent_map: BTreeMap::new(),
             enum_values: BTreeMap::new(),
             nan_temp_global: 0, // set during compile()
@@ -1167,7 +1172,31 @@ impl WasmModuleEmitter {
         }
         self.num_imports = async_import_idx;
 
-        // Now set user_func_idx AFTER all imports (including async) are registered
+        // Register external FFI functions as WASM imports under the "ffi" namespace.
+        // These are `declare function` statements with no body (e.g., bloom_init_window).
+        // Deduplicate by name since the same extern can appear in multiple modules.
+        let mut ffi_import_idx = self.num_imports;
+        let mut seen_ffi: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for (_, module) in modules {
+            for (name, param_types, return_type) in &module.extern_funcs {
+                if seen_ffi.contains(name) {
+                    continue;
+                }
+                seen_ffi.insert(name.clone());
+                let param_count = param_types.len();
+                let has_return = !matches!(return_type, perry_types::Type::Void);
+                let params = vec![ValType::I64; param_count];
+                let results = if has_return { vec![ValType::I64] } else { vec![] };
+                let type_idx = self.get_type_idx(params, results);
+                let _ = type_idx;
+                self.func_name_map.insert(name.clone(), ffi_import_idx);
+                self.ffi_imports.push((name.clone(), param_count, has_return));
+                ffi_import_idx += 1;
+            }
+        }
+        self.num_imports = ffi_import_idx;
+
+        // Now set user_func_idx AFTER all imports (including async and FFI) are registered
         let mut user_func_idx = self.num_imports;
 
         // __init_strings function
@@ -1335,6 +1364,14 @@ impl WasmModuleEmitter {
         }).collect();
         for (name, type_idx) in &async_import_entries {
             import_section.import("rt", name, EntityType::Function(*type_idx));
+        }
+        // Add FFI function imports under "ffi" namespace
+        for (name, param_count, has_return) in &self.ffi_imports {
+            let params = vec![ValType::I64; *param_count];
+            let results = if *has_return { vec![ValType::I64] } else { vec![] };
+            let key = (params, results);
+            let type_idx = self.type_map.get(&key).copied().unwrap_or(0);
+            import_section.import("ffi", name, EntityType::Function(type_idx));
         }
         wasm_module.section(&import_section);
 
@@ -1724,7 +1761,8 @@ impl WasmModuleEmitter {
 
         let wasm_bytes = wasm_module.finish();
         let async_js = self.async_js_code.join("\n");
-        WasmCompileOutput { wasm_bytes, async_js }
+        let ffi_import_names = self.ffi_imports.iter().map(|(name, _, _)| name.clone()).collect();
+        WasmCompileOutput { wasm_bytes, async_js, ffi_imports: ffi_import_names }
     }
 
     fn compile_function(&self, hir_func: &perry_hir::ir::Function) -> Function {
@@ -3880,10 +3918,15 @@ impl<'a> FuncEmitCtx<'a> {
                             func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                         }
                     }
-                    Expr::ExternFuncRef { name, .. } => {
-                        // Cross-module function call — look up by name
+                    Expr::ExternFuncRef { name, return_type, .. } => {
+                        // Cross-module or FFI function call — look up by name
                         if let Some(&idx) = self.emitter.func_name_map.get(name) {
                             func.instruction(&Instruction::Call(idx));
+                            // Void FFI functions don't push a return value, but call
+                            // expressions always need a value on the stack. Push undefined.
+                            if matches!(return_type, perry_types::Type::Void) {
+                                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
+                            }
                         } else {
                             for _ in args {
                                 func.instruction(&Instruction::Drop);

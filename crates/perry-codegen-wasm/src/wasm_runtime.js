@@ -106,6 +106,13 @@ function getString(val) {
 let wasmMemory = null;
 let wasmInstance = null;
 
+// Expose NaN-box conversion for FFI bridge (bloom_glue.js etc.)
+// These allow external code to convert between Perry's NaN-boxed i64 values and JS values.
+globalThis.__perryToJsValue = function(nanboxedF64) { return toJsValue(nanboxedF64); };
+globalThis.__perryFromJsValue = function(jsValue) { return fromJsValue(jsValue); };
+globalThis.__perryI64ToF64 = function(i64BigInt) { return u64ToF64(i64BigInt); };
+globalThis.__perryF64ToI64 = function(f64Val) { return f64ToU64(f64Val); };
+
 // Build the import object for WASM instantiation
 function buildImports() {
   return {
@@ -1378,7 +1385,10 @@ function buildImports() {
 
       // Async function implementations (merged from generated code)
       ...(typeof __asyncFuncImpls !== 'undefined' ? __asyncFuncImpls : {}),
-    }
+    },
+    // FFI namespace: external native functions (e.g., bloom_init_window, bloom_draw_rect)
+    // Provided by the host environment via __ffiImports or bootPerryWasm(base64, ffiImports)
+    ffi: typeof __ffiImports !== 'undefined' ? __ffiImports : {},
   };
 }
 
@@ -3174,7 +3184,16 @@ function __jsValueToBits(v) {
 }
 
 // Boot the WASM module
-async function bootPerryWasm(wasmBase64) {
+// ffiImports: optional object mapping FFI function names to JS functions.
+// These are injected into the "ffi" WASM import namespace for external native libraries.
+async function bootPerryWasm(wasmBase64, ffiImports) {
+  if (ffiImports) {
+    if (typeof __ffiImports === 'undefined') {
+      globalThis.__ffiImports = ffiImports;
+    } else {
+      Object.assign(__ffiImports, ffiImports);
+    }
+  }
   const wasmBytes = Uint8Array.from(atob(wasmBase64), c => c.charCodeAt(0));
   const imports = buildImports();
   const { instance } = await WebAssembly.instantiate(wasmBytes, imports);

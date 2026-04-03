@@ -140,6 +140,11 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 
 ## Recent Changes
 
+### v0.4.43
+- feat(wasm): FFI support — `declare function` statements generate WASM imports under `"ffi"` namespace; enables Bloom Engine and other native libraries to provide GPU rendering, audio, etc. to WASM code
+- feat(wasm): void FFI functions push TAG_UNDEFINED for stack consistency; `extern_funcs` field added to HIR Module
+- feat(wasm): `bootPerryWasm(base64, ffiImports)` accepts optional FFI import providers; `__perryToJsValue`/`__perryFromJsValue` exposed globally for external FFI bridges
+
 ### v0.4.42
 - fix: `Boolean()` constructor — added `BooleanCoerce` HIR/codegen handling via `js_is_truthy`; previously returned `undefined` for all inputs
 - fix: `!!string` always false — `Expr::String` and `Expr::Unary(Not)` now route through `js_is_truthy` instead of float comparison which treated NaN-boxed strings as zero

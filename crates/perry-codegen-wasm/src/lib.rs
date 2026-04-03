@@ -37,6 +37,16 @@ pub fn compile_modules_to_wasm_html(
         format!("\n// === Generated async function implementations ===\nconst __asyncFuncImpls = {{\n{}\n}};\n", output.async_js)
     };
 
+    // If there are FFI imports, generate a comment listing them for the host to provide
+    let ffi_comment = if output.ffi_imports.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n// === FFI imports required (provide via __ffiImports or bootPerryWasm 2nd arg) ===\n// {}\n",
+            output.ffi_imports.join(", ")
+        )
+    };
+
     let html = format!(
         r#"<!DOCTYPE html>
 <html>
@@ -53,7 +63,7 @@ pub fn compile_modules_to_wasm_html(
 <body>
   <div id="perry-root"></div>
   <script>
-{runtime_js}{async_inject}
+{runtime_js}{async_inject}{ffi_comment}
   </script>
   <script>
 window.__perryWasmB64 = "{wasm_b64}";
@@ -67,10 +77,17 @@ bootPerryWasm("{wasm_b64}").catch(e => {{
         title = html_escape(title),
         runtime_js = runtime_js,
         async_inject = async_inject,
+        ffi_comment = ffi_comment,
         wasm_b64 = wasm_b64,
     );
 
     Ok(html)
+}
+
+/// Get the list of FFI function names that a WASM module requires as imports.
+pub fn get_ffi_imports(modules: &[(String, Module)]) -> Vec<String> {
+    let output = emit::compile_to_wasm_with_async(modules);
+    output.ffi_imports
 }
 
 /// Get the raw WASM binary (for non-HTML output)
