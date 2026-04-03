@@ -788,6 +788,19 @@ impl Compiler {
     }
 
     /// Check if an init expression produces a bigint value (for type analysis)
+    fn is_buffer_method_call(init: Option<&Expr>, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+        if let Some(Expr::Call { callee, .. }) = init {
+            if let Expr::PropertyGet { object, property } = callee.as_ref() {
+                if matches!(property.as_str(), "slice" | "subarray") {
+                    if let Expr::LocalGet(obj_id) = object.as_ref() {
+                        return locals.get(obj_id).map(|i| i.is_buffer).unwrap_or(false);
+                    }
+                }
+            }
+        }
+        false
+    }
+
     pub(crate) fn is_bigint_init_expr(&self, expr: &Expr) -> bool {
         match expr {
             Expr::BigInt(_) | Expr::BigIntCoerce(_) => true,
@@ -928,11 +941,7 @@ impl Compiler {
                         )
                     ))
                     // Detect buffer.slice() / buffer.subarray() returning a buffer
-                    || matches!(init, Some(Expr::Call { callee, .. }) if matches!(callee.as_ref(),
-                        Expr::PropertyGet { object, property }
-                        if matches!(property.as_str(), "slice" | "subarray")
-                        && matches!(object.as_ref(), Expr::LocalGet(obj_id) if self.module_level_locals.get(obj_id).map(|i| i.is_buffer).unwrap_or(false))
-                    ));
+                    || Self::is_buffer_method_call(init.as_ref(), &self.module_level_locals);
 
                 // Track compile-time constant values for const module-level variables.
                 // Special case: `declare const __platform__: number` is injected with

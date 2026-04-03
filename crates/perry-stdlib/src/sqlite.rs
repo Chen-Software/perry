@@ -163,6 +163,58 @@ pub unsafe extern "C" fn js_sqlite_prepare(
     -1
 }
 
+/// Extract SQLite parameters from a NaN-boxed array
+unsafe fn params_from_array(arr_ptr: *const ArrayHeader) -> Vec<Box<dyn rusqlite::ToSql>> {
+    if arr_ptr.is_null() {
+        return vec![];
+    }
+    let len = (*arr_ptr).length as usize;
+    let elements = (arr_ptr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(len);
+
+    for i in 0..len {
+        let val = *elements.add(i);
+        let bits = val.to_bits();
+
+        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+        const TAG_NULL: u64 = 0x7FFC_0000_0000_0002;
+        const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+        const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+        const STRING_TAG: u64 = 0x7FFF;
+        const INT32_TAG: u64 = 0x7FFE;
+
+        let top16 = bits >> 48;
+
+        if bits == TAG_NULL || bits == TAG_UNDEFINED {
+            params.push(Box::new(rusqlite::types::Null));
+        } else if bits == TAG_TRUE {
+            params.push(Box::new(1i64));
+        } else if bits == TAG_FALSE {
+            params.push(Box::new(0i64));
+        } else if top16 == STRING_TAG {
+            // String: extract pointer
+            let ptr = (bits & 0x0000_FFFF_FFFF_FFFF) as *const StringHeader;
+            if let Some(s) = string_from_header(ptr) {
+                params.push(Box::new(s));
+            } else {
+                params.push(Box::new(rusqlite::types::Null));
+            }
+        } else if top16 == INT32_TAG {
+            let n = (bits & 0xFFFF_FFFF) as i32;
+            params.push(Box::new(n as i64));
+        } else {
+            // Regular f64 number
+            if val.fract() == 0.0 && val >= i64::MIN as f64 && val <= i64::MAX as f64 {
+                params.push(Box::new(val as i64));
+            } else {
+                params.push(Box::new(val));
+            }
+        }
+    }
+
+    params
+}
+
 /// stmt.run(...params) -> RunResult
 ///
 /// Execute a prepared statement with parameters.
@@ -170,43 +222,25 @@ pub unsafe extern "C" fn js_sqlite_prepare(
 #[no_mangle]
 pub unsafe extern "C" fn js_sqlite_stmt_run(
     stmt_handle: Handle,
-    params_json_ptr: *const StringHeader,
+    params_arr: *const ArrayHeader,
 ) -> *mut ObjectHeader {
-    let params_json = string_from_header(params_json_ptr).unwrap_or_else(|| "[]".to_string());
+    let sqlite_params = params_from_array(params_arr);
 
     if let Some(stmt) = get_handle::<SqliteStmtHandle>(stmt_handle) {
         if let Some(db) = get_handle::<SqliteDbHandle>(stmt.db_handle) {
             if let Ok(conn) = db.conn.lock() {
-                // Parse params from JSON
-                let params: Vec<serde_json::Value> = serde_json::from_str(&params_json)
-                    .unwrap_or_else(|_| vec![]);
-
-                let sqlite_params: Vec<Box<dyn rusqlite::ToSql>> = params
-                    .iter()
-                    .map(|v| -> Box<dyn rusqlite::ToSql> {
-                        match v {
-                            serde_json::Value::Null => Box::new(rusqlite::types::Null),
-                            serde_json::Value::Bool(b) => Box::new(*b),
-                            serde_json::Value::Number(n) => {
-                                if let Some(i) = n.as_i64() {
-                                    Box::new(i)
-                                } else if let Some(f) = n.as_f64() {
-                                    Box::new(f)
-                                } else {
-                                    Box::new(rusqlite::types::Null)
-                                }
-                            }
-                            serde_json::Value::String(s) => Box::new(s.clone()),
-                            _ => Box::new(rusqlite::types::Null),
-                        }
-                    })
-                    .collect();
-
                 let param_refs: Vec<&dyn rusqlite::ToSql> = sqlite_params.iter().map(|p| p.as_ref()).collect();
 
                 if let Ok(changes) = conn.execute(&stmt.sql, param_refs.as_slice()) {
                     let last_id = conn.last_insert_rowid();
-                    let result = js_object_alloc(0, 2);
+                    let keys = vec!["changes".to_string(), "lastInsertRowid".to_string()];
+                    let (packed_keys, shape_id) = build_packed_keys(&keys);
+                    let result = js_object_alloc_with_shape(
+                        shape_id,
+                        2,
+                        packed_keys.as_ptr(),
+                        packed_keys.len() as u32,
+                    );
                     js_object_set_field(result, 0, JSValue::number(changes as f64));
                     js_object_set_field(result, 1, JSValue::number(last_id as f64));
                     return result;
@@ -224,37 +258,13 @@ pub unsafe extern "C" fn js_sqlite_stmt_run(
 #[no_mangle]
 pub unsafe extern "C" fn js_sqlite_stmt_get(
     stmt_handle: Handle,
-    params_json_ptr: *const StringHeader,
+    params_arr: *const ArrayHeader,
 ) -> JSValue {
-    let params_json = string_from_header(params_json_ptr).unwrap_or_else(|| "[]".to_string());
+    let sqlite_params = params_from_array(params_arr);
 
     if let Some(stmt) = get_handle::<SqliteStmtHandle>(stmt_handle) {
         if let Some(db) = get_handle::<SqliteDbHandle>(stmt.db_handle) {
             if let Ok(conn) = db.conn.lock() {
-                let params: Vec<serde_json::Value> = serde_json::from_str(&params_json)
-                    .unwrap_or_else(|_| vec![]);
-
-                let sqlite_params: Vec<Box<dyn rusqlite::ToSql>> = params
-                    .iter()
-                    .map(|v| -> Box<dyn rusqlite::ToSql> {
-                        match v {
-                            serde_json::Value::Null => Box::new(rusqlite::types::Null),
-                            serde_json::Value::Bool(b) => Box::new(*b),
-                            serde_json::Value::Number(n) => {
-                                if let Some(i) = n.as_i64() {
-                                    Box::new(i)
-                                } else if let Some(f) = n.as_f64() {
-                                    Box::new(f)
-                                } else {
-                                    Box::new(rusqlite::types::Null)
-                                }
-                            }
-                            serde_json::Value::String(s) => Box::new(s.clone()),
-                            _ => Box::new(rusqlite::types::Null),
-                        }
-                    })
-                    .collect();
-
                 let param_refs: Vec<&dyn rusqlite::ToSql> = sqlite_params.iter().map(|p| p.as_ref()).collect();
 
                 if let Ok(mut prepared) = conn.prepare(&stmt.sql) {
@@ -298,38 +308,14 @@ pub unsafe extern "C" fn js_sqlite_stmt_get(
 #[no_mangle]
 pub unsafe extern "C" fn js_sqlite_stmt_all(
     stmt_handle: Handle,
-    params_json_ptr: *const StringHeader,
+    params_arr: *const ArrayHeader,
 ) -> *mut ArrayHeader {
-    let params_json = string_from_header(params_json_ptr).unwrap_or_else(|| "[]".to_string());
+    let sqlite_params = params_from_array(params_arr);
     let result_array = js_array_alloc(0);
 
     if let Some(stmt) = get_handle::<SqliteStmtHandle>(stmt_handle) {
         if let Some(db) = get_handle::<SqliteDbHandle>(stmt.db_handle) {
             if let Ok(conn) = db.conn.lock() {
-                let params: Vec<serde_json::Value> = serde_json::from_str(&params_json)
-                    .unwrap_or_else(|_| vec![]);
-
-                let sqlite_params: Vec<Box<dyn rusqlite::ToSql>> = params
-                    .iter()
-                    .map(|v| -> Box<dyn rusqlite::ToSql> {
-                        match v {
-                            serde_json::Value::Null => Box::new(rusqlite::types::Null),
-                            serde_json::Value::Bool(b) => Box::new(*b),
-                            serde_json::Value::Number(n) => {
-                                if let Some(i) = n.as_i64() {
-                                    Box::new(i)
-                                } else if let Some(f) = n.as_f64() {
-                                    Box::new(f)
-                                } else {
-                                    Box::new(rusqlite::types::Null)
-                                }
-                            }
-                            serde_json::Value::String(s) => Box::new(s.clone()),
-                            _ => Box::new(rusqlite::types::Null),
-                        }
-                    })
-                    .collect();
-
                 let param_refs: Vec<&dyn rusqlite::ToSql> = sqlite_params.iter().map(|p| p.as_ref()).collect();
 
                 if let Ok(mut prepared) = conn.prepare(&stmt.sql) {

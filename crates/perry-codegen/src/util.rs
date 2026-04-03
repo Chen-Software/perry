@@ -54,6 +54,11 @@ thread_local! {
     /// Module-scoped variables whose global write-back is deferred inside a simple loop
     /// (no function calls that could observe the global). The write-back is flushed after loop exit.
     pub(crate) static DEFERRED_MODULE_WRITEBACK_VARS: RefCell<HashSet<LocalId>> = RefCell::new(HashSet::new());
+    /// Cache for optional chaining: when Conditional detects an optional-chain pattern
+    /// (Compare(Eq, ArrayShift/ArrayPop, Null)), the compiled value is cached here
+    /// so the else_expr doesn't re-evaluate the side-effecting expression.
+    /// Format: (array_local_id, is_pop: bool, cranelift_value)
+    pub(crate) static OPT_CHAIN_CACHE: RefCell<Option<(LocalId, bool, u32)>> = RefCell::new(None);
 }
 
 /// Lightweight i18n table data for codegen thread-local access.

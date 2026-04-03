@@ -6131,6 +6131,17 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_sqlite_close"), func_id);
         }
 
+        // js_sqlite_pragma(db: i64, pragma: *const StringHeader, value: *const StringHeader) -> *mut StringHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // db handle
+            sig.params.push(AbiParam::new(types::I64)); // pragma name string
+            sig.params.push(AbiParam::new(types::I64)); // value string (or null)
+            sig.returns.push(AbiParam::new(types::I64)); // result string
+            let func_id = self.module.declare_function("js_sqlite_pragma", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_sqlite_pragma"), func_id);
+        }
+
         // js_sqlite_transaction(db: i64) -> i64 (transaction handle)
         {
             let mut sig = self.module.make_signature();
@@ -7538,6 +7549,16 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_string_match"), func_id);
         }
 
+        // js_string_match_all(s: *const StringHeader, re: *const RegExpHeader) -> *mut ArrayHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // string pointer
+            sig.params.push(AbiParam::new(types::I64)); // regex pointer
+            sig.returns.push(AbiParam::new(types::I64)); // array of arrays pointer
+            let func_id = self.module.declare_function("js_string_match_all", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_string_match_all"), func_id);
+        }
+
         // js_string_replace_regex(s: *const StringHeader, re: *const RegExpHeader, replacement: *const StringHeader) -> *mut StringHeader
         {
             let mut sig = self.module.make_signature();
@@ -7558,6 +7579,17 @@ impl Compiler {
             sig.returns.push(AbiParam::new(types::I64)); // result string pointer
             let func_id = self.module.declare_function("js_string_replace_string", Linkage::Import, &sig)?;
             self.extern_funcs.insert(Cow::Borrowed("js_string_replace_string"), func_id);
+        }
+
+        // js_string_replace_all_string(s, pattern, replacement) -> *mut StringHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // string pointer
+            sig.params.push(AbiParam::new(types::I64)); // pattern string pointer
+            sig.params.push(AbiParam::new(types::I64)); // replacement string pointer
+            sig.returns.push(AbiParam::new(types::I64)); // result string pointer
+            let func_id = self.module.declare_function("js_string_replace_all_string", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_string_replace_all_string"), func_id);
         }
 
         // js_value_typeof(value: f64) -> *mut StringHeader (returns the typeof string)

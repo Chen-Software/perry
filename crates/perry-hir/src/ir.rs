@@ -1344,6 +1344,11 @@ pub enum Expr {
         string: Box<Expr>,
         regex: Box<Expr>,
     },
+    /// string.matchAll(regex) -> Array<Array<string>>
+    StringMatchAll {
+        string: Box<Expr>,
+        regex: Box<Expr>,
+    },
     /// string.replace(regex, replacement) -> string
     StringReplace {
         string: Box<Expr>,

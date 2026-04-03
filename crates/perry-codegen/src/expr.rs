@@ -2934,6 +2934,27 @@ pub(crate) fn compile_expr(
             // Return as NaN-boxed pointer (array or null)
             Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr))
         }
+        Expr::StringMatchAll { string, regex } => {
+            let string_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, string, this_ctx)?;
+            let regex_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, regex, this_ctx)?;
+
+            let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+            let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+            let string_f64 = ensure_f64(builder, string_val);
+            let string_call = builder.ins().call(get_str_ref, &[string_f64]);
+            let string_ptr = builder.inst_results(string_call)[0];
+            let regex_ptr = ensure_i64(builder, regex_val);
+
+            let func = extern_funcs.get("js_string_match_all")
+                .ok_or_else(|| anyhow!("js_string_match_all not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[string_ptr, regex_ptr]);
+            let result_ptr = builder.inst_results(call)[0];
+
+            // matchAll always returns an array (never null)
+            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr))
+        }
         // string.replace(pattern, replacement) -> string
         Expr::StringReplace { string, pattern, replacement } => {
             // Check if pattern is a regex or a string
@@ -3150,6 +3171,20 @@ pub(crate) fn compile_expr(
             Ok(builder.ins().fcvt_from_uint(types::F64, length))
         }
         Expr::ArrayPop(array_id) => {
+            // Check optional-chaining cache — if this pop was already evaluated in a Conditional condition
+            let cached = OPT_CHAIN_CACHE.with(|c| {
+                let cache = c.borrow();
+                if let Some((id, is_pop, raw_val)) = *cache {
+                    if id == *array_id && is_pop {
+                        return Some(Value::from_u32(raw_val));
+                    }
+                }
+                None
+            });
+            if let Some(val) = cached {
+                return Ok(val);
+            }
+
             let info = match locals.get(array_id) {
                 Some(info) => info,
                 None => {
@@ -3178,6 +3213,20 @@ pub(crate) fn compile_expr(
             Ok(builder.inst_results(call)[0])
         }
         Expr::ArrayShift(array_id) => {
+            // Check optional-chaining cache — if this shift was already evaluated in a Conditional condition
+            let cached = OPT_CHAIN_CACHE.with(|c| {
+                let cache = c.borrow();
+                if let Some((id, is_pop, raw_val)) = *cache {
+                    if id == *array_id && !is_pop {
+                        return Some(Value::from_u32(raw_val));
+                    }
+                }
+                None
+            });
+            if let Some(val) = cached {
+                return Ok(val);
+            }
+
             let info = match locals.get(array_id) {
                 Some(info) => info,
                 None => {
@@ -8660,13 +8709,12 @@ pub(crate) fn compile_expr(
                                         let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
                                         return Ok(builder.inst_results(nanbox_call)[0]);
                                     }
-                                    "replace" => {
-                                        // str.replace(pattern, replacement)
+                                    "replace" | "replaceAll" => {
+                                        // str.replace(pattern, replacement) / str.replaceAll(pattern, replacement)
                                         if arg_vals.len() >= 2 {
-                                            // Check if the pattern argument is a regex
                                             let is_regex = matches!(args.get(0), Some(Expr::RegExp { .. }));
+                                            let is_replace_all = property == "replaceAll";
 
-                                            // Extract string pointers from NaN-boxed values
                                             let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
                                                 .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
                                             let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
@@ -8676,18 +8724,17 @@ pub(crate) fn compile_expr(
                                             let replacement_ptr = builder.inst_results(replacement_call)[0];
 
                                             let (replace_func, pattern_ptr) = if is_regex {
-                                                // Regex pattern: bitcast to raw I64 pointer
                                                 let p = ensure_i64(builder, arg_vals[0]);
                                                 let f = extern_funcs.get("js_string_replace_regex")
                                                     .ok_or_else(|| anyhow!("js_string_replace_regex not declared"))?;
                                                 (f, p)
                                             } else {
-                                                // String pattern: extract string pointer
                                                 let pattern_f64 = ensure_f64(builder, arg_vals[0]);
                                                 let pattern_call = builder.ins().call(get_str_ptr_ref, &[pattern_f64]);
                                                 let p = builder.inst_results(pattern_call)[0];
-                                                let f = extern_funcs.get("js_string_replace_string")
-                                                    .ok_or_else(|| anyhow!("js_string_replace_string not declared"))?;
+                                                let func_name = if is_replace_all { "js_string_replace_all_string" } else { "js_string_replace_string" };
+                                                let f = extern_funcs.get(func_name)
+                                                    .ok_or_else(|| anyhow!("{} not declared", func_name))?;
                                                 (f, p)
                                             };
 
@@ -8695,7 +8742,6 @@ pub(crate) fn compile_expr(
 
                                             let call = builder.ins().call(func_ref, &[str_ptr, pattern_ptr, replacement_ptr]);
                                             let result_ptr = builder.inst_results(call)[0];
-                                            // NaN-box the result string
                                             let nanbox_func = extern_funcs.get("js_nanbox_string")
                                                 .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
                                             let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
@@ -8821,8 +8867,8 @@ pub(crate) fn compile_expr(
                                         let result_ptr = builder.inst_results(call)[0];
                                         return Ok(inline_nanbox_string(builder, result_ptr));
                                     }
-                                    "slice" => {
-                                        // buf.slice(start?, end?)
+                                    "slice" | "subarray" => {
+                                        // buf.slice(start?, end?) / buf.subarray(start?, end?)
                                         let start = if arg_vals.len() > 0 {
                                             let arg_f64 = ensure_f64(builder, arg_vals[0]);
                                             builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
@@ -10065,17 +10111,26 @@ pub(crate) fn compile_expr(
                                     }
                                 }
                             } else if native_module == "better-sqlite3" {
-                                // better-sqlite3 stmt methods: run/get/all take (stmt, params_json_string)
+                                // better-sqlite3 stmt methods: run/get/all take (stmt, params_array_ptr)
+                                // Build a JS array from all arguments
+                                let arr_alloc_func = extern_funcs.get("js_array_alloc")
+                                    .ok_or_else(|| anyhow!("js_array_alloc not declared"))?;
+                                let arr_alloc_ref = module.declare_func_in_func(*arr_alloc_func, builder.func);
+                                let arr_len = builder.ins().iconst(types::I32, arg_vals.len() as i64);
+                                let arr_call = builder.ins().call(arr_alloc_ref, &[arr_len]);
+                                let arr_ptr = builder.inst_results(arr_call)[0];
+
                                 if !arg_vals.is_empty() {
-                                    let str_f64 = ensure_f64(builder, arg_vals[0]);
-                                    let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
-                                        .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
-                                    let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
-                                    let str_call = builder.ins().call(get_str_ref, &[str_f64]);
-                                    call_args.push(builder.inst_results(str_call)[0]);
-                                } else {
-                                    call_args.push(builder.ins().iconst(types::I64, 0));
+                                    let push_func = extern_funcs.get("js_array_push_f64")
+                                        .ok_or_else(|| anyhow!("js_array_push_f64 not declared"))?;
+                                    let push_ref = module.declare_func_in_func(*push_func, builder.func);
+                                    for arg in &arg_vals {
+                                        let arg_f64 = ensure_f64(builder, *arg);
+                                        builder.ins().call(push_ref, &[arr_ptr, arg_f64]);
+                                    }
                                 }
+
+                                call_args.push(arr_ptr);
                             } else {
                                 for arg in &arg_vals {
                                     // Other modules (decimal etc) - simple bitcast
@@ -10164,7 +10219,7 @@ pub(crate) fn compile_expr(
                     // Handle string methods on any expression (e.g., query.queryText.substring(0, 20))
                     // This handles property access chains and other cases where the object is not a LocalGet
                     match property.as_str() {
-                        "substring" | "slice" | "trim" | "trimStart" | "trimEnd" | "toLowerCase" | "toUpperCase" | "indexOf" | "includes" | "split" | "replace" | "startsWith" | "endsWith" | "padStart" | "padEnd" | "repeat" | "charAt" | "charCodeAt" => {
+                        "substring" | "slice" | "trim" | "trimStart" | "trimEnd" | "toLowerCase" | "toUpperCase" | "indexOf" | "includes" | "split" | "replace" | "replaceAll" | "startsWith" | "endsWith" | "padStart" | "padEnd" | "repeat" | "charAt" | "charCodeAt" => {
                             // Compile the object expression to get a string value
                             let str_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
 
@@ -10369,9 +10424,10 @@ pub(crate) fn compile_expr(
                                         return Ok(result_f64);
                                     }
                                 }
-                                "replace" => {
+                                "replace" | "replaceAll" => {
                                     if arg_vals.len() >= 2 {
                                         let is_regex = matches!(args.get(0), Some(Expr::RegExp { .. }));
+                                        let is_replace_all = property == "replaceAll";
                                         let (replace_func_name, pattern_ptr) = if is_regex {
                                             // Regex pattern: bitcast to raw I64 pointer
                                             let p = ensure_i64(builder, arg_vals[0]);
@@ -10384,7 +10440,7 @@ pub(crate) fn compile_expr(
                                             let get_str_ptr_ref = module.declare_func_in_func(*get_str_ptr_func, builder.func);
                                             let pattern_call = builder.ins().call(get_str_ptr_ref, &[pattern_f64]);
                                             let p = builder.inst_results(pattern_call)[0];
-                                            ("js_string_replace_string", p)
+                                            (if is_replace_all { "js_string_replace_all_string" } else { "js_string_replace_string" }, p)
                                         };
                                         // Replacement is always a string
                                         let repl_f64 = ensure_f64(builder, arg_vals[1]);
@@ -11662,7 +11718,7 @@ pub(crate) fn compile_expr(
                     if let Expr::PropertyGet { object, property } = else_expr.as_ref() {
                         match property.as_str() {
                             "substring" | "slice" | "trim" | "trimStart" | "trimEnd" | "toLowerCase" | "toUpperCase" |
-                            "indexOf" | "includes" | "split" | "replace" | "startsWith" |
+                            "indexOf" | "includes" | "split" | "replace" | "replaceAll" | "startsWith" |
                             "endsWith" | "padStart" | "padEnd" | "repeat" | "charAt" | "charCodeAt" => {
                                 // Compile the object to get the string value
                                 let str_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
@@ -12450,9 +12506,83 @@ pub(crate) fn compile_expr(
                 }
             }
 
+            // Detect optional-chaining pattern: Compare(Eq, ArrayShift/ArrayPop, Null)
+            // Cache the side-effecting value so the else_expr doesn't re-evaluate it
+            let opt_chain_info = if let Expr::Compare { op: CompareOp::Eq, left, right } = condition.as_ref() {
+                if matches!(right.as_ref(), Expr::Null) {
+                    match left.as_ref() {
+                        Expr::ArrayShift(id) => Some((*id, false)),
+                        Expr::ArrayPop(id) => Some((*id, true)),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             // Check if either branch produces a string - we need NaN-boxing for those
             let then_is_string = is_string_conditional_expr(then_expr, locals);
             let else_is_string = is_string_conditional_expr(else_expr, locals);
+
+            // Optional-chaining optimization: when condition is Compare(Eq, ArrayShift/Pop, Null),
+            // compile the shift/pop once, cache the result for the else branch so it's not re-evaluated.
+            if let Some((arr_id, is_pop)) = opt_chain_info {
+                // Compile the side-effecting expression once
+                let left_expr: &Expr = if let Expr::Compare { left, .. } = condition.as_ref() { left } else { unreachable!() };
+                let shift_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, left_expr, this_ctx)?;
+                let shift_f64 = ensure_f64(builder, shift_val);
+
+                // Check if null or undefined
+                let truthy_func = extern_funcs.get("js_is_truthy")
+                    .ok_or_else(|| anyhow!("js_is_truthy not declared"))?;
+                let truthy_ref = module.declare_func_in_func(*truthy_func, builder.func);
+                // For null/undefined check: compare with TAG_NULL and TAG_UNDEFINED
+                let val_bits = builder.ins().bitcast(types::I64, MemFlags::new(), shift_f64);
+                let null_tag = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0002u64 as i64);
+                let undef_tag = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0001u64 as i64);
+                let is_null = builder.ins().icmp(IntCC::Equal, val_bits, null_tag);
+                let is_undef = builder.ins().icmp(IntCC::Equal, val_bits, undef_tag);
+                let is_nullish = builder.ins().bor(is_null, is_undef);
+
+                let then_block = builder.create_block();
+                let else_block = builder.create_block();
+                let merge_block = builder.create_block();
+                builder.append_block_param(merge_block, types::F64);
+
+                builder.ins().brif(is_nullish, then_block, &[], else_block, &[]);
+
+                builder.switch_to_block(then_block);
+                builder.seal_block(then_block);
+                let then_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, then_expr, this_ctx)?;
+                let then_val_f64 = ensure_f64(builder, then_val);
+                builder.ins().jump(merge_block, &[then_val_f64.into()]);
+
+                builder.switch_to_block(else_block);
+                builder.seal_block(else_block);
+                // Cache the shift/pop value so ArrayShift/ArrayPop in else_expr reuses it
+                OPT_CHAIN_CACHE.with(|c| {
+                    *c.borrow_mut() = Some((arr_id, is_pop, shift_f64.as_u32()));
+                });
+                let else_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, else_expr, this_ctx)?;
+                OPT_CHAIN_CACHE.with(|c| { *c.borrow_mut() = None; });
+                let else_val_f64 = if else_is_string {
+                    let ptr = ensure_i64(builder, else_val);
+                    let nanbox_func = extern_funcs.get("js_nanbox_string")
+                        .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                    let func_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                    let call = builder.ins().call(func_ref, &[ptr]);
+                    builder.inst_results(call)[0]
+                } else {
+                    ensure_f64(builder, else_val)
+                };
+                builder.ins().jump(merge_block, &[else_val_f64.into()]);
+
+                builder.switch_to_block(merge_block);
+                builder.seal_block(merge_block);
+                return Ok(builder.block_params(merge_block)[0]);
+            }
 
             let cond_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, condition, this_ctx)?;
             let cond_val = ensure_f64(builder, cond_val_raw);
@@ -15801,7 +15931,7 @@ pub(crate) fn compile_expr(
                                 // String methods that return strings
                                 matches!(property.as_str(),
                                     "substring" | "slice" | "trim" | "trimStart" | "trimEnd" | "toLowerCase" | "toUpperCase" |
-                                    "padStart" | "padEnd" | "repeat" | "charAt" | "replace")
+                                    "padStart" | "padEnd" | "repeat" | "charAt" | "replace" | "replaceAll")
                             } else {
                                 false
                             }
@@ -19196,6 +19326,7 @@ pub(crate) fn compile_expr(
                 ("better-sqlite3", true, "all") => "js_sqlite_stmt_all",
                 ("better-sqlite3", true, "exec") => "js_sqlite_exec",
                 ("better-sqlite3", true, "close") => "js_sqlite_close",
+                ("better-sqlite3", true, "pragma") => "js_sqlite_pragma",
                 ("better-sqlite3", true, "transaction") => "js_sqlite_transaction",
                 ("better-sqlite3", true, "commit") => "js_sqlite_transaction_commit",
                 ("better-sqlite3", true, "rollback") => "js_sqlite_transaction_rollback",
@@ -20659,8 +20790,29 @@ pub(crate) fn compile_expr(
                             }
                         }
                         "run" | "get" | "all" => {
-                            // run(params_json) / get(params_json) / all(params_json)
-                            // params is a JSON-stringified array string
+                            // run(...params) / get(...params) / all(...params)
+                            // Build a JS array from all arguments
+                            let arr_alloc_func = extern_funcs.get("js_array_alloc")
+                                .ok_or_else(|| anyhow!("js_array_alloc not declared"))?;
+                            let arr_alloc_ref = module.declare_func_in_func(*arr_alloc_func, builder.func);
+                            let arr_len = builder.ins().iconst(types::I32, arg_vals.len() as i64);
+                            let arr_call = builder.ins().call(arr_alloc_ref, &[arr_len]);
+                            let arr_ptr = builder.inst_results(arr_call)[0];
+
+                            if !arg_vals.is_empty() {
+                                let push_func = extern_funcs.get("js_array_push_f64")
+                                    .ok_or_else(|| anyhow!("js_array_push_f64 not declared"))?;
+                                let push_ref = module.declare_func_in_func(*push_func, builder.func);
+                                for arg in &arg_vals {
+                                    let arg_f64 = ensure_f64(builder, *arg);
+                                    builder.ins().call(push_ref, &[arr_ptr, arg_f64]);
+                                }
+                            }
+
+                            call_args.push(arr_ptr);
+                        }
+                        "pragma" => {
+                            // pragma(name, options?) - pass name as string, ignore options
                             if !arg_vals.is_empty() {
                                 let str_f64 = ensure_f64(builder, arg_vals[0]);
                                 let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
@@ -20671,6 +20823,8 @@ pub(crate) fn compile_expr(
                             } else {
                                 call_args.push(builder.ins().iconst(types::I64, 0));
                             }
+                            // value_ptr (null for query-only pragmas)
+                            call_args.push(builder.ins().iconst(types::I64, 0));
                         }
                         "close" | "transaction" | "commit" | "rollback" => {
                             // No additional args
@@ -22018,6 +22172,10 @@ pub(crate) fn compile_expr(
                         }
                         // get returns JSValue (f64) directly
                         "get" => Ok(result),
+                        // pragma returns string pointer (i64) - NaN-box as string
+                        "pragma" => {
+                            Ok(inline_nanbox_string(builder, result))
+                        }
                         _ => {
                             Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result))
                         }

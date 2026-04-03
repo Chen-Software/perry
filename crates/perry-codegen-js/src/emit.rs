@@ -1886,6 +1886,12 @@ impl JsEmitter {
                 self.emit_expr(regex);
                 self.output.push(')');
             }
+            Expr::StringMatchAll { string, regex } => {
+                self.emit_expr(string);
+                self.output.push_str(".matchAll(");
+                self.emit_expr(regex);
+                self.output.push(')');
+            }
             Expr::StringReplace { string, pattern, replacement } => {
                 self.emit_expr(string);
                 self.output.push_str(".replace(");

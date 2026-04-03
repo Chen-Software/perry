@@ -211,6 +211,58 @@ pub extern "C" fn js_string_match(s: *const StringHeader, re: *const RegExpHeade
     }
 }
 
+/// Find all matches in a string, each with capture groups
+/// string.matchAll(regex) -> Array<Array<string>> (array of match arrays)
+#[no_mangle]
+pub extern "C" fn js_string_match_all(s: *const StringHeader, re: *const RegExpHeader) -> *mut ArrayHeader {
+    if !is_valid_ptr(s) || !is_valid_ptr(re) {
+        // Return empty array, not null (matchAll never returns null)
+        return crate::array::js_array_alloc(0);
+    }
+
+    let str_data = string_as_str(s);
+
+    unsafe {
+        let regex = &*(*re).regex_ptr;
+
+        // Collect all captures
+        let all_caps: Vec<regex::Captures> = regex.captures_iter(str_data).collect();
+
+        if all_caps.is_empty() {
+            return crate::array::js_array_alloc(0);
+        }
+
+        // Create outer array (one entry per match)
+        let outer = crate::array::js_array_alloc(all_caps.len() as u32);
+        (*outer).length = all_caps.len() as u32;
+        let outer_elements = (outer as *mut u8).add(std::mem::size_of::<ArrayHeader>()) as *mut f64;
+
+        for (i, caps) in all_caps.iter().enumerate() {
+            // Create inner array for this match (full match + capture groups)
+            let inner = crate::array::js_array_alloc(caps.len() as u32);
+            (*inner).length = caps.len() as u32;
+            let inner_elements = (inner as *mut u8).add(std::mem::size_of::<ArrayHeader>()) as *mut f64;
+
+            for (j, cap) in caps.iter().enumerate() {
+                if let Some(m) = cap {
+                    let str_ptr = js_string_from_str(m.as_str());
+                    let nanboxed = js_nanbox_string(str_ptr as i64);
+                    std::ptr::write(inner_elements.add(j), nanboxed);
+                } else {
+                    // Undefined capture group
+                    std::ptr::write(inner_elements.add(j), f64::from_bits(0x7FFC_0000_0000_0001));
+                }
+            }
+
+            // Store inner array as NaN-boxed pointer in outer array
+            let inner_ptr = inner as i64;
+            std::ptr::write(outer_elements.add(i), f64::from_bits(inner_ptr as u64));
+        }
+
+        outer
+    }
+}
+
 /// Replace matches in a string
 /// string.replace(regex, replacement) -> string
 #[no_mangle]
@@ -265,6 +317,26 @@ pub extern "C" fn js_string_replace_string(
 
     // String.replace with a string pattern only replaces the first occurrence
     let result = str_data.replacen(pattern_str, repl_str, 1);
+    js_string_from_str(&result)
+}
+
+/// Replace ALL occurrences with a simple string pattern (not regex)
+/// string.replaceAll(pattern, replacement) -> string
+#[no_mangle]
+pub extern "C" fn js_string_replace_all_string(
+    s: *const StringHeader,
+    pattern: *const StringHeader,
+    replacement: *const StringHeader,
+) -> *mut StringHeader {
+    if !is_valid_ptr(s) {
+        return js_string_from_str("");
+    }
+
+    let str_data = string_as_str(s);
+    let pattern_str = if is_valid_ptr(pattern) { string_as_str(pattern) } else { "" };
+    let repl_str = if is_valid_ptr(replacement) { string_as_str(replacement) } else { "undefined" };
+
+    let result = str_data.replace(pattern_str, repl_str);
     js_string_from_str(&result)
 }
 
