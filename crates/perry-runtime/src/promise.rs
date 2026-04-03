@@ -563,6 +563,9 @@ extern "C" fn promise_all_fulfill_handler(closure: *const crate::closure::Closur
     let result_promise = js_closure_get_capture_ptr(closure, 0) as *mut Promise;
     let results_arr = js_closure_get_capture_ptr(closure, 1) as *mut ArrayHeader;
     let state_arr = js_closure_get_capture_ptr(closure, 2) as *mut ArrayHeader;
+    if result_promise.is_null() || results_arr.is_null() || state_arr.is_null() {
+        return 0.0;
+    }
     let index = js_closure_get_capture_f64(closure, 3) as u32;
 
     // Check if already rejected
@@ -594,6 +597,9 @@ extern "C" fn promise_all_reject_handler(closure: *const crate::closure::Closure
 
     let result_promise = js_closure_get_capture_ptr(closure, 0) as *mut Promise;
     let state_arr = js_closure_get_capture_ptr(closure, 1) as *mut ArrayHeader;
+    if result_promise.is_null() || state_arr.is_null() {
+        return 0.0;
+    }
 
     // Check if already rejected (only reject once)
     let rejected = js_array_get_f64(state_arr, 1);

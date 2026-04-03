@@ -70,6 +70,7 @@ pub extern "C" fn js_closure_get_func(closure: *const ClosureHeader) -> *const u
 /// Get a captured value (as f64) by index
 #[no_mangle]
 pub extern "C" fn js_closure_get_capture_f64(closure: *const ClosureHeader, index: u32) -> f64 {
+    if closure.is_null() { return 0.0; }
     unsafe {
         let captures_ptr = (closure as *const u8).add(std::mem::size_of::<ClosureHeader>()) as *const f64;
         *captures_ptr.add(index as usize)
@@ -79,6 +80,7 @@ pub extern "C" fn js_closure_get_capture_f64(closure: *const ClosureHeader, inde
 /// Set a captured value (as f64) by index
 #[no_mangle]
 pub extern "C" fn js_closure_set_capture_f64(closure: *mut ClosureHeader, index: u32, value: f64) {
+    if closure.is_null() { return; }
     unsafe {
         let captures_ptr = (closure as *mut u8).add(std::mem::size_of::<ClosureHeader>()) as *mut f64;
         *captures_ptr.add(index as usize) = value;
@@ -88,6 +90,7 @@ pub extern "C" fn js_closure_set_capture_f64(closure: *mut ClosureHeader, index:
 /// Get a captured value (as i64 pointer) by index
 #[no_mangle]
 pub extern "C" fn js_closure_get_capture_ptr(closure: *const ClosureHeader, index: u32) -> i64 {
+    if closure.is_null() { return 0; }
     unsafe {
         let captures_ptr = (closure as *const u8).add(std::mem::size_of::<ClosureHeader>()) as *const i64;
         *captures_ptr.add(index as usize)
@@ -97,6 +100,7 @@ pub extern "C" fn js_closure_get_capture_ptr(closure: *const ClosureHeader, inde
 /// Set a captured value (as i64 pointer) by index
 #[no_mangle]
 pub extern "C" fn js_closure_set_capture_ptr(closure: *mut ClosureHeader, index: u32, value: i64) {
+    if closure.is_null() { return; }
     unsafe {
         let captures_ptr = (closure as *mut u8).add(std::mem::size_of::<ClosureHeader>()) as *mut i64;
         *captures_ptr.add(index as usize) = value;
