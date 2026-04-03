@@ -647,6 +647,17 @@ impl crate::codegen::Compiler {
                                 None
                             }
                         }
+                        Expr::Array(elements) if elements.is_empty() => {
+                            // Default empty array: `param: T[] = []`
+                            if let Some(&alloc_func) = self.extern_funcs.get("js_array_alloc") {
+                                let alloc_ref = self.module.declare_func_in_func(alloc_func, builder.func);
+                                let zero = builder.ins().iconst(types::I32, 0);
+                                let call = builder.ins().call(alloc_ref, &[zero]);
+                                Some(builder.inst_results(call)[0])
+                            } else {
+                                None
+                            }
+                        }
                         _ => None, // Complex defaults handled by intra-module call expansion
                     };
 
