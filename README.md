@@ -27,6 +27,23 @@ People are building real apps with Perry today. Here are some highlights:
 | [**Pry**](https://github.com/nicktrebes/perry-pry) | Fast, native JSON viewer with tree navigation and search. | macOS, iOS, Android |
 | [**dB Meter**](https://dbmeter.app) | Real-time sound level measurement with 60fps updates and per-device calibration. | iOS, macOS, Android |
 
+### Screenshots
+
+**Mango** — Native MongoDB GUI ([source](https://github.com/MangoQuery/app))
+
+<p align="center">
+  <img src="docs/images/showcase/mango-explorer.png" width="720" alt="Mango — database explorer view" />
+</p>
+<p align="center">
+  <img src="docs/images/showcase/mango-editor.png" width="720" alt="Mango — document editor view" />
+</p>
+
+**Hone** — AI-powered native code editor ([hone.codes](https://hone.codes))
+
+<p align="center">
+  <img src="https://hone.codes/screenshot.png" width="720" alt="Hone — AI code editor built with Perry" />
+</p>
+
 > Have something you've built with Perry? Open a PR to add it here!
 
 ---
