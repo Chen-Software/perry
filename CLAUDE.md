@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.46
+**Current Version:** 0.4.47
 
 ## Workflow Requirements
 
@@ -139,6 +139,13 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.47
+- fix: module-local function wrappers use `Linkage::Local` — prevents cross-module symbol collisions when two modules share filename + function names (e.g., two `contract.ts` files both with `resolveType`); fixes x86_64 wrong dispatch in large module graphs
+- feat: `Promise.race` implemented — `js_promise_race` runtime function with resolve/reject handlers; settles with first promise that completes
+- fix: `obj[c.name]` returned garbage when `c` is from `any`-typed array element — `is_string_index_expr_get` now defaults `PropertyGet` to string except for known class instances with numeric fields
+- fix: union-typed `obj[integerKey]` used string-key lookup instead of `js_dynamic_array_get` — added `is_union` to `is_known_array` check for correct runtime dispatch
+- fix: cross-module `await` on `Promise<[T, T]>` tuple — added `Tuple` to Await expression-inference handler's inner_type match (one-line fix at line 810)
 
 ### v0.4.46
 - feat: `String.replaceAll(pattern, replacement)` — string-pattern replaceAll via new `js_string_replace_all_string` runtime function; dispatched in both local-variable and generic-expression codegen paths
