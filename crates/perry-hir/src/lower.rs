@@ -4587,9 +4587,13 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                     let arg_is_regex = match call.args.first().map(|a| a.expr.as_ref()) {
                                         Some(ast::Expr::Lit(ast::Lit::Regex(_))) => true,
                                         Some(ast::Expr::Ident(ident)) => {
-                                            ctx.lookup_local_type(&ident.sym.to_string())
-                                                .map(|ty| matches!(ty, Type::Any | Type::Unknown))
-                                                .unwrap_or(true)
+                                            match ctx.lookup_local_type(&ident.sym.to_string()) {
+                                                // Known regex local
+                                                Some(Type::Named(n)) if n == "RegExp" => true,
+                                                // Unknown type — assume could be regex
+                                                Some(Type::Any) | Some(Type::Unknown) | None => true,
+                                                _ => false,
+                                            }
                                         }
                                         _ => false,
                                     };

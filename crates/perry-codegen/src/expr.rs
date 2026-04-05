@@ -3014,8 +3014,13 @@ pub(crate) fn compile_expr(
             let call = builder.ins().call(func_ref, &[string_ptr, regex_ptr]);
             let result_ptr = builder.inst_results(call)[0];
 
-            // Return as NaN-boxed pointer (array or null)
-            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr))
+            // NaN-box the result pointer (TAG_NULL for null, POINTER_TAG for array)
+            // so downstream code can distinguish null from valid arrays.
+            let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+            let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+            let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
+            Ok(builder.inst_results(nanbox_call)[0])
         }
         Expr::StringMatchAll { string, regex } => {
             let string_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, string, this_ctx)?;
@@ -3035,8 +3040,12 @@ pub(crate) fn compile_expr(
             let call = builder.ins().call(func_ref, &[string_ptr, regex_ptr]);
             let result_ptr = builder.inst_results(call)[0];
 
-            // matchAll always returns an array (never null)
-            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr))
+            // matchAll always returns an array (never null) - NaN-box it for proper array dispatch
+            let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+            let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+            let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
+            Ok(builder.inst_results(nanbox_call)[0])
         }
         // string.replace(pattern, replacement) -> string
         Expr::StringReplace { string, pattern, replacement } => {
@@ -8913,7 +8922,22 @@ pub(crate) fn compile_expr(
                                         return Ok(result_f64);
                                     }
                                     "split" => {
-                                        // str.split(delimiter)
+                                        // str.split(delimiter) — delimiter may be a string or a regex
+                                        let is_regex_arg = matches!(args.get(0), Some(Expr::RegExp { .. }));
+                                        if is_regex_arg {
+                                            // Regex split: call js_string_split_regex
+                                            let split_func = extern_funcs.get("js_string_split_regex")
+                                                .ok_or_else(|| anyhow!("js_string_split_regex not declared"))?;
+                                            let func_ref = module.declare_func_in_func(*split_func, builder.func);
+                                            let re_ptr = ensure_i64(builder, arg_vals[0]);
+                                            let call = builder.ins().call(func_ref, &[str_ptr, re_ptr]);
+                                            let result_ptr = builder.inst_results(call)[0];
+                                            let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                                                .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                                            let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                                            let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
+                                            return Ok(builder.inst_results(nanbox_call)[0]);
+                                        }
                                         let split_func = extern_funcs.get("js_string_split")
                                             .ok_or_else(|| anyhow!("js_string_split not declared"))?;
                                         let func_ref = module.declare_func_in_func(*split_func, builder.func);
@@ -8934,6 +8958,18 @@ pub(crate) fn compile_expr(
                                         let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
                                         let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
                                         return Ok(builder.inst_results(nanbox_call)[0]);
+                                    }
+                                    "search" => {
+                                        // str.search(regex) -> number
+                                        if !arg_vals.is_empty() && matches!(args.get(0), Some(Expr::RegExp { .. })) {
+                                            let func = extern_funcs.get("js_string_search_regex")
+                                                .ok_or_else(|| anyhow!("js_string_search_regex not declared"))?;
+                                            let func_ref = module.declare_func_in_func(*func, builder.func);
+                                            let re_ptr = ensure_i64(builder, arg_vals[0]);
+                                            let call = builder.ins().call(func_ref, &[str_ptr, re_ptr]);
+                                            let result_i32 = builder.inst_results(call)[0];
+                                            return Ok(builder.ins().fcvt_from_sint(types::F64, result_i32));
+                                        }
                                     }
                                     "replace" | "replaceAll" => {
                                         // str.replace(pattern, replacement) / str.replaceAll(pattern, replacement)
@@ -10489,7 +10525,7 @@ pub(crate) fn compile_expr(
                     // Handle string methods on any expression (e.g., query.queryText.substring(0, 20))
                     // This handles property access chains and other cases where the object is not a LocalGet
                     match property.as_str() {
-                        "substring" | "slice" | "trim" | "trimStart" | "trimEnd" | "toLowerCase" | "toUpperCase" | "indexOf" | "lastIndexOf" | "includes" | "split" | "replace" | "replaceAll" | "startsWith" | "endsWith" | "padStart" | "padEnd" | "repeat" | "charAt" | "charCodeAt" => {
+                        "substring" | "slice" | "trim" | "trimStart" | "trimEnd" | "toLowerCase" | "toUpperCase" | "indexOf" | "lastIndexOf" | "includes" | "split" | "search" | "replace" | "replaceAll" | "startsWith" | "endsWith" | "padStart" | "padEnd" | "repeat" | "charAt" | "charCodeAt" => {
                             // Compile the object expression to get a string value
                             let str_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
 
@@ -10652,6 +10688,21 @@ pub(crate) fn compile_expr(
                                 }
                                 "split" => {
                                     if !arg_vals.is_empty() {
+                                        // Check if delimiter is a regex literal
+                                        let is_regex_arg = matches!(args.get(0), Some(Expr::RegExp { .. }));
+                                        if is_regex_arg {
+                                            let split_func = extern_funcs.get("js_string_split_regex")
+                                                .ok_or_else(|| anyhow!("js_string_split_regex not declared"))?;
+                                            let func_ref = module.declare_func_in_func(*split_func, builder.func);
+                                            let re_ptr = ensure_i64(builder, arg_vals[0]);
+                                            let call = builder.ins().call(func_ref, &[str_ptr, re_ptr]);
+                                            let result_ptr = builder.inst_results(call)[0];
+                                            let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                                                .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                                            let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                                            let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
+                                            return Ok(builder.inst_results(nanbox_call)[0]);
+                                        }
                                         // Extract delimiter string pointer from NaN-boxed value
                                         let delim_f64 = ensure_f64(builder, arg_vals[0]);
                                         let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
@@ -10671,6 +10722,17 @@ pub(crate) fn compile_expr(
                                         let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
                                         let nanbox_call = builder.ins().call(nanbox_ref, &[result_ptr]);
                                         return Ok(builder.inst_results(nanbox_call)[0]);
+                                    }
+                                }
+                                "search" => {
+                                    if !arg_vals.is_empty() && matches!(args.get(0), Some(Expr::RegExp { .. })) {
+                                        let func = extern_funcs.get("js_string_search_regex")
+                                            .ok_or_else(|| anyhow!("js_string_search_regex not declared"))?;
+                                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                                        let re_ptr = ensure_i64(builder, arg_vals[0]);
+                                        let call = builder.ins().call(func_ref, &[str_ptr, re_ptr]);
+                                        let result_i32 = builder.inst_results(call)[0];
+                                        return Ok(builder.ins().fcvt_from_sint(types::F64, result_i32));
                                     }
                                 }
                                 "startsWith" => {

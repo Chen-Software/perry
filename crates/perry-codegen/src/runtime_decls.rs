@@ -7662,6 +7662,26 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_string_replace_all_string"), func_id);
         }
 
+        // js_string_split_regex(s: *const StringHeader, re: *const RegExpHeader) -> *mut ArrayHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // string pointer
+            sig.params.push(AbiParam::new(types::I64)); // regex pointer
+            sig.returns.push(AbiParam::new(types::I64)); // array pointer
+            let func_id = self.module.declare_function("js_string_split_regex", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_string_split_regex"), func_id);
+        }
+
+        // js_string_search_regex(s: *const StringHeader, re: *const RegExpHeader) -> i32
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // string pointer
+            sig.params.push(AbiParam::new(types::I64)); // regex pointer
+            sig.returns.push(AbiParam::new(types::I32)); // index (i32)
+            let func_id = self.module.declare_function("js_string_search_regex", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_string_search_regex"), func_id);
+        }
+
         // js_value_typeof(value: f64) -> *mut StringHeader (returns the typeof string)
         {
             let mut sig = self.module.make_signature();

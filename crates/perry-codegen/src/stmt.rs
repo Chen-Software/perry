@@ -817,6 +817,10 @@ pub(crate) fn compile_stmt(
                     Some(Expr::ArrayMap { .. }) | Some(Expr::ArrayFilter { .. }) |
                     Some(Expr::ArraySort { .. }) | Some(Expr::ArraySlice { .. }) |
                     Some(Expr::ArraySplice { .. }) => (None, true, true, false, false, false, false, false, false, false),
+                    // string.match(regex) / string.matchAll(regex) return arrays (or null for match)
+                    // The result is NaN-boxed as F64 by the codegen, so is_pointer=false (union-style storage)
+                    Some(Expr::StringMatch { .. }) | Some(Expr::StringMatchAll { .. }) =>
+                        (None, false, true, false, false, false, false, false, false, false),
                     // MapNew returns a Map pointer
                     Some(Expr::MapNew) => (None, true, false, false, false, false, true, false, false, false),
                     // SetNew/SetNewFromArray returns a Set pointer

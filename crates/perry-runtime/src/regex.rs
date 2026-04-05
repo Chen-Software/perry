@@ -365,6 +365,78 @@ pub extern "C" fn js_string_replace_all_string(
     js_string_from_str(&result)
 }
 
+/// Split a string by a regex delimiter
+/// string.split(regex) -> string[] (array of NaN-boxed string pointers)
+#[no_mangle]
+pub extern "C" fn js_string_split_regex(
+    s: *const StringHeader,
+    re: *const RegExpHeader,
+) -> *mut ArrayHeader {
+    const STRING_TAG: u64 = 0x7FFF_0000_0000_0000;
+    const POINTER_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
+
+    if !is_valid_ptr(s) {
+        return crate::array::js_array_alloc(0);
+    }
+    let str_data = string_as_str(s);
+
+    if !is_valid_ptr(re) {
+        // No regex: return array with the whole string as a single element
+        let arr = crate::array::js_array_alloc(1);
+        unsafe {
+            (*arr).length = 1;
+            let elements_ptr = (arr as *mut u8).add(std::mem::size_of::<ArrayHeader>()) as *mut f64;
+            let str_ptr = js_string_from_str(str_data) as u64;
+            let nanboxed = STRING_TAG | (str_ptr & POINTER_MASK);
+            std::ptr::write(elements_ptr, f64::from_bits(nanboxed));
+        }
+        return arr;
+    }
+
+    unsafe {
+        let regex = &*(*re).regex_ptr;
+        let parts: Vec<&str> = regex.split(str_data).collect();
+
+        let arr = crate::array::js_array_alloc(parts.len() as u32);
+        (*arr).length = parts.len() as u32;
+        let elements_ptr = (arr as *mut u8).add(std::mem::size_of::<ArrayHeader>()) as *mut f64;
+
+        for (i, part) in parts.iter().enumerate() {
+            let str_ptr = js_string_from_str(part) as u64;
+            let nanboxed = STRING_TAG | (str_ptr & POINTER_MASK);
+            std::ptr::write(elements_ptr.add(i), f64::from_bits(nanboxed));
+        }
+        arr
+    }
+}
+
+/// Search for a regex match in a string
+/// string.search(regex) -> number (index of first match, -1 if none)
+#[no_mangle]
+pub extern "C" fn js_string_search_regex(
+    s: *const StringHeader,
+    re: *const RegExpHeader,
+) -> i32 {
+    if !is_valid_ptr(s) || !is_valid_ptr(re) {
+        return -1;
+    }
+    let str_data = string_as_str(s);
+
+    unsafe {
+        let regex = &*(*re).regex_ptr;
+        match regex.find(str_data) {
+            Some(m) => {
+                // Convert byte offset to char offset (JS indices are UTF-16 code units,
+                // but for ASCII/BMP this matches char offset)
+                let byte_offset = m.start();
+                let char_offset = str_data[..byte_offset].chars().count();
+                char_offset as i32
+            }
+            None => -1,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
