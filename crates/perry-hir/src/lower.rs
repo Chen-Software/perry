@@ -4386,12 +4386,27 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                 // checks is_string at codegen time.
                                 let type_info = ctx.lookup_local_type(&arr_name);
                                 let is_known_string = type_info.map(|ty| matches!(ty, Type::String)).unwrap_or(false);
+                                // A user-defined class instance is NOT an array — must skip the array
+                                // fast path so user-defined methods like Stack<T>.push() are dispatched
+                                // to the class method, not runtime js_array_push. Map/Set/Promise are
+                                // handled by explicit checks within the array block below.
+                                let builtin_generic_bases = ["Map", "Set", "WeakMap", "WeakSet", "Promise"];
+                                let is_user_class_instance = match type_info {
+                                    Some(Type::Named(name)) => ctx.lookup_class(name).is_some(),
+                                    Some(Type::Generic { base, .. }) => {
+                                        !builtin_generic_bases.contains(&base.as_str())
+                                            && ctx.lookup_class(base).is_some()
+                                    }
+                                    _ => false,
+                                };
                                 let is_known_not_string = type_info.map(|ty| !matches!(ty, Type::String | Type::Any | Type::Unknown)).unwrap_or(false);
                                 let is_ambiguous_method = matches!(method_name,
                                     "indexOf" | "includes" | "slice"
                                 );
                                 let is_not_string = if is_known_string {
                                     false  // definitely a string, skip array block
+                                } else if is_user_class_instance {
+                                    false  // user class — must dispatch to class method, skip array fast-path
                                 } else if is_known_not_string {
                                     true   // definitely not a string, enter array block
                                 } else if is_ambiguous_method {
@@ -5243,23 +5258,43 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                     }
                                     "push" if args.len() >= 1 => {
                                         // Generic expr.push(value) or expr.push(...spread)
-                                        let array_expr = lower_expr(ctx, &member.obj)?;
-                                        if call.args.len() >= 1 && call.args[0].spread.is_some() {
-                                            return Ok(Expr::NativeMethodCall {
-                                                module: "array".to_string(),
-                                                method: "push_spread".to_string(),
-                                                class_name: None,
-                                                object: Some(Box::new(array_expr)),
-                                                args: args,
-                                            });
-                                        } else {
-                                            return Ok(Expr::NativeMethodCall {
-                                                module: "array".to_string(),
-                                                method: "push_single".to_string(),
-                                                class_name: None,
-                                                object: Some(Box::new(array_expr)),
-                                                args: args,
-                                            });
+                                        // GUARD: Skip if the receiver is a user-defined class instance
+                                        // (e.g. Stack<T>.push()), so its method dispatches correctly.
+                                        let is_user_class_receiver = match member.obj.as_ref() {
+                                            ast::Expr::Ident(ident) => {
+                                                ctx.lookup_local_type(&ident.sym.to_string()).map(|ty| {
+                                                    match ty {
+                                                        Type::Named(name) => ctx.lookup_class(name).is_some(),
+                                                        Type::Generic { base, .. } => {
+                                                            let builtin = ["Map", "Set", "WeakMap", "WeakSet", "Promise"];
+                                                            !builtin.contains(&base.as_str()) && ctx.lookup_class(base).is_some()
+                                                        }
+                                                        _ => false,
+                                                    }
+                                                }).unwrap_or(false)
+                                            }
+                                            ast::Expr::New(_) => true, // new ClassName().push()
+                                            _ => false,
+                                        };
+                                        if !is_user_class_receiver {
+                                            let array_expr = lower_expr(ctx, &member.obj)?;
+                                            if call.args.len() >= 1 && call.args[0].spread.is_some() {
+                                                return Ok(Expr::NativeMethodCall {
+                                                    module: "array".to_string(),
+                                                    method: "push_spread".to_string(),
+                                                    class_name: None,
+                                                    object: Some(Box::new(array_expr)),
+                                                    args: args,
+                                                });
+                                            } else {
+                                                return Ok(Expr::NativeMethodCall {
+                                                    module: "array".to_string(),
+                                                    method: "push_single".to_string(),
+                                                    class_name: None,
+                                                    object: Some(Box::new(array_expr)),
+                                                    args: args,
+                                                });
+                                            }
                                         }
                                     }
                                     _ => {} // Fall through - ambiguous methods on non-array expressions use generic dispatch

@@ -7422,9 +7422,62 @@ pub(crate) fn compile_expr(
                         }
                     }
 
+                    // Handle .pop() and .shift() on a class field array, e.g. `this.items.pop()`
+                    // or `obj.items.shift()`. This is necessary when method inlining turns
+                    // `this.items.pop()` into `localVar.items.pop()`: the receiver becomes a
+                    // PropertyGet and the usual arr_ident HIR lowering doesn't apply.
+                    if matches!(property.as_str(), "pop" | "shift") && args.is_empty() {
+                        if let Expr::PropertyGet { object: nested_obj, property: array_prop } = object.as_ref() {
+                            if let Expr::LocalGet(local_id) = nested_obj.as_ref() {
+                                if let Some(info) = locals.get(local_id) {
+                                    if let Some(ref class_name) = info.class_name {
+                                        if let Some(class_meta) = classes.get(class_name) {
+                                            let field_is_array = class_meta.field_types.get(array_prop)
+                                                .map(|t| matches!(t, perry_types::Type::Array(_) | perry_types::Type::Tuple(_)))
+                                                .unwrap_or(false);
+                                            if field_is_array {
+                                                if let Some(&field_idx) = class_meta.field_indices.get(array_prop) {
+                                                    // Load the array from the field
+                                                    let obj_val = builder.use_var(info.var);
+                                                    let obj_ptr = ensure_i64(builder, obj_val);
+                                                    let field_offset = 24 + (field_idx as i32) * 8;
+                                                    let arr_val_f64 = builder.ins().load(types::F64, MemFlags::new(), obj_ptr, field_offset);
+                                                    let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                                        .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                                                    let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                                                    let ptr_call = builder.ins().call(get_ptr_ref, &[arr_val_f64]);
+                                                    let arr_ptr = builder.inst_results(ptr_call)[0];
+
+                                                    let runtime_fn = if property == "pop" { "js_array_pop_f64" } else { "js_array_shift_f64" };
+                                                    let func = extern_funcs.get(runtime_fn)
+                                                        .ok_or_else(|| anyhow!("{} not declared", runtime_fn))?;
+                                                    let func_ref = module.declare_func_in_func(*func, builder.func);
+                                                    let call = builder.ins().call(func_ref, &[arr_ptr]);
+                                                    return Ok(builder.inst_results(call)[0]);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Handle generic expr.push(value) on non-local arrays
                     // (e.g., map.get(key).push(value) or map.get(key).push(...spread))
-                    if property == "push" && args.len() >= 1 {
+                    // GUARD: If the object is a class instance that has a user-defined `push`
+                    // method, we must dispatch to that method instead of treating it as Array.push.
+                    // This fixes generic container classes like Stack<T> that define their own push().
+                    let object_is_user_class_with_push = if let Expr::LocalGet(id) = object.as_ref() {
+                        locals.get(id)
+                            .and_then(|info| info.class_name.as_ref())
+                            .and_then(|cn| classes.get(cn))
+                            .map(|meta| meta.method_ids.contains_key("push"))
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    };
+                    if property == "push" && args.len() >= 1 && !object_is_user_class_with_push {
                         // Compile the object expression to get the array pointer
                         let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
 
@@ -16227,7 +16280,10 @@ pub(crate) fn compile_expr(
             }
 
             // Handle property-based array indexing: this.items[0], obj.paths[1], etc.
-            // This is for accessing array elements where the array is stored in an object property
+            // This is for accessing array elements where the array is stored in an object property.
+            // IMPORTANT: Only applies when the field is known to be an Array type and the index is
+            // numeric. For Record<string, T> / object-typed fields with string keys, we must fall
+            // through to the general path which calls js_object_get_field_by_name_f64.
             if let Expr::PropertyGet { object: prop_obj, property: prop_name } = object.as_ref() {
                 // Check if this is accessing a property of a local variable with class metadata
                 if let Expr::LocalGet(obj_id) = prop_obj.as_ref() {
@@ -16235,7 +16291,23 @@ pub(crate) fn compile_expr(
                         if let Some(ref class_name) = obj_info.class_name {
                             if let Some(class_meta) = classes.get(class_name) {
                                 if let Some(&field_idx) = class_meta.field_indices.get(prop_name) {
+                                    // Only take the array fast path if:
+                                    // 1. The field's HIR type is an array (or Tuple/Buffer)
+                                    // 2. The index is NOT a string literal/string-typed expression
+                                    let field_is_array = class_meta.field_types.get(prop_name)
+                                        .map(|t| matches!(t,
+                                            perry_types::Type::Array(_) |
+                                            perry_types::Type::Tuple(_)))
+                                        .unwrap_or(false);
+                                    let index_is_string = matches!(index.as_ref(), Expr::String(_)) || {
+                                        if let Expr::LocalGet(idx_id) = index.as_ref() {
+                                            locals.get(idx_id).map(|i| i.is_string).unwrap_or(false)
+                                        } else {
+                                            false
+                                        }
+                                    };
 
+                                    if field_is_array && !index_is_string {
 
                                     // Get the object pointer
                                     let obj_val = builder.use_var(obj_info.var);
@@ -16272,6 +16344,7 @@ pub(crate) fn compile_expr(
                                     let result = builder.ins().bitcast(types::F64, MemFlags::new(), jsvalue_bits);
 
                                     return Ok(result);
+                                    } // end if field_is_array && !index_is_string
                                 }
                             }
                         }

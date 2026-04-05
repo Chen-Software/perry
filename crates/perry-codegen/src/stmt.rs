@@ -420,6 +420,7 @@ pub(crate) fn compile_stmt(
             // Note: Type::Any and Type::Unknown use expression inference, not pointer type
             use perry_types::Type as HirType;
             let is_typed_pointer = matches!(ty, HirType::String | HirType::Array(_) |
+                HirType::Tuple(_) |
                 HirType::Object(_) | HirType::Named(_) | HirType::Generic { .. } |
                 HirType::Function(_));
             // Check if parameter is a string type (including string enums like ChainName)
@@ -641,7 +642,7 @@ pub(crate) fn compile_stmt(
             }
 
             // Determine variable type - prefer declared type, fall back to init expression inference
-            let is_typed_array = matches!(ty, HirType::Array(_));
+            let is_typed_array = matches!(ty, HirType::Array(_) | HirType::Tuple(_));
             let is_typed_bigint = matches!(ty, HirType::BigInt);
             let is_typed_closure = matches!(ty, HirType::Function(_));
             let is_typed_map = matches!(ty, HirType::Generic { base, .. } if base == "Map");
