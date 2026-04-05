@@ -1330,11 +1330,43 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
             let body = lower_body_stmt(ctx, &while_stmt.body)?;
             result.push(Stmt::While { condition, body });
         }
-        ast::Stmt::Break(_) => {
-            result.push(Stmt::Break);
+        ast::Stmt::DoWhile(do_while_stmt) => {
+            let body = lower_body_stmt(ctx, &do_while_stmt.body)?;
+            let condition = lower_expr(ctx, &do_while_stmt.test)?;
+            result.push(Stmt::DoWhile { body, condition });
         }
-        ast::Stmt::Continue(_) => {
-            result.push(Stmt::Continue);
+        ast::Stmt::Labeled(labeled_stmt) => {
+            let label = labeled_stmt.label.sym.to_string();
+            let inner = lower_body_stmt(ctx, &labeled_stmt.body)?;
+            // If the body lowered to a single statement, wrap it directly.
+            // Otherwise wrap the first statement (preserving any hoisted lets before it).
+            if inner.len() == 1 {
+                let body = inner.into_iter().next().unwrap();
+                result.push(Stmt::Labeled { label, body: Box::new(body) });
+            } else {
+                // Multiple statements — take the last "real" loop/block as the labeled target,
+                // and emit any preceding statements (e.g., hoisted lets from for-of/for-in desugar) first.
+                let mut inner = inner;
+                let last = inner.pop().unwrap();
+                for s in inner {
+                    result.push(s);
+                }
+                result.push(Stmt::Labeled { label, body: Box::new(last) });
+            }
+        }
+        ast::Stmt::Break(break_stmt) => {
+            if let Some(ref label) = break_stmt.label {
+                result.push(Stmt::LabeledBreak(label.sym.to_string()));
+            } else {
+                result.push(Stmt::Break);
+            }
+        }
+        ast::Stmt::Continue(continue_stmt) => {
+            if let Some(ref label) = continue_stmt.label {
+                result.push(Stmt::LabeledContinue(label.sym.to_string()));
+            } else {
+                result.push(Stmt::Continue);
+            }
         }
         ast::Stmt::For(for_stmt) => {
             let init = if let Some(init) = &for_stmt.init {

@@ -659,6 +659,11 @@ pub enum Stmt {
         condition: Expr,
         body: Vec<Stmt>,
     },
+    /// Do-while loop (body runs at least once, condition checked at the end)
+    DoWhile {
+        body: Vec<Stmt>,
+        condition: Expr,
+    },
     /// For loop (lowered from various JS for loops)
     For {
         init: Option<Box<Stmt>>,
@@ -666,10 +671,19 @@ pub enum Stmt {
         update: Option<Expr>,
         body: Vec<Stmt>,
     },
+    /// Labeled statement: `label: for/while/do/block`
+    Labeled {
+        label: String,
+        body: Box<Stmt>,
+    },
     /// Break statement
     Break,
     /// Continue statement
     Continue,
+    /// Labeled break: `break label;`
+    LabeledBreak(String),
+    /// Labeled continue: `continue label;`
+    LabeledContinue(String),
     /// Throw statement
     Throw(Expr),
     /// Try-catch-finally

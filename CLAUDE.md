@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.50
+**Current Version:** 0.4.51
 
 ## Workflow Requirements
 
@@ -139,6 +139,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.51
+- feat: labeled `break`/`continue` and `do...while` loops — new HIR variants `Labeled`, `LabeledBreak`, `LabeledContinue`, `DoWhile`; thread-local `LABEL_STACK`/`PENDING_LABEL` in codegen lets nested loops resolve labels without restructuring `loop_ctx`; for/while/do-while all push their exit/continue blocks on the label stack while compiling the body; `contains_loop_control` now recurses into nested loops to detect labeled control flow (prevents unsafe unrolling when an inner loop's `break outer`/`continue outer` targets the unrolled outer loop). Test `test_edge_control_flow` now passes (up from 7 to 8 passing edge tests).
 
 ### v0.4.50
 - feat: comprehensive edge-case test suite — 26 test files in `test-files/test_edge_*.ts` covering closures, classes, generics, truthiness, arrays, strings, type narrowing, control flow, operators, destructuring, async/promises, objects/records, interfaces, numeric edge cases, error handling, iteration, regex/JSON, and complex real-world patterns

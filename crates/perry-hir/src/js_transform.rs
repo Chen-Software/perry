@@ -205,6 +205,10 @@ fn transform_stmt(
             transform_expr(condition, js_imports, extern_func_to_js, local_name_to_js, tracker);
             transform_stmts(body, js_imports, extern_func_to_js, local_name_to_js, tracker);
         }
+        Stmt::DoWhile { body, condition } => {
+            transform_stmts(body, js_imports, extern_func_to_js, local_name_to_js, tracker);
+            transform_expr(condition, js_imports, extern_func_to_js, local_name_to_js, tracker);
+        }
         Stmt::For { init, condition, update, body } => {
             if let Some(init_stmt) = init {
                 transform_stmt(init_stmt, js_imports, extern_func_to_js, local_name_to_js, tracker);
@@ -216,6 +220,9 @@ fn transform_stmt(
                 transform_expr(upd, js_imports, extern_func_to_js, local_name_to_js, tracker);
             }
             transform_stmts(body, js_imports, extern_func_to_js, local_name_to_js, tracker);
+        }
+        Stmt::Labeled { body, .. } => {
+            transform_stmt(body, js_imports, extern_func_to_js, local_name_to_js, tracker);
         }
         Stmt::Switch { discriminant, cases } => {
             transform_expr(discriminant, js_imports, extern_func_to_js, local_name_to_js, tracker);
@@ -238,7 +245,7 @@ fn transform_stmt(
                 transform_stmts(finally_body, js_imports, extern_func_to_js, local_name_to_js, tracker);
             }
         }
-        Stmt::Break | Stmt::Continue => {}
+        Stmt::Break | Stmt::Continue | Stmt::LabeledBreak(_) | Stmt::LabeledContinue(_) => {}
     }
 }
 
@@ -1081,6 +1088,15 @@ fn fix_native_instance_stmt(stmt: &mut Stmt, native_instances: &HashMap<String, 
                 fix_native_instance_stmt(s, native_instances, local_id_instances);
             }
         }
+        Stmt::DoWhile { body, condition } => {
+            for s in body {
+                fix_native_instance_stmt(s, native_instances, local_id_instances);
+            }
+            fix_native_instance_expr(condition, native_instances, local_id_instances);
+        }
+        Stmt::Labeled { body, .. } => {
+            fix_native_instance_stmt(body, native_instances, local_id_instances);
+        }
         Stmt::For { init, condition, update, body } => {
             if let Some(init_stmt) = init {
                 fix_native_instance_stmt(init_stmt, native_instances, local_id_instances);
@@ -1122,7 +1138,7 @@ fn fix_native_instance_stmt(stmt: &mut Stmt, native_instances: &HashMap<String, 
             }
         }
         Stmt::Throw(e) => fix_native_instance_expr(e, native_instances, local_id_instances),
-        Stmt::Break | Stmt::Continue => {}
+        Stmt::Break | Stmt::Continue | Stmt::LabeledBreak(_) | Stmt::LabeledContinue(_) => {}
     }
 }
 
@@ -1516,6 +1532,15 @@ fn fix_native_instance_stmt_with_locals(
                 fix_native_instance_stmt_with_locals(s, native_instances, local_id_instances);
             }
         }
+        Stmt::DoWhile { body, condition } => {
+            for s in body {
+                fix_native_instance_stmt_with_locals(s, native_instances, local_id_instances);
+            }
+            fix_native_instance_expr_with_locals(condition, native_instances, local_id_instances);
+        }
+        Stmt::Labeled { body, .. } => {
+            fix_native_instance_stmt_with_locals(body, native_instances, local_id_instances);
+        }
         Stmt::For { init, condition, update, body } => {
             if let Some(init_stmt) = init {
                 fix_native_instance_stmt_with_locals(init_stmt.as_mut(), native_instances, local_id_instances);
@@ -1557,7 +1582,7 @@ fn fix_native_instance_stmt_with_locals(
                 }
             }
         }
-        Stmt::Break | Stmt::Continue => {}
+        Stmt::Break | Stmt::Continue | Stmt::LabeledBreak(_) | Stmt::LabeledContinue(_) => {}
     }
 }
 

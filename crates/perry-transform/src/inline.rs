@@ -285,8 +285,10 @@ fn has_simple_control_flow(stmts: &[Stmt]) -> bool {
                     }
                 }
             }
-            Stmt::While { .. } | Stmt::For { .. } | Stmt::Try { .. } |
-            Stmt::Switch { .. } | Stmt::Break | Stmt::Continue | Stmt::Throw(_) => {
+            Stmt::While { .. } | Stmt::DoWhile { .. } | Stmt::For { .. } | Stmt::Try { .. } |
+            Stmt::Switch { .. } | Stmt::Labeled { .. } |
+            Stmt::Break | Stmt::Continue | Stmt::LabeledBreak(_) | Stmt::LabeledContinue(_) |
+            Stmt::Throw(_) => {
                 return false;
             }
         }
@@ -388,6 +390,15 @@ fn find_max_local_id(stmts: &[Stmt]) -> LocalId {
                     check_stmt(s, max_id);
                 }
             }
+            Stmt::DoWhile { body, condition } => {
+                for s in body {
+                    check_stmt(s, max_id);
+                }
+                check_expr(condition, max_id);
+            }
+            Stmt::Labeled { body, .. } => {
+                check_stmt(body, max_id);
+            }
             Stmt::For { init, condition, update, body } => {
                 if let Some(i) = init {
                     check_stmt(i, max_id);
@@ -431,7 +442,7 @@ fn find_max_local_id(stmts: &[Stmt]) -> LocalId {
                     }
                 }
             }
-            Stmt::Break | Stmt::Continue => {}
+            Stmt::Break | Stmt::Continue | Stmt::LabeledBreak(_) | Stmt::LabeledContinue(_) => {}
         }
     }
 

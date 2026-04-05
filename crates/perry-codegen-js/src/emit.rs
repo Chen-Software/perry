@@ -548,6 +548,24 @@ impl JsEmitter {
                 self.indent -= 1;
                 self.writeln("}");
             }
+            Stmt::DoWhile { body, condition } => {
+                self.writeln("do {");
+                self.indent += 1;
+                for s in body {
+                    self.emit_stmt(s);
+                }
+                self.indent -= 1;
+                self.write_indent();
+                self.output.push_str("} while (");
+                self.emit_expr(condition);
+                self.output.push_str(");\n");
+            }
+            Stmt::Labeled { label, body } => {
+                self.write_indent();
+                let _ = write!(self.output, "{}: ", label);
+                // Emit the body statement without extra indentation prefix
+                self.emit_stmt(body);
+            }
             Stmt::For { init, condition, update, body } => {
                 self.write_indent();
                 self.output.push_str("for (");
@@ -593,6 +611,14 @@ impl JsEmitter {
             }
             Stmt::Continue => {
                 self.writeln("continue;");
+            }
+            Stmt::LabeledBreak(label) => {
+                self.write_indent();
+                let _ = write!(self.output, "break {};\n", label);
+            }
+            Stmt::LabeledContinue(label) => {
+                self.write_indent();
+                let _ = write!(self.output, "continue {};\n", label);
             }
             Stmt::Throw(expr) => {
                 self.write_indent();

@@ -2100,6 +2100,21 @@ impl WasmModuleEmitter {
             }
             Stmt::Break => { out.push_str(&format!("{pad}    break;\n")); }
             Stmt::Continue => { out.push_str(&format!("{pad}    continue;\n")); }
+            Stmt::LabeledBreak(label) => { out.push_str(&format!("{pad}    break {};\n", label)); }
+            Stmt::LabeledContinue(label) => { out.push_str(&format!("{pad}    continue {};\n", label)); }
+            Stmt::DoWhile { body, condition } => {
+                out.push_str(&format!("{pad}    do {{\n"));
+                for s in body {
+                    self.emit_js_stmt(out, s, locals, indent + 1);
+                }
+                let cond = self.emit_js_expr(condition, locals);
+                out.push_str(&format!("{pad}    }} while (isTruthy({cond}));\n"));
+            }
+            Stmt::Labeled { label, body } => {
+                out.push_str(&format!("{pad}    {}: {{\n", label));
+                self.emit_js_stmt(out, body, locals, indent + 1);
+                out.push_str(&format!("{pad}    }}\n"));
+            }
             Stmt::Switch { discriminant, cases } => {
                 let disc = self.emit_js_expr(discriminant, locals);
                 out.push_str(&format!("{pad}    switch (toJsValue({disc})) {{\n"));
@@ -2612,6 +2627,13 @@ impl WasmModuleEmitter {
                 self.collect_strings_in_expr(condition);
                 self.collect_strings_in_stmts(body);
             }
+            Stmt::DoWhile { body, condition } => {
+                self.collect_strings_in_stmts(body);
+                self.collect_strings_in_expr(condition);
+            }
+            Stmt::Labeled { body, .. } => {
+                self.collect_strings_in_stmt(body);
+            }
             Stmt::For { init, condition, update, body } => {
                 if let Some(i) = init { self.collect_strings_in_stmt(i); }
                 if let Some(c) = condition { self.collect_strings_in_expr(c); }
@@ -2633,7 +2655,7 @@ impl WasmModuleEmitter {
                     self.collect_strings_in_stmts(&case.body);
                 }
             }
-            Stmt::Break | Stmt::Continue => {}
+            Stmt::Break | Stmt::Continue | Stmt::LabeledBreak(_) | Stmt::LabeledContinue(_) => {}
         }
     }
 
@@ -2895,6 +2917,11 @@ struct FuncEmitCtx<'a> {
     break_depth: Vec<u32>,
     loop_depth: Vec<u32>,
     block_depth: u32,
+    /// Stack of (label, break_depth, continue_depth) for labeled break/continue.
+    /// When `Labeled { label, body }` is a loop, this ties the label to the loop's blocks.
+    label_stack: Vec<(String, u32, u32)>,
+    /// Pending label to attach to the next loop encountered.
+    pending_label: Option<String>,
     /// Current class name (set when compiling class methods/constructors)
     current_class: Option<String>,
     /// Index of a temp i64 local
@@ -2915,6 +2942,8 @@ impl<'a> FuncEmitCtx<'a> {
             break_depth: Vec::new(),
             loop_depth: Vec::new(),
             block_depth: 0,
+            label_stack: Vec::new(),
+            pending_label: None,
             current_class: None,
             temp_local,
             temp_local_i32,
@@ -3435,6 +3464,11 @@ impl<'a> FuncEmitCtx<'a> {
                 let continue_depth = self.block_depth;
                 self.loop_depth.push(continue_depth);
 
+                let label_pushed = if let Some(lbl) = self.pending_label.take() {
+                    self.label_stack.push((lbl, break_depth, continue_depth));
+                    true
+                } else { false };
+
                 self.emit_frame_begin(func, 1);
                 self.emit_store_arg(func, 0, condition);
                 self.emit_memcall_i32(func, "is_truthy", 1);
@@ -3449,10 +3483,61 @@ impl<'a> FuncEmitCtx<'a> {
                 self.block_depth -= 1;
                 func.instruction(&Instruction::End); // end loop
 
+                if label_pushed { self.label_stack.pop(); }
                 self.loop_depth.pop();
                 self.break_depth.pop();
                 self.block_depth -= 1;
                 func.instruction(&Instruction::End); // end block
+            }
+            Stmt::DoWhile { body, condition } => {
+                // block $break
+                //   loop $continue
+                //     <body>
+                //     <condition>
+                //     is_truthy
+                //     br_if $continue (0) — loop back if truthy
+                //   end
+                // end
+                func.instruction(&Instruction::Block(wasm_encoder::BlockType::Empty));
+                self.block_depth += 1;
+                let break_depth = self.block_depth;
+                self.break_depth.push(break_depth);
+
+                func.instruction(&Instruction::Loop(wasm_encoder::BlockType::Empty));
+                self.block_depth += 1;
+                let continue_depth = self.block_depth;
+                self.loop_depth.push(continue_depth);
+
+                let label_pushed = if let Some(lbl) = self.pending_label.take() {
+                    self.label_stack.push((lbl, break_depth, continue_depth));
+                    true
+                } else { false };
+
+                for s in body {
+                    self.emit_stmt(func, s, in_returning_func);
+                }
+
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, condition);
+                self.emit_memcall_i32(func, "is_truthy", 1);
+                func.instruction(&Instruction::BrIf(0)); // loop back if truthy
+
+                self.block_depth -= 1;
+                func.instruction(&Instruction::End); // end loop
+
+                if label_pushed { self.label_stack.pop(); }
+                self.loop_depth.pop();
+                self.break_depth.pop();
+                self.block_depth -= 1;
+                func.instruction(&Instruction::End); // end block
+            }
+            Stmt::Labeled { label, body } => {
+                // Set the pending label and compile the body statement.
+                // The inner loop will consume it and register in label_stack.
+                self.pending_label = Some(label.clone());
+                self.emit_stmt(func, body, in_returning_func);
+                // If the body wasn't a loop, the pending label is stale; drop it.
+                self.pending_label = None;
             }
             Stmt::For { init, condition, update, body } => {
                 // <init>
@@ -3471,11 +3556,18 @@ impl<'a> FuncEmitCtx<'a> {
 
                 func.instruction(&Instruction::Block(wasm_encoder::BlockType::Empty));
                 self.block_depth += 1;
-                self.break_depth.push(self.block_depth);
+                let break_d = self.block_depth;
+                self.break_depth.push(break_d);
 
                 func.instruction(&Instruction::Loop(wasm_encoder::BlockType::Empty));
                 self.block_depth += 1;
-                self.loop_depth.push(self.block_depth);
+                let continue_d = self.block_depth;
+                self.loop_depth.push(continue_d);
+
+                let label_pushed = if let Some(lbl) = self.pending_label.take() {
+                    self.label_stack.push((lbl, break_d, continue_d));
+                    true
+                } else { false };
 
                 if let Some(cond) = condition {
                     self.emit_frame_begin(func, 1);
@@ -3500,6 +3592,7 @@ impl<'a> FuncEmitCtx<'a> {
                 self.block_depth -= 1;
                 func.instruction(&Instruction::End);
 
+                if label_pushed { self.label_stack.pop(); }
                 self.loop_depth.pop();
                 self.break_depth.pop();
                 self.block_depth -= 1;
@@ -3513,6 +3606,19 @@ impl<'a> FuncEmitCtx<'a> {
             Stmt::Continue => {
                 // Branch to the enclosing loop (continue target)
                 func.instruction(&Instruction::Br(0));
+            }
+            Stmt::LabeledBreak(label) => {
+                // Find the label in the stack and compute the relative depth.
+                if let Some(&(_, break_d, _)) = self.label_stack.iter().rev().find(|(l, _, _)| l == label) {
+                    let rel = self.block_depth - break_d;
+                    func.instruction(&Instruction::Br(rel));
+                }
+            }
+            Stmt::LabeledContinue(label) => {
+                if let Some(&(_, _, continue_d)) = self.label_stack.iter().rev().find(|(l, _, _)| l == label) {
+                    let rel = self.block_depth - continue_d;
+                    func.instruction(&Instruction::Br(rel));
+                }
             }
             Stmt::Throw(expr) => {
                 // Set exception in bridge and return

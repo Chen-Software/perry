@@ -59,6 +59,13 @@ thread_local! {
     /// so the else_expr doesn't re-evaluate the side-effecting expression.
     /// Format: (array_local_id, is_pop: bool, cranelift_value)
     pub(crate) static OPT_CHAIN_CACHE: RefCell<Option<(LocalId, bool, u32)>> = RefCell::new(None);
+    /// Label stack for labeled break/continue.
+    /// Each entry: (label_name, break_block, continue_block, try_depth_when_entered).
+    /// Pushed when a `Labeled { label, body: loop }` stmt is compiled, popped on loop exit.
+    pub(crate) static LABEL_STACK: RefCell<Vec<(String, cranelift_codegen::ir::Block, cranelift_codegen::ir::Block, usize)>> = RefCell::new(Vec::new());
+    /// Pending label attached to the next loop/switch statement compiled.
+    /// Set when a `Labeled { label, body: loop }` stmt is seen; consumed by the inner loop's compiler.
+    pub(crate) static PENDING_LABEL: RefCell<Option<String>> = RefCell::new(None);
 }
 
 /// Lightweight i18n table data for codegen thread-local access.
@@ -769,7 +776,8 @@ pub(crate) fn loop_body_has_calls(stmts: &[Stmt]) -> bool {
 fn loop_stmt_has_calls(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Expr(e) | Stmt::Return(Some(e)) | Stmt::Throw(e) => loop_expr_has_calls(e),
-        Stmt::Return(None) | Stmt::Break | Stmt::Continue => false,
+        Stmt::Return(None) | Stmt::Break | Stmt::Continue
+            | Stmt::LabeledBreak(_) | Stmt::LabeledContinue(_) => false,
         Stmt::Let { init: Some(e), .. } => loop_expr_has_calls(e),
         Stmt::Let { init: None, .. } => false,
         Stmt::If { condition, then_branch, else_branch } => {
@@ -786,6 +794,10 @@ fn loop_stmt_has_calls(stmt: &Stmt) -> bool {
         Stmt::While { condition, body } => {
             loop_expr_has_calls(condition) || loop_body_has_calls(body)
         }
+        Stmt::DoWhile { body, condition } => {
+            loop_body_has_calls(body) || loop_expr_has_calls(condition)
+        }
+        Stmt::Labeled { body, .. } => loop_stmt_has_calls(body),
         Stmt::Try { body, catch, finally } => {
             loop_body_has_calls(body)
                 || catch.as_ref().map_or(false, |c| loop_body_has_calls(&c.body))

@@ -30,15 +30,25 @@ use crate::expr::compile_expr;
 pub(crate) fn contains_loop_control(stmts: &[Stmt]) -> bool {
     for stmt in stmts {
         match stmt {
-            Stmt::Break | Stmt::Continue | Stmt::Return(_) | Stmt::Throw(_) => return true,
+            Stmt::Break | Stmt::Continue
+                | Stmt::LabeledBreak(_) | Stmt::LabeledContinue(_)
+                | Stmt::Return(_) | Stmt::Throw(_) => return true,
             Stmt::If { then_branch, else_branch, .. } => {
                 if contains_loop_control(then_branch) { return true; }
                 if let Some(else_b) = else_branch {
                     if contains_loop_control(else_b) { return true; }
                 }
             }
-            // Nested loops have their own break/continue scope, so we don't recurse
-            Stmt::For { .. } | Stmt::While { .. } => {}
+            // Nested loops contain their own (unlabeled) break/continue scope.
+            // However, LabeledBreak/LabeledContinue may target an OUTER loop, so we
+            // must recurse to detect them and disable unrolling in that case.
+            Stmt::For { body, .. } | Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
+                if contains_labeled_control(body) { return true; }
+            }
+            Stmt::Labeled { body, .. } => {
+                // Labels propagate: a labeled inner loop's break could exit this outer scope
+                if contains_loop_control(std::slice::from_ref(body.as_ref())) { return true; }
+            }
             Stmt::Try { body, catch, finally } => {
                 if contains_loop_control(body) { return true; }
                 if let Some(c) = catch {
@@ -46,6 +56,44 @@ pub(crate) fn contains_loop_control(stmts: &[Stmt]) -> bool {
                 }
                 if let Some(f) = finally {
                     if contains_loop_control(f) { return true; }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Check if `stmts` contain any LabeledBreak or LabeledContinue (recursive, through any construct).
+/// Used for loop-unrolling safety when an inner loop might target an outer label.
+fn contains_labeled_control(stmts: &[Stmt]) -> bool {
+    for stmt in stmts {
+        match stmt {
+            Stmt::LabeledBreak(_) | Stmt::LabeledContinue(_) => return true,
+            Stmt::If { then_branch, else_branch, .. } => {
+                if contains_labeled_control(then_branch) { return true; }
+                if let Some(else_b) = else_branch {
+                    if contains_labeled_control(else_b) { return true; }
+                }
+            }
+            Stmt::For { body, .. } | Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
+                if contains_labeled_control(body) { return true; }
+            }
+            Stmt::Labeled { body, .. } => {
+                if contains_labeled_control(std::slice::from_ref(body.as_ref())) { return true; }
+            }
+            Stmt::Try { body, catch, finally } => {
+                if contains_labeled_control(body) { return true; }
+                if let Some(c) = catch {
+                    if contains_labeled_control(&c.body) { return true; }
+                }
+                if let Some(f) = finally {
+                    if contains_labeled_control(f) { return true; }
+                }
+            }
+            Stmt::Switch { cases, .. } => {
+                for c in cases {
+                    if contains_labeled_control(&c.body) { return true; }
                 }
             }
             _ => {}
@@ -2048,6 +2096,20 @@ pub(crate) fn compile_stmt(
             // Create loop context for break/continue
             let while_loop_ctx = LoopContext { exit_block, header_block, bounded_indices: HashMap::new(), try_depth: TRY_CATCH_DEPTH.with(|d| d.get()) };
 
+            // Consume any pending label and push onto the label stack so inner
+            // `break label;` / `continue label;` statements can jump to this loop's blocks.
+            let while_label_pushed = PENDING_LABEL.with(|p| p.borrow_mut().take());
+            if let Some(ref lbl) = while_label_pushed {
+                LABEL_STACK.with(|s| {
+                    s.borrow_mut().push((
+                        lbl.clone(),
+                        exit_block,
+                        header_block,
+                        TRY_CATCH_DEPTH.with(|d| d.get()),
+                    ));
+                });
+            }
+
             // Body - with optional unrolling for CSE loops
             builder.switch_to_block(body_block);
             builder.seal_block(body_block);
@@ -2415,8 +2477,85 @@ pub(crate) fn compile_stmt(
                     info.squared_cache = None;
                 }
             }
+
+            // Pop label if we pushed one for this while loop
+            if while_label_pushed.is_some() {
+                LABEL_STACK.with(|s| { s.borrow_mut().pop(); });
+            }
+        }
+        Stmt::DoWhile { body, condition } => {
+            // Do-while: body executes first, then condition is checked at the end.
+            //   body_block:  <body>; jump cond_block
+            //   cond_block:  if cond -> body_block else exit_block
+            //   exit_block:
+            let body_block = builder.create_block();
+            let cond_block = builder.create_block();
+            let exit_block = builder.create_block();
+
+            // Enter body
+            builder.ins().jump(body_block, &[]);
+            builder.switch_to_block(body_block);
+
+            // Loop context: continue jumps to the condition check, break to exit.
+            let do_while_ctx = LoopContext {
+                exit_block,
+                header_block: cond_block,
+                bounded_indices: HashMap::new(),
+                try_depth: TRY_CATCH_DEPTH.with(|d| d.get()),
+            };
+
+            // Consume pending label
+            let dw_label_pushed = PENDING_LABEL.with(|p| p.borrow_mut().take());
+            if let Some(ref lbl) = dw_label_pushed {
+                LABEL_STACK.with(|s| {
+                    s.borrow_mut().push((
+                        lbl.clone(),
+                        exit_block,
+                        cond_block,
+                        TRY_CATCH_DEPTH.with(|d| d.get()),
+                    ));
+                });
+            }
+
+            for s in body {
+                compile_stmt(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, closure_returning_funcs, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, next_var, s, this_ctx, Some(&do_while_ctx), boxed_vars, async_promise_var)?;
+            }
+
+            // After the body, fall through to condition check
+            let current = builder.current_block().unwrap();
+            if !is_block_filled(builder, current) {
+                builder.ins().jump(cond_block, &[]);
+            }
+
+            // Condition
+            builder.switch_to_block(cond_block);
+            let cond_bool = compile_condition_to_bool(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, condition, this_ctx)?;
+            builder.ins().brif(cond_bool, body_block, &[], exit_block, &[]);
+
+            builder.seal_block(body_block);
+            builder.seal_block(cond_block);
+
+            builder.switch_to_block(exit_block);
+            builder.seal_block(exit_block);
+
+            if dw_label_pushed.is_some() {
+                LABEL_STACK.with(|s| { s.borrow_mut().pop(); });
+            }
+        }
+        Stmt::Labeled { label, body } => {
+            // Set pending label; the inner loop (or switch) will consume it
+            // and push onto LABEL_STACK so nested break/continue can reference it.
+            PENDING_LABEL.with(|p| *p.borrow_mut() = Some(label.clone()));
+            compile_stmt(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, closure_returning_funcs, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, next_var, body, this_ctx, loop_ctx, boxed_vars, async_promise_var)?;
+            // If the body wasn't a loop that consumed the pending label, clear it.
+            PENDING_LABEL.with(|p| *p.borrow_mut() = None);
         }
         Stmt::For { init, condition, update, body } => {
+            // Consume any pending label (set by an enclosing Stmt::Labeled) so inner
+            // `break label;` / `continue label;` jump to this for-loop's blocks.
+            // We push to LABEL_STACK after the blocks are created below.
+            let for_pending_label = PENDING_LABEL.with(|p| p.borrow_mut().take());
+
             // Execute init statement (if any) in current block (outside loop context)
             if let Some(init_stmt) = init {
                 compile_stmt(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, closure_returning_funcs, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, next_var, init_stmt, this_ctx, loop_ctx, boxed_vars, async_promise_var)?;
@@ -3196,6 +3335,19 @@ pub(crate) fn compile_stmt(
                 // Main loop context
                 let main_loop_ctx = LoopContext { exit_block, header_block: main_update, bounded_indices: bounded_indices.clone(), try_depth: TRY_CATCH_DEPTH.with(|d| d.get()) };
 
+                // Push label (if any) so inner `break label;` / `continue label;` reach this for-loop's blocks.
+                let unrolled_label_pushed = if let Some(ref lbl) = for_pending_label {
+                    LABEL_STACK.with(|s| {
+                        s.borrow_mut().push((
+                            lbl.clone(),
+                            exit_block,
+                            main_update,
+                            TRY_CATCH_DEPTH.with(|d| d.get()),
+                        ));
+                    });
+                    true
+                } else { false };
+
                 // Set BCE for loop counter
                 if let Some(arr_id) = bce_array_var {
                     if let Some(idx_info) = locals.get_mut(&idx_id) {
@@ -3549,6 +3701,11 @@ pub(crate) fn compile_stmt(
                         info.hoisted_i32_products = None;
                     }
                 }
+
+                // Pop label pushed for this for loop (unrolled path)
+                if unrolled_label_pushed {
+                    LABEL_STACK.with(|s| { s.borrow_mut().pop(); });
+                }
             } else {
                 // NON-UNROLLED LOOP: Original implementation
 
@@ -3773,6 +3930,19 @@ pub(crate) fn compile_stmt(
 
                 let for_loop_ctx = LoopContext { exit_block, header_block: update_block, bounded_indices, try_depth: TRY_CATCH_DEPTH.with(|d| d.get()) };
 
+                // Push label (if any) so inner `break label;` / `continue label;` resolve to this for-loop's blocks.
+                let for_label_pushed = if let Some(ref lbl) = for_pending_label {
+                    LABEL_STACK.with(|s| {
+                        s.borrow_mut().push((
+                            lbl.clone(),
+                            exit_block,
+                            update_block,
+                            TRY_CATCH_DEPTH.with(|d| d.get()),
+                        ));
+                    });
+                    true
+                } else { false };
+
                 // Set BCE information on index variable
                 if let Some(idx_id) = bce_index_var {
                     if let Some(idx_info) = locals.get_mut(&idx_id) {
@@ -3891,6 +4061,11 @@ pub(crate) fn compile_stmt(
                         info.hoisted_i32_products = None;
                     }
                 }
+
+                // Pop label pushed for this for loop
+                if for_label_pushed {
+                    LABEL_STACK.with(|s| { s.borrow_mut().pop(); });
+                }
             }
         }
         Stmt::Expr(expr) => {
@@ -3978,6 +4153,30 @@ pub(crate) fn compile_stmt(
                 builder.ins().jump(ctx.header_block, &[]);
             }
             // If no loop context, continue is invalid but we silently ignore for now
+        }
+        Stmt::LabeledBreak(label) => {
+            // Walk LABEL_STACK from the top looking for a matching label.
+            let entry = LABEL_STACK.with(|s| {
+                s.borrow().iter().rev().find(|(l, _, _, _)| l == label).cloned()
+            });
+            if let Some((_, exit_blk, _, lbl_try_depth)) = entry {
+                let cur_try_depth = TRY_CATCH_DEPTH.with(|d| d.get());
+                let cleanup_count = cur_try_depth.saturating_sub(lbl_try_depth);
+                emit_try_end_cleanup(builder, module, extern_funcs, cleanup_count)?;
+                builder.ins().jump(exit_blk, &[]);
+            }
+            // If label not found, silently ignore (TypeScript would have errored at parse time)
+        }
+        Stmt::LabeledContinue(label) => {
+            let entry = LABEL_STACK.with(|s| {
+                s.borrow().iter().rev().find(|(l, _, _, _)| l == label).cloned()
+            });
+            if let Some((_, _, header_blk, lbl_try_depth)) = entry {
+                let cur_try_depth = TRY_CATCH_DEPTH.with(|d| d.get());
+                let cleanup_count = cur_try_depth.saturating_sub(lbl_try_depth);
+                emit_try_end_cleanup(builder, module, extern_funcs, cleanup_count)?;
+                builder.ins().jump(header_blk, &[]);
+            }
         }
         Stmt::Throw(expr) => {
             // Compile the expression to throw

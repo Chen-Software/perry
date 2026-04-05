@@ -706,6 +706,15 @@ pub fn collect_local_refs_stmt(stmt: &Stmt, refs: &mut Vec<LocalId>, visited: &m
                 collect_local_refs_stmt(s, refs, visited);
             }
         }
+        Stmt::DoWhile { body, condition } => {
+            for s in body {
+                collect_local_refs_stmt(s, refs, visited);
+            }
+            collect_local_refs_expr(condition, refs, visited);
+        }
+        Stmt::Labeled { body, .. } => {
+            collect_local_refs_stmt(body, refs, visited);
+        }
         Stmt::For { init, condition, update, body } => {
             if let Some(init_stmt) = init {
                 collect_local_refs_stmt(init_stmt, refs, visited);
@@ -720,7 +729,7 @@ pub fn collect_local_refs_stmt(stmt: &Stmt, refs: &mut Vec<LocalId>, visited: &m
                 collect_local_refs_stmt(s, refs, visited);
             }
         }
-        Stmt::Break | Stmt::Continue => {}
+        Stmt::Break | Stmt::Continue | Stmt::LabeledBreak(_) | Stmt::LabeledContinue(_) => {}
         Stmt::Try { body, catch, finally } => {
             for s in body {
                 collect_local_refs_stmt(s, refs, visited);
@@ -784,6 +793,15 @@ pub(crate) fn collect_assigned_locals_stmt(stmt: &Stmt, assigned: &mut Vec<Local
                 collect_assigned_locals_stmt(s, assigned);
             }
         }
+        Stmt::DoWhile { body, condition } => {
+            for s in body {
+                collect_assigned_locals_stmt(s, assigned);
+            }
+            collect_assigned_locals_expr(condition, assigned);
+        }
+        Stmt::Labeled { body, .. } => {
+            collect_assigned_locals_stmt(body, assigned);
+        }
         Stmt::For { init, condition, update, body } => {
             if let Some(init_stmt) = init {
                 collect_assigned_locals_stmt(init_stmt, assigned);
@@ -798,7 +816,7 @@ pub(crate) fn collect_assigned_locals_stmt(stmt: &Stmt, assigned: &mut Vec<Local
                 collect_assigned_locals_stmt(s, assigned);
             }
         }
-        Stmt::Break | Stmt::Continue => {}
+        Stmt::Break | Stmt::Continue | Stmt::LabeledBreak(_) | Stmt::LabeledContinue(_) => {}
         Stmt::Try { body, catch, finally } => {
             for s in body {
                 collect_assigned_locals_stmt(s, assigned);

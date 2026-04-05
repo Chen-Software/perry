@@ -1389,6 +1389,14 @@ fn substitute_stmt(stmt: &Stmt, substitutions: &HashMap<String, Type>) -> Stmt {
             condition: substitute_expr(condition, substitutions),
             body: substitute_stmts(body, substitutions),
         },
+        Stmt::DoWhile { body, condition } => Stmt::DoWhile {
+            body: substitute_stmts(body, substitutions),
+            condition: substitute_expr(condition, substitutions),
+        },
+        Stmt::Labeled { label, body } => Stmt::Labeled {
+            label: label.clone(),
+            body: Box::new(substitute_stmt(body, substitutions)),
+        },
         Stmt::For { init, condition, update, body } => Stmt::For {
             init: init.as_ref().map(|s| Box::new(substitute_stmt(s, substitutions))),
             condition: condition.as_ref().map(|e| substitute_expr(e, substitutions)),
@@ -1397,6 +1405,8 @@ fn substitute_stmt(stmt: &Stmt, substitutions: &HashMap<String, Type>) -> Stmt {
         },
         Stmt::Break => Stmt::Break,
         Stmt::Continue => Stmt::Continue,
+        Stmt::LabeledBreak(label) => Stmt::LabeledBreak(label.clone()),
+        Stmt::LabeledContinue(label) => Stmt::LabeledContinue(label.clone()),
         Stmt::Throw(expr) => Stmt::Throw(substitute_expr(expr, substitutions)),
         Stmt::Try { body, catch, finally } => Stmt::Try {
             body: substitute_stmts(body, substitutions),
@@ -1694,6 +1704,13 @@ fn collect_instantiations_in_stmt(stmt: &Stmt, ctx: &mut MonomorphizationContext
             collect_instantiations_in_expr(condition, ctx, module, idx);
             collect_instantiations_in_stmts(body, ctx, module, idx);
         }
+        Stmt::DoWhile { body, condition } => {
+            collect_instantiations_in_stmts(body, ctx, module, idx);
+            collect_instantiations_in_expr(condition, ctx, module, idx);
+        }
+        Stmt::Labeled { body, .. } => {
+            collect_instantiations_in_stmt(body, ctx, module, idx);
+        }
         Stmt::For { init, condition, update, body } => {
             if let Some(init_stmt) = init {
                 collect_instantiations_in_stmt(init_stmt, ctx, module, idx);
@@ -1725,7 +1742,7 @@ fn collect_instantiations_in_stmt(stmt: &Stmt, ctx: &mut MonomorphizationContext
                 collect_instantiations_in_stmts(&case.body, ctx, module, idx);
             }
         }
-        Stmt::Break | Stmt::Continue => {}
+        Stmt::Break | Stmt::Continue | Stmt::LabeledBreak(_) | Stmt::LabeledContinue(_) => {}
     }
 }
 
@@ -2096,6 +2113,13 @@ fn update_call_sites_in_stmt(stmt: &mut Stmt, ctx: &MonomorphizationContext, loo
             update_call_sites_in_expr(condition, ctx, lookup);
             update_call_sites_in_stmts(body, ctx, lookup);
         }
+        Stmt::DoWhile { body, condition } => {
+            update_call_sites_in_stmts(body, ctx, lookup);
+            update_call_sites_in_expr(condition, ctx, lookup);
+        }
+        Stmt::Labeled { body, .. } => {
+            update_call_sites_in_stmt(body, ctx, lookup);
+        }
         Stmt::For { init, condition, update, body } => {
             if let Some(init_stmt) = init {
                 update_call_sites_in_stmt(init_stmt, ctx, lookup);
@@ -2127,7 +2151,7 @@ fn update_call_sites_in_stmt(stmt: &mut Stmt, ctx: &MonomorphizationContext, loo
                 update_call_sites_in_stmts(&mut case.body, ctx, lookup);
             }
         }
-        Stmt::Break | Stmt::Continue => {}
+        Stmt::Break | Stmt::Continue | Stmt::LabeledBreak(_) | Stmt::LabeledContinue(_) => {}
     }
 }
 
@@ -2629,6 +2653,13 @@ fn fill_defaults_in_stmt(stmt: &mut Stmt, ctor_defaults: &HashMap<String, Vec<Op
             fill_defaults_in_expr(condition, ctor_defaults);
             fill_defaults_in_stmts(body, ctor_defaults);
         }
+        Stmt::DoWhile { body, condition } => {
+            fill_defaults_in_stmts(body, ctor_defaults);
+            fill_defaults_in_expr(condition, ctor_defaults);
+        }
+        Stmt::Labeled { body, .. } => {
+            fill_defaults_in_stmt(body, ctor_defaults);
+        }
         Stmt::For { init, condition, update, body } => {
             if let Some(init_stmt) = init {
                 fill_defaults_in_stmt(init_stmt, ctor_defaults);
@@ -2657,7 +2688,7 @@ fn fill_defaults_in_stmt(stmt: &mut Stmt, ctor_defaults: &HashMap<String, Vec<Op
                 fill_defaults_in_stmts(&mut case.body, ctor_defaults);
             }
         }
-        Stmt::Break | Stmt::Continue => {}
+        Stmt::Break | Stmt::Continue | Stmt::LabeledBreak(_) | Stmt::LabeledContinue(_) => {}
     }
 }
 

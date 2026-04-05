@@ -54,6 +54,13 @@ fn collect_referenced_locals_stmt(stmt: &Stmt, out: &mut std::collections::HashS
             collect_referenced_locals_expr(condition, out);
             collect_referenced_locals_stmts(body, out);
         }
+        Stmt::DoWhile { body, condition } => {
+            collect_referenced_locals_stmts(body, out);
+            collect_referenced_locals_expr(condition, out);
+        }
+        Stmt::Labeled { body, .. } => {
+            collect_referenced_locals_stmt(body, out);
+        }
         Stmt::For { init, condition, update, body } => {
             if let Some(i) = init { collect_referenced_locals_stmt(i, out); }
             if let Some(c) = condition { collect_referenced_locals_expr(c, out); }
@@ -79,7 +86,7 @@ fn collect_referenced_locals_stmt(stmt: &Stmt, out: &mut std::collections::HashS
                 collect_referenced_locals_stmts(&case.body, out);
             }
         }
-        Stmt::Break | Stmt::Continue => {}
+        Stmt::Break | Stmt::Continue | Stmt::LabeledBreak(_) | Stmt::LabeledContinue(_) => {}
     }
 }
 

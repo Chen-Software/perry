@@ -1767,6 +1767,26 @@ fn lower_stmt(
             let body = lower_body_stmt(ctx, &while_stmt.body)?;
             module.init.push(Stmt::While { condition, body });
         }
+        ast::Stmt::DoWhile(do_while_stmt) => {
+            let body = lower_body_stmt(ctx, &do_while_stmt.body)?;
+            let condition = lower_expr(ctx, &do_while_stmt.test)?;
+            module.init.push(Stmt::DoWhile { body, condition });
+        }
+        ast::Stmt::Labeled(labeled_stmt) => {
+            let label = labeled_stmt.label.sym.to_string();
+            let inner = lower_body_stmt(ctx, &labeled_stmt.body)?;
+            if inner.len() == 1 {
+                let body = inner.into_iter().next().unwrap();
+                module.init.push(Stmt::Labeled { label, body: Box::new(body) });
+            } else {
+                let mut inner = inner;
+                let last = inner.pop().unwrap();
+                for s in inner {
+                    module.init.push(s);
+                }
+                module.init.push(Stmt::Labeled { label, body: Box::new(last) });
+            }
+        }
         ast::Stmt::For(for_stmt) => {
             let init = if let Some(init) = &for_stmt.init {
                 match init {
