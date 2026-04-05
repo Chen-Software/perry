@@ -242,8 +242,15 @@ pub extern "C" fn js_string_concat(a: *const StringHeader, b: *const StringHeade
 /// Returns a new string representing the number
 #[no_mangle]
 pub extern "C" fn js_number_to_string(value: f64) -> *mut StringHeader {
-    // Format the number as a string
-    let s = if value.fract() == 0.0 && value.abs() < 1e15 {
+    // Format the number as a string per JS semantics.
+    let s = if value.is_nan() {
+        "NaN".to_string()
+    } else if value.is_infinite() {
+        if value > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
+    } else if value == 0.0 {
+        // Cover both +0 and -0 as "0" (matches JS)
+        "0".to_string()
+    } else if value.fract() == 0.0 && value.abs() < 1e15 {
         // Integer-like, format without decimal
         format!("{}", value as i64)
     } else {

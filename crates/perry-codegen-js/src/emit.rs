@@ -1994,6 +1994,26 @@ impl JsEmitter {
                 self.emit_expr(val);
                 self.output.push(')');
             }
+            Expr::NumberIsNaN(val) => {
+                self.output.push_str("Number.isNaN(");
+                self.emit_expr(val);
+                self.output.push(')');
+            }
+            Expr::NumberIsFinite(val) => {
+                self.output.push_str("Number.isFinite(");
+                self.emit_expr(val);
+                self.output.push(')');
+            }
+            Expr::NumberIsInteger(val) => {
+                self.output.push_str("Number.isInteger(");
+                self.emit_expr(val);
+                self.output.push(')');
+            }
+            Expr::NumberIsSafeInteger(val) => {
+                self.output.push_str("Number.isSafeInteger(");
+                self.emit_expr(val);
+                self.output.push(')');
+            }
 
             // --- Static plugin resolve ---
             Expr::StaticPluginResolve(_) => {

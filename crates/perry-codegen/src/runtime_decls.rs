@@ -7733,6 +7733,16 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_is_finite"), func_id);
         }
 
+        // js_number_is_nan / is_finite / is_integer / is_safe_integer
+        // Stricter versions that don't coerce — return NaN-boxed TAG_TRUE/FALSE.
+        for name in &["js_number_is_nan", "js_number_is_finite", "js_number_is_integer", "js_number_is_safe_integer"] {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function(name, Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Owned(name.to_string()), func_id);
+        }
+
         // js_ethers_format_units(bigint: i64, decimals: f64) -> i64 (string pointer)
         {
             let mut sig = self.module.make_signature();

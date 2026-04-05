@@ -1224,13 +1224,19 @@ pub(crate) fn compile_expr(
             Ok(builder.ins().ceil(coerced))
         }
         Expr::MathRound(expr) => {
+            // JS Math.round: round-half-away-from-zero for positives (0.5 → 1),
+            // round-half-toward-positive-infinity (−0.5 → 0 because toward +∞).
+            // Cranelift's `nearest` uses IEEE round-half-to-even (banker's rounding)
+            // which gives the wrong answer for 0.5. Emulate JS via floor(x + 0.5).
             let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, expr, this_ctx)?;
             let val_f64 = ensure_f64(builder, val);
             let coerce_func = extern_funcs.get("js_number_coerce").ok_or_else(|| anyhow!("js_number_coerce not declared"))?;
             let coerce_ref = module.declare_func_in_func(*coerce_func, builder.func);
             let call = builder.ins().call(coerce_ref, &[val_f64]);
             let coerced = builder.inst_results(call)[0];
-            Ok(builder.ins().nearest(coerced))
+            let half = builder.ins().f64const(0.5);
+            let plus_half = builder.ins().fadd(coerced, half);
+            Ok(builder.ins().floor(plus_half))
         }
         Expr::MathAbs(expr) => {
             let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, expr, this_ctx)?;
@@ -4089,8 +4095,8 @@ pub(crate) fn compile_expr(
             let has_ref = module.declare_func_in_func(*has_func, builder.func);
             let call = builder.ins().call(has_ref, &[map_ptr, key_f64]);
             let result_i32 = builder.inst_results(call)[0];
-            // Convert i32 (0 or 1) to f64
-            Ok(builder.ins().fcvt_from_sint(types::F64, result_i32))
+            // Convert i32 (0 or 1) to NaN-boxed boolean (TAG_TRUE / TAG_FALSE)
+            Ok(i32_to_nanbox_bool(builder, result_i32))
         }
         Expr::MapDelete { map, key } => {
             // Get map pointer - if it's a local map variable, use directly as i64
@@ -4126,8 +4132,8 @@ pub(crate) fn compile_expr(
             let delete_ref = module.declare_func_in_func(*delete_func, builder.func);
             let call = builder.ins().call(delete_ref, &[map_ptr, key_f64]);
             let result_i32 = builder.inst_results(call)[0];
-            // Convert i32 (0 or 1) to f64
-            Ok(builder.ins().fcvt_from_sint(types::F64, result_i32))
+            // Convert i32 (0 or 1) to NaN-boxed boolean
+            Ok(i32_to_nanbox_bool(builder, result_i32))
         }
         Expr::MapSize(map) => {
             // Get map pointer - if it's a local map variable, use directly as i64
@@ -4360,8 +4366,8 @@ pub(crate) fn compile_expr(
             let has_ref = module.declare_func_in_func(*has_func, builder.func);
             let call = builder.ins().call(has_ref, &[set_ptr, value_f64]);
             let result_i32 = builder.inst_results(call)[0];
-            // Convert i32 (0 or 1) to f64
-            Ok(builder.ins().fcvt_from_sint(types::F64, result_i32))
+            // Convert i32 (0 or 1) to NaN-boxed boolean
+            Ok(i32_to_nanbox_bool(builder, result_i32))
         }
         Expr::SetDelete { set, value } => {
             // Get set pointer - if it's a local set variable, use directly as i64
@@ -4408,8 +4414,8 @@ pub(crate) fn compile_expr(
             let delete_ref = module.declare_func_in_func(*delete_func, builder.func);
             let call = builder.ins().call(delete_ref, &[set_ptr, value_f64]);
             let result_i32 = builder.inst_results(call)[0];
-            // Convert i32 (0 or 1) to f64
-            Ok(builder.ins().fcvt_from_sint(types::F64, result_i32))
+            // Convert i32 (0 or 1) to NaN-boxed boolean
+            Ok(i32_to_nanbox_bool(builder, result_i32))
         }
         Expr::SetSize(set) => {
             // Get set pointer - if it's a local set variable, use directly as i64
@@ -5972,20 +5978,34 @@ pub(crate) fn compile_expr(
                 UnaryOp::Not => {
                     // Check if operand might be a string/pointer/NaN-boxed value
                     // In those cases, use js_is_truthy for correct falsiness (e.g., "" is falsy)
-                    let needs_truthy_check = match operand.as_ref() {
-                        Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string || i.is_pointer || i.is_union || i.is_bigint || i.is_boolean).unwrap_or(false),
-                        Expr::Call { .. } | Expr::PropertyGet { .. } | Expr::IndexGet { .. } | Expr::StaticMethodCall { .. } => true,
-                        Expr::BigInt(_) | Expr::BigIntCoerce(_) => true,
-                        // String literals are NaN-boxed — must use js_is_truthy (empty string is falsy)
-                        Expr::String(_) | Expr::StringCoerce(_) => true,
-                        // Comparisons and boolean expressions return NaN-boxed booleans
-                        Expr::Compare { .. } | Expr::Bool(_) => true,
-                        // 'in' operator returns NaN-boxed TAG_TRUE/TAG_FALSE
-                        Expr::In { .. } => true,
-                        // Unary not on another not (double negation) needs truthy check
-                        Expr::Unary { op: UnaryOp::Not, .. } => true,
-                        _ => false,
-                    };
+                    fn expr_yields_nanboxed(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                        match expr {
+                            Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string || i.is_pointer || i.is_union || i.is_bigint || i.is_boolean).unwrap_or(false),
+                            Expr::Call { .. } | Expr::PropertyGet { .. } | Expr::IndexGet { .. } | Expr::StaticMethodCall { .. } => true,
+                            Expr::BigInt(_) | Expr::BigIntCoerce(_) => true,
+                            Expr::String(_) | Expr::StringCoerce(_) => true,
+                            Expr::Compare { .. } | Expr::Bool(_) => true,
+                            Expr::In { .. } => true,
+                            Expr::Unary { op: UnaryOp::Not, .. } => true,
+                            Expr::Null | Expr::Undefined => true,
+                            Expr::Array(_) | Expr::ArraySpread(_) | Expr::Object(_) | Expr::New { .. } => true,
+                            Expr::BooleanCoerce(_) | Expr::IsNaN(_) | Expr::IsFinite(_) => true,
+                            Expr::NumberIsNaN(_) | Expr::NumberIsFinite(_) | Expr::NumberIsInteger(_) | Expr::NumberIsSafeInteger(_) => true,
+                            // String concatenation: if either side is a string, the result is a string.
+                            Expr::Binary { op: BinaryOp::Add, left, right } => {
+                                expr_yields_nanboxed(left, locals) || expr_yields_nanboxed(right, locals)
+                            }
+                            // Logical/conditional may yield any of their operand types.
+                            Expr::Logical { left, right, .. } => {
+                                expr_yields_nanboxed(left, locals) || expr_yields_nanboxed(right, locals)
+                            }
+                            Expr::Conditional { then_expr, else_expr, .. } => {
+                                expr_yields_nanboxed(then_expr, locals) || expr_yields_nanboxed(else_expr, locals)
+                            }
+                            _ => false,
+                        }
+                    }
+                    let needs_truthy_check = expr_yields_nanboxed(operand.as_ref(), locals);
                     // ! always returns a boolean in JS
                     const NOT_TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
                     const NOT_TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
@@ -6000,9 +6020,15 @@ pub(crate) fn compile_expr(
                         let is_falsy = builder.ins().icmp_imm(IntCC::Equal, is_truthy, 0);
                         Ok(builder.ins().select(is_falsy, true_val, false_val))
                     } else {
+                        // For plain numeric values, JS falsy = 0, -0, or NaN.
+                        // is_zero = (val == 0) — fcmp Equal is false for NaN
+                        // is_nan  = (val != val)
+                        // is_falsy = is_zero || is_nan
                         let zero = builder.ins().f64const(0.0);
                         let is_zero = builder.ins().fcmp(FloatCC::Equal, val, zero);
-                        Ok(builder.ins().select(is_zero, true_val, false_val))
+                        let is_nan = builder.ins().fcmp(FloatCC::NotEqual, val, val);
+                        let is_falsy = builder.ins().bor(is_zero, is_nan);
+                        Ok(builder.ins().select(is_falsy, true_val, false_val))
                     }
                 }
                 UnaryOp::BitNot => {
@@ -6253,36 +6279,42 @@ pub(crate) fn compile_expr(
                     _ => Err(anyhow!("Invalid null comparison operator")),
                 }
             } else if is_null_compare {
-                // F64 null comparison implementing JS loose equality: null == undefined is true
-                // null = TAG_NULL (0x7FFC_0000_0000_0002), undefined = TAG_UNDEFINED (0x7FFC_0000_0000_0001)
-                // Both are specific NaN-boxed bit patterns, so use integer comparison
+                // TypeScript `===`/`!==` is STRICT — null !== undefined.
+                // null = TAG_NULL (0x7FFC_0000_0000_0002), undefined = TAG_UNDEFINED (0x7FFC_0000_0000_0001).
+                // For strict equality, we compare the exact bit pattern of the value against the
+                // specific tag of the literal (null or undefined).
                 let lhs_f64 = ensure_f64(builder, lhs);
                 let rhs_f64 = ensure_f64(builder, rhs);
 
-                // Determine which side is the null/undefined literal and which is the value
-                let is_lhs_null = matches!(left.as_ref(), Expr::Null | Expr::Undefined);
-                let value_f64 = if is_lhs_null { rhs_f64 } else { lhs_f64 };
+                let is_lhs_null_lit = matches!(left.as_ref(), Expr::Null);
+                let is_lhs_undef_lit = matches!(left.as_ref(), Expr::Undefined);
+                let is_rhs_null_lit = matches!(right.as_ref(), Expr::Null);
+                let is_rhs_undef_lit = matches!(right.as_ref(), Expr::Undefined);
 
-                // Use raw bitcast (NOT ensure_i64 which strips top 16 tag bits)
+                // Determine which literal tag we're comparing against, and which side is the value.
+                // If both sides are literals, pick a tag from the left and compare against the right.
+                let (value_f64, expected_tag): (Value, u64) = if is_lhs_null_lit {
+                    (rhs_f64, 0x7FFC_0000_0000_0002)
+                } else if is_lhs_undef_lit {
+                    (rhs_f64, 0x7FFC_0000_0000_0001)
+                } else if is_rhs_null_lit {
+                    (lhs_f64, 0x7FFC_0000_0000_0002)
+                } else if is_rhs_undef_lit {
+                    (lhs_f64, 0x7FFC_0000_0000_0001)
+                } else {
+                    // Shouldn't happen, is_null_compare guarantees one side is null/undefined.
+                    (lhs_f64, 0x7FFC_0000_0000_0001)
+                };
+
                 let val_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), value_f64);
-
-                // Check 1: value == TAG_NULL (0x7FFC_0000_0000_0002)
-                let null_const = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0002u64 as i64);
-                let is_null = builder.ins().icmp(IntCC::Equal, val_i64, null_const);
-
-                // Check 2: value == TAG_UNDEFINED (0x7FFC_0000_0000_0001)
-                let undef_const = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0001u64 as i64);
-                let is_undefined = builder.ins().icmp(IntCC::Equal, val_i64, undef_const);
-
-                // Combine: value == null || value == undefined
-                let is_nullish = builder.ins().bor(is_null, is_undefined);
+                let tag_const = builder.ins().iconst(types::I64, expected_tag as i64);
+                let is_match = builder.ins().icmp(IntCC::Equal, val_i64, tag_const);
 
                 match op {
-                    CompareOp::Eq => Ok(builder.ins().select(is_nullish, one, zero)),
+                    CompareOp::Eq => Ok(builder.ins().select(is_match, one, zero)),
                     CompareOp::Ne => {
-                        // NOT nullish
-                        let not_nullish = builder.ins().bxor_imm(is_nullish, 1);
-                        Ok(builder.ins().select(not_nullish, one, zero))
+                        let not_match = builder.ins().bxor_imm(is_match, 1);
+                        Ok(builder.ins().select(not_match, one, zero))
                     }
                     _ => Err(anyhow!("Invalid null comparison operator")),
                 }
@@ -6584,14 +6616,28 @@ pub(crate) fn compile_expr(
                     let lhs = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, left, this_ctx)?;
                     let lhs_type = builder.func.dfg.value_type(lhs);
 
+                    // Detect whether lhs is a string (I64 raw string pointer) — empty strings
+                    // are JS-falsy even though the pointer is non-null.
+                    let lhs_is_string = matches!(left.as_ref(), Expr::String(_) | Expr::StringCoerce(_))
+                        || match left.as_ref() {
+                            Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
+                            _ => false,
+                        };
+
                     // Check if lhs is truthy - handle both f64 and i64 types
                     // Use js_is_truthy for f64 to handle undefined/null/NaN/empty string
-                    let lhs_bool = if lhs_type == types::I64 {
+                    let lhs_bool = if lhs_type == types::I64 && !lhs_is_string {
                         // For i64 (pointers), null is 0 and non-null objects are truthy
                         let zero_i64 = builder.ins().iconst(types::I64, 0);
                         builder.ins().icmp(IntCC::NotEqual, lhs, zero_i64)
                     } else {
-                        let lhs_f64 = ensure_f64(builder, lhs);
+                        // For strings or F64, use js_is_truthy (handles "" as falsy).
+                        // NaN-box I64 strings before the call.
+                        let lhs_f64 = if lhs_type == types::I64 {
+                            inline_nanbox_string(builder, lhs)
+                        } else {
+                            lhs
+                        };
                         let truthy_func = extern_funcs.get("js_is_truthy")
                             .ok_or_else(|| anyhow!("js_is_truthy not declared"))?;
                         let truthy_ref = module.declare_func_in_func(*truthy_func, builder.func);
@@ -7325,8 +7371,8 @@ pub(crate) fn compile_expr(
                         let call = builder.ins().call(func_ref, &[arr_ptr, search_f64]);
                         let result = builder.inst_results(call)[0];
 
-                        // Convert i32 (0 or 1) to f64
-                        return Ok(builder.ins().fcvt_from_sint(types::F64, result));
+                        // Convert i32 (0 or 1) to NaN-boxed boolean
+                        return Ok(i32_to_nanbox_bool(builder, result));
                     }
 
                     // Handle console.log
@@ -9234,7 +9280,8 @@ pub(crate) fn compile_expr(
                                                 .ok_or_else(|| anyhow!("js_map_has not declared"))?;
                                             let func_ref = module.declare_func_in_func(*has_func, builder.func);
                                             let call = builder.ins().call(func_ref, &[map_ptr, key]);
-                                            return Ok(builder.inst_results(call)[0]);
+                                            let result_i32 = builder.inst_results(call)[0];
+                                            return Ok(i32_to_nanbox_bool(builder, result_i32));
                                         }
                                     }
                                     "delete" => {
@@ -9245,7 +9292,8 @@ pub(crate) fn compile_expr(
                                                 .ok_or_else(|| anyhow!("js_map_delete not declared"))?;
                                             let func_ref = module.declare_func_in_func(*delete_func, builder.func);
                                             let call = builder.ins().call(func_ref, &[map_ptr, key]);
-                                            return Ok(builder.inst_results(call)[0]);
+                                            let result_i32 = builder.inst_results(call)[0];
+                                            return Ok(i32_to_nanbox_bool(builder, result_i32));
                                         }
                                     }
                                     "clear" => {
@@ -9326,8 +9374,7 @@ pub(crate) fn compile_expr(
                                             let func_ref = module.declare_func_in_func(*has_func, builder.func);
                                             let call = builder.ins().call(func_ref, &[set_ptr, value]);
                                             let result_i32 = builder.inst_results(call)[0];
-                                            // Convert i32 boolean to NaN-boxed f64 boolean
-                                            return Ok(builder.ins().fcvt_from_sint(types::F64, result_i32));
+                                            return Ok(i32_to_nanbox_bool(builder, result_i32));
                                         }
                                     }
                                     "delete" => {
@@ -9339,8 +9386,7 @@ pub(crate) fn compile_expr(
                                             let func_ref = module.declare_func_in_func(*delete_func, builder.func);
                                             let call = builder.ins().call(func_ref, &[set_ptr, value]);
                                             let result_i32 = builder.inst_results(call)[0];
-                                            // Convert i32 boolean to NaN-boxed f64 boolean
-                                            return Ok(builder.ins().fcvt_from_sint(types::F64, result_i32));
+                                            return Ok(i32_to_nanbox_bool(builder, result_i32));
                                         }
                                     }
                                     "clear" => {
@@ -9869,7 +9915,7 @@ pub(crate) fn compile_expr(
                                                             let func_ref = module.declare_func_in_func(*has_func, builder.func);
                                                             let call = builder.ins().call(func_ref, &[ptr, key]);
                                                             let result_i32 = builder.inst_results(call)[0];
-                                                            return Ok(builder.ins().fcvt_from_sint(types::F64, result_i32));
+                                                            return Ok(i32_to_nanbox_bool(builder, result_i32));
                                                         }
                                                     }
                                                     "delete" => {
@@ -9880,7 +9926,7 @@ pub(crate) fn compile_expr(
                                                             let func_ref = module.declare_func_in_func(*delete_func, builder.func);
                                                             let call = builder.ins().call(func_ref, &[ptr, key]);
                                                             let result_i32 = builder.inst_results(call)[0];
-                                                            return Ok(builder.ins().fcvt_from_sint(types::F64, result_i32));
+                                                            return Ok(i32_to_nanbox_bool(builder, result_i32));
                                                         }
                                                     }
                                                     "clear" => {
@@ -9950,7 +9996,7 @@ pub(crate) fn compile_expr(
                                                             let func_ref = module.declare_func_in_func(*has_func, builder.func);
                                                             let call = builder.ins().call(func_ref, &[ptr, value]);
                                                             let result_i32 = builder.inst_results(call)[0];
-                                                            return Ok(builder.ins().fcvt_from_sint(types::F64, result_i32));
+                                                            return Ok(i32_to_nanbox_bool(builder, result_i32));
                                                         }
                                                     }
                                                     "delete" => {
@@ -9961,7 +10007,7 @@ pub(crate) fn compile_expr(
                                                             let func_ref = module.declare_func_in_func(*delete_func, builder.func);
                                                             let call = builder.ins().call(func_ref, &[ptr, value]);
                                                             let result_i32 = builder.inst_results(call)[0];
-                                                            return Ok(builder.ins().fcvt_from_sint(types::F64, result_i32));
+                                                            return Ok(i32_to_nanbox_bool(builder, result_i32));
                                                         }
                                                     }
                                                     "clear" => {
@@ -10413,13 +10459,11 @@ pub(crate) fn compile_expr(
                                         let func_ref = module.declare_func_in_func(*index_of_func, builder.func);
                                         let call = builder.ins().call(func_ref, &[str_ptr, needle_ptr]);
                                         let index_i32 = builder.inst_results(call)[0];
-                                        // includes returns true if index >= 0
+                                        // includes returns true if index >= 0 — return NaN-boxed boolean
                                         let zero = builder.ins().iconst(types::I32, 0);
                                         let is_found = builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, index_i32, zero);
-                                        // Convert i8 bool to f64 (1.0 or 0.0)
                                         let extended = builder.ins().uextend(types::I32, is_found);
-                                        let result_f64 = builder.ins().fcvt_from_sint(types::F64, extended);
-                                        return Ok(result_f64);
+                                        return Ok(i32_to_nanbox_bool(builder, extended));
                                     }
                                 }
                                 "split" => {
@@ -10460,8 +10504,8 @@ pub(crate) fn compile_expr(
                                         let func_ref = module.declare_func_in_func(*func, builder.func);
                                         let call = builder.ins().call(func_ref, &[str_ptr, prefix_ptr]);
                                         let result_i32 = builder.inst_results(call)[0];
-                                        let result_f64 = builder.ins().fcvt_from_sint(types::F64, result_i32);
-                                        return Ok(result_f64);
+                                        // Convert i32 to NaN-boxed boolean
+                                        return Ok(i32_to_nanbox_bool(builder, result_i32));
                                     }
                                 }
                                 "endsWith" => {
@@ -10479,8 +10523,8 @@ pub(crate) fn compile_expr(
                                         let func_ref = module.declare_func_in_func(*func, builder.func);
                                         let call = builder.ins().call(func_ref, &[str_ptr, suffix_ptr]);
                                         let result_i32 = builder.inst_results(call)[0];
-                                        let result_f64 = builder.ins().fcvt_from_sint(types::F64, result_i32);
-                                        return Ok(result_f64);
+                                        // Convert i32 to NaN-boxed boolean
+                                        return Ok(i32_to_nanbox_bool(builder, result_i32));
                                     }
                                 }
                                 "replace" | "replaceAll" => {
@@ -10769,7 +10813,7 @@ pub(crate) fn compile_expr(
                                 let func_ref = module.declare_func_in_func(*func, builder.func);
                                 let call = builder.ins().call(func_ref, &[arr_ptr, value]);
                                 let result_i32 = builder.inst_results(call)[0];
-                                return Ok(builder.ins().fcvt_from_sint(types::F64, result_i32));
+                                return Ok(i32_to_nanbox_bool(builder, result_i32));
                             }
                         }
                         "slice" => {
@@ -23009,6 +23053,44 @@ pub(crate) fn compile_expr(
                 .ok_or_else(|| anyhow!("js_is_finite not declared"))?;
             let isfinite_ref = module.declare_func_in_func(*isfinite_func, builder.func);
             let call = builder.ins().call(isfinite_ref, &[val_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::NumberIsNaN(value) => {
+            // Number.isNaN: returns true only if value is actually NaN (no coercion).
+            // Delegates to runtime which handles NaN-box tag checks correctly.
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
+            let val_f64 = ensure_f64(builder, val);
+            let func = extern_funcs.get("js_number_is_nan")
+                .ok_or_else(|| anyhow!("js_number_is_nan not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::NumberIsFinite(value) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
+            let val_f64 = ensure_f64(builder, val);
+            let func = extern_funcs.get("js_number_is_finite")
+                .ok_or_else(|| anyhow!("js_number_is_finite not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::NumberIsInteger(value) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
+            let val_f64 = ensure_f64(builder, val);
+            let func = extern_funcs.get("js_number_is_integer")
+                .ok_or_else(|| anyhow!("js_number_is_integer not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::NumberIsSafeInteger(value) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
+            let val_f64 = ensure_f64(builder, val);
+            let func = extern_funcs.get("js_number_is_safe_integer")
+                .ok_or_else(|| anyhow!("js_number_is_safe_integer not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
             Ok(builder.inst_results(call)[0])
         }
 

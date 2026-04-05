@@ -996,7 +996,13 @@ pub extern "C" fn js_string_coerce(value: f64) -> *mut StringHeader {
     } else {
         // Regular number
         let n = value;
-        if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
+        if n.is_nan() {
+            "NaN".to_string()
+        } else if n.is_infinite() {
+            if n > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
+        } else if n == 0.0 {
+            "0".to_string()
+        } else if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
             (n as i64).to_string()
         } else {
             n.to_string()
@@ -1048,7 +1054,14 @@ pub extern "C" fn js_is_nan(value: f64) -> f64 {
         value
     };
 
-    if num.is_nan() { 1.0 } else { 0.0 }
+    // Return NaN-boxed boolean (TAG_TRUE / TAG_FALSE)
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+    if num.is_nan() {
+        f64::from_bits(TAG_TRUE)
+    } else {
+        f64::from_bits(TAG_FALSE)
+    }
 }
 
 /// isFinite(value) -> boolean
@@ -1093,7 +1106,83 @@ pub extern "C" fn js_is_finite(value: f64) -> f64 {
         value
     };
 
-    if num.is_finite() { 1.0 } else { 0.0 }
+    // Return NaN-boxed boolean (TAG_TRUE / TAG_FALSE)
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+    if num.is_finite() {
+        f64::from_bits(TAG_TRUE)
+    } else {
+        f64::from_bits(TAG_FALSE)
+    }
+}
+
+const NB_TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+const NB_TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+
+/// Number.isNaN(value) -> boolean (strict, no coercion)
+/// Returns true only if value is a plain number AND that number is NaN.
+#[no_mangle]
+pub extern "C" fn js_number_is_nan(value: f64) -> f64 {
+    let jsval = JSValue::from_bits(value.to_bits());
+    // Strict: only plain numbers can be NaN. Any NaN-boxed tag type => false.
+    if !jsval.is_number() {
+        return f64::from_bits(NB_TAG_FALSE);
+    }
+    let n = jsval.as_number();
+    if n.is_nan() {
+        f64::from_bits(NB_TAG_TRUE)
+    } else {
+        f64::from_bits(NB_TAG_FALSE)
+    }
+}
+
+/// Number.isFinite(value) -> boolean (strict, no coercion)
+/// Returns true only if value is a plain finite number.
+#[no_mangle]
+pub extern "C" fn js_number_is_finite(value: f64) -> f64 {
+    let jsval = JSValue::from_bits(value.to_bits());
+    if !jsval.is_number() {
+        return f64::from_bits(NB_TAG_FALSE);
+    }
+    let n = jsval.as_number();
+    if n.is_finite() {
+        f64::from_bits(NB_TAG_TRUE)
+    } else {
+        f64::from_bits(NB_TAG_FALSE)
+    }
+}
+
+/// Number.isInteger(value) -> boolean
+/// Returns true if value is a finite number with no fractional part.
+#[no_mangle]
+pub extern "C" fn js_number_is_integer(value: f64) -> f64 {
+    let jsval = JSValue::from_bits(value.to_bits());
+    if !jsval.is_number() {
+        return f64::from_bits(NB_TAG_FALSE);
+    }
+    let n = jsval.as_number();
+    if n.is_finite() && n.floor() == n {
+        f64::from_bits(NB_TAG_TRUE)
+    } else {
+        f64::from_bits(NB_TAG_FALSE)
+    }
+}
+
+/// Number.isSafeInteger(value) -> boolean
+/// Returns true if value is an integer within ±(2^53 - 1).
+#[no_mangle]
+pub extern "C" fn js_number_is_safe_integer(value: f64) -> f64 {
+    let jsval = JSValue::from_bits(value.to_bits());
+    if !jsval.is_number() {
+        return f64::from_bits(NB_TAG_FALSE);
+    }
+    let n = jsval.as_number();
+    const MAX_SAFE: f64 = 9007199254740991.0;
+    if n.is_finite() && n.floor() == n && n.abs() <= MAX_SAFE {
+        f64::from_bits(NB_TAG_TRUE)
+    } else {
+        f64::from_bits(NB_TAG_FALSE)
+    }
 }
 
 /// Debug trace for module initialization order.

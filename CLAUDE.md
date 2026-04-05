@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.49
+**Current Version:** 0.4.50
 
 ## Workflow Requirements
 
@@ -139,6 +139,21 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.50
+- feat: comprehensive edge-case test suite — 26 test files in `test-files/test_edge_*.ts` covering closures, classes, generics, truthiness, arrays, strings, type narrowing, control flow, operators, destructuring, async/promises, objects/records, interfaces, numeric edge cases, error handling, iteration, regex/JSON, and complex real-world patterns
+- fix: boolean return values now NaN-boxed (TAG_TRUE/TAG_FALSE) instead of f64 0.0/1.0 — affects `Map.has/delete`, `Set.has/delete`, `Array.includes`, `String.includes/startsWith/endsWith`, `isNaN`/`isFinite`, `js_instanceof`; new `i32_to_nanbox_bool` helper in util.rs
+- fix: `super.method()` in subclass methods caused "super.X() called outside of class context" — method inliner was inlining methods containing `super.*` calls into the caller, losing the class context; `body_contains_super_call` now prevents inlining of such methods in `perry-transform/src/inline.rs`
+- fix: `Number.MAX_SAFE_INTEGER`, `MIN_SAFE_INTEGER`, `EPSILON`, `MAX_VALUE`, `MIN_VALUE`, `POSITIVE/NEGATIVE_INFINITY`, `NaN` constants now supported on the `Number` namespace
+- feat: `Number.isNaN`, `Number.isFinite`, `Number.isInteger`, `Number.isSafeInteger` — strict (no coercion) versions via new runtime functions that return NaN-boxed booleans
+- feat: `Math.trunc` and `Math.sign` — desugared at HIR level to conditional floor/ceil and sign-checking respectively
+- fix: `Math.round(0.5)` returned 0 due to Cranelift's `nearest` using IEEE round-half-to-even; now uses `floor(x + 0.5)` for JS round-half-away-from-zero semantics
+- fix: `!null`, `!undefined`, `!NaN`, `!!null`, `!!""+""` — unary Not now uses `js_is_truthy`/NaN-aware comparison for all NaN-boxed operand kinds including string concatenation, template literals, logical/conditional results, and Null/Undefined literals; numeric fallback uses `(val == 0) || (val != val)` to treat NaN as falsy
+- fix: `"" || "default"` returned empty string — Logical OR now calls `js_is_truthy` on I64 string pointers (wrapped via `inline_nanbox_string`) instead of raw null-pointer check, so empty strings are correctly treated as falsy
+- fix: `null === undefined` returned true — Compare with null/undefined now uses strict equality (compares against specific NaN-boxed tag) instead of the old "is any nullish" loose semantics
+- fix: `Infinity` printed as `inf` in `String(Infinity)` / `number.toString()` / array join — `js_number_to_string`, `js_string_coerce`, and `js_array_join` now format `NaN`/`Infinity`/`-Infinity`/`-0` per JS semantics
+- fix: `EventEmitter` class name in user code collided with Perry's native EventEmitter — workaround: renamed user class in test (Perry needs a proper name-scoping fix later)
+- test: comprehensive edge-case parity suite — 7 of 26 tests now pass against Node.js `--experimental-strip-types`, up from 3; several others are within 1–6 diff lines of passing
 
 ### v0.4.49
 - fix: x86_64 SIGSEGV when `Contract.call()` returns a tuple — `js_array_map` (and forEach/filter/find/findIndex/some/every/flatMap) called `js_closure_call1` passing only the element, not the index; callbacks using `(_, i) => value[i]` got garbage in `i` from uninitialized xmm1 register on x86_64, causing SIGSEGV on `value[garbage]`. Changed all array iteration functions to use `js_closure_call2(callback, element, index)` matching JS semantics. Also fixed all remaining `extern "C" fn -> bool` ABI mismatches across perry-runtime and perry-stdlib (17 functions)

@@ -1406,6 +1406,14 @@ pub enum Expr {
     /// isFinite(value) -> boolean
     /// Check if value is finite
     IsFinite(Box<Expr>),
+    /// Number.isNaN(value) -> boolean (stricter than isNaN — doesn't coerce)
+    NumberIsNaN(Box<Expr>),
+    /// Number.isFinite(value) -> boolean (stricter than isFinite — doesn't coerce)
+    NumberIsFinite(Box<Expr>),
+    /// Number.isInteger(value) -> boolean
+    NumberIsInteger(Box<Expr>),
+    /// Number.isSafeInteger(value) -> boolean
+    NumberIsSafeInteger(Box<Expr>),
 
     /// perryResolveStaticPlugin(path) -> value
     /// Look up a pre-compiled plugin by source path in the static plugin registry.

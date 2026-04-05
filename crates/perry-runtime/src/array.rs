@@ -1231,7 +1231,13 @@ pub extern "C" fn js_array_join(arr: *const ArrayHeader, separator: *const crate
                 }
             } else if jsvalue.is_number() {
                 let n = jsvalue.as_number();
-                if n.fract() == 0.0 && n.abs() < 1e15 {
+                if n.is_nan() {
+                    result.push_str("NaN");
+                } else if n.is_infinite() {
+                    result.push_str(if n > 0.0 { "Infinity" } else { "-Infinity" });
+                } else if n == 0.0 {
+                    result.push('0');
+                } else if n.fract() == 0.0 && n.abs() < 1e15 {
                     result.push_str(&format!("{}", n as i64));
                 } else {
                     result.push_str(&format!("{}", n));

@@ -133,7 +133,67 @@ fn is_inlinable(func: &Function) -> bool {
         return false;
     }
 
+    // Don't inline methods containing super.method() or super() calls.
+    // These rely on the enclosing class context (ThisContext with parent_class)
+    // which is lost once the body is inlined into the caller.
+    if body_contains_super_call(&func.body) {
+        return false;
+    }
+
     true
+}
+
+/// Check if a body contains Expr::SuperCall or Expr::SuperMethodCall (recursively).
+fn body_contains_super_call(stmts: &[Stmt]) -> bool {
+    fn check_expr(expr: &Expr) -> bool {
+        match expr {
+            Expr::SuperCall(_) | Expr::SuperMethodCall { .. } => true,
+            Expr::Binary { left, right, .. } | Expr::Logical { left, right, .. } |
+            Expr::Compare { left, right, .. } => {
+                check_expr(left) || check_expr(right)
+            }
+            Expr::Unary { operand, .. } => check_expr(operand),
+            Expr::Conditional { condition, then_expr, else_expr } => {
+                check_expr(condition) || check_expr(then_expr) || check_expr(else_expr)
+            }
+            Expr::Call { callee, args, .. } => {
+                check_expr(callee) || args.iter().any(|a| check_expr(a))
+            }
+            Expr::Array(elements) => elements.iter().any(|e| check_expr(e)),
+            Expr::IndexGet { object, index } => check_expr(object) || check_expr(index),
+            Expr::IndexSet { object, index, value } => {
+                check_expr(object) || check_expr(index) || check_expr(value)
+            }
+            Expr::PropertyGet { object, .. } => check_expr(object),
+            Expr::PropertySet { object, value, .. } => check_expr(object) || check_expr(value),
+            Expr::LocalSet(_, value) => check_expr(value),
+            _ => false,
+        }
+    }
+
+    fn check_stmt(stmt: &Stmt) -> bool {
+        match stmt {
+            Stmt::Let { init: Some(expr), .. } => check_expr(expr),
+            Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => check_expr(expr),
+            Stmt::If { condition, then_branch, else_branch } => {
+                check_expr(condition)
+                    || then_branch.iter().any(check_stmt)
+                    || else_branch.as_ref().map_or(false, |b| b.iter().any(check_stmt))
+            }
+            Stmt::While { condition, body } => {
+                check_expr(condition) || body.iter().any(check_stmt)
+            }
+            Stmt::For { init, condition, update, body } => {
+                init.as_ref().map_or(false, |i| check_stmt(i))
+                    || condition.as_ref().map_or(false, |c| check_expr(c))
+                    || update.as_ref().map_or(false, |u| check_expr(u))
+                    || body.iter().any(check_stmt)
+            }
+            _ => false,
+        }
+    }
+
+    stmts.iter().any(check_stmt)
 }
 
 /// Check if statements contain a closure that captures any of the given local IDs

@@ -1477,9 +1477,14 @@ pub extern "C" fn js_object_rest(src: *const ObjectHeader, exclude_keys: *const 
 
 /// Check if a value is an instance of a class with the given class_id
 /// Walks the inheritance chain to check parent classes
-/// Returns 1.0 for true, 0.0 for false
+/// Returns NaN-boxed TAG_TRUE / TAG_FALSE so the result identifies as a boolean.
 #[no_mangle]
 pub extern "C" fn js_instanceof(value: f64, class_id: u32) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+    let true_val = f64::from_bits(TAG_TRUE);
+    let false_val = f64::from_bits(TAG_FALSE);
+
     let bits = value.to_bits();
     let jsval = crate::JSValue::from_bits(bits);
 
@@ -1492,35 +1497,35 @@ pub extern "C" fn js_instanceof(value: f64, class_id: u32) -> f64 {
         if jsval.is_pointer() {
             let addr = (bits & 0x0000_FFFF_FFFF_FFFF) as usize;
             if crate::buffer::is_registered_buffer(addr) {
-                return 1.0;
+                return true_val;
             }
         }
         // Check if raw pointer (buffer values are bitcast, not NaN-boxed)
         let top16 = (bits >> 48) as u16;
         if top16 == 0 && bits >= 0x1000 {
             if crate::buffer::is_registered_buffer(bits as usize) {
-                return 1.0;
+                return true_val;
             }
         }
-        return 0.0;
+        return false_val;
     }
 
     // Only objects (pointers) can be instances of classes
     if !jsval.is_pointer() {
-        return 0.0;
+        return false_val;
     }
 
     // Get the object pointer
     let obj_ptr = jsval.as_pointer::<ObjectHeader>();
     if obj_ptr.is_null() {
-        return 0.0;
+        return false_val;
     }
 
     unsafe {
         // Check if the object's class_id matches directly
         let obj_class_id = (*obj_ptr).class_id;
         if obj_class_id == class_id {
-            return 1.0;
+            return true_val;
         }
 
         // Walk up the inheritance chain using the class registry
@@ -1530,12 +1535,12 @@ pub extern "C" fn js_instanceof(value: f64, class_id: u32) -> f64 {
                 break;
             }
             if parent_id == class_id {
-                return 1.0;
+                return true_val;
             }
             current_class = parent_id;
         }
 
-        0.0
+        false_val
     }
 }
 

@@ -3024,6 +3024,44 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                 return Ok(Expr::MathRound(Box::new(args.into_iter().next().unwrap())));
                                             }
                                         }
+                                        "trunc" => {
+                                            // Math.trunc(x) = x >= 0 ? floor(x) : ceil(x)
+                                            if args.len() >= 1 {
+                                                let arg = args.into_iter().next().unwrap();
+                                                return Ok(Expr::Conditional {
+                                                    condition: Box::new(Expr::Compare {
+                                                        op: crate::CompareOp::Ge,
+                                                        left: Box::new(arg.clone()),
+                                                        right: Box::new(Expr::Number(0.0)),
+                                                    }),
+                                                    then_expr: Box::new(Expr::MathFloor(Box::new(arg.clone()))),
+                                                    else_expr: Box::new(Expr::MathCeil(Box::new(arg))),
+                                                });
+                                            }
+                                        }
+                                        "sign" => {
+                                            // Math.sign(x) = x > 0 ? 1 : x < 0 ? -1 : 0 (or x for NaN)
+                                            if args.len() >= 1 {
+                                                let arg = args.into_iter().next().unwrap();
+                                                return Ok(Expr::Conditional {
+                                                    condition: Box::new(Expr::Compare {
+                                                        op: crate::CompareOp::Gt,
+                                                        left: Box::new(arg.clone()),
+                                                        right: Box::new(Expr::Number(0.0)),
+                                                    }),
+                                                    then_expr: Box::new(Expr::Number(1.0)),
+                                                    else_expr: Box::new(Expr::Conditional {
+                                                        condition: Box::new(Expr::Compare {
+                                                            op: crate::CompareOp::Lt,
+                                                            left: Box::new(arg.clone()),
+                                                            right: Box::new(Expr::Number(0.0)),
+                                                        }),
+                                                        then_expr: Box::new(Expr::Number(-1.0)),
+                                                        else_expr: Box::new(arg),
+                                                    }),
+                                                });
+                                            }
+                                        }
                                         "abs" => {
                                             if args.len() >= 1 {
                                                 return Ok(Expr::MathAbs(Box::new(args.into_iter().next().unwrap())));
@@ -3116,6 +3154,36 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                 let y = args_iter.next().unwrap();
                                                 let x = args_iter.next().unwrap();
                                                 return Ok(Expr::MathAtan2(Box::new(y), Box::new(x)));
+                                            }
+                                        }
+                                        _ => {} // Fall through to generic handling
+                                    }
+                                }
+                            }
+
+                            // Check for Number.methodName() static calls
+                            if obj_ident.sym.as_ref() == "Number" {
+                                if let ast::MemberProp::Ident(method_ident) = &member.prop {
+                                    let method_name = method_ident.sym.as_ref();
+                                    match method_name {
+                                        "isNaN" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::NumberIsNaN(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        "isFinite" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::NumberIsFinite(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        "isInteger" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::NumberIsInteger(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        "isSafeInteger" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::NumberIsSafeInteger(Box::new(args.into_iter().next().unwrap())));
                                             }
                                         }
                                         _ => {} // Fall through to generic handling
@@ -4986,6 +5054,28 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                             "LOG10E" => Some(std::f64::consts::LOG10_E),
                             "SQRT2" => Some(std::f64::consts::SQRT_2),
                             "SQRT1_2" => Some(std::f64::consts::FRAC_1_SQRT_2),
+                            _ => None,
+                        };
+                        if let Some(v) = val {
+                            return Ok(Expr::Number(v));
+                        }
+                    }
+                }
+            }
+
+            // Check for Number constants (e.g., Number.MAX_SAFE_INTEGER)
+            if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
+                if obj_ident.sym.as_ref() == "Number" {
+                    if let ast::MemberProp::Ident(prop_ident) = &member.prop {
+                        let val = match prop_ident.sym.as_ref() {
+                            "MAX_SAFE_INTEGER" => Some(9007199254740991.0),
+                            "MIN_SAFE_INTEGER" => Some(-9007199254740991.0),
+                            "MAX_VALUE" => Some(f64::MAX),
+                            "MIN_VALUE" => Some(f64::MIN_POSITIVE),
+                            "EPSILON" => Some(f64::EPSILON),
+                            "POSITIVE_INFINITY" => Some(f64::INFINITY),
+                            "NEGATIVE_INFINITY" => Some(f64::NEG_INFINITY),
+                            "NaN" => Some(f64::NAN),
                             _ => None,
                         };
                         if let Some(v) = val {

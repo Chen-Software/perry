@@ -3,11 +3,25 @@ target/
 *.o
 *.app/
 
-# Compiled test executables (no extension)
-test_*
-test-*
-!test_*.ts
-!test-*.ts
+# Compiled test executables in the project root (no extension)
+/test_*
+/test-*
+!/test_*.ts
+!/test-*.ts
+# Re-include the test source directories
+!test-files/
+!tests/
+# But ignore compiled test binaries (no extension) inside them
+test-files/test_*
+test-files/test-*
+!test-files/test_*.ts
+!test-files/test-*.ts
+!test-files/*/
+tests/test_*
+tests/test-*
+!tests/test_*.ts
+!tests/test-*.ts
+!tests/*/
 bench_*
 !bench_*.ts
 

@@ -375,6 +375,18 @@ pub(crate) fn inline_nanbox_string(builder: &mut FunctionBuilder, ptr: Value) ->
     builder.ins().bitcast(types::F64, MemFlags::new(), tagged)
 }
 
+/// Convert an i32 boolean (0 or 1) into a NaN-boxed f64 boolean (TAG_FALSE / TAG_TRUE).
+/// Use this for runtime functions that return i32 booleans so the result properly
+/// identifies as a boolean to console.log and equality comparisons.
+pub(crate) fn i32_to_nanbox_bool(builder: &mut FunctionBuilder, val_i32: Value) -> Value {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+    let is_true = builder.ins().icmp_imm(IntCC::NotEqual, val_i32, 0);
+    let true_val = builder.ins().f64const(f64::from_bits(TAG_TRUE));
+    let false_val = builder.ins().f64const(f64::from_bits(TAG_FALSE));
+    builder.ins().select(is_true, true_val, false_val)
+}
+
 /// Inline extract raw pointer from NaN-boxed string.
 /// Equivalent to `js_get_string_pointer_unified(val)` for values known to be NaN-boxed strings.
 /// val must be F64, returns I64.
