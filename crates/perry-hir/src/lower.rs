@@ -85,6 +85,21 @@ pub struct LoweringContext {
     /// Module-level variable names pre-registered in the forward-declaration pass.
     /// Used to avoid duplicate define_local calls when the actual declaration is lowered.
     pub(crate) pre_registered_module_vars: HashSet<String>,
+    /// LocalIds that are defined at module top level (outside any function or
+    /// block). Closure `captures` referencing these IDs are filtered out at
+    /// lowering time because codegen loads module-level bindings from their
+    /// global data slot inside the closure body — passing them via the
+    /// capture-slot would race with self-referential `const f = () => f(...)`
+    /// and double-book state shared between sibling closures.
+    pub(crate) module_level_ids: HashSet<LocalId>,
+    /// Current function/closure nesting depth (`enter_scope` bumps this,
+    /// `exit_scope` decrements). 0 == still at module top level.
+    pub(crate) scope_depth: usize,
+    /// Block scope nesting counter (for bare `{}`, `if`, loops, try/finally).
+    /// A local only counts as module-level when both `scope_depth == 0` and
+    /// `inside_block_scope == 0`; `const captured = i` inside a top-level for
+    /// loop must still be per-iteration box, not a shared global slot.
+    pub(crate) inside_block_scope: usize,
     /// Namespace exported variables: (namespace_name, member_name, local_id)
     /// Used to resolve Namespace.member access to module-level LocalGet
     pub(crate) namespace_vars: Vec<(String, String, LocalId)>,
@@ -144,6 +159,9 @@ impl LoweringContext {
             func_return_types: Vec::new(),
             resolved_types: None,
             pre_registered_module_vars: HashSet::new(),
+            module_level_ids: HashSet::new(),
+            scope_depth: 0,
+            inside_block_scope: 0,
             namespace_vars: Vec::new(),
             current_namespace: None,
             module_native_instances: Vec::new(),
@@ -312,8 +330,27 @@ impl LoweringContext {
 
     pub(crate) fn define_local(&mut self, name: String, ty: Type) -> LocalId {
         let id = self.fresh_local();
+        // Tag as module-level only when declared outside any function AND any
+        // block. `scope_depth == 0` keeps us at module top, `inside_block_scope
+        // == 0` keeps us out of `{}`/if/while/for bodies (so per-iteration
+        // `const captured = i` inside a top-level for loop stays per-iteration).
+        if self.scope_depth == 0 && self.inside_block_scope == 0 {
+            self.module_level_ids.insert(id);
+        }
         self.locals.push((name, id, ty));
         id
+    }
+
+    /// Drop module-level LocalIds from a closure's `captures` list. Module-
+    /// level variables are loaded directly from their global data slot inside
+    /// the closure body (see `closures.rs` auto-loading pass), so passing them
+    /// through the capture-slot mechanism races with the not-yet-assigned
+    /// binding for `const f = () => f(...)` and stomps on state shared between
+    /// sibling closures.
+    pub(crate) fn filter_module_level_captures(&self, captures: Vec<LocalId>) -> Vec<LocalId> {
+        captures.into_iter()
+            .filter(|id| !self.module_level_ids.contains(id))
+            .collect()
     }
 
     pub(crate) fn lookup_local(&self, name: &str) -> Option<LocalId> {
@@ -509,11 +546,15 @@ impl LoweringContext {
             .map(|(_, ty)| ty)
     }
 
-    pub(crate) fn enter_scope(&self) -> (usize, usize, usize) {
+    pub(crate) fn enter_scope(&mut self) -> (usize, usize, usize) {
+        // Function/closure boundary: new locals are no longer module-level.
+        self.scope_depth += 1;
         (self.locals.len(), self.native_instances.len(), self.functions.len())
     }
 
     pub(crate) fn exit_scope(&mut self, mark: (usize, usize, usize)) {
+        debug_assert!(self.scope_depth > 0, "exit_scope called at module depth");
+        self.scope_depth = self.scope_depth.saturating_sub(1);
         self.locals.truncate(mark.0);
         self.native_instances.truncate(mark.1);
         // Remove index entries for functions being truncated, then restore any
@@ -542,7 +583,8 @@ impl LoweringContext {
     /// block-scoped `let`/`const`: `pop_block_scope` removes inner `let`/`const`
     /// bindings while preserving `var`-hoisted ones so they remain visible in
     /// the enclosing function scope.
-    pub(crate) fn push_block_scope(&self) -> (usize, usize) {
+    pub(crate) fn push_block_scope(&mut self) -> (usize, usize) {
+        self.inside_block_scope += 1;
         (self.locals.len(), self.functions.len())
     }
 
@@ -551,6 +593,8 @@ impl LoweringContext {
     /// (tracked via `var_hoisted_ids`) are retained, since `var` is
     /// function-scoped in JS.
     pub(crate) fn pop_block_scope(&mut self, mark: (usize, usize)) {
+        debug_assert!(self.inside_block_scope > 0, "pop_block_scope without matching push");
+        self.inside_block_scope = self.inside_block_scope.saturating_sub(1);
         let (locals_mark, functions_mark) = mark;
 
         // Preserve var-hoisted locals: move any hoisted entries defined after
@@ -857,7 +901,676 @@ pub fn lower_module_with_class_id_and_types(ast_module: &ast::Module, name: &str
 
     module.uses_fetch = ctx.uses_fetch;
     module.extern_funcs = ctx.extern_func_types.clone();
+
+    // Post-pass: widen `mutable_captures` across sibling closures. When two
+    // closures in the same scope share a capture and one of them assigns to
+    // it, the variable must be boxed; every closure that captures it must
+    // also go through the box so they observe each other's writes. Without
+    // this pass, a `get: () => value` sibling of `inc: () => value++` captures
+    // the raw initial value instead of the shared boxed binding.
+    widen_mutable_captures_stmts(&mut module.init);
+    for func in &mut module.functions {
+        widen_mutable_captures_stmts(&mut func.body);
+    }
+    for class in &mut module.classes {
+        for method in &mut class.methods {
+            widen_mutable_captures_stmts(&mut method.body);
+        }
+        for (_, getter) in &mut class.getters {
+            widen_mutable_captures_stmts(&mut getter.body);
+        }
+        for (_, setter) in &mut class.setters {
+            widen_mutable_captures_stmts(&mut setter.body);
+        }
+        for static_method in &mut class.static_methods {
+            widen_mutable_captures_stmts(&mut static_method.body);
+        }
+        if let Some(ref mut ctor) = class.constructor {
+            widen_mutable_captures_stmts(&mut ctor.body);
+        }
+    }
+
     Ok((module, ctx.next_class_id))
+}
+
+/// Post-lowering pass that widens every `Expr::Closure`'s `mutable_captures`
+/// to include any capture that is assigned to inside a sibling closure in the
+/// same lexical scope. Then recurses into each closure body so nested scopes
+/// get the same treatment. This ensures that when multiple closures share a
+/// captured binding and any one of them mutates it, all of them treat it as
+/// boxed so reads and writes observe the same storage slot.
+fn widen_mutable_captures_stmts(stmts: &mut [Stmt]) {
+    let mut scope_mutable: std::collections::HashSet<LocalId> = std::collections::HashSet::new();
+    for stmt in stmts.iter() {
+        collect_closure_assigned_stmt(stmt, &mut scope_mutable);
+    }
+    for stmt in stmts.iter_mut() {
+        widen_mutable_captures_stmt(stmt, &scope_mutable);
+    }
+}
+
+fn widen_mutable_captures_stmt(stmt: &mut Stmt, scope_mutable: &std::collections::HashSet<LocalId>) {
+    match stmt {
+        Stmt::Let { init: Some(expr), .. } => widen_mutable_captures_expr(expr, scope_mutable),
+        Stmt::Expr(expr) => widen_mutable_captures_expr(expr, scope_mutable),
+        Stmt::Return(Some(expr)) => widen_mutable_captures_expr(expr, scope_mutable),
+        Stmt::Throw(expr) => widen_mutable_captures_expr(expr, scope_mutable),
+        Stmt::If { condition, then_branch, else_branch } => {
+            widen_mutable_captures_expr(condition, scope_mutable);
+            widen_mutable_captures_stmts(then_branch);
+            if let Some(else_stmts) = else_branch {
+                widen_mutable_captures_stmts(else_stmts);
+            }
+        }
+        Stmt::While { condition, body } => {
+            widen_mutable_captures_expr(condition, scope_mutable);
+            widen_mutable_captures_stmts(body);
+        }
+        Stmt::DoWhile { body, condition } => {
+            widen_mutable_captures_stmts(body);
+            widen_mutable_captures_expr(condition, scope_mutable);
+        }
+        Stmt::For { init, condition, update, body } => {
+            if let Some(init_stmt) = init {
+                widen_mutable_captures_stmt(init_stmt, scope_mutable);
+            }
+            if let Some(cond) = condition {
+                widen_mutable_captures_expr(cond, scope_mutable);
+            }
+            if let Some(upd) = update {
+                widen_mutable_captures_expr(upd, scope_mutable);
+            }
+            widen_mutable_captures_stmts(body);
+        }
+        Stmt::Try { body, catch, finally } => {
+            widen_mutable_captures_stmts(body);
+            if let Some(catch_clause) = catch {
+                widen_mutable_captures_stmts(&mut catch_clause.body);
+            }
+            if let Some(finally_stmts) = finally {
+                widen_mutable_captures_stmts(finally_stmts);
+            }
+        }
+        Stmt::Switch { discriminant, cases } => {
+            widen_mutable_captures_expr(discriminant, scope_mutable);
+            for case in cases {
+                if let Some(test) = &mut case.test {
+                    widen_mutable_captures_expr(test, scope_mutable);
+                }
+                widen_mutable_captures_stmts(&mut case.body);
+            }
+        }
+        Stmt::Labeled { body, .. } => {
+            widen_mutable_captures_stmt(body, scope_mutable);
+        }
+        _ => {}
+    }
+}
+
+fn widen_mutable_captures_expr(expr: &mut Expr, scope_mutable: &std::collections::HashSet<LocalId>) {
+    match expr {
+        Expr::Closure { captures, mutable_captures, body, .. } => {
+            let mut mset: std::collections::HashSet<LocalId> = mutable_captures.iter().copied().collect();
+            for id in captures.iter() {
+                if scope_mutable.contains(id) {
+                    mset.insert(*id);
+                }
+            }
+            let mut new_mutable: Vec<LocalId> = mset.into_iter().collect();
+            new_mutable.sort();
+            *mutable_captures = new_mutable;
+
+            // Recurse into the closure body so nested closures get a fresh
+            // scope-relative widening.
+            widen_mutable_captures_stmts(body);
+        }
+        Expr::Binary { left, right, .. }
+        | Expr::Compare { left, right, .. }
+        | Expr::Logical { left, right, .. } => {
+            widen_mutable_captures_expr(left, scope_mutable);
+            widen_mutable_captures_expr(right, scope_mutable);
+        }
+        Expr::Unary { operand, .. } => widen_mutable_captures_expr(operand, scope_mutable),
+        Expr::Call { callee, args, .. } => {
+            widen_mutable_captures_expr(callee, scope_mutable);
+            for arg in args {
+                widen_mutable_captures_expr(arg, scope_mutable);
+            }
+        }
+        Expr::CallSpread { callee, args, .. } => {
+            widen_mutable_captures_expr(callee, scope_mutable);
+            for arg in args {
+                match arg {
+                    CallArg::Expr(e) | CallArg::Spread(e) => widen_mutable_captures_expr(e, scope_mutable),
+                }
+            }
+        }
+        Expr::Array(elements) => {
+            for e in elements {
+                widen_mutable_captures_expr(e, scope_mutable);
+            }
+        }
+        Expr::ArraySpread(elements) => {
+            for e in elements {
+                match e {
+                    ArrayElement::Expr(x) | ArrayElement::Spread(x) => widen_mutable_captures_expr(x, scope_mutable),
+                }
+            }
+        }
+        Expr::Object(fields) => {
+            for (_, v) in fields {
+                widen_mutable_captures_expr(v, scope_mutable);
+            }
+        }
+        Expr::ObjectSpread { parts } => {
+            for (_, v) in parts {
+                widen_mutable_captures_expr(v, scope_mutable);
+            }
+        }
+        Expr::Conditional { condition, then_expr, else_expr } => {
+            widen_mutable_captures_expr(condition, scope_mutable);
+            widen_mutable_captures_expr(then_expr, scope_mutable);
+            widen_mutable_captures_expr(else_expr, scope_mutable);
+        }
+        Expr::PropertyGet { object, .. } => widen_mutable_captures_expr(object, scope_mutable),
+        Expr::PropertySet { object, value, .. } => {
+            widen_mutable_captures_expr(object, scope_mutable);
+            widen_mutable_captures_expr(value, scope_mutable);
+        }
+        Expr::PropertyUpdate { object, .. } => widen_mutable_captures_expr(object, scope_mutable),
+        Expr::IndexGet { object, index } => {
+            widen_mutable_captures_expr(object, scope_mutable);
+            widen_mutable_captures_expr(index, scope_mutable);
+        }
+        Expr::IndexSet { object, index, value } => {
+            widen_mutable_captures_expr(object, scope_mutable);
+            widen_mutable_captures_expr(index, scope_mutable);
+            widen_mutable_captures_expr(value, scope_mutable);
+        }
+        Expr::IndexUpdate { object, index, .. } => {
+            widen_mutable_captures_expr(object, scope_mutable);
+            widen_mutable_captures_expr(index, scope_mutable);
+        }
+        Expr::New { args, .. } => {
+            for arg in args {
+                widen_mutable_captures_expr(arg, scope_mutable);
+            }
+        }
+        Expr::NewDynamic { callee, args } => {
+            widen_mutable_captures_expr(callee, scope_mutable);
+            for arg in args {
+                widen_mutable_captures_expr(arg, scope_mutable);
+            }
+        }
+        Expr::LocalSet(_, value) | Expr::GlobalSet(_, value) => {
+            widen_mutable_captures_expr(value, scope_mutable);
+        }
+        Expr::Await(inner) | Expr::TypeOf(inner) | Expr::Void(inner) | Expr::Delete(inner) => {
+            widen_mutable_captures_expr(inner, scope_mutable);
+        }
+        Expr::InstanceOf { expr, .. } => widen_mutable_captures_expr(expr, scope_mutable),
+        Expr::In { property, object } => {
+            widen_mutable_captures_expr(property, scope_mutable);
+            widen_mutable_captures_expr(object, scope_mutable);
+        }
+        Expr::Sequence(exprs) => {
+            for e in exprs {
+                widen_mutable_captures_expr(e, scope_mutable);
+            }
+        }
+        Expr::ArrayForEach { array, callback }
+        | Expr::ArrayMap { array, callback }
+        | Expr::ArrayFilter { array, callback }
+        | Expr::ArrayFind { array, callback }
+        | Expr::ArrayFindIndex { array, callback }
+        | Expr::ArraySome { array, callback }
+        | Expr::ArrayEvery { array, callback }
+        | Expr::ArrayFlatMap { array, callback } => {
+            widen_mutable_captures_expr(array, scope_mutable);
+            widen_mutable_captures_expr(callback, scope_mutable);
+        }
+        Expr::ArraySort { array, comparator } => {
+            widen_mutable_captures_expr(array, scope_mutable);
+            widen_mutable_captures_expr(comparator, scope_mutable);
+        }
+        Expr::ArrayReduce { array, callback, initial } => {
+            widen_mutable_captures_expr(array, scope_mutable);
+            widen_mutable_captures_expr(callback, scope_mutable);
+            if let Some(init) = initial {
+                widen_mutable_captures_expr(init, scope_mutable);
+            }
+        }
+        Expr::NativeMethodCall { object, args, .. } => {
+            if let Some(obj) = object {
+                widen_mutable_captures_expr(obj, scope_mutable);
+            }
+            for arg in args {
+                widen_mutable_captures_expr(arg, scope_mutable);
+            }
+        }
+        Expr::JsCreateCallback { closure, .. } => widen_mutable_captures_expr(closure, scope_mutable),
+        _ => {}
+    }
+}
+
+/// Walk a statement collecting the set of LocalIds that are assigned to
+/// inside any `Expr::Closure` reachable from it (including nested closures).
+/// This is the "mutably shared" set at the enclosing lexical scope.
+fn collect_closure_assigned_stmt(stmt: &Stmt, out: &mut std::collections::HashSet<LocalId>) {
+    match stmt {
+        Stmt::Let { init: Some(expr), .. } => collect_closure_assigned_expr(expr, out),
+        Stmt::Expr(expr) => collect_closure_assigned_expr(expr, out),
+        Stmt::Return(Some(expr)) => collect_closure_assigned_expr(expr, out),
+        Stmt::Throw(expr) => collect_closure_assigned_expr(expr, out),
+        Stmt::If { condition, then_branch, else_branch } => {
+            collect_closure_assigned_expr(condition, out);
+            for s in then_branch {
+                collect_closure_assigned_stmt(s, out);
+            }
+            if let Some(else_stmts) = else_branch {
+                for s in else_stmts {
+                    collect_closure_assigned_stmt(s, out);
+                }
+            }
+        }
+        Stmt::While { condition, body } | Stmt::DoWhile { body, condition } => {
+            collect_closure_assigned_expr(condition, out);
+            for s in body {
+                collect_closure_assigned_stmt(s, out);
+            }
+        }
+        Stmt::For { init, condition, update, body } => {
+            if let Some(init_stmt) = init {
+                collect_closure_assigned_stmt(init_stmt, out);
+            }
+            if let Some(cond) = condition {
+                collect_closure_assigned_expr(cond, out);
+            }
+            if let Some(upd) = update {
+                collect_closure_assigned_expr(upd, out);
+            }
+            for s in body {
+                collect_closure_assigned_stmt(s, out);
+            }
+        }
+        Stmt::Try { body, catch, finally } => {
+            for s in body {
+                collect_closure_assigned_stmt(s, out);
+            }
+            if let Some(catch_clause) = catch {
+                for s in &catch_clause.body {
+                    collect_closure_assigned_stmt(s, out);
+                }
+            }
+            if let Some(finally_stmts) = finally {
+                for s in finally_stmts {
+                    collect_closure_assigned_stmt(s, out);
+                }
+            }
+        }
+        Stmt::Switch { discriminant, cases } => {
+            collect_closure_assigned_expr(discriminant, out);
+            for case in cases {
+                if let Some(ref test) = case.test {
+                    collect_closure_assigned_expr(test, out);
+                }
+                for s in &case.body {
+                    collect_closure_assigned_stmt(s, out);
+                }
+            }
+        }
+        Stmt::Labeled { body, .. } => collect_closure_assigned_stmt(body, out),
+        _ => {}
+    }
+}
+
+fn collect_closure_assigned_expr(expr: &Expr, out: &mut std::collections::HashSet<LocalId>) {
+    match expr {
+        Expr::Closure { body, .. } => {
+            // Any LocalSet/Update inside this closure body (or nested closures
+            // within it) counts as "assigned in a closure at our scope".
+            for stmt in body {
+                collect_closure_assigned_in_closure_body_stmt(stmt, out);
+            }
+        }
+        Expr::Binary { left, right, .. }
+        | Expr::Compare { left, right, .. }
+        | Expr::Logical { left, right, .. } => {
+            collect_closure_assigned_expr(left, out);
+            collect_closure_assigned_expr(right, out);
+        }
+        Expr::Unary { operand, .. } => collect_closure_assigned_expr(operand, out),
+        Expr::Call { callee, args, .. } => {
+            collect_closure_assigned_expr(callee, out);
+            for arg in args {
+                collect_closure_assigned_expr(arg, out);
+            }
+        }
+        Expr::CallSpread { callee, args, .. } => {
+            collect_closure_assigned_expr(callee, out);
+            for arg in args {
+                match arg {
+                    CallArg::Expr(e) | CallArg::Spread(e) => collect_closure_assigned_expr(e, out),
+                }
+            }
+        }
+        Expr::Array(elements) => {
+            for e in elements {
+                collect_closure_assigned_expr(e, out);
+            }
+        }
+        Expr::ArraySpread(elements) => {
+            for e in elements {
+                match e {
+                    ArrayElement::Expr(x) | ArrayElement::Spread(x) => collect_closure_assigned_expr(x, out),
+                }
+            }
+        }
+        Expr::Object(fields) => {
+            for (_, v) in fields {
+                collect_closure_assigned_expr(v, out);
+            }
+        }
+        Expr::ObjectSpread { parts } => {
+            for (_, v) in parts {
+                collect_closure_assigned_expr(v, out);
+            }
+        }
+        Expr::Conditional { condition, then_expr, else_expr } => {
+            collect_closure_assigned_expr(condition, out);
+            collect_closure_assigned_expr(then_expr, out);
+            collect_closure_assigned_expr(else_expr, out);
+        }
+        Expr::PropertyGet { object, .. } => collect_closure_assigned_expr(object, out),
+        Expr::PropertySet { object, value, .. } => {
+            collect_closure_assigned_expr(object, out);
+            collect_closure_assigned_expr(value, out);
+        }
+        Expr::PropertyUpdate { object, .. } => collect_closure_assigned_expr(object, out),
+        Expr::IndexGet { object, index } => {
+            collect_closure_assigned_expr(object, out);
+            collect_closure_assigned_expr(index, out);
+        }
+        Expr::IndexSet { object, index, value } => {
+            collect_closure_assigned_expr(object, out);
+            collect_closure_assigned_expr(index, out);
+            collect_closure_assigned_expr(value, out);
+        }
+        Expr::IndexUpdate { object, index, .. } => {
+            collect_closure_assigned_expr(object, out);
+            collect_closure_assigned_expr(index, out);
+        }
+        Expr::New { args, .. } => {
+            for arg in args {
+                collect_closure_assigned_expr(arg, out);
+            }
+        }
+        Expr::NewDynamic { callee, args } => {
+            collect_closure_assigned_expr(callee, out);
+            for arg in args {
+                collect_closure_assigned_expr(arg, out);
+            }
+        }
+        Expr::LocalSet(_, value) | Expr::GlobalSet(_, value) => {
+            collect_closure_assigned_expr(value, out);
+        }
+        Expr::Await(inner) | Expr::TypeOf(inner) | Expr::Void(inner) | Expr::Delete(inner) => {
+            collect_closure_assigned_expr(inner, out);
+        }
+        Expr::InstanceOf { expr, .. } => collect_closure_assigned_expr(expr, out),
+        Expr::In { property, object } => {
+            collect_closure_assigned_expr(property, out);
+            collect_closure_assigned_expr(object, out);
+        }
+        Expr::Sequence(exprs) => {
+            for e in exprs {
+                collect_closure_assigned_expr(e, out);
+            }
+        }
+        Expr::ArrayForEach { array, callback }
+        | Expr::ArrayMap { array, callback }
+        | Expr::ArrayFilter { array, callback }
+        | Expr::ArrayFind { array, callback }
+        | Expr::ArrayFindIndex { array, callback }
+        | Expr::ArraySome { array, callback }
+        | Expr::ArrayEvery { array, callback }
+        | Expr::ArrayFlatMap { array, callback } => {
+            collect_closure_assigned_expr(array, out);
+            collect_closure_assigned_expr(callback, out);
+        }
+        Expr::ArraySort { array, comparator } => {
+            collect_closure_assigned_expr(array, out);
+            collect_closure_assigned_expr(comparator, out);
+        }
+        Expr::ArrayReduce { array, callback, initial } => {
+            collect_closure_assigned_expr(array, out);
+            collect_closure_assigned_expr(callback, out);
+            if let Some(init) = initial {
+                collect_closure_assigned_expr(init, out);
+            }
+        }
+        Expr::NativeMethodCall { object, args, .. } => {
+            if let Some(obj) = object {
+                collect_closure_assigned_expr(obj, out);
+            }
+            for arg in args {
+                collect_closure_assigned_expr(arg, out);
+            }
+        }
+        Expr::JsCreateCallback { closure, .. } => collect_closure_assigned_expr(closure, out),
+        _ => {}
+    }
+}
+
+/// Walk a closure body collecting every LocalSet/Update target AND any
+/// assigns inside nested closures within this body.
+fn collect_closure_assigned_in_closure_body_stmt(stmt: &Stmt, out: &mut std::collections::HashSet<LocalId>) {
+    match stmt {
+        Stmt::Let { init: Some(expr), .. } => collect_closure_assigned_in_body_expr(expr, out),
+        Stmt::Expr(expr) => collect_closure_assigned_in_body_expr(expr, out),
+        Stmt::Return(Some(expr)) => collect_closure_assigned_in_body_expr(expr, out),
+        Stmt::Throw(expr) => collect_closure_assigned_in_body_expr(expr, out),
+        Stmt::If { condition, then_branch, else_branch } => {
+            collect_closure_assigned_in_body_expr(condition, out);
+            for s in then_branch {
+                collect_closure_assigned_in_closure_body_stmt(s, out);
+            }
+            if let Some(else_stmts) = else_branch {
+                for s in else_stmts {
+                    collect_closure_assigned_in_closure_body_stmt(s, out);
+                }
+            }
+        }
+        Stmt::While { condition, body } | Stmt::DoWhile { body, condition } => {
+            collect_closure_assigned_in_body_expr(condition, out);
+            for s in body {
+                collect_closure_assigned_in_closure_body_stmt(s, out);
+            }
+        }
+        Stmt::For { init, condition, update, body } => {
+            if let Some(init_stmt) = init {
+                collect_closure_assigned_in_closure_body_stmt(init_stmt, out);
+            }
+            if let Some(cond) = condition {
+                collect_closure_assigned_in_body_expr(cond, out);
+            }
+            if let Some(upd) = update {
+                collect_closure_assigned_in_body_expr(upd, out);
+            }
+            for s in body {
+                collect_closure_assigned_in_closure_body_stmt(s, out);
+            }
+        }
+        Stmt::Try { body, catch, finally } => {
+            for s in body {
+                collect_closure_assigned_in_closure_body_stmt(s, out);
+            }
+            if let Some(catch_clause) = catch {
+                for s in &catch_clause.body {
+                    collect_closure_assigned_in_closure_body_stmt(s, out);
+                }
+            }
+            if let Some(finally_stmts) = finally {
+                for s in finally_stmts {
+                    collect_closure_assigned_in_closure_body_stmt(s, out);
+                }
+            }
+        }
+        Stmt::Switch { discriminant, cases } => {
+            collect_closure_assigned_in_body_expr(discriminant, out);
+            for case in cases {
+                if let Some(ref test) = case.test {
+                    collect_closure_assigned_in_body_expr(test, out);
+                }
+                for s in &case.body {
+                    collect_closure_assigned_in_closure_body_stmt(s, out);
+                }
+            }
+        }
+        Stmt::Labeled { body, .. } => collect_closure_assigned_in_closure_body_stmt(body, out),
+        _ => {}
+    }
+}
+
+fn collect_closure_assigned_in_body_expr(expr: &Expr, out: &mut std::collections::HashSet<LocalId>) {
+    match expr {
+        Expr::LocalSet(id, value) => {
+            out.insert(*id);
+            collect_closure_assigned_in_body_expr(value, out);
+        }
+        Expr::Update { id, .. } => {
+            out.insert(*id);
+        }
+        Expr::Closure { body, .. } => {
+            for stmt in body {
+                collect_closure_assigned_in_closure_body_stmt(stmt, out);
+            }
+        }
+        Expr::Binary { left, right, .. }
+        | Expr::Compare { left, right, .. }
+        | Expr::Logical { left, right, .. } => {
+            collect_closure_assigned_in_body_expr(left, out);
+            collect_closure_assigned_in_body_expr(right, out);
+        }
+        Expr::Unary { operand, .. } => collect_closure_assigned_in_body_expr(operand, out),
+        Expr::Call { callee, args, .. } => {
+            collect_closure_assigned_in_body_expr(callee, out);
+            for arg in args {
+                collect_closure_assigned_in_body_expr(arg, out);
+            }
+        }
+        Expr::CallSpread { callee, args, .. } => {
+            collect_closure_assigned_in_body_expr(callee, out);
+            for arg in args {
+                match arg {
+                    CallArg::Expr(e) | CallArg::Spread(e) => collect_closure_assigned_in_body_expr(e, out),
+                }
+            }
+        }
+        Expr::Array(elements) => {
+            for e in elements {
+                collect_closure_assigned_in_body_expr(e, out);
+            }
+        }
+        Expr::ArraySpread(elements) => {
+            for e in elements {
+                match e {
+                    ArrayElement::Expr(x) | ArrayElement::Spread(x) => collect_closure_assigned_in_body_expr(x, out),
+                }
+            }
+        }
+        Expr::Object(fields) => {
+            for (_, v) in fields {
+                collect_closure_assigned_in_body_expr(v, out);
+            }
+        }
+        Expr::ObjectSpread { parts } => {
+            for (_, v) in parts {
+                collect_closure_assigned_in_body_expr(v, out);
+            }
+        }
+        Expr::Conditional { condition, then_expr, else_expr } => {
+            collect_closure_assigned_in_body_expr(condition, out);
+            collect_closure_assigned_in_body_expr(then_expr, out);
+            collect_closure_assigned_in_body_expr(else_expr, out);
+        }
+        Expr::PropertyGet { object, .. } => collect_closure_assigned_in_body_expr(object, out),
+        Expr::PropertySet { object, value, .. } => {
+            collect_closure_assigned_in_body_expr(object, out);
+            collect_closure_assigned_in_body_expr(value, out);
+        }
+        Expr::PropertyUpdate { object, .. } => collect_closure_assigned_in_body_expr(object, out),
+        Expr::IndexGet { object, index } => {
+            collect_closure_assigned_in_body_expr(object, out);
+            collect_closure_assigned_in_body_expr(index, out);
+        }
+        Expr::IndexSet { object, index, value } => {
+            collect_closure_assigned_in_body_expr(object, out);
+            collect_closure_assigned_in_body_expr(index, out);
+            collect_closure_assigned_in_body_expr(value, out);
+        }
+        Expr::IndexUpdate { object, index, .. } => {
+            collect_closure_assigned_in_body_expr(object, out);
+            collect_closure_assigned_in_body_expr(index, out);
+        }
+        Expr::New { args, .. } => {
+            for arg in args {
+                collect_closure_assigned_in_body_expr(arg, out);
+            }
+        }
+        Expr::NewDynamic { callee, args } => {
+            collect_closure_assigned_in_body_expr(callee, out);
+            for arg in args {
+                collect_closure_assigned_in_body_expr(arg, out);
+            }
+        }
+        Expr::GlobalSet(_, value) => collect_closure_assigned_in_body_expr(value, out),
+        Expr::Await(inner) | Expr::TypeOf(inner) | Expr::Void(inner) | Expr::Delete(inner) => {
+            collect_closure_assigned_in_body_expr(inner, out);
+        }
+        Expr::InstanceOf { expr, .. } => collect_closure_assigned_in_body_expr(expr, out),
+        Expr::In { property, object } => {
+            collect_closure_assigned_in_body_expr(property, out);
+            collect_closure_assigned_in_body_expr(object, out);
+        }
+        Expr::Sequence(exprs) => {
+            for e in exprs {
+                collect_closure_assigned_in_body_expr(e, out);
+            }
+        }
+        Expr::ArrayForEach { array, callback }
+        | Expr::ArrayMap { array, callback }
+        | Expr::ArrayFilter { array, callback }
+        | Expr::ArrayFind { array, callback }
+        | Expr::ArrayFindIndex { array, callback }
+        | Expr::ArraySome { array, callback }
+        | Expr::ArrayEvery { array, callback }
+        | Expr::ArrayFlatMap { array, callback } => {
+            collect_closure_assigned_in_body_expr(array, out);
+            collect_closure_assigned_in_body_expr(callback, out);
+        }
+        Expr::ArraySort { array, comparator } => {
+            collect_closure_assigned_in_body_expr(array, out);
+            collect_closure_assigned_in_body_expr(comparator, out);
+        }
+        Expr::ArrayReduce { array, callback, initial } => {
+            collect_closure_assigned_in_body_expr(array, out);
+            collect_closure_assigned_in_body_expr(callback, out);
+            if let Some(init) = initial {
+                collect_closure_assigned_in_body_expr(init, out);
+            }
+        }
+        Expr::NativeMethodCall { object, args, .. } => {
+            if let Some(obj) = object {
+                collect_closure_assigned_in_body_expr(obj, out);
+            }
+            for arg in args {
+                collect_closure_assigned_in_body_expr(arg, out);
+            }
+        }
+        Expr::JsCreateCallback { closure, .. } => collect_closure_assigned_in_body_expr(closure, out),
+        _ => {}
+    }
 }
 
 fn lower_module_decl(
@@ -5791,6 +6504,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                     .collect();
                                 captures.sort();
                                 captures.dedup();
+                                captures = ctx.filter_module_level_captures(captures);
 
                                 // Check if the method body uses `this` — even with no
                                 // outer-scope captures we must emit a Closure so the
@@ -6146,6 +6860,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                 .collect();
             captures.sort();
             captures.dedup();
+            captures = ctx.filter_module_level_captures(captures);
 
             // Detect which captures are assigned to inside the closure (need boxing)
             let mut all_assigned = Vec::new();
@@ -6289,6 +7004,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                 .collect();
             captures.sort();
             captures.dedup();
+            captures = ctx.filter_module_level_captures(captures);
 
             // Detect which captures are assigned to inside the closure (need boxing)
             let mut all_assigned = Vec::new();

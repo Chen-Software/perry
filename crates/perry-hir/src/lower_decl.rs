@@ -1357,6 +1357,7 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
                     .collect();
                 captures.sort();
                 captures.dedup();
+                captures = ctx.filter_module_level_captures(captures);
 
                 // Detect mutable captures
                 let mut all_assigned = Vec::new();
