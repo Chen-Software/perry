@@ -628,8 +628,8 @@ pub(crate) fn compile_condition_to_bool(
                 let lhs_f64 = ensure_f64(builder, lhs);
                 let rhs_f64 = ensure_f64(builder, rhs);
                 let float_cc = match op {
-                    CompareOp::Eq => FloatCC::Equal,
-                    CompareOp::Ne => FloatCC::NotEqual,
+                    CompareOp::Eq | CompareOp::LooseEq => FloatCC::Equal,
+                    CompareOp::Ne | CompareOp::LooseNe => FloatCC::NotEqual,
                     CompareOp::Lt => FloatCC::LessThan,
                     CompareOp::Le => FloatCC::LessThanOrEqual,
                     CompareOp::Gt => FloatCC::GreaterThan,

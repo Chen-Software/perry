@@ -6342,7 +6342,7 @@ pub(crate) fn compile_expr(
             let one = builder.ins().f64const(f64::from_bits(CMP_TAG_TRUE));
             let zero = builder.ins().f64const(f64::from_bits(CMP_TAG_FALSE));
 
-            if is_static_string_compare && (*op == CompareOp::Eq || *op == CompareOp::Ne) {
+            if is_static_string_compare && matches!(op, CompareOp::Eq | CompareOp::LooseEq | CompareOp::Ne | CompareOp::LooseNe) {
                 // Static string comparison: use js_string_equals
                 // Strings are NaN-boxed, extract raw pointers using js_get_string_pointer_unified
                 let get_str_ptr_func = extern_funcs.get("js_get_string_pointer_unified")
@@ -6364,15 +6364,15 @@ pub(crate) fn compile_expr(
                 let result = builder.inst_results(call)[0]; // i32 bool
 
                 // Convert to f64 result
-                if *op == CompareOp::Eq {
+                if matches!(op, CompareOp::Eq | CompareOp::LooseEq) {
                     let cmp = builder.ins().icmp_imm(IntCC::NotEqual, result, 0);
                     Ok(builder.ins().select(cmp, one, zero))
                 } else {
-                    // Ne
+                    // Ne / LooseNe
                     let cmp = builder.ins().icmp_imm(IntCC::Equal, result, 0);
                     Ok(builder.ins().select(cmp, one, zero))
                 }
-            } else if is_dynamic_string_compare && (*op == CompareOp::Eq || *op == CompareOp::Ne) {
+            } else if is_dynamic_string_compare && matches!(op, CompareOp::Eq | CompareOp::LooseEq | CompareOp::Ne | CompareOp::LooseNe) {
                 // Dynamic string comparison: one side may be NaN-boxed
                 // Use js_dynamic_string_equals which handles both representations
                 let lhs_f64 = ensure_f64(builder, lhs);
@@ -6385,11 +6385,11 @@ pub(crate) fn compile_expr(
                 let result = builder.inst_results(call)[0]; // i32 bool
 
                 // Convert to f64 result
-                if *op == CompareOp::Eq {
+                if matches!(op, CompareOp::Eq | CompareOp::LooseEq) {
                     let cmp = builder.ins().icmp_imm(IntCC::NotEqual, result, 0);
                     Ok(builder.ins().select(cmp, one, zero))
                 } else {
-                    // Ne
+                    // Ne / LooseNe
                     let cmp = builder.ins().icmp_imm(IntCC::Equal, result, 0);
                     Ok(builder.ins().select(cmp, one, zero))
                 }
@@ -6452,8 +6452,8 @@ pub(crate) fn compile_expr(
                 let is_nullish = builder.ins().bor(is_nullish, is_tag_undef);
 
                 match op {
-                    CompareOp::Eq => Ok(builder.ins().select(is_nullish, one, zero)),
-                    CompareOp::Ne => {
+                    CompareOp::Eq | CompareOp::LooseEq => Ok(builder.ins().select(is_nullish, one, zero)),
+                    CompareOp::Ne | CompareOp::LooseNe => {
                         let not_nullish = builder.ins().bxor_imm(is_nullish, 1);
                         Ok(builder.ins().select(not_nullish, one, zero))
                     }
@@ -6488,12 +6488,24 @@ pub(crate) fn compile_expr(
                 };
 
                 let val_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), value_f64);
-                let tag_const = builder.ins().iconst(types::I64, expected_tag as i64);
-                let is_match = builder.ins().icmp(IntCC::Equal, val_i64, tag_const);
+
+                // For loose equality (==), null == undefined is true.
+                // For strict equality (===), null !== undefined.
+                let is_match = if matches!(op, CompareOp::LooseEq | CompareOp::LooseNe) {
+                    // Check both TAG_NULL and TAG_UNDEFINED
+                    let tag_null = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0002u64 as i64);
+                    let tag_undef = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0001u64 as i64);
+                    let is_null = builder.ins().icmp(IntCC::Equal, val_i64, tag_null);
+                    let is_undef = builder.ins().icmp(IntCC::Equal, val_i64, tag_undef);
+                    builder.ins().bor(is_null, is_undef)
+                } else {
+                    let tag_const = builder.ins().iconst(types::I64, expected_tag as i64);
+                    builder.ins().icmp(IntCC::Equal, val_i64, tag_const)
+                };
 
                 match op {
-                    CompareOp::Eq => Ok(builder.ins().select(is_match, one, zero)),
-                    CompareOp::Ne => {
+                    CompareOp::Eq | CompareOp::LooseEq => Ok(builder.ins().select(is_match, one, zero)),
+                    CompareOp::Ne | CompareOp::LooseNe => {
                         let not_match = builder.ins().bxor_imm(is_match, 1);
                         Ok(builder.ins().select(not_match, one, zero))
                     }
@@ -6542,8 +6554,8 @@ pub(crate) fn compile_expr(
 
                     // Convert cmp result to boolean based on operation
                     let result_bool = match op {
-                        CompareOp::Eq => builder.ins().icmp_imm(IntCC::Equal, cmp_result, 0),
-                        CompareOp::Ne => builder.ins().icmp_imm(IntCC::NotEqual, cmp_result, 0),
+                        CompareOp::Eq | CompareOp::LooseEq => builder.ins().icmp_imm(IntCC::Equal, cmp_result, 0),
+                        CompareOp::Ne | CompareOp::LooseNe => builder.ins().icmp_imm(IntCC::NotEqual, cmp_result, 0),
                         CompareOp::Lt => builder.ins().icmp_imm(IntCC::SignedLessThan, cmp_result, 0),
                         CompareOp::Le => builder.ins().icmp_imm(IntCC::SignedLessThanOrEqual, cmp_result, 0),
                         CompareOp::Gt => builder.ins().icmp_imm(IntCC::SignedGreaterThan, cmp_result, 0),
@@ -6557,7 +6569,7 @@ pub(crate) fn compile_expr(
                     }
                     let is_bool_compare = is_bool_expr(left) || is_bool_expr(right);
 
-                    if is_bool_compare && (*op == CompareOp::Eq || *op == CompareOp::Ne) {
+                    if is_bool_compare && matches!(op, CompareOp::Eq | CompareOp::Ne) {
                         // Boolean comparison: NaN-boxed booleans must be compared by bit pattern.
                         // Use raw bitcast (NOT ensure_i64 which strips top 16 tag bits and
                         // collapses values < 0x1000 to 0 — both TAG_TRUE and TAG_FALSE have
@@ -6567,8 +6579,8 @@ pub(crate) fn compile_expr(
                         let lhs_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), lhs_f64);
                         let rhs_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), rhs_f64);
                         let icc = match op {
-                            CompareOp::Eq => IntCC::Equal,
-                            CompareOp::Ne => IntCC::NotEqual,
+                            CompareOp::Eq | CompareOp::LooseEq => IntCC::Equal,
+                            CompareOp::Ne | CompareOp::LooseNe => IntCC::NotEqual,
                             _ => unreachable!(),
                         };
                         let cmp = builder.ins().icmp(icc, lhs_i64, rhs_i64);
@@ -6613,8 +6625,8 @@ pub(crate) fn compile_expr(
                             let lhs_f64 = ensure_f64(builder, lhs);
                             let rhs_f64 = ensure_f64(builder, rhs);
                             let float_cc = match op {
-                                CompareOp::Eq => FloatCC::Equal,
-                                CompareOp::Ne => FloatCC::NotEqual,
+                                CompareOp::Eq | CompareOp::LooseEq => FloatCC::Equal,
+                                CompareOp::Ne | CompareOp::LooseNe => FloatCC::NotEqual,
                                 CompareOp::Lt => FloatCC::LessThan,
                                 CompareOp::Le => FloatCC::LessThanOrEqual,
                                 CompareOp::Gt => FloatCC::GreaterThan,
@@ -6660,32 +6672,44 @@ pub(crate) fn compile_expr(
                             ensure_f64(builder, rhs)
                         };
 
-                        if is_union_compare && (*op == CompareOp::Eq || *op == CompareOp::Ne) {
+                        if is_union_compare && matches!(op, CompareOp::Eq | CompareOp::LooseEq | CompareOp::Ne | CompareOp::LooseNe) {
                             // Generic JSValue equality: handles BigInt by value, String by content
-                            let jsval_eq_func = extern_funcs.get("js_jsvalue_equals")
-                                .ok_or_else(|| anyhow!("js_jsvalue_equals not declared"))?;
+                            let eq_func_name = if matches!(op, CompareOp::LooseEq | CompareOp::LooseNe) {
+                                "js_jsvalue_loose_equals"
+                            } else {
+                                "js_jsvalue_equals"
+                            };
+                            let jsval_eq_func = extern_funcs.get(eq_func_name)
+                                .ok_or_else(|| anyhow!("{} not declared", eq_func_name))?;
                             let jsval_eq_ref = module.declare_func_in_func(*jsval_eq_func, builder.func);
                             let call = builder.ins().call(jsval_eq_ref, &[lhs_f64, rhs_f64]);
                             let result = builder.inst_results(call)[0]; // i32: 1=equal, 0=not equal
-                            if *op == CompareOp::Eq {
+                            if matches!(op, CompareOp::Eq | CompareOp::LooseEq) {
                                 let cmp = builder.ins().icmp_imm(IntCC::NotEqual, result, 0);
                                 Ok(builder.ins().select(cmp, one, zero))
                             } else {
-                                // Ne
+                                // Ne / LooseNe
                                 let cmp = builder.ins().icmp_imm(IntCC::Equal, result, 0);
                                 Ok(builder.ins().select(cmp, one, zero))
                             }
-                        } else if *op == CompareOp::Eq || *op == CompareOp::Ne {
+                        } else if matches!(op, CompareOp::Eq | CompareOp::LooseEq | CompareOp::Ne | CompareOp::LooseNe) {
                             // For Eq/Ne with unknown types: use js_jsvalue_equals which handles
                             // BigInt by value, String by content, and regular f64 with IEEE 754.
+                            // For LooseEq/LooseNe: use js_jsvalue_loose_equals which also handles
+                            // type coercion (string==number, null==undefined, etc.)
                             // fcmp would fail for NaN-boxed values (BigInt, String, etc.) since
                             // NaN === NaN is always false in IEEE 754 float comparison.
-                            let jsval_eq_func = extern_funcs.get("js_jsvalue_equals")
-                                .ok_or_else(|| anyhow!("js_jsvalue_equals not declared"))?;
+                            let eq_func_name = if matches!(op, CompareOp::LooseEq | CompareOp::LooseNe) {
+                                "js_jsvalue_loose_equals"
+                            } else {
+                                "js_jsvalue_equals"
+                            };
+                            let jsval_eq_func = extern_funcs.get(eq_func_name)
+                                .ok_or_else(|| anyhow!("{} not declared", eq_func_name))?;
                             let jsval_eq_ref = module.declare_func_in_func(*jsval_eq_func, builder.func);
                             let call = builder.ins().call(jsval_eq_ref, &[lhs_f64, rhs_f64]);
                             let result = builder.inst_results(call)[0];
-                            if *op == CompareOp::Eq {
+                            if matches!(op, CompareOp::Eq | CompareOp::LooseEq) {
                                 let cmp = builder.ins().icmp_imm(IntCC::NotEqual, result, 0);
                                 Ok(builder.ins().select(cmp, one, zero))
                             } else {
@@ -6939,8 +6963,10 @@ pub(crate) fn compile_expr(
 
             match callee.as_ref() {
                 Expr::FuncRef(func_id) => {
+                    let is_closure_func = !func_ids.contains_key(func_id) && closure_func_ids.contains_key(func_id);
                     let clif_func_id = func_ids.get(func_id)
                         .copied()
+                        .or_else(|| closure_func_ids.get(func_id).copied())
                         .ok_or_else(|| anyhow!("Unknown function ID: {}", func_id))?;
                     let func_ref = module.declare_func_in_func(clif_func_id, builder.func);
 
@@ -7118,6 +7144,18 @@ pub(crate) fn compile_expr(
                         // No param type info available - default to f64 for all args
                         // since user-defined functions are declared with f64 params
                         final_args.iter().map(|&val| ensure_f64(builder, val)).collect()
+                    };
+
+                    // If calling a closure function directly (inner function via FuncRef),
+                    // prepend a null closure pointer as the first argument since the
+                    // closure ABI expects (closure_ptr: I64, ...params).
+                    let converted_args = if is_closure_func {
+                        let null_closure = builder.ins().iconst(types::I64, 0);
+                        let mut args = vec![null_closure];
+                        args.extend(converted_args);
+                        args
+                    } else {
+                        converted_args
                     };
 
                     // Get the expected parameter count from the actual function declaration

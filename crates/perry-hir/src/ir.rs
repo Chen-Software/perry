@@ -1558,12 +1558,14 @@ pub enum UnaryOp {
 /// Comparison operators
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompareOp {
-    Eq,    // ===
-    Ne,    // !==
-    Lt,    // <
-    Le,    // <=
-    Gt,    // >
-    Ge,    // >=
+    Eq,       // ===
+    Ne,       // !==
+    LooseEq,  // ==
+    LooseNe,  // !=
+    Lt,       // <
+    Le,       // <=
+    Gt,       // >
+    Ge,       // >=
 }
 
 /// Logical operators

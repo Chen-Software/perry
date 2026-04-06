@@ -808,6 +808,8 @@ impl JsEmitter {
                 let op_str = match op {
                     CompareOp::Eq => " === ",
                     CompareOp::Ne => " !== ",
+                    CompareOp::LooseEq => " == ",
+                    CompareOp::LooseNe => " != ",
                     CompareOp::Lt => " < ",
                     CompareOp::Le => " <= ",
                     CompareOp::Gt => " > ",

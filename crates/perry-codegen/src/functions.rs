@@ -1624,8 +1624,8 @@ impl crate::codegen::Compiler {
                     CompareOp::Le => IntCC::SignedLessThanOrEqual,
                     CompareOp::Gt => IntCC::SignedGreaterThan,
                     CompareOp::Ge => IntCC::SignedGreaterThanOrEqual,
-                    CompareOp::Eq => IntCC::Equal,
-                    CompareOp::Ne => IntCC::NotEqual,
+                    CompareOp::Eq | CompareOp::LooseEq => IntCC::Equal,
+                    CompareOp::Ne | CompareOp::LooseNe => IntCC::NotEqual,
                 };
                 builder.ins().icmp(cc, lhs, rhs)
             }

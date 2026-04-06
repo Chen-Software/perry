@@ -2177,6 +2177,8 @@ impl WasmModuleEmitter {
                 let js_op = match op {
                     CompareOp::Eq => "===",
                     CompareOp::Ne => "!==",
+                    CompareOp::LooseEq => "==",
+                    CompareOp::LooseNe => "!=",
                     CompareOp::Lt => "<",
                     CompareOp::Le => "<=",
                     CompareOp::Gt => ">",
@@ -3887,7 +3889,7 @@ impl<'a> FuncEmitCtx<'a> {
                 self.emit_expr(func, right);
                 // For strict equality on mixed types, use JS bridge
                 match op {
-                    CompareOp::Eq | CompareOp::Ne => {
+                    CompareOp::Eq | CompareOp::Ne | CompareOp::LooseEq | CompareOp::LooseNe => {
                         // Values are i64 on stack, store them to memory via emit_store_arg pattern
                         self.emit_frame_begin(func, 2);
                         func.instruction(&Instruction::LocalSet(self.temp_local));
@@ -3898,8 +3900,9 @@ impl<'a> FuncEmitCtx<'a> {
                         self.emit_slot_addr(func, 0);
                         func.instruction(&Instruction::LocalGet(self.temp_local));
                         func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
-                        self.emit_memcall_i32(func, "js_strict_eq", 2);
-                        if matches!(op, CompareOp::Ne) {
+                        let eq_fn = if matches!(op, CompareOp::LooseEq | CompareOp::LooseNe) { "js_loose_eq" } else { "js_strict_eq" };
+                        self.emit_memcall_i32(func, eq_fn, 2);
+                        if matches!(op, CompareOp::Ne | CompareOp::LooseNe) {
                             func.instruction(&Instruction::I32Eqz);
                         }
                         // Convert i32 result to NaN-boxed boolean

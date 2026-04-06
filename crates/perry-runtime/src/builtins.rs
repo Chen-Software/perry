@@ -1018,6 +1018,10 @@ pub extern "C" fn js_string_coerce(value: f64) -> *mut StringHeader {
             let str_ptr = crate::bigint::js_bigint_to_string(ptr);
             return str_ptr as *mut StringHeader;
         }
+    } else if jsval.is_pointer() {
+        // Pointer type — could be array or object.
+        // Delegate to js_jsvalue_to_string which handles arrays via join(",") and objects.
+        return crate::value::js_jsvalue_to_string(value);
     } else if jsval.is_int32() {
         jsval.as_int32().to_string()
     } else {

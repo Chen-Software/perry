@@ -7818,6 +7818,17 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_jsvalue_equals"), func_id);
         }
 
+        // js_jsvalue_loose_equals(a: f64, b: f64) -> i32
+        // JS Abstract Equality (==): type-coercing comparison.
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::I32));
+            let func_id = self.module.declare_function("js_jsvalue_loose_equals", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_jsvalue_loose_equals"), func_id);
+        }
+
         // js_jsvalue_compare(a: f64, b: f64) -> i32
         // Generic JS relational comparison: handles BigInt, INT32, Number.
         // Returns -1 (a < b), 0 (a == b), 1 (a > b).

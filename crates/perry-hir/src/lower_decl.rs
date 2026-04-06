@@ -1319,6 +1319,11 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
             if fn_decl.function.body.is_some() {
                 let func_name = fn_decl.ident.sym.to_string();
                 let func_id = ctx.fresh_func();
+
+                // Register the function name temporarily so self-recursive calls
+                // inside the body resolve to FuncRef(func_id).
+                ctx.register_func(func_name.clone(), func_id);
+
                 let scope_mark = ctx.enter_scope();
 
                 // Track outer locals for capture detection
@@ -1395,10 +1400,15 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
                     collect_assigned_locals_stmt(stmt, &mut all_assigned);
                 }
                 let assigned_set: std::collections::HashSet<LocalId> = all_assigned.into_iter().collect();
-                let mutable_captures: Vec<LocalId> = captures.iter()
+                let mut mutable_captures: Vec<LocalId> = captures.iter()
                     .filter(|id| assigned_set.contains(id) || ctx.var_hoisted_ids.contains(id))
                     .copied()
                     .collect();
+
+                // Define local variable and assign closure via Stmt::Let.
+                // Use existing local if already pre-registered (function hoisting).
+                let local_id = ctx.lookup_local(&func_name)
+                    .unwrap_or_else(|| ctx.define_local(func_name.clone(), Type::Any));
 
                 let closure = Expr::Closure {
                     func_id,
@@ -1411,11 +1421,6 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
                     enclosing_class: None,
                     is_async: fn_decl.function.is_async,
                 };
-
-                // Define local variable and assign closure via Stmt::Let.
-                // Use existing local if already pre-registered (function hoisting).
-                let local_id = ctx.lookup_local(&func_name)
-                    .unwrap_or_else(|| ctx.define_local(func_name.clone(), Type::Any));
                 result.push(Stmt::Let {
                     id: local_id,
                     name: func_name,

@@ -1047,6 +1047,129 @@ pub extern "C" fn js_jsvalue_equals(a: f64, b: f64) -> i32 {
     0
 }
 
+/// JS Abstract Equality Comparison (==).
+/// Implements the type coercion rules from ECMA-262 §7.2.14:
+/// - null == undefined → true
+/// - string == number → ToNumber(string) == number
+/// - boolean == anything → ToNumber(boolean) == anything
+/// - Same type → strict equality
+#[no_mangle]
+pub extern "C" fn js_jsvalue_loose_equals(a: f64, b: f64) -> i32 {
+    let abits = a.to_bits();
+    let bbits = b.to_bits();
+
+    // Fast path: same bit pattern
+    if abits == bbits {
+        return 1;
+    }
+
+    let a_val = JSValue::from_bits(abits);
+    let b_val = JSValue::from_bits(bbits);
+
+    // null == undefined (and vice versa)
+    let a_null = a_val.is_null() || a_val.is_undefined();
+    let b_null = b_val.is_null() || b_val.is_undefined();
+    if a_null && b_null {
+        return 1;
+    }
+    // null/undefined != anything else
+    if a_null || b_null {
+        return 0;
+    }
+
+    #[inline(always)]
+    fn is_plain_number(bits: u64) -> bool {
+        let tag = bits >> 48;
+        tag < 0x7FF8 || tag > 0x7FFF
+    }
+
+    // Helper: convert a JSValue to f64 for numeric comparison
+    fn to_number(val: &JSValue, bits: u64, raw: f64) -> Option<f64> {
+        if val.is_int32() {
+            Some(val.as_int32() as f64)
+        } else if is_plain_number(bits) {
+            Some(raw)
+        } else if val.is_bool() {
+            Some(if val.as_bool() { 1.0 } else { 0.0 })
+        } else if val.is_string() {
+            let ptr = val.as_string_ptr();
+            if ptr.is_null() {
+                return Some(f64::NAN);
+            }
+            let header = unsafe { &*ptr };
+            let s = unsafe {
+                let data = (ptr as *const u8).add(std::mem::size_of::<crate::string::StringHeader>());
+                std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, header.length as usize))
+            };
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                Some(0.0)
+            } else {
+                trimmed.parse::<f64>().ok()
+            }
+        } else {
+            None
+        }
+    }
+
+    // If both are same type, delegate to strict equals
+    let a_is_num = a_val.is_int32() || is_plain_number(abits);
+    let b_is_num = b_val.is_int32() || is_plain_number(bbits);
+    let a_is_str = a_val.is_string();
+    let b_is_str = b_val.is_string();
+    let a_is_bool = a_val.is_bool();
+    let b_is_bool = b_val.is_bool();
+
+    // Both strings: strict string comparison
+    if a_is_str && b_is_str {
+        let a_ptr = a_val.as_string_ptr();
+        let b_ptr = b_val.as_string_ptr();
+        return crate::string::js_string_equals(a_ptr, b_ptr);
+    }
+
+    // Both numbers: numeric comparison
+    if a_is_num && b_is_num {
+        let af = if a_val.is_int32() { a_val.as_int32() as f64 } else { a };
+        let bf = if b_val.is_int32() { b_val.as_int32() as f64 } else { b };
+        return if af == bf { 1 } else { 0 };
+    }
+
+    // Boolean == anything: convert boolean to number, then recurse
+    if a_is_bool {
+        let a_num = if a_val.as_bool() { 1.0 } else { 0.0 };
+        return js_jsvalue_loose_equals(a_num, b);
+    }
+    if b_is_bool {
+        let b_num = if b_val.as_bool() { 1.0 } else { 0.0 };
+        return js_jsvalue_loose_equals(a, b_num);
+    }
+
+    // String == Number: convert string to number
+    if a_is_str && b_is_num {
+        if let Some(af) = to_number(&a_val, abits, a) {
+            let bf = if b_val.is_int32() { b_val.as_int32() as f64 } else { b };
+            return if af == bf { 1 } else { 0 };
+        }
+        return 0;
+    }
+    if a_is_num && b_is_str {
+        if let Some(bf) = to_number(&b_val, bbits, b) {
+            let af = if a_val.is_int32() { a_val.as_int32() as f64 } else { a };
+            return if af == bf { 1 } else { 0 };
+        }
+        return 0;
+    }
+
+    // BigInt comparisons
+    if a_val.is_bigint() && b_val.is_bigint() {
+        let a_ptr = a_val.as_bigint_ptr();
+        let b_ptr = b_val.as_bigint_ptr();
+        return crate::bigint::js_bigint_eq(a_ptr, b_ptr);
+    }
+
+    0
+}
+
 /// Compare two JSValues for relational ordering (< <= > >=).
 /// Returns -1 if a < b, 0 if a == b, 1 if a > b.
 /// Handles BigInt, String, Number, and INT32 types.
