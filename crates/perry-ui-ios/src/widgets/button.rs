@@ -95,6 +95,7 @@ pub fn create(label_ptr: *const u8, on_press: f64) -> i64 {
 
         let ns_string = NSString::from_str(label);
         let _: () = msg_send![&*button, setTitle: &*ns_string, forState: 0u64]; // UIControlStateNormal = 0
+        let _: () = msg_send![&*button, setAccessibilityLabel: &*ns_string];
 
         let _: () = msg_send![&*button, setTranslatesAutoresizingMaskIntoConstraints: false];
 

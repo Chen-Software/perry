@@ -83,6 +83,11 @@ pub fn add_item(menu_handle: i64, title_ptr: *const u8, callback: f64) {
             });
         }
     });
+    #[cfg(feature = "geisterhand")]
+    {
+        extern "C" { fn perry_geisterhand_register(h: i64, wt: u8, ck: u8, cb: f64, lbl: *const u8); }
+        unsafe { perry_geisterhand_register(menu_handle, 5, 0, callback, title_ptr); }
+    }
 }
 
 /// Add an item with a keyboard shortcut (e.g. "Cmd+N").
@@ -101,10 +106,26 @@ pub fn add_item_with_shortcut(
             menus[idx].push(MenuItemEntry::Item {
                 title,
                 callback,
-                shortcut: Some(shortcut),
+                shortcut: Some(shortcut.clone()),
             });
         }
     });
+    #[cfg(feature = "geisterhand")]
+    {
+        extern "C" {
+            fn perry_geisterhand_register_with_shortcut(
+                h: i64, wt: u8, ck: u8, cb: f64, lbl: *const u8,
+                shortcut_ptr: *const u8, shortcut_len: usize,
+            );
+        }
+        let shortcut_bytes = shortcut.as_bytes();
+        unsafe {
+            perry_geisterhand_register_with_shortcut(
+                menu_handle, 5, 0, callback, title_ptr,
+                shortcut_bytes.as_ptr(), shortcut_bytes.len(),
+            );
+        }
+    }
 }
 
 /// Remove all items from a menu.

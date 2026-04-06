@@ -58,7 +58,13 @@ pub fn create() -> i64 {
         let _: () = msg_send![&*scroll, setTranslatesAutoresizingMaskIntoConstraints: false];
     }
     let view: Retained<NSView> = unsafe { Retained::cast_unchecked(scroll) };
-    super::register_widget(view)
+    let handle = super::register_widget(view);
+    #[cfg(feature = "geisterhand")]
+    {
+        extern "C" { fn perry_geisterhand_register(h: i64, wt: u8, ck: u8, cb: f64, lbl: *const u8); }
+        unsafe { perry_geisterhand_register(handle, 8, 0, 0.0, std::ptr::null()); }
+    }
+    handle
 }
 
 /// Set the document (content) view of a scroll view.
@@ -168,6 +174,19 @@ pub fn set_offset(scroll_handle: i64, offset: f64) {
             let sv: &NSScrollView = &*(Retained::as_ptr(&scroll_view) as *const NSScrollView);
             let content_view = sv.contentView();
             let point = CGPoint::new(0.0, offset);
+            let _: () = msg_send![&*content_view, setBoundsOrigin: point];
+        }
+    }
+}
+
+/// Set both x and y scroll offsets. Used by geisterhand for programmatic scrolling.
+#[no_mangle]
+pub extern "C" fn perry_ui_scroll_set_offset(scroll_handle: i64, x: f64, y: f64) {
+    if let Some(scroll_view) = super::get_widget(scroll_handle) {
+        unsafe {
+            let sv: &NSScrollView = &*(Retained::as_ptr(&scroll_view) as *const NSScrollView);
+            let content_view = sv.contentView();
+            let point = CGPoint::new(x, y);
             let _: () = msg_send![&*content_view, setBoundsOrigin: point];
         }
     }

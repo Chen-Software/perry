@@ -14,6 +14,7 @@ pub const WIDGET_PICKER: u8 = 4;
 pub const WIDGET_MENU: u8 = 5;
 pub const WIDGET_SHORTCUT: u8 = 6;
 pub const WIDGET_TABLE: u8 = 7;
+pub const WIDGET_SCROLLVIEW: u8 = 8;
 
 /// Callback kind identifiers
 pub const CB_ON_CLICK: u8 = 0;
@@ -30,6 +31,7 @@ pub struct RegisteredWidget {
     pub callback_kind: u8,
     pub closure_f64: f64,
     pub label: String,
+    pub shortcut: String,
 }
 
 /// An action queued for main-thread execution
@@ -38,6 +40,7 @@ pub enum PendingAction {
     SetState { handle: i64, value: f64 },
     CaptureScreenshot,
     SetText { handle: i64, text: String },
+    ScrollTo { handle: i64, x: f64, y: f64 },
 }
 
 static REGISTRY: Mutex<Vec<RegisteredWidget>> = Mutex::new(Vec::new());
@@ -64,6 +67,7 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 static UI_STATE_SET_FN: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 static UI_SCREENSHOT_CAPTURE_FN: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 static UI_TEXTFIELD_SET_STRING_FN: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+static UI_SCROLL_SET_FN: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 
 /// Register the platform UI crate's state_set function.
 #[no_mangle]
@@ -83,6 +87,12 @@ pub extern "C" fn perry_geisterhand_register_screenshot_capture(
 #[no_mangle]
 pub extern "C" fn perry_geisterhand_register_textfield_set_string(f: extern "C" fn(i64, i64)) {
     UI_TEXTFIELD_SET_STRING_FN.store(f as *mut (), Ordering::Release);
+}
+
+/// Register the platform UI crate's scroll_set function.
+#[no_mangle]
+pub extern "C" fn perry_geisterhand_register_scroll_set(f: extern "C" fn(i64, f64, f64)) {
+    UI_SCROLL_SET_FN.store(f as *mut (), Ordering::Release);
 }
 
 /// Register a widget callback in the global registry.
@@ -123,7 +133,86 @@ pub extern "C" fn perry_geisterhand_register(
             callback_kind,
             closure_f64,
             label,
+            shortcut: String::new(),
         });
+    }
+}
+
+/// Register a widget callback with an associated keyboard shortcut string.
+/// Used by menu items that have shortcuts (e.g., "s" for Cmd+S).
+#[no_mangle]
+pub extern "C" fn perry_geisterhand_register_with_shortcut(
+    handle: i64,
+    widget_type: u8,
+    callback_kind: u8,
+    closure_f64: f64,
+    label_ptr: *const u8,
+    shortcut_ptr: *const u8,
+    shortcut_len: usize,
+) {
+    let label = if label_ptr.is_null() {
+        String::new()
+    } else {
+        unsafe {
+            let len = *(label_ptr as *const u32) as usize;
+            let data = label_ptr.add(std::mem::size_of::<[u64; 1]>());
+            if len > 0 && len < 10000 {
+                String::from_utf8_lossy(std::slice::from_raw_parts(data, len)).into_owned()
+            } else {
+                String::new()
+            }
+        }
+    };
+    let shortcut = if shortcut_ptr.is_null() || shortcut_len == 0 {
+        String::new()
+    } else {
+        unsafe {
+            String::from_utf8_lossy(std::slice::from_raw_parts(shortcut_ptr, shortcut_len)).into_owned()
+        }
+    };
+    if let Ok(mut reg) = REGISTRY.lock() {
+        reg.push(RegisteredWidget {
+            handle,
+            widget_type,
+            callback_kind,
+            closure_f64,
+            label,
+            shortcut,
+        });
+    }
+}
+
+/// Find a registered callback by shortcut string. Case-insensitive match.
+/// Returns the closure_f64 or 0.0 if not found.
+#[no_mangle]
+pub extern "C" fn perry_geisterhand_find_by_shortcut(
+    shortcut_ptr: *const u8,
+    shortcut_len: usize,
+) -> f64 {
+    if shortcut_ptr.is_null() || shortcut_len == 0 {
+        return 0.0;
+    }
+    let query = unsafe {
+        String::from_utf8_lossy(std::slice::from_raw_parts(shortcut_ptr, shortcut_len))
+    }.to_lowercase();
+    match REGISTRY.lock() {
+        Ok(reg) => {
+            for w in reg.iter() {
+                if !w.shortcut.is_empty() && w.shortcut.to_lowercase() == query {
+                    return w.closure_f64;
+                }
+            }
+            0.0
+        }
+        Err(_) => 0.0,
+    }
+}
+
+/// Queue a scroll action for main-thread dispatch.
+#[no_mangle]
+pub extern "C" fn perry_geisterhand_queue_scroll(handle: i64, x: f64, y: f64) {
+    if let Ok(mut q) = PENDING_ACTIONS.lock() {
+        q.push(PendingAction::ScrollTo { handle, x, y });
     }
 }
 
@@ -225,6 +314,15 @@ pub extern "C" fn perry_geisterhand_pump() {
                     }
                 }
             }
+            PendingAction::ScrollTo { handle, x, y } => {
+                let f = UI_SCROLL_SET_FN.load(Ordering::Acquire);
+                if !f.is_null() {
+                    unsafe {
+                        let func: extern "C" fn(i64, f64, f64) = std::mem::transmute(f);
+                        func(handle, x, y);
+                    }
+                }
+            }
             PendingAction::CaptureScreenshot => {
                 let f = UI_SCREENSHOT_CAPTURE_FN.load(Ordering::Acquire);
                 let (ptr, len) = if !f.is_null() {
@@ -261,10 +359,12 @@ pub extern "C" fn perry_geisterhand_get_registry_json(out_len: *mut usize) -> *m
             let mut s = String::from("[");
             for (i, w) in reg.iter().enumerate() {
                 if i > 0 { s.push(','); }
+                let escaped_label = w.label.replace('\\', "\\\\").replace('"', "\\\"");
+                let escaped_shortcut = w.shortcut.replace('\\', "\\\\").replace('"', "\\\"");
                 s.push_str(&format!(
-                    r#"{{"handle":{},"widget_type":{},"callback_kind":{},"label":"{}"}}"#,
+                    r#"{{"handle":{},"widget_type":{},"callback_kind":{},"label":"{}","shortcut":"{}"}}"#,
                     w.handle, w.widget_type, w.callback_kind,
-                    w.label.replace('\\', "\\\\").replace('"', "\\\"")
+                    escaped_label, escaped_shortcut
                 ));
             }
             s.push(']');

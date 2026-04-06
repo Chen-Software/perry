@@ -65,15 +65,19 @@ Returns a JSON array of all registered widgets:
 
 ```json
 [
-  {"handle": 3, "widget_type": 0, "callback_kind": 0, "label": "Click Me"},
-  {"handle": 4, "widget_type": 1, "callback_kind": 1, "label": "Type here..."},
-  {"handle": 5, "widget_type": 2, "callback_kind": 1, "label": ""},
-  {"handle": 6, "widget_type": 3, "callback_kind": 1, "label": "Enable"},
-  {"handle": 7, "widget_type": 4, "callback_kind": 1, "label": "Select..."},
-  {"handle": 8, "widget_type": 5, "callback_kind": 0, "label": "File > Open"},
-  {"handle": 9, "widget_type": 7, "callback_kind": 0, "label": "data-table"}
+  {"handle": 3, "widget_type": 0, "callback_kind": 0, "label": "Click Me", "shortcut": ""},
+  {"handle": 4, "widget_type": 1, "callback_kind": 1, "label": "Type here...", "shortcut": ""},
+  {"handle": 5, "widget_type": 2, "callback_kind": 1, "label": "", "shortcut": ""},
+  {"handle": 6, "widget_type": 3, "callback_kind": 1, "label": "Enable", "shortcut": ""},
+  {"handle": 7, "widget_type": 5, "callback_kind": 0, "label": "Save", "shortcut": "s"},
+  {"handle": 8, "widget_type": 8, "callback_kind": 0, "label": "", "shortcut": ""}
 ]
 ```
+
+Supports query parameter filters:
+- `GET /widgets?label=Save` — filter by label substring (case-insensitive)
+- `GET /widgets?type=button` — filter by widget type name or code
+- `GET /widgets?label=Save&type=5` — combine filters
 
 #### Widget Types
 
@@ -87,6 +91,7 @@ Returns a JSON array of all registered widgets:
 | 5 | Menu | Menu item |
 | 6 | Shortcut | Keyboard shortcut |
 | 7 | Table | Data table |
+| 8 | ScrollView | Scrollable container |
 
 #### Callback Kinds
 
@@ -195,6 +200,42 @@ POST /doubleclick/:handle
 ```
 
 Fires the widget's `onDoubleClick` callback.
+
+### Trigger Keyboard Shortcut
+
+```
+POST /key
+Content-Type: application/json
+
+{"shortcut": "s"}
+```
+
+Finds a registered menu item whose shortcut matches and fires its callback. Shortcut strings are case-insensitive and match the key string passed to `menuAddItem` (e.g., `"s"` for Cmd+S, `"S"` for Cmd+Shift+S, `"n"` for Cmd+N).
+
+```bash
+curl -X POST http://127.0.0.1:7676/key \
+  -H 'Content-Type: application/json' \
+  -d '{"shortcut":"s"}'
+```
+
+Returns `{"ok":true}` if a matching shortcut was found, or 404 if no match.
+
+### Scroll a ScrollView
+
+```
+POST /scroll/:handle
+Content-Type: application/json
+
+{"x": 0, "y": 100}
+```
+
+Sets the scroll offset of a ScrollView widget. Both `x` and `y` are in points.
+
+```bash
+curl -X POST http://127.0.0.1:7676/scroll/8 \
+  -H 'Content-Type: application/json' \
+  -d '{"x":0,"y":200}'
+```
 
 ### Capture Screenshot
 

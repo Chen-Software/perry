@@ -36,11 +36,21 @@ thread_local! {
 
 /// Store a UIView and return its handle (1-based i64).
 pub fn register_widget(view: Retained<UIView>) -> i64 {
-    WIDGETS.with(|w| {
+    let handle = WIDGETS.with(|w| {
         let mut widgets = w.borrow_mut();
-        widgets.push(view);
+        widgets.push(view.clone());
         widgets.len() as i64
-    })
+    });
+    #[cfg(feature = "geisterhand")]
+    {
+        use objc2_foundation::NSString;
+        let id_str = format!("gh-{}", handle);
+        let ns_id = NSString::from_str(&id_str);
+        unsafe {
+            let _: () = objc2::msg_send![&*view, setAccessibilityIdentifier: &*ns_id];
+        }
+    }
+    handle
 }
 
 /// Retrieve the UIView for a given handle.

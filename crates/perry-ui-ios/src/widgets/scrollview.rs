@@ -86,7 +86,13 @@ pub fn create() -> i64 {
         let _: () = msg_send![&*scroll, setContentInsetAdjustmentBehavior: 2i64];
 
         let view: Retained<UIView> = Retained::cast_unchecked(scroll);
-        super::register_widget(view)
+        let handle = super::register_widget(view);
+        #[cfg(feature = "geisterhand")]
+        {
+            extern "C" { fn perry_geisterhand_register(h: i64, wt: u8, ck: u8, cb: f64, lbl: *const u8); }
+            unsafe { perry_geisterhand_register(handle, 8, 0, 0.0, std::ptr::null()); }
+        }
+        handle
     }
 }
 
@@ -162,6 +168,20 @@ pub fn set_offset(scroll_handle: i64, offset: f64) {
         unsafe {
             let point = CGPoint::new(0.0, offset);
             let _: () = msg_send![&*scroll_view, setContentOffset: point, animated: true];
+        }
+    }
+}
+
+/// Set both x and y scroll offsets. Used by geisterhand for programmatic scrolling.
+#[no_mangle]
+pub extern "C" fn perry_ui_scroll_set_offset(scroll_handle: i64, x: f64, y: f64) {
+    if let Some(scroll_view) = super::get_widget(scroll_handle) {
+        unsafe {
+            #[repr(C)]
+            #[derive(Copy, Clone)]
+            struct CGPoint { x: f64, y: f64 }
+            let point = CGPoint { x, y };
+            let _: () = objc2::msg_send![&*scroll_view, setContentOffset: point animated: false];
         }
     }
 }

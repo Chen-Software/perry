@@ -28,6 +28,7 @@ pub fn create(text_ptr: *const u8) -> i64 {
         let label: Retained<UILabel> = msg_send![objc2::runtime::AnyClass::get(c"UILabel").unwrap(), new];
         let ns_string = NSString::from_str(text);
         let _: () = msg_send![&*label, setText: &*ns_string];
+        let _: () = msg_send![&*label, setAccessibilityLabel: &*ns_string];
         // translatesAutoresizingMaskIntoConstraints = false for Auto Layout
         let _: () = msg_send![&*label, setTranslatesAutoresizingMaskIntoConstraints: false];
 

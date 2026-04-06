@@ -1,6 +1,6 @@
 //! HTTP server for geisterhand.
 //! Routes: /widgets, /click/:handle, /type/:handle, /slide/:handle,
-//! /toggle/:handle, /state/:handle, /key, /chaos/start, /chaos/stop, /chaos/status
+//! /toggle/:handle, /state/:handle, /key, /scroll/:handle, /chaos/start, /chaos/stop, /chaos/status
 
 use tiny_http::{Server, Response, Header, Method};
 
@@ -12,6 +12,8 @@ extern "C" {
     fn perry_geisterhand_queue_action1(closure_f64: f64, arg: f64);
     fn perry_geisterhand_queue_state_set(handle: i64, value: f64);
     fn perry_geisterhand_request_screenshot(out_len: *mut usize) -> *mut u8;
+    fn perry_geisterhand_find_by_shortcut(shortcut_ptr: *const u8, shortcut_len: usize) -> f64;
+    fn perry_geisterhand_queue_scroll(handle: i64, x: f64, y: f64);
 }
 
 // Callback kind constants (must match perry-runtime/src/geisterhand_registry.rs)
@@ -49,6 +51,34 @@ fn parse_handle(path: &str, prefix: &str) -> Option<i64> {
     rest.parse::<i64>().ok()
 }
 
+/// Parse a query parameter value from a URL (e.g., "/widgets?label=Save" → Some("Save"))
+fn query_param<'a>(url: &'a str, key: &str) -> Option<&'a str> {
+    let query = url.split('?').nth(1)?;
+    let needle = format!("{}=", key);
+    for pair in query.split('&') {
+        if let Some(val) = pair.strip_prefix(&needle) {
+            return Some(val);
+        }
+    }
+    None
+}
+
+/// Map widget type name to code
+fn widget_type_from_name(name: &str) -> Option<u8> {
+    match name {
+        "button" => Some(0),
+        "textfield" | "text_field" => Some(1),
+        "slider" => Some(2),
+        "toggle" => Some(3),
+        "picker" => Some(4),
+        "menu" => Some(5),
+        "shortcut" => Some(6),
+        "table" => Some(7),
+        "scrollview" | "scroll_view" => Some(8),
+        _ => name.parse::<u8>().ok(),
+    }
+}
+
 /// Read request body as string
 fn read_body(request: &mut tiny_http::Request) -> String {
     let mut body = String::new();
@@ -67,7 +97,8 @@ pub fn run_server(port: u16) {
     };
 
     for mut request in server.incoming_requests() {
-        let path = request.url().to_string();
+        let full_url = request.url().to_string();
+        let path = full_url.split('?').next().unwrap_or(&full_url);
         let method = request.method().clone();
 
         // Handle CORS preflight
@@ -80,8 +111,8 @@ pub fn run_server(port: u16) {
             continue;
         }
 
-        let response = match (method, path.as_str()) {
-            // GET /widgets — list all registered widgets
+        let response = match (method, path) {
+            // GET /widgets — list all registered widgets (supports ?label= and ?type= filters)
             (Method::Get, "/widgets") => {
                 let mut len: usize = 0;
                 let ptr = unsafe { perry_geisterhand_get_registry_json(&mut len) };
@@ -92,7 +123,42 @@ pub fn run_server(port: u16) {
                 } else {
                     "[]".to_string()
                 };
-                ok_json(&json)
+
+                // Apply query param filters
+                let label_filter = query_param(&full_url, "label");
+                let type_filter = query_param(&full_url, "type")
+                    .and_then(|t| widget_type_from_name(t));
+
+                if label_filter.is_some() || type_filter.is_some() {
+                    if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&json) {
+                        let filtered: Vec<&serde_json::Value> = arr.iter().filter(|w| {
+                            if let Some(label) = label_filter {
+                                if let Some(wl) = w.get("label").and_then(|l| l.as_str()) {
+                                    if !wl.to_lowercase().contains(&label.to_lowercase()) {
+                                        return false;
+                                    }
+                                } else {
+                                    return false;
+                                }
+                            }
+                            if let Some(wt) = type_filter {
+                                if let Some(wt_val) = w.get("widget_type").and_then(|t| t.as_u64()) {
+                                    if wt_val != wt as u64 {
+                                        return false;
+                                    }
+                                } else {
+                                    return false;
+                                }
+                            }
+                            true
+                        }).collect();
+                        ok_json(&serde_json::to_string(&filtered).unwrap_or_else(|_| "[]".to_string()))
+                    } else {
+                        ok_json(&json)
+                    }
+                } else {
+                    ok_json(&json)
+                }
             }
 
             // POST /click/:handle — fire onClick
@@ -290,6 +356,47 @@ pub fn run_server(port: u16) {
                         .with_header(cors_header())
                 } else {
                     error_json(500, "screenshot capture failed or timed out")
+                }
+            }
+
+            // POST /key — fire a keyboard shortcut by matching registered menu shortcuts
+            (Method::Post, "/key") => {
+                let body = read_body(&mut request);
+                let shortcut = match serde_json::from_str::<serde_json::Value>(&body) {
+                    Ok(v) => v.get("shortcut").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                    Err(_) => body.trim().to_string(),
+                };
+                if shortcut.is_empty() {
+                    error_json(400, "missing shortcut field")
+                } else {
+                    let closure = unsafe {
+                        perry_geisterhand_find_by_shortcut(shortcut.as_ptr(), shortcut.len())
+                    };
+                    if closure != 0.0 {
+                        unsafe { perry_geisterhand_queue_action(closure); }
+                        ok_json(r#"{"ok":true}"#)
+                    } else {
+                        error_json(404, "no registered shortcut matches")
+                    }
+                }
+            }
+
+            // POST /scroll/:handle — scroll a scrollview
+            (Method::Post, p) if p.starts_with("/scroll/") => {
+                match parse_handle(p, "/scroll/") {
+                    Some(handle) => {
+                        let body = read_body(&mut request);
+                        let (x, y) = match serde_json::from_str::<serde_json::Value>(&body) {
+                            Ok(v) => (
+                                v.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                                v.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                            ),
+                            Err(_) => (0.0, 0.0),
+                        };
+                        unsafe { perry_geisterhand_queue_scroll(handle, x, y); }
+                        ok_json(r#"{"ok":true}"#)
+                    }
+                    None => error_json(400, "invalid handle"),
                 }
             }
 

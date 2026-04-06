@@ -33,6 +33,11 @@ pub fn create(_label_ptr: *const u8, _on_change: f64, _style: i64) -> i64 {
         let handle = super::register_widget(view);
         PICKER_ITEMS.with(|pi| pi.borrow_mut().insert(handle, Vec::new()));
         PICKER_SELECTED.with(|ps| ps.borrow_mut().insert(handle, 0));
+        #[cfg(feature = "geisterhand")]
+        {
+            extern "C" { fn perry_geisterhand_register(h: i64, wt: u8, ck: u8, cb: f64, lbl: *const u8); }
+            perry_geisterhand_register(handle, 4, 1, _on_change, _label_ptr);
+        }
         handle
     }
 }
