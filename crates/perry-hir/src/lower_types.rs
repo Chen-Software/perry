@@ -521,7 +521,71 @@ pub(crate) fn extract_ts_type_with_ctx(ts_type: &ast::TsType, ctx: Option<&Lower
         TsTypeOperator(_) => Type::Any,
 
         // Type literal: { a: T, b: U }
-        TsTypeLit(_) => Type::Any, // TODO: Extract to ObjectType
+        TsTypeLit(lit) => {
+            let mut properties = std::collections::HashMap::new();
+            for member in &lit.members {
+                match member {
+                    ast::TsTypeElement::TsPropertySignature(prop) => {
+                        if let ast::Expr::Ident(ident) = prop.key.as_ref() {
+                            let field_name = ident.sym.to_string();
+                            let field_type = if let Some(ann) = &prop.type_ann {
+                                extract_ts_type_with_ctx(&ann.type_ann, ctx)
+                            } else {
+                                Type::Any
+                            };
+                            properties.insert(field_name, perry_types::PropertyInfo {
+                                ty: field_type,
+                                optional: prop.optional,
+                                readonly: prop.readonly,
+                            });
+                        }
+                    }
+                    ast::TsTypeElement::TsMethodSignature(method) => {
+                        if let ast::Expr::Ident(ident) = method.key.as_ref() {
+                            let method_name = ident.sym.to_string();
+                            let return_type = method.type_ann.as_ref()
+                                .map(|ann| extract_ts_type_with_ctx(&ann.type_ann, ctx))
+                                .unwrap_or(Type::Any);
+                            let params: Vec<(String, Type, bool)> = method.params.iter().map(|p| {
+                                let (name, ty) = get_fn_param_name_and_type_with_ctx(p, ctx);
+                                (name, ty, false)
+                            }).collect();
+                            properties.insert(method_name, perry_types::PropertyInfo {
+                                ty: Type::Function(perry_types::FunctionType {
+                                    params,
+                                    return_type: Box::new(return_type),
+                                    is_async: false,
+                                    is_generator: false,
+                                }),
+                                optional: method.optional,
+                                readonly: false,
+                            });
+                        }
+                    }
+                    ast::TsTypeElement::TsIndexSignature(idx_sig) => {
+                        // index signature: { [key: string]: T }
+                        if let Some(ann) = &idx_sig.type_ann {
+                            let val_type = extract_ts_type_with_ctx(&ann.type_ann, ctx);
+                            return Type::Object(perry_types::ObjectType {
+                                name: None,
+                                properties,
+                                index_signature: Some(Box::new(val_type)),
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if properties.is_empty() {
+                Type::Any
+            } else {
+                Type::Object(perry_types::ObjectType {
+                    name: None,
+                    properties,
+                    index_signature: None,
+                })
+            }
+        }
     }
 }
 

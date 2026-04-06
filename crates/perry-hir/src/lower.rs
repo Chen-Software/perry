@@ -1828,6 +1828,21 @@ fn collect_closure_assigned_in_body_expr(expr: &Expr, out: &mut std::collections
             }
         }
         Expr::JsCreateCallback { closure, .. } => collect_closure_assigned_in_body_expr(closure, out),
+        // Array mutation methods may reallocate the array pointer, so they
+        // count as assignments to the array_id for mutable-capture widening.
+        Expr::ArrayPush { array_id, value } | Expr::ArrayUnshift { array_id, value } | Expr::ArrayPushSpread { array_id, source: value } => {
+            out.insert(*array_id);
+            collect_closure_assigned_in_body_expr(value, out);
+        }
+        Expr::ArrayPop(array_id) | Expr::ArrayShift(array_id) => {
+            out.insert(*array_id);
+        }
+        Expr::ArraySplice { array_id, start, delete_count, items } => {
+            out.insert(*array_id);
+            collect_closure_assigned_in_body_expr(start, out);
+            if let Some(dc) = delete_count { collect_closure_assigned_in_body_expr(dc, out); }
+            for item in items { collect_closure_assigned_in_body_expr(item, out); }
+        }
         _ => {}
     }
 }
@@ -4659,6 +4674,10 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                     _ => false,
                                 };
                                 let is_known_not_string = type_info.map(|ty| !matches!(ty, Type::String | Type::Any | Type::Unknown)).unwrap_or(false);
+                                // Object type literals (e.g., { push: (v: number) => void; ... })
+                                // are NOT arrays — they are plain objects with closure-valued
+                                // properties and must NOT enter the array fast path.
+                                let is_object_type = matches!(type_info, Some(Type::Object(_)));
                                 let is_ambiguous_method = matches!(method_name,
                                     "indexOf" | "includes" | "slice"
                                 );
@@ -4666,6 +4685,8 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                     false  // definitely a string, skip array block
                                 } else if is_user_class_instance {
                                     false  // user class — must dispatch to class method, skip array fast-path
+                                } else if is_object_type {
+                                    false  // object type literal — dispatch via method call, not array ops
                                 } else if is_known_not_string {
                                     true   // definitely not a string, enter array block
                                 } else if is_ambiguous_method {
@@ -5518,7 +5539,8 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                     "push" if args.len() >= 1 => {
                                         // Generic expr.push(value) or expr.push(...spread)
                                         // GUARD: Skip if the receiver is a user-defined class instance
-                                        // (e.g. Stack<T>.push()), so its method dispatches correctly.
+                                        // (e.g. Stack<T>.push()), or an object type literal (e.g.
+                                        // { push: (v) => void, ... }), so its method dispatches correctly.
                                         let is_user_class_receiver = match member.obj.as_ref() {
                                             ast::Expr::Ident(ident) => {
                                                 ctx.lookup_local_type(&ident.sym.to_string()).map(|ty| {
@@ -5528,6 +5550,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                             let builtin = ["Map", "Set", "WeakMap", "WeakSet", "Promise"];
                                                             !builtin.contains(&base.as_str()) && ctx.lookup_class(base).is_some()
                                                         }
+                                                        Type::Object(_) => true, // object type literal with push property
                                                         _ => false,
                                                     }
                                                 }).unwrap_or(false)

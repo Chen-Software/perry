@@ -199,6 +199,33 @@ fn collect_referenced_locals_expr(expr: &Expr, out: &mut std::collections::HashS
             if let Some(dc) = delete_count { collect_referenced_locals_expr(dc, out); }
             for item in items { collect_referenced_locals_expr(item, out); }
         }
+        // Set mutation expressions with set_id: LocalId
+        Expr::SetAdd { set_id, value } => {
+            out.insert(*set_id);
+            collect_referenced_locals_expr(value, out);
+        }
+        // Set expressions with Box<Expr> sub-expressions
+        Expr::SetHas { set, value } | Expr::SetDelete { set, value } => {
+            collect_referenced_locals_expr(set, out);
+            collect_referenced_locals_expr(value, out);
+        }
+        Expr::SetSize(expr) | Expr::SetClear(expr) | Expr::SetValues(expr) => {
+            collect_referenced_locals_expr(expr, out);
+        }
+        // Map expressions with Box<Expr> sub-expressions
+        Expr::MapSet { map, key, value } => {
+            collect_referenced_locals_expr(map, out);
+            collect_referenced_locals_expr(key, out);
+            collect_referenced_locals_expr(value, out);
+        }
+        Expr::MapGet { map, key } | Expr::MapHas { map, key } | Expr::MapDelete { map, key } => {
+            collect_referenced_locals_expr(map, out);
+            collect_referenced_locals_expr(key, out);
+        }
+        Expr::MapSize(expr) | Expr::MapClear(expr) | Expr::MapEntries(expr)
+        | Expr::MapKeys(expr) | Expr::MapValues(expr) | Expr::MapNewFromArray(expr) => {
+            collect_referenced_locals_expr(expr, out);
+        }
         // Leaf nodes with no LocalId references
         _ => {}
     }

@@ -7515,7 +7515,17 @@ pub(crate) fn compile_expr(
                     } else {
                         false
                     };
-                    if property == "push" && args.len() >= 1 && !object_is_user_class_with_push {
+                    // Also skip if the local is known NOT to be an array.
+                    // For LocalGet objects, check is_array — if explicitly false and the
+                    // variable is a known pointer (object type literal, etc.), skip.
+                    let object_is_known_non_array = if let Expr::LocalGet(id) = object.as_ref() {
+                        locals.get(id)
+                            .map(|info| info.is_pointer && !info.is_array)
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    };
+                    if property == "push" && args.len() >= 1 && !object_is_user_class_with_push && !object_is_known_non_array {
                         // Compile the object expression to get the array pointer
                         let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
 
