@@ -727,7 +727,8 @@ pub(crate) fn compile_stmt(
                     Expr::BufferFrom { .. } | Expr::BufferAlloc { .. } | Expr::BufferAllocUnsafe(_) |
                     Expr::BufferConcat(_) | Expr::BufferSlice { .. } | Expr::BufferFill { .. } |
                     Expr::Uint8ArrayNew(_) | Expr::Uint8ArrayFrom(_) |
-                    Expr::ChildProcessExecSync { .. } | Expr::CryptoRandomBytes(_) => true,
+                    Expr::ChildProcessExecSync { .. } | Expr::CryptoRandomBytes(_) |
+                    Expr::FsReadFileBinary(_) => true,
                     Expr::NativeMethodCall { module, method, .. }
                         if module == "crypto" && method == "randomBytes" => true,
                     // Detect chained buffer methods: new Uint8Array(n).fill(v), buf.slice(), buf.subarray()
@@ -2586,7 +2587,7 @@ pub(crate) fn compile_stmt(
                             Expr::PropertyGet { object, property } if property == "length" => {
                                 if let Expr::LocalGet(array_id) = object.as_ref() {
                                     if let Some(arr_info) = locals.get(array_id) {
-                                        if arr_info.is_array {
+                                        if arr_info.is_array && !arr_info.is_boxed {
                                             let arr_val = builder.use_var(arr_info.var);
                                             // Always use js_nanbox_get_pointer to safely extract the array pointer.
                                             // Array values may come from various sources (Expr::Array, ArrayMap,
@@ -3786,7 +3787,7 @@ pub(crate) fn compile_stmt(
                 let mut cached_array_ids: Vec<LocalId> = Vec::new();
                 for arr_id in &array_ids_in_body {
                     if let Some(info) = locals.get(arr_id) {
-                        if info.is_array && !info.is_mixed_array && !info.is_union && info.cached_array_ptr.is_none() {
+                        if info.is_array && !info.is_mixed_array && !info.is_union && !info.is_boxed && info.cached_array_ptr.is_none() {
                             // Extract raw pointer once and cache it
                             let arr_val = builder.use_var(info.var);
                             let val_type = builder.func.dfg.value_type(arr_val);

@@ -4376,6 +4376,14 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_buffer_length"), func_id);
         }
 
+        // js_buffer_print(buf_ptr: i64) -> void
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // buffer ptr
+            let func_id = self.module.declare_function("js_buffer_print", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_buffer_print"), func_id);
+        }
+
         // js_buffer_slice(buf_ptr: i64, start: i32, end: i32) -> i64
         {
             let mut sig = self.module.make_signature();

@@ -2102,8 +2102,14 @@ unsafe fn dispatch_native_module_method(
         }
     };
 
-    // Helper: convert i32 boolean to f64
-    let bool_to_f64 = |v: i32| -> f64 { v as f64 };
+    // Helper: convert i32 boolean to NaN-boxed TAG_TRUE / TAG_FALSE
+    let bool_to_f64 = |v: i32| -> f64 {
+        if v != 0 {
+            f64::from_bits(0x7FFC_0000_0000_0004) // TAG_TRUE
+        } else {
+            f64::from_bits(0x7FFC_0000_0000_0003) // TAG_FALSE
+        }
+    };
 
     // Helper: convert *mut StringHeader to NaN-boxed string f64
     let str_to_f64 = |ptr: *mut crate::StringHeader| -> f64 {

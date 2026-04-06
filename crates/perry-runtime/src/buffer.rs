@@ -400,6 +400,32 @@ pub extern "C" fn js_buffer_to_string(buf_ptr: *const BufferHeader, encoding: i3
     }
 }
 
+/// Print a buffer in Node.js `<Buffer xx xx ...>` format to stdout
+#[no_mangle]
+pub extern "C" fn js_buffer_print(buf_ptr: *const BufferHeader) {
+    if buf_ptr.is_null() {
+        println!("<Buffer >");
+        return;
+    }
+    unsafe {
+        let len = (*buf_ptr).length as usize;
+        let data = buffer_data(buf_ptr);
+        let bytes = std::slice::from_raw_parts(data, len);
+        let mut out = String::with_capacity(9 + len * 3);
+        out.push_str("<Buffer");
+        for (i, b) in bytes.iter().enumerate() {
+            if i == 0 {
+                out.push(' ');
+            } else {
+                out.push(' ');
+            }
+            out.push_str(&format!("{:02x}", b));
+        }
+        out.push('>');
+        println!("{}", out);
+    }
+}
+
 /// Get the length of a buffer
 #[no_mangle]
 pub extern "C" fn js_buffer_length(buf_ptr: *const BufferHeader) -> i32 {

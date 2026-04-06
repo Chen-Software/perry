@@ -4018,8 +4018,12 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                     let method_name = method_ident.sym.as_ref();
                                     match method_name {
                                         "readFileSync" => {
-                                            if args.len() >= 1 {
+                                            if args.len() >= 2 {
+                                                // readFileSync(path, encoding) — returns string
                                                 return Ok(Expr::FsReadFileSync(Box::new(args.into_iter().next().unwrap())));
+                                            } else if args.len() == 1 {
+                                                // readFileSync(path) without encoding — returns Buffer (Node parity)
+                                                return Ok(Expr::FsReadFileBinary(Box::new(args.into_iter().next().unwrap())));
                                             }
                                         }
                                         "writeFileSync" => {
@@ -6018,8 +6022,12 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                             if module_name == "fs" {
                                 match func_name {
                                     "readFileSync" => {
-                                        if args.len() >= 1 {
+                                        if args.len() >= 2 {
+                                            // readFileSync(path, encoding) — returns string
                                             return Ok(Expr::FsReadFileSync(Box::new(args.into_iter().next().unwrap())));
+                                        } else if args.len() == 1 {
+                                            // readFileSync(path) without encoding — returns Buffer (Node parity)
+                                            return Ok(Expr::FsReadFileBinary(Box::new(args.into_iter().next().unwrap())));
                                         }
                                     }
                                     "writeFileSync" => {

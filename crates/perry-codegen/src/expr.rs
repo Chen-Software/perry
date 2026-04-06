@@ -947,8 +947,8 @@ pub(crate) fn compile_expr(
             let call = builder.ins().call(func_ref, &[path_f64]);
             let result_i32 = builder.inst_results(call)[0];
 
-            // Return as f64 (1.0 = true, 0.0 = false)
-            Ok(builder.ins().fcvt_from_sint(types::F64, result_i32))
+            // Return as NaN-boxed boolean (TAG_TRUE / TAG_FALSE)
+            Ok(i32_to_nanbox_bool(builder, result_i32))
         }
         Expr::FsMkdirSync(path_expr) => {
             // Compile the path expression
@@ -8075,6 +8075,24 @@ pub(crate) fn compile_expr(
                                 builder.ins().call(func_ref, &[arr_ptr]);
                                 return Ok(builder.ins().f64const(0.0));
                             }
+                        } else if args.first().map(|arg| match arg {
+                            Expr::FsReadFileBinary(_) | Expr::BufferFrom { .. } | Expr::BufferAlloc { .. }
+                            | Expr::BufferAllocUnsafe(_) | Expr::BufferConcat(_) | Expr::BufferSlice { .. }
+                            | Expr::Uint8ArrayNew(_) | Expr::Uint8ArrayFrom(_) => true,
+                            Expr::LocalGet(id) => locals.get(id).map(|i| i.is_buffer).unwrap_or(false),
+                            _ => false,
+                        }).unwrap_or(false) {
+                            // Use js_buffer_print for Buffer/Uint8Array arguments
+                            if let Some(func_id) = extern_funcs.get("js_buffer_print") {
+                                let func_ref = module.declare_func_in_func(*func_id, builder.func);
+                                let buf_ptr = if builder.func.dfg.value_type(arg_vals[0]) == types::I64 {
+                                    arg_vals[0]
+                                } else {
+                                    ensure_i64(builder, arg_vals[0])
+                                };
+                                builder.ins().call(func_ref, &[buf_ptr]);
+                                return Ok(builder.ins().f64const(0.0));
+                            }
                         } else {
                             // Check if the value is i64 - could be a string/pointer from function call
                             // In that case, use js_string_print instead of js_console_log_dynamic
@@ -9860,6 +9878,75 @@ pub(crate) fn compile_expr(
                                 if let Some(class_meta) = classes.get(class_name) {
                                     // First check for own methods
                                     if let Some(&method_id) = class_meta.method_ids.get(property) {
+                                        // VIRTUAL DISPATCH: If any subclass in this module overrides
+                                        // this method, we must use runtime vtable dispatch so the
+                                        // actual class_id of the instance is used (JS semantics).
+                                        let is_overridden_in_subclass = classes.iter().any(|(_, other_meta)| {
+                                            if other_meta.id == class_meta.id {
+                                                return false;
+                                            }
+                                            let mut current = other_meta;
+                                            loop {
+                                                let parent_name = match &current.parent_class {
+                                                    Some(n) => n.clone(),
+                                                    None => return false,
+                                                };
+                                                let parent = match classes.get(&parent_name) {
+                                                    Some(p) => p,
+                                                    None => return false,
+                                                };
+                                                if parent.id == class_meta.id {
+                                                    if let (Some(&child_mid), Some(&own_mid)) = (
+                                                        other_meta.method_ids.get(property),
+                                                        class_meta.method_ids.get(property),
+                                                    ) {
+                                                        return child_mid != own_mid;
+                                                    }
+                                                    return false;
+                                                }
+                                                current = parent;
+                                            }
+                                        });
+
+                                        if is_overridden_in_subclass {
+                                            // Use runtime vtable dispatch via js_native_call_method
+                                            let obj_val = builder.use_var(info.var);
+                                            let obj_ptr = ensure_i64(builder, obj_val);
+                                            let obj_nanboxed = inline_nanbox_pointer(builder, obj_ptr);
+
+                                            let name_bytes = property.as_bytes();
+                                            let name_data_id = module.declare_anonymous_data(false, false)?;
+                                            let mut name_desc = cranelift_module::DataDescription::new();
+                                            name_desc.define(name_bytes.to_vec().into_boxed_slice());
+                                            module.define_data(name_data_id, &name_desc)?;
+                                            let name_gv = module.declare_data_in_func(name_data_id, builder.func);
+                                            let name_ptr = builder.ins().global_value(types::I64, name_gv);
+                                            let name_len = builder.ins().iconst(types::I64, name_bytes.len() as i64);
+
+                                            let args_len_val = builder.ins().iconst(types::I64, arg_vals.len() as i64);
+                                            let args_ptr_val = if arg_vals.is_empty() {
+                                                builder.ins().iconst(types::I64, 0)
+                                            } else {
+                                                let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                                                    StackSlotKind::ExplicitSlot,
+                                                    (arg_vals.len() * 8) as u32,
+                                                    8,
+                                                ));
+                                                for (idx, arg) in arg_vals.iter().enumerate() {
+                                                    let val_f64 = ensure_f64(builder, *arg);
+                                                    builder.ins().stack_store(val_f64, slot, (idx * 8) as i32);
+                                                }
+                                                builder.ins().stack_addr(types::I64, slot, 0)
+                                            };
+
+                                            let call_func = extern_funcs.get("js_native_call_method")
+                                                .ok_or_else(|| anyhow!("js_native_call_method not declared"))?;
+                                            let call_ref = module.declare_func_in_func(*call_func, builder.func);
+                                            let call = builder.ins().call(call_ref, &[obj_nanboxed, name_ptr, name_len, args_ptr_val, args_len_val]);
+                                            return Ok(builder.inst_results(call)[0]);
+                                        }
+
+                                        // No override: safe to static dispatch
                                         // Get the object pointer - ensure it's i64
                                         let obj_val = builder.use_var(info.var);
                                         let obj_ptr = ensure_i64(builder, obj_val);
@@ -22833,10 +22920,8 @@ pub(crate) fn compile_expr(
                     // LRUCache methods that return f64 directly
                     Ok(result)
                 } else if native_module == "fs" && (method == "existsSync" || method == "mkdirSync" || method == "unlinkSync" || method == "writeFileSync" || method == "isDirectory") {
-                    // fs functions return i32 boolean - convert to f64
-                    // result is already i32, extend to i64 then convert to f64
-                    let extended = builder.ins().uextend(types::I64, result);
-                    Ok(builder.ins().fcvt_from_uint(types::F64, extended))
+                    // fs functions return i32 boolean - convert to NaN-boxed boolean
+                    Ok(i32_to_nanbox_bool(builder, result))
                 } else if native_module == "fs" && method == "readdirSync" {
                     // readdirSync returns f64 directly (NaN-boxed array pointer from Rust)
                     Ok(result)

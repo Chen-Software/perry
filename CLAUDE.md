@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.55
+**Current Version:** 0.4.56
 
 ## Workflow Requirements
 
@@ -139,6 +139,11 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.56
+- fix: `for (let i = 0; i < capturedArr.length; i++) total += capturedArr[i]` inside closures returned garbage — two for-loop optimizations (i32 counter promotion and array pointer caching) read the box pointer instead of the actual array pointer for boxed mutable captures; both now skip when `is_boxed`. `test_closure_capture_types` passes.
+- fix: `getArea(shape)` where `shape` is typed as parent class but holds a subclass instance — method calls on local variables with class type now check for subclass overrides and route through `js_native_call_method` (runtime vtable dispatch) when the method is polymorphic, matching the existing `this.method()` virtual dispatch logic. `test_super_calls` passes.
+- fix: `fs.existsSync()` returned `1`/`0` instead of `true`/`false` — all three dispatch paths (HIR `FsExistsSync`, native module fallback, and `js_native_call_method` runtime) now return NaN-boxed TAG_TRUE/TAG_FALSE booleans. `fs.readFileSync(path)` without encoding now returns a Buffer (via `FsReadFileBinary`) matching Node.js semantics; new `js_buffer_print` runtime function for `<Buffer xx xx ...>` console output. `test_cli_simulation` passes.
 
 ### v0.4.55
 - fix: `makeStack().push(1)` pattern — object type literals (`{ push: (v) => void, ... }`) no longer misidentified as arrays. Three-layer fix: (1) `TsTypeLit` now extracts to `Type::Object(ObjectType)` instead of `Type::Any`, so `lookup_local_type` returns a proper object type; (2) HIR lowering skips the `ArrayPush`/`NativeMethodCall` fast paths when the receiver is `Type::Object`; (3) codegen `expr.push(value)` interception checks `is_pointer && !is_array` to avoid treating objects as arrays. Also fixed `widen_mutable_captures` not tracking `ArrayPush`/`ArrayPop`/`ArraySplice` as mutations — when one closure does `items.push(v)` and a sibling reads `items.length`, both must use boxed access to share the array pointer. `test_edge_closures` passes.
