@@ -1254,6 +1254,61 @@ impl JsEmitter {
                 self.emit_expr(x);
                 self.output.push(')');
             }
+            Expr::MathCbrt(x) => { self.emit_math_unary("Math.cbrt", x); }
+            Expr::MathHypot(a, b) => {
+                self.output.push_str("Math.hypot(");
+                self.emit_expr(a);
+                self.output.push_str(", ");
+                self.emit_expr(b);
+                self.output.push(')');
+            }
+            Expr::MathHypotZero => { self.output.push_str("Math.hypot()"); }
+            Expr::MathFround(x) => { self.emit_math_unary("Math.fround", x); }
+            Expr::MathClz32(x) => { self.emit_math_unary("Math.clz32", x); }
+            Expr::MathExpm1(x) => { self.emit_math_unary("Math.expm1", x); }
+            Expr::MathLog1p(x) => { self.emit_math_unary("Math.log1p", x); }
+            Expr::MathSinh(x) => { self.emit_math_unary("Math.sinh", x); }
+            Expr::MathCosh(x) => { self.emit_math_unary("Math.cosh", x); }
+            Expr::MathTanh(x) => { self.emit_math_unary("Math.tanh", x); }
+            Expr::MathAsinh(x) => { self.emit_math_unary("Math.asinh", x); }
+            Expr::MathAcosh(x) => { self.emit_math_unary("Math.acosh", x); }
+            Expr::MathAtanh(x) => { self.emit_math_unary("Math.atanh", x); }
+            Expr::StringFromCodePoint(args) => {
+                self.output.push_str("String.fromCodePoint(");
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 { self.output.push_str(", "); }
+                    self.emit_expr(a);
+                }
+                self.output.push(')');
+            }
+            Expr::DateParse(x) => {
+                self.output.push_str("Date.parse(");
+                self.emit_expr(x);
+                self.output.push(')');
+            }
+            Expr::DateUTC(args) => {
+                self.output.push_str("Date.UTC(");
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 { self.output.push_str(", "); }
+                    self.emit_expr(a);
+                }
+                self.output.push(')');
+            }
+            Expr::DateGetUTCDay(d) => { self.emit_expr(d); self.output.push_str(".getUTCDay()"); }
+            Expr::DateGetDay(d) => { self.emit_expr(d); self.output.push_str(".getDay()"); }
+            Expr::DateValueOf(d) => { self.emit_expr(d); self.output.push_str(".valueOf()"); }
+            Expr::DateSetUTCFullYear(d, v) => { self.emit_expr(d); self.output.push_str(".setUTCFullYear("); self.emit_expr(v); self.output.push(')'); }
+            Expr::DateSetUTCMonth(d, v) => { self.emit_expr(d); self.output.push_str(".setUTCMonth("); self.emit_expr(v); self.output.push(')'); }
+            Expr::DateSetUTCDate(d, v) => { self.emit_expr(d); self.output.push_str(".setUTCDate("); self.emit_expr(v); self.output.push(')'); }
+            Expr::DateSetUTCHours(d, v) => { self.emit_expr(d); self.output.push_str(".setUTCHours("); self.emit_expr(v); self.output.push(')'); }
+            Expr::DateSetUTCMinutes(d, v) => { self.emit_expr(d); self.output.push_str(".setUTCMinutes("); self.emit_expr(v); self.output.push(')'); }
+            Expr::DateSetUTCSeconds(d, v) => { self.emit_expr(d); self.output.push_str(".setUTCSeconds("); self.emit_expr(v); self.output.push(')'); }
+            Expr::DateToDateString(d) => { self.emit_expr(d); self.output.push_str(".toDateString()"); }
+            Expr::DateToTimeString(d) => { self.emit_expr(d); self.output.push_str(".toTimeString()"); }
+            Expr::DateToLocaleDateString(d) => { self.emit_expr(d); self.output.push_str(".toLocaleDateString()"); }
+            Expr::DateToLocaleTimeString(d) => { self.emit_expr(d); self.output.push_str(".toLocaleTimeString()"); }
+            Expr::DateGetTimezoneOffset(d) => { self.emit_expr(d); self.output.push_str(".getTimezoneOffset()"); }
+            Expr::DateToJSON(d) => { self.emit_expr(d); self.output.push_str(".toJSON()"); }
             Expr::MathPow(base, exp) => {
                 self.output.push_str("Math.pow(");
                 self.emit_expr(base);

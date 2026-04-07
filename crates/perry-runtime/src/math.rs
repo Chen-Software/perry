@@ -115,3 +115,51 @@ pub extern "C" fn js_math_max_array(arr_ptr: i64) -> f64 {
     }
     result
 }
+
+/// Math.cbrt(x) -> number (cube root)
+#[no_mangle]
+pub extern "C" fn js_math_cbrt(x: f64) -> f64 { x.cbrt() }
+
+/// Math.hypot(a, b) -> number (hypotenuse)
+#[no_mangle]
+pub extern "C" fn js_math_hypot(a: f64, b: f64) -> f64 { a.hypot(b) }
+
+/// Math.fround(x) -> number (nearest 32-bit float)
+#[no_mangle]
+pub extern "C" fn js_math_fround(x: f64) -> f64 { (x as f32) as f64 }
+
+/// Math.clz32(x) -> number (count leading zeros in 32-bit integer)
+#[no_mangle]
+pub extern "C" fn js_math_clz32(x: f64) -> f64 { (x as i32 as u32).leading_zeros() as f64 }
+
+/// Math.expm1(x) -> number (exp(x) - 1, accurate near zero)
+#[no_mangle]
+pub extern "C" fn js_math_expm1(x: f64) -> f64 { x.exp_m1() }
+
+/// Math.log1p(x) -> number (log(1 + x), accurate near zero)
+#[no_mangle]
+pub extern "C" fn js_math_log1p(x: f64) -> f64 { x.ln_1p() }
+
+/// Math.sinh(x) -> number (hyperbolic sine)
+#[no_mangle]
+pub extern "C" fn js_math_sinh(x: f64) -> f64 { x.sinh() }
+
+/// Math.cosh(x) -> number (hyperbolic cosine)
+#[no_mangle]
+pub extern "C" fn js_math_cosh(x: f64) -> f64 { x.cosh() }
+
+/// Math.tanh(x) -> number (hyperbolic tangent)
+#[no_mangle]
+pub extern "C" fn js_math_tanh(x: f64) -> f64 { x.tanh() }
+
+/// Math.asinh(x) -> number (inverse hyperbolic sine)
+#[no_mangle]
+pub extern "C" fn js_math_asinh(x: f64) -> f64 { x.asinh() }
+
+/// Math.acosh(x) -> number (inverse hyperbolic cosine)
+#[no_mangle]
+pub extern "C" fn js_math_acosh(x: f64) -> f64 { x.acosh() }
+
+/// Math.atanh(x) -> number (inverse hyperbolic tangent)
+#[no_mangle]
+pub extern "C" fn js_math_atanh(x: f64) -> f64 { x.atanh() }

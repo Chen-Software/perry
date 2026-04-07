@@ -4291,6 +4291,70 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                 return Ok(Expr::MathAtan2(Box::new(y), Box::new(x)));
                                             }
                                         }
+                                        "cbrt" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::MathCbrt(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        "hypot" => {
+                                            if args.len() >= 2 {
+                                                let mut args_iter = args.into_iter();
+                                                let a = args_iter.next().unwrap();
+                                                let b = args_iter.next().unwrap();
+                                                return Ok(Expr::MathHypot(Box::new(a), Box::new(b)));
+                                            }
+                                            return Ok(Expr::MathHypotZero);
+                                        }
+                                        "fround" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::MathFround(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        "clz32" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::MathClz32(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        "expm1" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::MathExpm1(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        "log1p" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::MathLog1p(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        "sinh" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::MathSinh(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        "cosh" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::MathCosh(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        "tanh" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::MathTanh(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        "asinh" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::MathAsinh(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        "acosh" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::MathAcosh(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        "atanh" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::MathAtanh(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
                                         _ => {} // Fall through to generic handling
                                     }
                                 }
@@ -4321,6 +4385,39 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                 return Ok(Expr::NumberIsSafeInteger(Box::new(args.into_iter().next().unwrap())));
                                             }
                                         }
+                                        "parseFloat" => {
+                                            // Number.parseFloat is same as global parseFloat
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::ParseFloat(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        "parseInt" => {
+                                            // Number.parseInt is same as global parseInt
+                                            if args.len() >= 1 {
+                                                let mut args_iter = args.into_iter();
+                                                let string = args_iter.next().unwrap();
+                                                let radix = args_iter.next().map(|r| Box::new(r));
+                                                return Ok(Expr::ParseInt { string: Box::new(string), radix });
+                                            }
+                                        }
+                                        _ => {} // Fall through to generic handling
+                                    }
+                                }
+                            }
+
+                            // Check for Date.methodName() static calls
+                            if obj_ident.sym.as_ref() == "Date" {
+                                if let ast::MemberProp::Ident(method_ident) = &member.prop {
+                                    let method_name = method_ident.sym.as_ref();
+                                    match method_name {
+                                        "parse" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::DateParse(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        "UTC" => {
+                                            return Ok(Expr::DateUTC(args));
+                                        }
                                         _ => {} // Fall through to generic handling
                                     }
                                 }
@@ -4335,6 +4432,9 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             if args.len() >= 1 {
                                                 return Ok(Expr::StringFromCharCode(Box::new(args.into_iter().next().unwrap())));
                                             }
+                                        }
+                                        "fromCodePoint" => {
+                                            return Ok(Expr::StringFromCodePoint(args));
                                         }
                                         _ => {} // Fall through to generic handling
                                     }
@@ -4645,6 +4745,108 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                 "getMilliseconds" => {
                                     let date_expr = lower_expr(ctx, &member.obj)?;
                                     return Ok(Expr::DateGetMilliseconds(Box::new(date_expr)));
+                                }
+                                "getUTCFullYear" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateGetFullYear(Box::new(date_expr)));
+                                }
+                                "getUTCMonth" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateGetMonth(Box::new(date_expr)));
+                                }
+                                "getUTCDate" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateGetDate(Box::new(date_expr)));
+                                }
+                                "getUTCHours" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateGetHours(Box::new(date_expr)));
+                                }
+                                "getUTCMinutes" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateGetMinutes(Box::new(date_expr)));
+                                }
+                                "getUTCSeconds" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateGetSeconds(Box::new(date_expr)));
+                                }
+                                "getUTCDay" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateGetUTCDay(Box::new(date_expr)));
+                                }
+                                "getDay" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateGetDay(Box::new(date_expr)));
+                                }
+                                "valueOf" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateValueOf(Box::new(date_expr)));
+                                }
+                                "setUTCFullYear" => {
+                                    if args.len() >= 1 {
+                                        let date_expr = lower_expr(ctx, &member.obj)?;
+                                        let arg = args.into_iter().next().unwrap();
+                                        return Ok(Expr::DateSetUTCFullYear(Box::new(date_expr), Box::new(arg)));
+                                    }
+                                }
+                                "setUTCMonth" => {
+                                    if args.len() >= 1 {
+                                        let date_expr = lower_expr(ctx, &member.obj)?;
+                                        let arg = args.into_iter().next().unwrap();
+                                        return Ok(Expr::DateSetUTCMonth(Box::new(date_expr), Box::new(arg)));
+                                    }
+                                }
+                                "setUTCDate" => {
+                                    if args.len() >= 1 {
+                                        let date_expr = lower_expr(ctx, &member.obj)?;
+                                        let arg = args.into_iter().next().unwrap();
+                                        return Ok(Expr::DateSetUTCDate(Box::new(date_expr), Box::new(arg)));
+                                    }
+                                }
+                                "setUTCHours" => {
+                                    if args.len() >= 1 {
+                                        let date_expr = lower_expr(ctx, &member.obj)?;
+                                        let arg = args.into_iter().next().unwrap();
+                                        return Ok(Expr::DateSetUTCHours(Box::new(date_expr), Box::new(arg)));
+                                    }
+                                }
+                                "setUTCMinutes" => {
+                                    if args.len() >= 1 {
+                                        let date_expr = lower_expr(ctx, &member.obj)?;
+                                        let arg = args.into_iter().next().unwrap();
+                                        return Ok(Expr::DateSetUTCMinutes(Box::new(date_expr), Box::new(arg)));
+                                    }
+                                }
+                                "setUTCSeconds" => {
+                                    if args.len() >= 1 {
+                                        let date_expr = lower_expr(ctx, &member.obj)?;
+                                        let arg = args.into_iter().next().unwrap();
+                                        return Ok(Expr::DateSetUTCSeconds(Box::new(date_expr), Box::new(arg)));
+                                    }
+                                }
+                                "toDateString" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateToDateString(Box::new(date_expr)));
+                                }
+                                "toTimeString" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateToTimeString(Box::new(date_expr)));
+                                }
+                                "toLocaleDateString" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateToLocaleDateString(Box::new(date_expr)));
+                                }
+                                "toLocaleTimeString" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateToLocaleTimeString(Box::new(date_expr)));
+                                }
+                                "getTimezoneOffset" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateGetTimezoneOffset(Box::new(date_expr)));
+                                }
+                                "toJSON" => {
+                                    let date_expr = lower_expr(ctx, &member.obj)?;
+                                    return Ok(Expr::DateToJSON(Box::new(date_expr)));
                                 }
                                 _ => {} // Fall through to other handling
                             }

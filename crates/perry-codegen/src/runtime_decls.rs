@@ -7281,6 +7281,97 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_math_max_array"), func_id);
         }
 
+        // New Math functions: (f64) -> f64
+        for name in &["js_math_cbrt", "js_math_fround", "js_math_clz32",
+                       "js_math_expm1", "js_math_log1p",
+                       "js_math_sinh", "js_math_cosh", "js_math_tanh",
+                       "js_math_asinh", "js_math_acosh", "js_math_atanh"] {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function(name, Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed(name), func_id);
+        }
+
+        // js_math_hypot(a: f64, b: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_math_hypot", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_math_hypot"), func_id);
+        }
+
+        // js_number_to_precision(value: f64, digits: f64) -> *mut StringHeader (I64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_number_to_precision", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_number_to_precision"), func_id);
+        }
+
+        // js_number_to_exponential(value: f64, digits: f64) -> *mut StringHeader (I64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_number_to_exponential", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_number_to_exponential"), func_id);
+        }
+
+        // js_string_at(s: I64, index: f64) -> f64 (NaN-boxed string or TAG_UNDEFINED)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_string_at", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_string_at"), func_id);
+        }
+
+        // js_string_code_point_at(s: I64, index: f64) -> f64 (code point or TAG_UNDEFINED)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_string_code_point_at", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_string_code_point_at"), func_id);
+        }
+
+        // js_string_from_code_point(arr_ptr: I64) -> I64 (string pointer)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_string_from_code_point", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_string_from_code_point"), func_id);
+        }
+
+        // js_string_normalize(s: I64, form: I32) -> I64 (string pointer)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I32));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_string_normalize", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_string_normalize"), func_id);
+        }
+
+        // js_string_locale_compare(s: I64, other: I64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_string_locale_compare", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_string_locale_compare"), func_id);
+        }
+
         // ========================================================================
         // Perry Native Framework: Date
         // ========================================================================
@@ -7398,6 +7489,57 @@ impl Compiler {
             sig.returns.push(AbiParam::new(types::F64));
             let func_id = self.module.declare_function("js_date_get_milliseconds", Linkage::Import, &sig)?;
             self.extern_funcs.insert(Cow::Borrowed("js_date_get_milliseconds"), func_id);
+        }
+
+        // New Date functions: (f64) -> f64 (single timestamp arg, returns f64)
+        for name in &["js_date_get_utc_day", "js_date_get_day", "js_date_value_of",
+                       "js_date_get_timezone_offset"] {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function(name, Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed(name), func_id);
+        }
+
+        // Date setter functions: (f64, f64) -> f64
+        for name in &["js_date_set_utc_full_year", "js_date_set_utc_month",
+                       "js_date_set_utc_date", "js_date_set_utc_hours",
+                       "js_date_set_utc_minutes", "js_date_set_utc_seconds"] {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function(name, Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed(name), func_id);
+        }
+
+        // Date string functions: (f64) -> I64 (string pointer)
+        for name in &["js_date_to_date_string", "js_date_to_time_string",
+                       "js_date_to_locale_date_string", "js_date_to_locale_time_string",
+                       "js_date_to_json"] {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function(name, Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed(name), func_id);
+        }
+
+        // js_date_parse(s: I64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_date_parse", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_date_parse"), func_id);
+        }
+
+        // js_date_utc(arr_ptr: I64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_date_utc", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_date_utc"), func_id);
         }
 
         // Error runtime functions

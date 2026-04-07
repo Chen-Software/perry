@@ -772,8 +772,30 @@ impl crate::codegen::Compiler {
             Expr::MathAbs(expr) | Expr::MathSqrt(expr) |
             Expr::MathLog(expr) | Expr::MathLog2(expr) | Expr::MathLog10(expr) |
             Expr::MathSin(expr) | Expr::MathCos(expr) | Expr::MathTan(expr) |
-            Expr::MathAsin(expr) | Expr::MathAcos(expr) | Expr::MathAtan(expr) => {
+            Expr::MathAsin(expr) | Expr::MathAcos(expr) | Expr::MathAtan(expr) |
+            Expr::MathCbrt(expr) | Expr::MathFround(expr) | Expr::MathClz32(expr) |
+            Expr::MathExpm1(expr) | Expr::MathLog1p(expr) |
+            Expr::MathSinh(expr) | Expr::MathCosh(expr) | Expr::MathTanh(expr) |
+            Expr::MathAsinh(expr) | Expr::MathAcosh(expr) | Expr::MathAtanh(expr) |
+            Expr::DateParse(expr) |
+            Expr::DateGetUTCDay(expr) | Expr::DateGetDay(expr) | Expr::DateValueOf(expr) |
+            Expr::DateToDateString(expr) | Expr::DateToTimeString(expr) |
+            Expr::DateToLocaleDateString(expr) | Expr::DateToLocaleTimeString(expr) |
+            Expr::DateGetTimezoneOffset(expr) | Expr::DateToJSON(expr) => {
                 self.collect_closures_from_expr(expr, closures, enclosing_class);
+            }
+            Expr::MathHypotZero => {}
+            Expr::StringFromCodePoint(args) | Expr::DateUTC(args) => {
+                for arg in args {
+                    self.collect_closures_from_expr(arg, closures, enclosing_class);
+                }
+            }
+            Expr::DateSetUTCFullYear(a, b) | Expr::DateSetUTCMonth(a, b) |
+            Expr::DateSetUTCDate(a, b) | Expr::DateSetUTCHours(a, b) |
+            Expr::DateSetUTCMinutes(a, b) | Expr::DateSetUTCSeconds(a, b) |
+            Expr::MathHypot(a, b) => {
+                self.collect_closures_from_expr(a, closures, enclosing_class);
+                self.collect_closures_from_expr(b, closures, enclosing_class);
             }
             // Crypto operations
             Expr::CryptoRandomBytes(inner) | Expr::CryptoSha256(inner) | Expr::CryptoMd5(inner) => {

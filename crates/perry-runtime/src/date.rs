@@ -300,6 +300,234 @@ pub fn timestamp_to_components(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
     (y as i32, m, d, hour, minute, second)
 }
 
+/// Date.parse(string) -> number (milliseconds since epoch)
+/// Parses ISO 8601 date strings. Returns NaN for invalid dates.
+#[no_mangle]
+pub extern "C" fn js_date_parse(s: *const crate::StringHeader) -> f64 {
+    if s.is_null() || (s as usize) < 0x1000 {
+        return f64::NAN;
+    }
+    unsafe {
+        let len = (*s).length as usize;
+        let data = (s as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+        let bytes = std::slice::from_raw_parts(data, len);
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            parse_date_string(text)
+        } else {
+            f64::NAN
+        }
+    }
+}
+
+/// Date.UTC(year, month, day?, hours?, minutes?, seconds?, ms?) -> number
+/// Takes an array of arguments and returns milliseconds since epoch
+#[no_mangle]
+pub extern "C" fn js_date_utc(arr_ptr: i64) -> f64 {
+    if arr_ptr == 0 {
+        return f64::NAN;
+    }
+    let arr = arr_ptr as *const crate::ArrayHeader;
+    let len = crate::array::js_array_length(arr) as usize;
+    if len < 2 {
+        return f64::NAN;
+    }
+    let year = crate::array::js_array_get_f64(arr, 0) as i32;
+    let month = crate::array::js_array_get_f64(arr, 1) as u32 + 1; // JS months are 0-based
+    let day = if len > 2 { crate::array::js_array_get_f64(arr, 2) as u32 } else { 1 };
+    let hour = if len > 3 { crate::array::js_array_get_f64(arr, 3) as u32 } else { 0 };
+    let minute = if len > 4 { crate::array::js_array_get_f64(arr, 4) as u32 } else { 0 };
+    let second = if len > 5 { crate::array::js_array_get_f64(arr, 5) as u32 } else { 0 };
+    let ms = if len > 6 { crate::array::js_array_get_f64(arr, 6) as i64 } else { 0 };
+
+    let ts = components_to_timestamp(year, month, day, hour, minute, second);
+    (ts * 1000 + ms) as f64
+}
+
+/// date.getUTCDay() -> number (day of week, 0=Sunday, 6=Saturday)
+#[no_mangle]
+pub extern "C" fn js_date_get_utc_day(timestamp: f64) -> f64 {
+    let ts_ms = timestamp as i64;
+    let secs = ts_ms / 1000;
+    // Days since epoch. Jan 1 1970 was a Thursday (day 4)
+    let mut days = secs / 86400;
+    if secs < 0 && secs % 86400 != 0 {
+        days -= 1;
+    }
+    // (days + 4) % 7 gives day of week where 0=Sunday
+    let dow = ((days % 7 + 4) % 7 + 7) % 7;
+    dow as f64
+}
+
+/// date.getDay() -> number (day of week in local time)
+/// For simplicity, same as getUTCDay (no timezone support yet)
+#[no_mangle]
+pub extern "C" fn js_date_get_day(timestamp: f64) -> f64 {
+    js_date_get_utc_day(timestamp)
+}
+
+/// date.valueOf() -> number (same as getTime)
+#[no_mangle]
+pub extern "C" fn js_date_value_of(timestamp: f64) -> f64 {
+    timestamp
+}
+
+/// date.setUTCFullYear(year) -> new timestamp
+#[no_mangle]
+pub extern "C" fn js_date_set_utc_full_year(timestamp: f64, year: f64) -> f64 {
+    let ts_ms = timestamp as i64;
+    let secs = ts_ms / 1000;
+    let ms = ts_ms % 1000;
+    let (_, month, day, hour, minute, second) = timestamp_to_components(secs);
+    let new_ts = components_to_timestamp(year as i32, month, day, hour, minute, second);
+    (new_ts * 1000 + ms) as f64
+}
+
+/// date.setUTCMonth(month) -> new timestamp
+#[no_mangle]
+pub extern "C" fn js_date_set_utc_month(timestamp: f64, month: f64) -> f64 {
+    let ts_ms = timestamp as i64;
+    let secs = ts_ms / 1000;
+    let ms = ts_ms % 1000;
+    let (year, _, day, hour, minute, second) = timestamp_to_components(secs);
+    let new_month = month as u32 + 1; // JS months are 0-based
+    let new_ts = components_to_timestamp(year, new_month, day, hour, minute, second);
+    (new_ts * 1000 + ms) as f64
+}
+
+/// date.setUTCDate(day) -> new timestamp
+#[no_mangle]
+pub extern "C" fn js_date_set_utc_date(timestamp: f64, day: f64) -> f64 {
+    let ts_ms = timestamp as i64;
+    let secs = ts_ms / 1000;
+    let ms = ts_ms % 1000;
+    let (year, month, _, hour, minute, second) = timestamp_to_components(secs);
+    let new_ts = components_to_timestamp(year, month, day as u32, hour, minute, second);
+    (new_ts * 1000 + ms) as f64
+}
+
+/// date.setUTCHours(hours) -> new timestamp
+#[no_mangle]
+pub extern "C" fn js_date_set_utc_hours(timestamp: f64, hours: f64) -> f64 {
+    let ts_ms = timestamp as i64;
+    let secs = ts_ms / 1000;
+    let ms = ts_ms % 1000;
+    let (year, month, day, _, minute, second) = timestamp_to_components(secs);
+    let new_ts = components_to_timestamp(year, month, day, hours as u32, minute, second);
+    (new_ts * 1000 + ms) as f64
+}
+
+/// date.setUTCMinutes(minutes) -> new timestamp
+#[no_mangle]
+pub extern "C" fn js_date_set_utc_minutes(timestamp: f64, minutes: f64) -> f64 {
+    let ts_ms = timestamp as i64;
+    let secs = ts_ms / 1000;
+    let ms = ts_ms % 1000;
+    let (year, month, day, hour, _, second) = timestamp_to_components(secs);
+    let new_ts = components_to_timestamp(year, month, day, hour, minutes as u32, second);
+    (new_ts * 1000 + ms) as f64
+}
+
+/// date.setUTCSeconds(seconds) -> new timestamp
+#[no_mangle]
+pub extern "C" fn js_date_set_utc_seconds(timestamp: f64, seconds: f64) -> f64 {
+    let ts_ms = timestamp as i64;
+    let secs = ts_ms / 1000;
+    let ms = ts_ms % 1000;
+    let (year, month, day, hour, minute, _) = timestamp_to_components(secs);
+    let new_ts = components_to_timestamp(year, month, day, hour, minute, seconds as u32);
+    (new_ts * 1000 + ms) as f64
+}
+
+/// date.toDateString() -> "Mon Jan 15 2024" style string
+#[no_mangle]
+pub extern "C" fn js_date_to_date_string(timestamp: f64) -> *mut crate::StringHeader {
+    let ts_ms = timestamp as i64;
+    let secs = ts_ms / 1000;
+    let (year, month, day, _, _, _) = timestamp_to_components(secs);
+
+    // Get day of week
+    let mut days = secs / 86400;
+    if secs < 0 && secs % 86400 != 0 {
+        days -= 1;
+    }
+    let dow = ((days % 7 + 4) % 7 + 7) % 7;
+
+    let day_name = match dow {
+        0 => "Sun", 1 => "Mon", 2 => "Tue", 3 => "Wed",
+        4 => "Thu", 5 => "Fri", 6 => "Sat", _ => "???",
+    };
+    let month_name = match month {
+        1 => "Jan", 2 => "Feb", 3 => "Mar", 4 => "Apr",
+        5 => "May", 6 => "Jun", 7 => "Jul", 8 => "Aug",
+        9 => "Sep", 10 => "Oct", 11 => "Nov", 12 => "Dec", _ => "???",
+    };
+
+    let result = format!("{} {} {:02} {}", day_name, month_name, day, year);
+    let bytes = result.as_bytes();
+    crate::string::js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
+}
+
+/// date.toTimeString() -> "12:00:00 GMT+0000 (UTC)" style string
+#[no_mangle]
+pub extern "C" fn js_date_to_time_string(timestamp: f64) -> *mut crate::StringHeader {
+    let ts_ms = timestamp as i64;
+    let secs = ts_ms / 1000;
+    let (_, _, _, hour, minute, second) = timestamp_to_components(secs);
+
+    let result = format!("{:02}:{:02}:{:02} GMT+0000 (Coordinated Universal Time)", hour, minute, second);
+    let bytes = result.as_bytes();
+    crate::string::js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
+}
+
+/// date.toLocaleDateString() -> locale-specific date string
+/// Simplified: returns ISO date part
+#[no_mangle]
+pub extern "C" fn js_date_to_locale_date_string(timestamp: f64) -> *mut crate::StringHeader {
+    let ts_ms = timestamp as i64;
+    let secs = ts_ms / 1000;
+    let (year, month, day, _, _, _) = timestamp_to_components(secs);
+    let result = format!("{}/{}/{}", month, day, year);
+    let bytes = result.as_bytes();
+    crate::string::js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
+}
+
+/// date.toLocaleTimeString() -> locale-specific time string
+/// Simplified: returns HH:MM:SS
+#[no_mangle]
+pub extern "C" fn js_date_to_locale_time_string(timestamp: f64) -> *mut crate::StringHeader {
+    let ts_ms = timestamp as i64;
+    let secs = ts_ms / 1000;
+    let (_, _, _, hour, minute, second) = timestamp_to_components(secs);
+    let ampm = if hour >= 12 { "PM" } else { "AM" };
+    let hour12 = if hour == 0 { 12 } else if hour > 12 { hour - 12 } else { hour };
+    let result = format!("{}:{:02}:{:02} {}", hour12, minute, second, ampm);
+    let bytes = result.as_bytes();
+    crate::string::js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
+}
+
+/// date.getTimezoneOffset() -> number (minutes offset from UTC)
+/// Returns 0 for UTC (simplified implementation)
+#[no_mangle]
+pub extern "C" fn js_date_get_timezone_offset(_timestamp: f64) -> f64 {
+    // Get the local timezone offset using libc
+    unsafe {
+        let now = libc::time(std::ptr::null_mut());
+        let mut local_tm: libc::tm = std::mem::zeroed();
+        let mut utc_tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&now, &mut local_tm);
+        libc::gmtime_r(&now, &mut utc_tm);
+        let local_secs = libc::mktime(&mut local_tm);
+        let utc_secs = libc::mktime(&mut utc_tm);
+        ((utc_secs - local_secs) / 60) as f64
+    }
+}
+
+/// date.toJSON() -> same as toISOString()
+#[no_mangle]
+pub extern "C" fn js_date_to_json(timestamp: f64) -> *mut crate::StringHeader {
+    js_date_to_iso_string(timestamp)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

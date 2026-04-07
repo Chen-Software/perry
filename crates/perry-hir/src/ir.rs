@@ -1028,6 +1028,43 @@ pub enum Expr {
     MathAcos(Box<Expr>),                 // Math.acos(x) -> number
     MathAtan(Box<Expr>),                 // Math.atan(x) -> number
     MathAtan2(Box<Expr>, Box<Expr>),     // Math.atan2(y, x) -> number
+    MathCbrt(Box<Expr>),                 // Math.cbrt(x) -> number
+    MathHypot(Box<Expr>, Box<Expr>),     // Math.hypot(a, b) -> number
+    MathHypotZero,                       // Math.hypot() -> 0
+    MathFround(Box<Expr>),               // Math.fround(x) -> number
+    MathClz32(Box<Expr>),                // Math.clz32(x) -> number
+    MathExpm1(Box<Expr>),                // Math.expm1(x) -> number
+    MathLog1p(Box<Expr>),                // Math.log1p(x) -> number
+    MathSinh(Box<Expr>),                 // Math.sinh(x) -> number
+    MathCosh(Box<Expr>),                 // Math.cosh(x) -> number
+    MathTanh(Box<Expr>),                 // Math.tanh(x) -> number
+    MathAsinh(Box<Expr>),                // Math.asinh(x) -> number
+    MathAcosh(Box<Expr>),                // Math.acosh(x) -> number
+    MathAtanh(Box<Expr>),                // Math.atanh(x) -> number
+
+    // String methods
+    StringFromCodePoint(Vec<Expr>),            // String.fromCodePoint(...codes) -> string
+
+    // Date static methods
+    DateParse(Box<Expr>),                      // Date.parse(string) -> number
+    DateUTC(Vec<Expr>),                        // Date.UTC(year, month, ...) -> number
+
+    // Date instance methods (all take timestamp as first arg)
+    DateGetUTCDay(Box<Expr>),                  // date.getUTCDay() -> number
+    DateGetDay(Box<Expr>),                     // date.getDay() -> number
+    DateValueOf(Box<Expr>),                    // date.valueOf() -> number
+    DateSetUTCFullYear(Box<Expr>, Box<Expr>),  // date.setUTCFullYear(year) -> number
+    DateSetUTCMonth(Box<Expr>, Box<Expr>),     // date.setUTCMonth(month) -> number
+    DateSetUTCDate(Box<Expr>, Box<Expr>),      // date.setUTCDate(day) -> number
+    DateSetUTCHours(Box<Expr>, Box<Expr>),     // date.setUTCHours(hours) -> number
+    DateSetUTCMinutes(Box<Expr>, Box<Expr>),   // date.setUTCMinutes(minutes) -> number
+    DateSetUTCSeconds(Box<Expr>, Box<Expr>),   // date.setUTCSeconds(seconds) -> number
+    DateToDateString(Box<Expr>),               // date.toDateString() -> string
+    DateToTimeString(Box<Expr>),               // date.toTimeString() -> string
+    DateToLocaleDateString(Box<Expr>),         // date.toLocaleDateString() -> string
+    DateToLocaleTimeString(Box<Expr>),         // date.toLocaleTimeString() -> string
+    DateGetTimezoneOffset(Box<Expr>),          // date.getTimezoneOffset() -> number
+    DateToJSON(Box<Expr>),                     // date.toJSON() -> string
 
     // Crypto operations
     CryptoRandomBytes(Box<Expr>),        // crypto.randomBytes(size) -> string (hex)

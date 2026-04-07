@@ -271,6 +271,117 @@ pub extern "C" fn js_number_to_fixed(value: f64, decimals: f64) -> *mut StringHe
     js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
 }
 
+/// Format a number with specified precision (Number.prototype.toPrecision)
+/// toPrecision(digits) returns a string with `digits` significant digits
+#[no_mangle]
+pub extern "C" fn js_number_to_precision(value: f64, digits: f64) -> *mut StringHeader {
+    let prec = digits as usize;
+    if prec == 0 {
+        return js_string_from_bytes(std::ptr::null(), 0);
+    }
+    // Use Rust's formatting to get the right precision
+    // JS toPrecision counts total significant digits
+    let s = format!("{:.prec$e}", value, prec = prec - 1);
+    // Parse the scientific notation result and convert to JS-style output
+    let result = format_to_precision(value, prec);
+    let bytes = result.as_bytes();
+    js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
+}
+
+/// Helper: format a number with the given number of significant digits (JS toPrecision style)
+fn format_to_precision(value: f64, prec: usize) -> String {
+    if value.is_nan() { return "NaN".to_string(); }
+    if value.is_infinite() { return if value > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }; }
+    if prec == 0 { return String::new(); }
+
+    let negative = value < 0.0;
+    let abs_val = value.abs();
+
+    // Use Rust's scientific formatting to get significant digits
+    let sci = format!("{:.prec$e}", abs_val, prec = prec - 1);
+    // Parse mantissa and exponent
+    let parts: Vec<&str> = sci.split('e').collect();
+    if parts.len() != 2 { return format!("{}", value); }
+    let mantissa_str = parts[0]; // e.g. "1.34"
+    let exp: i32 = parts[1].parse().unwrap_or(0);
+
+    let prefix = if negative { "-" } else { "" };
+
+    // Remove decimal point from mantissa to get raw digits
+    let raw_digits: String = mantissa_str.chars().filter(|c| *c != '.').collect();
+
+    if exp >= 0 && (exp as usize) < prec {
+        // Fixed notation: e.g. 1.34 with exp=0 -> "1.34", 123.46 with exp=2 -> "123.46"
+        let exp_u = exp as usize;
+        let integer_digits = exp_u + 1;
+        if integer_digits >= raw_digits.len() {
+            // All digits are in the integer part, pad with zeros if needed
+            let mut s = raw_digits.clone();
+            while s.len() < integer_digits {
+                s.push('0');
+            }
+            format!("{}{}", prefix, s)
+        } else {
+            // Split into integer and fractional parts
+            let (int_part, frac_part) = raw_digits.split_at(integer_digits);
+            if frac_part.is_empty() {
+                format!("{}{}", prefix, int_part)
+            } else {
+                format!("{}{}.{}", prefix, int_part, frac_part)
+            }
+        }
+    } else if exp < 0 && exp >= -(4 as i32) {
+        // Small numbers: e.g. 0.0012
+        let leading_zeros = (-exp - 1) as usize;
+        let mut s = String::from("0.");
+        for _ in 0..leading_zeros {
+            s.push('0');
+        }
+        s.push_str(&raw_digits);
+        format!("{}{}", prefix, s)
+    } else {
+        // Scientific notation for very large/very small numbers
+        if raw_digits.len() <= 1 {
+            format!("{}{}e{}{}", prefix, &raw_digits, if exp >= 0 { "+" } else { "" }, exp)
+        } else {
+            let (first, rest) = raw_digits.split_at(1);
+            format!("{}{}.{}e{}{}", prefix, first, rest, if exp >= 0 { "+" } else { "" }, exp)
+        }
+    }
+}
+
+/// Format a number in exponential notation (Number.prototype.toExponential)
+/// toExponential(fractionDigits) returns string like "1.23e+4"
+#[no_mangle]
+pub extern "C" fn js_number_to_exponential(value: f64, digits: f64) -> *mut StringHeader {
+    if value.is_nan() {
+        let s = "NaN";
+        return js_string_from_bytes(s.as_ptr(), s.len() as u32);
+    }
+    if value.is_infinite() {
+        let s = if value > 0.0 { "Infinity" } else { "-Infinity" };
+        return js_string_from_bytes(s.as_ptr(), s.len() as u32);
+    }
+    let frac = digits as usize;
+    let negative = value < 0.0;
+    let abs_val = value.abs();
+    let prefix = if negative { "-" } else { "" };
+
+    // Use Rust's scientific notation
+    let sci = format!("{:.prec$e}", abs_val, prec = frac);
+    // Rust formats as "1.23e2" or "1.23e-3", JS wants "1.23e+2" or "1.23e-3"
+    let parts: Vec<&str> = sci.split('e').collect();
+    if parts.len() != 2 {
+        let bytes = sci.as_bytes();
+        return js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32);
+    }
+    let mantissa = parts[0];
+    let exp: i32 = parts[1].parse().unwrap_or(0);
+    let result = format!("{}{}e{}{}", prefix, mantissa, if exp >= 0 { "+" } else { "" }, exp);
+    let bytes = result.as_bytes();
+    js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
+}
+
 /// Get a slice of a string (byte-based for now)
 /// Returns a new string from start to end (exclusive)
 #[no_mangle]
@@ -598,6 +709,153 @@ pub extern "C" fn js_string_char_at(s: *const StringHeader, index: i32) -> *mut 
         let data = string_data(s);
         let char_ptr = data.add(index as usize);
         js_string_from_bytes(char_ptr, 1)
+    }
+}
+
+/// Get character at index, supporting negative indices (String.prototype.at)
+/// Negative index counts from end: at(-1) = last char
+/// Returns TAG_UNDEFINED for out of bounds
+#[no_mangle]
+pub extern "C" fn js_string_at(s: *const StringHeader, index: f64) -> f64 {
+    use crate::value::{TAG_UNDEFINED, STRING_TAG};
+    if !is_valid_string_ptr(s) {
+        return f64::from_bits(TAG_UNDEFINED);
+    }
+    let len = unsafe { (*s).length } as i32;
+    let mut idx = index as i32;
+    if idx < 0 {
+        idx += len;
+    }
+    if idx < 0 || idx >= len {
+        return f64::from_bits(TAG_UNDEFINED);
+    }
+    let result = unsafe {
+        let data = string_data(s);
+        let char_ptr = data.add(idx as usize);
+        js_string_from_bytes(char_ptr, 1)
+    };
+    // NaN-box the string pointer
+    let ptr_bits = (result as u64) & 0x0000_FFFF_FFFF_FFFF;
+    let nanboxed = ((STRING_TAG as u64) << 48) | ptr_bits;
+    f64::from_bits(nanboxed)
+}
+
+/// Get Unicode code point at index (String.prototype.codePointAt)
+/// Returns the full Unicode code point (supports surrogate pairs in UTF-16 view)
+/// Returns TAG_UNDEFINED for out of bounds
+#[no_mangle]
+pub extern "C" fn js_string_code_point_at(s: *const StringHeader, index: f64) -> f64 {
+    use crate::value::TAG_UNDEFINED;
+    if !is_valid_string_ptr(s) {
+        return f64::from_bits(TAG_UNDEFINED);
+    }
+    let len = unsafe { (*s).length } as usize;
+    let idx = index as usize;
+    if idx >= len {
+        return f64::from_bits(TAG_UNDEFINED);
+    }
+    // Perry stores UTF-8, but JS codePointAt operates on UTF-16 code units
+    // For compatibility, we interpret the string as UTF-8 and index into UTF-16 positions
+    let bytes = unsafe {
+        let data = string_data(s);
+        std::slice::from_raw_parts(data, len)
+    };
+    let text = match std::str::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(_) => return f64::from_bits(TAG_UNDEFINED),
+    };
+    // Convert to UTF-16 code units and index by position
+    let utf16_units: Vec<u16> = text.encode_utf16().collect();
+    if idx >= utf16_units.len() {
+        return f64::from_bits(TAG_UNDEFINED);
+    }
+    let unit = utf16_units[idx];
+    // Check for surrogate pair (high surrogate: 0xD800-0xDBFF)
+    if (0xD800..=0xDBFF).contains(&unit) && idx + 1 < utf16_units.len() {
+        let low = utf16_units[idx + 1];
+        if (0xDC00..=0xDFFF).contains(&low) {
+            // Decode surrogate pair
+            let cp = 0x10000 + ((unit as u32 - 0xD800) << 10) + (low as u32 - 0xDC00);
+            return cp as f64;
+        }
+    }
+    unit as f64
+}
+
+/// Create a string from code points (String.fromCodePoint)
+/// Takes an array of code points and returns a string
+#[no_mangle]
+pub extern "C" fn js_string_from_code_point(arr_ptr: i64) -> *mut StringHeader {
+    if arr_ptr == 0 {
+        return js_string_from_bytes(std::ptr::null(), 0);
+    }
+    let arr = arr_ptr as *const crate::ArrayHeader;
+    let len = crate::array::js_array_length(arr) as usize;
+    let mut result = String::new();
+    for i in 0..len {
+        let cp = crate::array::js_array_get_f64(arr, i as u32) as u32;
+        if let Some(ch) = char::from_u32(cp) {
+            result.push(ch);
+        }
+    }
+    let bytes = result.as_bytes();
+    js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
+}
+
+/// String.prototype.normalize(form) — Unicode normalization
+/// form: 0 = NFC (default), 1 = NFD, 2 = NFKC, 3 = NFKD
+#[no_mangle]
+pub extern "C" fn js_string_normalize(s: *const StringHeader, form: i32) -> *mut StringHeader {
+    if !is_valid_string_ptr(s) {
+        return js_string_from_bytes(std::ptr::null(), 0);
+    }
+    let len = unsafe { (*s).length } as usize;
+    let bytes = unsafe {
+        let data = string_data(s);
+        std::slice::from_raw_parts(data, len)
+    };
+    let text = match std::str::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(_) => return js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32),
+    };
+    // Use unicode-normalization crate
+    use unicode_normalization::UnicodeNormalization;
+    let normalized: String = match form {
+        1 => text.nfd().collect(),
+        2 => text.nfkc().collect(),
+        3 => text.nfkd().collect(),
+        _ => text.nfc().collect(), // 0 or default = NFC
+    };
+    let result_bytes = normalized.as_bytes();
+    js_string_from_bytes(result_bytes.as_ptr(), result_bytes.len() as u32)
+}
+
+/// String.prototype.localeCompare(other) — basic comparison (-1, 0, 1)
+/// This is a simplified implementation without full Intl support
+#[no_mangle]
+pub extern "C" fn js_string_locale_compare(s: *const StringHeader, other: *const StringHeader) -> f64 {
+    let s_str = if is_valid_string_ptr(s) {
+        unsafe {
+            let len = (*s).length as usize;
+            let data = string_data(s);
+            std::str::from_utf8(std::slice::from_raw_parts(data, len)).unwrap_or("")
+        }
+    } else {
+        ""
+    };
+    let other_str = if is_valid_string_ptr(other) {
+        unsafe {
+            let len = (*other).length as usize;
+            let data = string_data(other);
+            std::str::from_utf8(std::slice::from_raw_parts(data, len)).unwrap_or("")
+        }
+    } else {
+        ""
+    };
+    match s_str.cmp(other_str) {
+        std::cmp::Ordering::Less => -1.0,
+        std::cmp::Ordering::Equal => 0.0,
+        std::cmp::Ordering::Greater => 1.0,
     }
 }
 
