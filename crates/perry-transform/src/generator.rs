@@ -146,6 +146,7 @@ fn make_iter_result(value: Expr, done: bool) -> Expr {
 fn transform_generator_function(func: &mut Function, next_local_id: &mut u32, next_func_id: &mut u32) {
     let state_id = alloc_local(next_local_id);
     let done_id = alloc_local(next_local_id);
+    let sent_id = alloc_local(next_local_id); // value passed by caller via next(val)
 
     // Collect all states from the generator body
     let mut states: Vec<State> = Vec::new();
@@ -154,7 +155,7 @@ fn transform_generator_function(func: &mut Function, next_local_id: &mut u32, ne
 
     // Track IDs allocated during linearization (e.g. yield* delegation vars)
     let local_id_before = *next_local_id;
-    linearize_body(&func.body, &mut states, &mut current, &mut state_num, state_id, next_local_id);
+    linearize_body(&func.body, &mut states, &mut current, &mut state_num, state_id, next_local_id, sent_id);
     let extra_local_ids: Vec<LocalId> = (local_id_before..*next_local_id).collect();
 
     // Push final state (code after last yield / end of function)
@@ -249,8 +250,16 @@ fn transform_generator_function(func: &mut Function, next_local_id: &mut u32, ne
     )));
     while_body.push(Stmt::Return(Some(make_iter_result(Expr::Undefined, true))));
 
+    // The next() closure parameter — receives the value from next(val) calls
+    let next_param_id = alloc_local(next_local_id);
+
     // Build next() method body
     let next_body = vec![
+        // __sent = <param from next(val)>
+        Stmt::Expr(Expr::LocalSet(
+            sent_id,
+            Box::new(Expr::LocalGet(next_param_id)),
+        )),
         // if (__done) return { value: undefined, done: true };
         Stmt::If {
             condition: Expr::LocalGet(done_id),
@@ -309,9 +318,18 @@ fn transform_generator_function(func: &mut Function, next_local_id: &mut u32, ne
         });
     }
 
-    // Build captures: state, done, params, hoisted vars, extra locals
-    let mut captures = vec![state_id, done_id];
-    let mut mutable_captures = vec![state_id, done_id];
+    // __sent variable for two-way yield: stores value from next(val) calls
+    new_body.push(Stmt::Let {
+        id: sent_id,
+        name: "__gen_sent".to_string(),
+        ty: Type::Any,
+        mutable: true,
+        init: Some(Expr::Undefined),
+    });
+
+    // Build captures: state, done, sent, params, hoisted vars, extra locals
+    let mut captures = vec![state_id, done_id, sent_id];
+    let mut mutable_captures = vec![state_id, done_id, sent_id];
     for param in &func.params {
         captures.push(param.id);
     }
@@ -336,19 +354,57 @@ fn transform_generator_function(func: &mut Function, next_local_id: &mut u32, ne
 
     let next_closure = Expr::Closure {
         func_id: next_func_id_val,
-        params: Vec::new(),
+        params: vec![perry_hir::Param { id: next_param_id, name: "__val".to_string(), ty: Type::Any, is_rest: false }],
         return_type: Type::Any,
         body: next_body,
-        captures,
-        mutable_captures,
+        captures: captures.clone(),
+        mutable_captures: mutable_captures.clone(),
         captures_this: false,
         enclosing_class: None,
         is_async: false,
     };
 
-    // return { next: <closure> }
+    // Build .return(value) closure — immediately marks done and returns {value, done: true}
+    let return_param_id = alloc_local(next_local_id);
+    let return_func_id_val = { let id = *next_func_id; *next_func_id += 1; id };
+    let return_closure = Expr::Closure {
+        func_id: return_func_id_val,
+        params: vec![perry_hir::Param { id: return_param_id, name: "__ret_val".to_string(), ty: Type::Any, is_rest: false }],
+        return_type: Type::Any,
+        body: vec![
+            Stmt::Expr(Expr::LocalSet(done_id, Box::new(Expr::Bool(true)))),
+            Stmt::Return(Some(make_iter_result(Expr::LocalGet(return_param_id), true))),
+        ],
+        captures: captures.clone(),
+        mutable_captures: mutable_captures.clone(),
+        captures_this: false,
+        enclosing_class: None,
+        is_async: false,
+    };
+
+    // Build .throw(error) closure — marks done (simplified: doesn't route to catch)
+    let throw_param_id = alloc_local(next_local_id);
+    let throw_func_id_val = { let id = *next_func_id; *next_func_id += 1; id };
+    let throw_closure = Expr::Closure {
+        func_id: throw_func_id_val,
+        params: vec![perry_hir::Param { id: throw_param_id, name: "__throw_val".to_string(), ty: Type::Any, is_rest: false }],
+        return_type: Type::Any,
+        body: vec![
+            Stmt::Expr(Expr::LocalSet(done_id, Box::new(Expr::Bool(true)))),
+            Stmt::Return(Some(make_iter_result(Expr::Undefined, true))),
+        ],
+        captures: captures.clone(),
+        mutable_captures: mutable_captures.clone(),
+        captures_this: false,
+        enclosing_class: None,
+        is_async: false,
+    };
+
+    // return { next: <closure>, return: <closure>, throw: <closure> }
     new_body.push(Stmt::Return(Some(Expr::Object(vec![
         ("next".to_string(), next_closure),
+        ("return".to_string(), return_closure),
+        ("throw".to_string(), throw_closure),
     ]))));
 
     func.body = new_body;
@@ -380,6 +436,7 @@ fn linearize_body(
     state_id: LocalId,
     #[allow(unused_variables)]
     next_local_id: &mut u32,
+    sent_id: LocalId,
 ) {
     for stmt in stmts {
         match stmt {
@@ -434,7 +491,7 @@ fn linearize_body(
                 };
 
                 // Now linearize the expanded while (it contains a yield, so the while handler picks it up)
-                linearize_body(&[while_stmt], states, current, state_num, state_id, next_local_id);
+                linearize_body(&[while_stmt], states, current, state_num, state_id, next_local_id, sent_id);
             }
 
             // yield expr at statement level (non-delegate)
@@ -525,7 +582,7 @@ fn linearize_body(
                 });
 
                 // Process loop body (may contain yields)
-                linearize_body(body, states, current, state_num, state_id, next_local_id);
+                linearize_body(body, states, current, state_num, state_id, next_local_id, sent_id);
 
                 // State for update: run update expression, goto condition check
                 let update_state = *state_num;
@@ -592,7 +649,7 @@ fn linearize_body(
                 });
 
                 // Process body
-                linearize_body(while_body, states, current, state_num, state_id, next_local_id);
+                linearize_body(while_body, states, current, state_num, state_id, next_local_id, sent_id);
 
                 // After body, goto condition
                 let loop_back_state = *state_num;
@@ -621,7 +678,7 @@ fn linearize_body(
                 if body_contains_yield(body) =>
             {
                 // Linearize the try body directly (yields become normal states)
-                linearize_body(body, states, current, state_num, state_id, next_local_id);
+                linearize_body(body, states, current, state_num, state_id, next_local_id, sent_id);
 
                 // If there's a catch block, append it as regular statements
                 // (they'll execute if the try body falls through, which is wrong
@@ -676,7 +733,7 @@ fn linearize_body(
                 });
 
                 // Linearize then-branch
-                linearize_body(then_branch, states, current, state_num, state_id, next_local_id);
+                linearize_body(then_branch, states, current, state_num, state_id, next_local_id, sent_id);
                 // After then-branch, flush into a goto-after state
                 let then_end_state = *state_num;
                 *state_num += 1;
@@ -689,7 +746,7 @@ fn linearize_body(
                 // Linearize else-branch
                 let else_state = *state_num;
                 if let Some(else_stmts) = else_branch {
-                    linearize_body(else_stmts, states, current, state_num, state_id, next_local_id);
+                    linearize_body(else_stmts, states, current, state_num, state_id, next_local_id, sent_id);
                 }
                 let else_end_state = *state_num;
                 *state_num += 1;
@@ -717,22 +774,22 @@ fn linearize_body(
                 }
             }
 
-            // Let with yield initializer: `const x = yield expr`
+            // Let with yield initializer: `const x = yield expr` (two-way yield)
+            // After resuming, `x` receives the value passed by the caller via next(val),
+            // which is stored in __sent by the next() closure preamble.
             Stmt::Let { id, init: Some(Expr::Yield { value, .. }), mutable, ty, name } => {
                 let yield_val = value.as_ref().map(|v| *v.clone()).unwrap_or(Expr::Undefined);
                 let this_state = *state_num;
                 *state_num += 1;
-                // Yield the value, then in the next state assign the received value to the local
-                // For now, the received value (from next(val)) isn't implemented, so assign undefined
                 states.push(State {
                     num: this_state,
                     body: std::mem::take(current),
                     exit: StateExit::Yield { value: yield_val, next_state: *state_num },
                 });
-                // In the next state, assign undefined to the local (two-way yield not yet supported)
+                // Assign __sent (the value from next(val)) to the target local
                 current.push(Stmt::Let {
                     id: *id,
-                    init: Some(Expr::Undefined),
+                    init: Some(Expr::LocalGet(sent_id)),
                     mutable: *mutable,
                     ty: ty.clone(),
                     name: name.clone(),
