@@ -1226,3 +1226,147 @@ pub extern "C" fn perry_debug_trace_init(_index: i64, _name_ptr: *const u8, _nam
 #[no_mangle]
 pub extern "C" fn perry_debug_trace_init_done(_index: i64) {
 }
+
+// === console.time / timeEnd / timeLog ===
+//
+// Per-thread map from label string to start Instant. Matches Node's
+// behavior of warning on duplicate labels and on missing labels.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::time::Instant;
+
+thread_local! {
+    static CONSOLE_TIMERS: RefCell<HashMap<String, Instant>> = RefCell::new(HashMap::new());
+    static CONSOLE_COUNTERS: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new());
+}
+
+unsafe fn label_from_str_ptr(ptr: *const StringHeader) -> String {
+    if ptr.is_null() || (ptr as usize) < 0x1000 {
+        return "default".to_string();
+    }
+    let len = (*ptr).length as usize;
+    let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+    let bytes = std::slice::from_raw_parts(data, len);
+    std::str::from_utf8(bytes).unwrap_or("default").to_string()
+}
+
+fn format_elapsed(dur: std::time::Duration) -> String {
+    let ms = dur.as_secs_f64() * 1000.0;
+    if ms < 1.0 {
+        format!("{:.3}ms", ms)
+    } else if ms < 1000.0 {
+        format!("{:.3}ms", ms)
+    } else {
+        format!("{:.3}s", dur.as_secs_f64())
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn js_console_time(label_ptr: *const StringHeader) {
+    let label = unsafe { label_from_str_ptr(label_ptr) };
+    CONSOLE_TIMERS.with(|t| {
+        let mut map = t.borrow_mut();
+        if map.contains_key(&label) {
+            eprintln!("Warning: Label '{}' already exists for console.time()", label);
+        }
+        map.insert(label, Instant::now());
+    });
+}
+
+#[no_mangle]
+pub extern "C" fn js_console_time_end(label_ptr: *const StringHeader) {
+    let label = unsafe { label_from_str_ptr(label_ptr) };
+    CONSOLE_TIMERS.with(|t| {
+        let mut map = t.borrow_mut();
+        match map.remove(&label) {
+            Some(start) => println!("{}: {}", label, format_elapsed(start.elapsed())),
+            None => eprintln!("Warning: No such label '{}' for console.timeEnd()", label),
+        }
+    });
+}
+
+#[no_mangle]
+pub extern "C" fn js_console_time_log(label_ptr: *const StringHeader) {
+    let label = unsafe { label_from_str_ptr(label_ptr) };
+    CONSOLE_TIMERS.with(|t| {
+        let map = t.borrow();
+        match map.get(&label) {
+            Some(start) => println!("{}: {}", label, format_elapsed(start.elapsed())),
+            None => eprintln!("Warning: No such label '{}' for console.timeLog()", label),
+        }
+    });
+}
+
+// === console.count / countReset ===
+
+#[no_mangle]
+pub extern "C" fn js_console_count(label_ptr: *const StringHeader) {
+    let label = unsafe { label_from_str_ptr(label_ptr) };
+    CONSOLE_COUNTERS.with(|c| {
+        let mut map = c.borrow_mut();
+        let entry = map.entry(label.clone()).or_insert(0);
+        *entry += 1;
+        println!("{}: {}", label, *entry);
+    });
+}
+
+#[no_mangle]
+pub extern "C" fn js_console_count_reset(label_ptr: *const StringHeader) {
+    let label = unsafe { label_from_str_ptr(label_ptr) };
+    CONSOLE_COUNTERS.with(|c| {
+        let mut map = c.borrow_mut();
+        if map.remove(&label).is_none() {
+            eprintln!("Warning: Count for '{}' does not exist", label);
+        }
+    });
+}
+
+// === console.group / groupEnd / groupCollapsed ===
+//
+// Just print the label like console.log; we don't track indent yet.
+
+#[no_mangle]
+pub extern "C" fn js_console_group(label_ptr: *const StringHeader) {
+    let label = unsafe { label_from_str_ptr(label_ptr) };
+    println!("{}", label);
+}
+
+#[no_mangle]
+pub extern "C" fn js_console_group_end() {
+    // No-op until we add indent tracking.
+}
+
+// === console.assert ===
+//
+// Prints "Assertion failed" + the message string when the condition is false.
+
+#[no_mangle]
+pub extern "C" fn js_console_assert(cond: f64, msg_ptr: *const StringHeader) {
+    use crate::value::js_is_truthy;
+    if js_is_truthy(cond) != 0 { return; }
+    let msg = unsafe {
+        if msg_ptr.is_null() || (msg_ptr as usize) < 0x1000 {
+            String::new()
+        } else {
+            let len = (*msg_ptr).length as usize;
+            let data = (msg_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+            let bytes = std::slice::from_raw_parts(data, len);
+            std::str::from_utf8(bytes).unwrap_or("").to_string()
+        }
+    };
+    if msg.is_empty() {
+        eprintln!("Assertion failed");
+    } else {
+        eprintln!("Assertion failed: {}", msg);
+    }
+}
+
+// === console.clear ===
+//
+// Best-effort: emit ANSI clear sequence on stdout.
+
+#[no_mangle]
+pub extern "C" fn js_console_clear() {
+    print!("\x1b[2J\x1b[H");
+}

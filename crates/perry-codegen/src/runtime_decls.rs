@@ -38,6 +38,38 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_console_log_dynamic"), func_id);
         }
 
+        // console.time / timeEnd / timeLog / count / countReset / group / assert / clear
+        for fname in [
+            "js_console_time",
+            "js_console_time_end",
+            "js_console_time_log",
+            "js_console_count",
+            "js_console_count_reset",
+            "js_console_group",
+        ] {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // label string pointer
+            let func_id = self.module.declare_function(fname, Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed(fname), func_id);
+        }
+        {
+            let sig = self.module.make_signature();
+            let func_id = self.module.declare_function("js_console_group_end", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_console_group_end"), func_id);
+        }
+        {
+            let sig = self.module.make_signature();
+            let func_id = self.module.declare_function("js_console_clear", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_console_clear"), func_id);
+        }
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // condition
+            sig.params.push(AbiParam::new(types::I64)); // message string pointer
+            let func_id = self.module.declare_function("js_console_assert", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_console_assert"), func_id);
+        }
+
         // Declare js_console_error_number(f64) -> void
         {
             let mut sig = self.module.make_signature();

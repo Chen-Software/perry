@@ -7923,6 +7923,85 @@ pub(crate) fn compile_expr(
                         return Ok(i32_to_nanbox_bool(builder, result));
                     }
 
+                    // Handle console.time / timeEnd / timeLog / count / countReset / group / groupEnd /
+                    // groupCollapsed / assert / dir / clear / trace
+                    //
+                    // We dispatch on `property` only (matching how the existing console.log
+                    // branch below does), since these names are uncommon enough on user objects
+                    // that the risk of hijacking is low and Perry's existing console handling
+                    // already follows this pattern.
+                    {
+                        let label_for = |idx: usize, builder: &mut FunctionBuilder, args: &[Expr], arg_vals: &[Value]| -> Value {
+                            if let Some(arg) = args.get(idx) {
+                                if let Expr::String(_) = arg {
+                                    // get_raw_string_ptr returns i64
+                                    return get_raw_string_ptr(builder, arg_vals[idx]);
+                                }
+                                ensure_i64(builder, arg_vals[idx])
+                            } else {
+                                builder.ins().iconst(types::I64, 0)
+                            }
+                        };
+                        match property.as_str() {
+                            "time" | "timeEnd" | "timeLog" | "count" | "countReset" | "group" | "groupCollapsed" => {
+                                let runtime = match property.as_str() {
+                                    "time" => "js_console_time",
+                                    "timeEnd" => "js_console_time_end",
+                                    "timeLog" => "js_console_time_log",
+                                    "count" => "js_console_count",
+                                    "countReset" => "js_console_count_reset",
+                                    "group" | "groupCollapsed" => "js_console_group",
+                                    _ => unreachable!(),
+                                };
+                                let func = extern_funcs.get(runtime)
+                                    .ok_or_else(|| anyhow!("{} not declared", runtime))?;
+                                let func_ref = module.declare_func_in_func(*func, builder.func);
+                                let label = label_for(0, builder, args, &arg_vals);
+                                builder.ins().call(func_ref, &[label]);
+                                return Ok(builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001)));
+                            }
+                            "groupEnd" | "clear" => {
+                                let runtime = if property == "groupEnd" { "js_console_group_end" } else { "js_console_clear" };
+                                let func = extern_funcs.get(runtime)
+                                    .ok_or_else(|| anyhow!("{} not declared", runtime))?;
+                                let func_ref = module.declare_func_in_func(*func, builder.func);
+                                builder.ins().call(func_ref, &[]);
+                                return Ok(builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001)));
+                            }
+                            "assert" => {
+                                let func = extern_funcs.get("js_console_assert")
+                                    .ok_or_else(|| anyhow!("js_console_assert not declared"))?;
+                                let func_ref = module.declare_func_in_func(*func, builder.func);
+                                let cond = if !arg_vals.is_empty() {
+                                    ensure_f64(builder, arg_vals[0])
+                                } else {
+                                    builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001))
+                                };
+                                let label = if args.len() > 1 { label_for(1, builder, args, &arg_vals) } else { builder.ins().iconst(types::I64, 0) };
+                                builder.ins().call(func_ref, &[cond, label]);
+                                return Ok(builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001)));
+                            }
+                            "dir" => {
+                                // Treat as alias for console.log of first arg.
+                                // Fall through to the existing console.log dispatch by rewriting `property`.
+                                // Simpler: just call js_console_log_dynamic on the first arg if present.
+                                if !arg_vals.is_empty() {
+                                    let func = extern_funcs.get("js_console_log_dynamic")
+                                        .ok_or_else(|| anyhow!("js_console_log_dynamic not declared"))?;
+                                    let func_ref = module.declare_func_in_func(*func, builder.func);
+                                    let v = ensure_f64(builder, arg_vals[0]);
+                                    builder.ins().call(func_ref, &[v]);
+                                }
+                                if let Some(nl) = extern_funcs.get("js_console_log_newline") {
+                                    let nl_ref = module.declare_func_in_func(*nl, builder.func);
+                                    builder.ins().call(nl_ref, &[]);
+                                }
+                                return Ok(builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001)));
+                            }
+                            _ => {}
+                        }
+                    }
+
                     // Handle console.log
                     if property == "log" {
                         // Handle multiple arguments by building an array and using spread
