@@ -1387,9 +1387,52 @@ function buildImports() {
       ...(typeof __asyncFuncImpls !== 'undefined' ? __asyncFuncImpls : {}),
     },
     // FFI namespace: external native functions (e.g., bloom_init_window, bloom_draw_rect)
-    // Provided by the host environment via __ffiImports or bootPerryWasm(base64, ffiImports)
-    ffi: typeof __ffiImports !== 'undefined' ? __ffiImports : {},
+    // Wrapped in Proxy so missing imports are auto-stubbed with no-ops returning
+    // NaN-boxed undefined as BigInt, allowing the WASM module to instantiate.
+    ffi: new Proxy(typeof __ffiImports !== 'undefined' ? __ffiImports : {}, {
+      get(target, prop) {
+        if (prop in target) return target[prop];
+        return function ffiStub() { return TAG_UNDEFINED; };
+      },
+    }),
   };
+}
+
+// Wrap a JS function so it interoperates with WASM i64 params/results using f64
+// NaN-boxed values internally. Converts BigInt args from WASM to f64 and Number
+// returns from JS to BigInt by bit reinterpretation. Necessary because BigInt(NaN) throws.
+function wrapForI64(fn) {
+  return function(...args) {
+    const convertedArgs = args.map(a => {
+      if (typeof a === 'bigint') { _u64[0] = a; return _f64[0]; }
+      return a;
+    });
+    const result = fn.apply(this, convertedArgs);
+    if (typeof result === 'number') {
+      if (Number.isInteger(result) && Math.abs(result) < 2147483648) return result;
+      _f64[0] = result;
+      return _u64[0];
+    }
+    return result;
+  };
+}
+
+function wrapNamespace(ns) {
+  return new Proxy(ns, {
+    get(target, prop) {
+      const v = target[prop];
+      if (typeof v === 'function') return wrapForI64(v);
+      return v;
+    },
+  });
+}
+
+function wrapImportsForI64(imports) {
+  const wrapped = {};
+  for (const nsName in imports) {
+    wrapped[nsName] = wrapNamespace(imports[nsName]);
+  }
+  return wrapped;
 }
 
 // Class method/static/parent tables
@@ -3199,7 +3242,7 @@ async function bootPerryWasm(wasmBase64, ffiImports) {
     }
   }
   const wasmBytes = Uint8Array.from(atob(wasmBase64), c => c.charCodeAt(0));
-  const imports = buildImports();
+  const imports = wrapImportsForI64(buildImports());
   const { instance } = await WebAssembly.instantiate(wasmBytes, imports);
   wasmInstance = instance;
   wasmMemory = instance.exports.memory;

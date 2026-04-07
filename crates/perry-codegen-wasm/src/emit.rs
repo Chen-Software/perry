@@ -382,11 +382,11 @@ fn map_ui_method(method: &str, class_name: Option<&str>) -> &'static str {
         "textfieldBlurAll" => "perry_ui_textfield_blur_all",
         "textfieldSetOnSubmit" => "perry_ui_textfield_set_on_submit",
         "textfieldSetOnFocus" => "perry_ui_textfield_set_on_focus",
-        // ScrollView
-        "scrollViewSetChild" => "perry_ui_scrollview_set_child",
-        "scrollViewScrollTo" => "perry_ui_scrollview_scroll_to",
-        "scrollViewGetOffset" => "perry_ui_scrollview_get_offset",
-        "scrollViewSetOffset" => "perry_ui_scrollview_set_offset",
+        // ScrollView (accept both camelCase forms)
+        "scrollViewSetChild" | "scrollviewSetChild" => "perry_ui_scrollview_set_child",
+        "scrollViewScrollTo" | "scrollviewScrollTo" => "perry_ui_scrollview_scroll_to",
+        "scrollViewGetOffset" | "scrollviewGetOffset" => "perry_ui_scrollview_get_offset",
+        "scrollViewSetOffset" | "scrollviewSetOffset" => "perry_ui_scrollview_set_offset",
         // Canvas
         "fillRect" | "canvas_fill_rect" => "perry_ui_canvas_fill_rect",
         "strokeRect" | "canvas_stroke_rect" => "perry_ui_canvas_stroke_rect",
@@ -512,6 +512,15 @@ struct WasmModuleEmitter {
     /// Global variable mapping: GlobalId → wasm global index
     global_map: BTreeMap<GlobalId, u32>,
     num_globals: u32,
+    /// Module-level Let bindings promoted to WASM globals: (mod_idx, LocalId) → wasm global idx.
+    /// Module-level `let`/`const` declarations live in module.init as Stmt::Let, but
+    /// are accessed by functions in the same module via LocalGet. They need to be
+    /// stored in WASM globals so cross-function references work, and so module-init
+    /// LocalIds don't collide with other modules' identical LocalIds.
+    module_let_globals: BTreeMap<(usize, LocalId), u32>,
+    /// Current module index when compiling functions/methods, so LocalGet can resolve
+    /// module-level Lets to the correct WASM global.
+    current_mod_idx: usize,
     /// Class constructor map: class_name → wasm function index
     class_ctor_map: BTreeMap<String, u32>,
     /// Class method map: class_name → {method_name → wasm function index}
@@ -557,6 +566,8 @@ impl WasmModuleEmitter {
             rt: None,
             global_map: BTreeMap::new(),
             num_globals: 0,
+            module_let_globals: BTreeMap::new(),
+            current_mod_idx: 0,
             class_ctor_map: BTreeMap::new(),
             class_method_map: BTreeMap::new(),
             class_static_map: BTreeMap::new(),
@@ -1271,6 +1282,7 @@ impl WasmModuleEmitter {
                     let type_idx = self.get_type_idx(params, results);
                     let _ = type_idx;
                     self.class_ctor_map.insert(class.name.clone(), user_func_idx);
+                    self.func_param_counts.insert(user_func_idx, param_count);
                     user_func_idx += 1;
                 }
                 // Instance methods: params = this + declared params
@@ -1284,6 +1296,7 @@ impl WasmModuleEmitter {
                         .entry(class.name.clone())
                         .or_insert_with(BTreeMap::new)
                         .insert(method.name.clone(), user_func_idx);
+                    self.func_param_counts.insert(user_func_idx, param_count);
                     user_func_idx += 1;
                 }
                 // Static methods: no this param
@@ -1299,6 +1312,7 @@ impl WasmModuleEmitter {
                         .insert(method.name.clone(), user_func_idx);
                     // Also register in func_name_map for cross-module resolution
                     self.func_name_map.insert(format!("{}_{}", class.name, method.name), user_func_idx);
+                    self.func_param_counts.insert(user_func_idx, param_count);
                     user_func_idx += 1;
                 }
                 // Getters: like methods with 0 params + this
@@ -1311,6 +1325,7 @@ impl WasmModuleEmitter {
                         .entry(class.name.clone())
                         .or_insert_with(BTreeMap::new)
                         .insert(format!("__get_{}", name), user_func_idx);
+                    self.func_param_counts.insert(user_func_idx, 1);
                     let _ = getter;
                     user_func_idx += 1;
                 }
@@ -1324,6 +1339,7 @@ impl WasmModuleEmitter {
                         .entry(class.name.clone())
                         .or_insert_with(BTreeMap::new)
                         .insert(format!("__set_{}", name), user_func_idx);
+                    self.func_param_counts.insert(user_func_idx, 2);
                     let _ = setter;
                     user_func_idx += 1;
                 }
@@ -1371,6 +1387,12 @@ impl WasmModuleEmitter {
                 self.global_map.insert(global.id, self.num_globals);
                 self.num_globals += 1;
             }
+        }
+
+        // Promote module-level Let bindings to WASM globals so cross-function
+        // references work and so different modules' identical LocalIds don't collide.
+        for (mod_idx, (_, module)) in modules.iter().enumerate() {
+            collect_module_let_ids(&module.init, mod_idx, &mut self.module_let_globals, &mut self.num_globals);
         }
 
         // Add a NaN-safe temp global for mem_store_slot (Firefox canonicalizes locals)
@@ -1585,6 +1607,10 @@ impl WasmModuleEmitter {
         export_section.export("_start", ExportKind::Func, start_idx);
         export_section.export("memory", ExportKind::Memory, 0);
         export_section.export("__indirect_function_table", ExportKind::Table, 0);
+        // Export all user functions so async JS code can call them by index.
+        for idx in self.num_imports..start_idx {
+            export_section.export(&format!("__wasm_func_{}", idx), ExportKind::Func, idx);
+        }
         wasm_module.section(&export_section);
 
         // --- Element section (populate the indirect call table) ---
@@ -1622,6 +1648,7 @@ impl WasmModuleEmitter {
         // Swap in the per-module func_map so FuncRef(id) resolves correctly within each module.
         for (mod_idx, (_, module)) in modules.iter().enumerate() {
             self.func_map = self.module_func_maps[mod_idx].clone();
+            self.current_mod_idx = mod_idx;
             for hir_func in &module.functions {
                 if hir_func.is_async { continue; }
                 let func = self.compile_function(hir_func);
@@ -1632,6 +1659,7 @@ impl WasmModuleEmitter {
         // Class constructors, methods, static methods, getters, setters
         for (mod_idx, (_, module)) in modules.iter().enumerate() {
             self.func_map = self.module_func_maps[mod_idx].clone();
+            self.current_mod_idx = mod_idx;
             for class in &module.classes {
                 if let Some(ctor) = &class.constructor {
                     let func = self.compile_class_constructor(class, ctor);
@@ -1660,6 +1688,7 @@ impl WasmModuleEmitter {
         for (func_id, params, body, captures, mutable_captures, mod_idx) in &closure_funcs {
             if self.module_func_maps[*mod_idx].contains_key(func_id) {
                 self.func_map = self.module_func_maps[*mod_idx].clone();
+                self.current_mod_idx = *mod_idx;
                 let func = self.compile_closure(params, body, captures, mutable_captures);
                 code_section.function(&func);
             }
@@ -1667,14 +1696,21 @@ impl WasmModuleEmitter {
 
         // _start: call __init_strings, then execute module init code
         {
-            // Collect all init statements to determine locals needed (recursively)
-            let mut init_locals = BTreeMap::new();
-            let mut extra_count = 0u32;
+            // Collect locals PER-MODULE so LocalIds don't collide across modules.
+            // Each module declares Lets starting from id 0, so without per-module maps
+            // module B's `let id=1` would alias module A's `let id=1`.
+            let mut per_module_init_locals: Vec<BTreeMap<LocalId, u32>> = Vec::with_capacity(modules.len());
+            let mut total_count = 0u32;
             for (_, module) in modules {
-                collect_locals(&module.init, &mut init_locals, &mut extra_count, 0);
+                let mut mod_map = BTreeMap::new();
+                collect_locals(&module.init, &mut mod_map, &mut total_count, 0);
+                per_module_init_locals.push(mod_map);
             }
+            // Empty fallback map for global initializers and class field inits that
+            // shouldn't reference module-level lets.
+            let init_locals: BTreeMap<LocalId, u32> = BTreeMap::new();
 
-            let num_locals = init_locals.len() as u32;
+            let num_locals = total_count;
             let start_temp_local = num_locals;
             let start_temp_i32 = num_locals + 2;
             let locals = vec![(num_locals + 2, ValType::I64), (1, ValType::I32)];
@@ -1787,9 +1823,13 @@ impl WasmModuleEmitter {
             }
 
             // Execute init statements from all modules — swap in per-module func_map
+            // and per-module local map so LocalGets resolve to the correct WASM local
+            // (or fall back to module_let_globals via current_mod_idx).
             for (mod_idx, (_, module)) in modules.iter().enumerate() {
                 self.func_map = self.module_func_maps[mod_idx].clone();
-                let mut ctx = FuncEmitCtx::new(self, &init_locals, start_temp_local, start_temp_i32);
+                self.current_mod_idx = mod_idx;
+                let mod_locals = &per_module_init_locals[mod_idx];
+                let mut ctx = FuncEmitCtx::new(self, mod_locals, start_temp_local, start_temp_i32);
                 for stmt in &module.init {
                     ctx.emit_stmt(&mut func, stmt, false);
                 }
@@ -1911,6 +1951,12 @@ impl WasmModuleEmitter {
             if let Some(init) = &field.init {
                 let mut ctx = FuncEmitCtx::new(self, &local_map, temp_local_idx, temp_i32_idx);
                 ctx.emit_frame_begin(&mut func, 3);
+                // Compute base address (sp - 24) and save to temp_i32 local
+                let sp = self.nan_temp_global;
+                func.instruction(&Instruction::GlobalGet(sp));
+                func.instruction(&Instruction::I32Const(24));
+                func.instruction(&Instruction::I32Sub);
+                func.instruction(&Instruction::LocalSet(temp_i32_idx));
                 // Store this handle to slot 0
                 func.instruction(&Instruction::LocalGet(temp_i32_idx));
                 func.instruction(&Instruction::LocalGet(0)); // this
@@ -2213,8 +2259,21 @@ impl WasmModuleEmitter {
                 match callee.as_ref() {
                     Expr::FuncRef(id) => {
                         if let Some(&func_idx) = self.func_map.get(id) {
-                            // Call exported WASM function
-                            format!("wasmInstance.exports.__wasm_func_{}({})", func_idx, args_js.join(", "))
+                            // Call exported WASM function. WASM funcs use i64 params/result.
+                            let args_i64: Vec<String> = args_js.iter()
+                                .map(|a| format!("f64ToU64({})", a))
+                                .collect();
+                            format!("u64ToF64(wasmInstance.exports.__wasm_func_{}({}))", func_idx, args_i64.join(", "))
+                        } else {
+                            "u64ToF64(TAG_UNDEFINED)".to_string()
+                        }
+                    }
+                    Expr::ExternFuncRef { name, .. } => {
+                        if let Some(&func_idx) = self.func_name_map.get(name) {
+                            let args_i64: Vec<String> = args_js.iter()
+                                .map(|a| format!("f64ToU64({})", a))
+                                .collect();
+                            format!("u64ToF64(wasmInstance.exports.__wasm_func_{}({}))", func_idx, args_i64.join(", "))
                         } else {
                             "u64ToF64(TAG_UNDEFINED)".to_string()
                         }
@@ -2914,6 +2973,24 @@ impl WasmModuleEmitter {
                 self.collect_strings_in_expr(callee);
                 for a in args { self.collect_strings_in_expr(a); }
             }
+            Expr::FetchWithOptions { url, method, body, headers } => {
+                self.collect_strings_in_expr(url);
+                self.collect_strings_in_expr(method);
+                self.collect_strings_in_expr(body);
+                for (key, val) in headers {
+                    self.intern_string(key);
+                    self.collect_strings_in_expr(val);
+                }
+            }
+            Expr::FetchGetWithAuth { url, auth_header } => {
+                self.collect_strings_in_expr(url);
+                self.collect_strings_in_expr(auth_header);
+            }
+            Expr::FetchPostWithAuth { url, auth_header, body } => {
+                self.collect_strings_in_expr(url);
+                self.collect_strings_in_expr(auth_header);
+                self.collect_strings_in_expr(body);
+            }
             _ => {}
         }
     }
@@ -3418,7 +3495,10 @@ impl<'a> FuncEmitCtx<'a> {
                     // Default: undefined
                     func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                 }
-                if let Some(&idx) = self.local_map.get(id) {
+                // Check module_let_globals FIRST (top-level Let → WASM global), then local_map
+                if let Some(&gidx) = self.emitter.module_let_globals.get(&(self.emitter.current_mod_idx, *id)) {
+                    func.instruction(&Instruction::GlobalSet(gidx));
+                } else if let Some(&idx) = self.local_map.get(id) {
                     func.instruction(&Instruction::LocalSet(idx));
                 } else {
                     func.instruction(&Instruction::Drop);
@@ -3779,7 +3859,10 @@ impl<'a> FuncEmitCtx<'a> {
 
             // --- Variables ---
             Expr::LocalGet(id) => {
-                if let Some(&idx) = self.local_map.get(id) {
+                // Check module_let_globals FIRST (handles top-level Lets in current module)
+                if let Some(&gidx) = self.emitter.module_let_globals.get(&(self.emitter.current_mod_idx, *id)) {
+                    func.instruction(&Instruction::GlobalGet(gidx));
+                } else if let Some(&idx) = self.local_map.get(id) {
                     func.instruction(&Instruction::LocalGet(idx));
                 } else {
                     // Unknown local — push undefined
@@ -3788,7 +3871,11 @@ impl<'a> FuncEmitCtx<'a> {
             }
             Expr::LocalSet(id, val) => {
                 self.emit_expr(func, val);
-                if let Some(&idx) = self.local_map.get(id) {
+                if let Some(&gidx) = self.emitter.module_let_globals.get(&(self.emitter.current_mod_idx, *id)) {
+                    // Module-level let — write to WASM global, then read back to leave on stack
+                    func.instruction(&Instruction::GlobalSet(gidx));
+                    func.instruction(&Instruction::GlobalGet(gidx));
+                } else if let Some(&idx) = self.local_map.get(id) {
                     // Tee: set and leave on stack
                     func.instruction(&Instruction::LocalTee(idx));
                 }
@@ -5503,13 +5590,17 @@ impl<'a> FuncEmitCtx<'a> {
                 // Call the compiled constructor if it exists
                 if let Some(&ctor_idx) = self.emitter.class_ctor_map.get(class_name.as_str()) {
                     // Stack: [instance_handle]
-                    // Constructor takes: (this, arg0, arg1, ...)
-                    // instance_handle is already on stack as first arg (this)
                     for arg in args {
                         self.emit_expr(func, arg);
                     }
+                    // Pad missing arguments with TAG_UNDEFINED
+                    if let Some(&expected) = self.emitter.func_param_counts.get(&ctor_idx) {
+                        let provided = args.len() + 1;
+                        for _ in provided..expected {
+                            func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
+                        }
+                    }
                     func.instruction(&Instruction::Call(ctor_idx));
-                    // Constructor returns this
                 }
                 // If no compiled constructor, just leave the instance handle on stack
             }
@@ -5546,6 +5637,12 @@ impl<'a> FuncEmitCtx<'a> {
                             func.instruction(&Instruction::LocalGet(0)); // this
                             for arg in args {
                                 self.emit_expr(func, arg);
+                            }
+                            if let Some(&expected) = self.emitter.func_param_counts.get(&ctor_idx) {
+                                let provided = args.len() + 1;
+                                for _ in provided..expected {
+                                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
+                                }
                             }
                             func.instruction(&Instruction::Call(ctor_idx));
                             func.instruction(&Instruction::Drop); // parent ctor returns this, discard
@@ -6255,6 +6352,39 @@ impl<'a> FuncEmitCtx<'a> {
                 self.emit_expr(func, p);
                 // In WASM, just return the string as-is
             }
+            Expr::PathRelative(from, to) => {
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, from);
+                self.emit_store_arg(func, 1, to);
+                self.emit_memcall(func, "path_relative", 2);
+            }
+            Expr::PathNormalize(p) => {
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, p);
+                self.emit_memcall(func, "path_normalize", 1);
+            }
+            Expr::PathParse(p) => {
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, p);
+                self.emit_memcall(func, "path_parse", 1);
+            }
+            Expr::PathFormat(o) => {
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, o);
+                self.emit_memcall(func, "path_format", 1);
+            }
+            Expr::PathBasenameExt(p, ext) => {
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, p);
+                self.emit_store_arg(func, 1, ext);
+                self.emit_memcall(func, "path_basename", 2);
+            }
+            Expr::PathSep => {
+                self.emit_memcall(func, "path_sep", 0);
+            }
+            Expr::PathDelimiter => {
+                self.emit_memcall(func, "path_delimiter", 0);
+            }
             // --- Buffer/TypedArray ---
             Expr::BufferAlloc { ref size, .. } => {
                 self.emit_frame_begin(func, 1);
@@ -6778,6 +6908,23 @@ impl<'a> FuncEmitCtx<'a> {
 }
 
 /// Recursively scan statements for local variable declarations
+/// Walk a module's init statements and assign WASM global indices to top-level Lets.
+/// Module-level Lets are then accessible from any function in the same module via
+/// the (mod_idx, LocalId) key.
+fn collect_module_let_ids(
+    stmts: &[Stmt],
+    mod_idx: usize,
+    map: &mut BTreeMap<(usize, LocalId), u32>,
+    next_global: &mut u32,
+) {
+    for stmt in stmts {
+        if let Stmt::Let { id, .. } = stmt {
+            map.insert((mod_idx, *id), *next_global);
+            *next_global += 1;
+        }
+    }
+}
+
 fn collect_locals(stmts: &[Stmt], map: &mut BTreeMap<LocalId, u32>, count: &mut u32, offset: u32) {
     for stmt in stmts {
         match stmt {
