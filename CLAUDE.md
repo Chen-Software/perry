@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.62
+**Current Version:** 0.4.63
 
 ## Workflow Requirements
 
@@ -140,8 +140,12 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 
 ## Recent Changes
 
+### v0.4.63
+- fix: complete JWT `keyid`/`kid` codegen wiring — v0.4.62 landed the runtime side (`sign_common` accepts `kid_ptr`, all three signers take a 4th arg) but the matching codegen + runtime_decls were missed, so the call site still passed 3 args to a 4-arg function and the kid was never set. This commit adds the missing pieces: `runtime_decls.rs` declares the 4th `i64` (kid StringHeader ptr), `expr.rs` jsonwebtoken.sign branch extracts `keyid` (alias `kid`) from a literal options object via `compile_expr` + `js_get_string_pointer_unified`, and also fixes a long-standing payload bug where `jwt.sign(JSON.stringify({...}), key, opts)` produced `{}` because the codegen always re-stringified via `js_json_stringify` with object type-hint — now `Expr::JsonStringify(_)` / `Expr::String(_)` / string-typed `LocalGet` payloads are forwarded as raw StringHeader pointers. Verified end-to-end: a Perry-signed `{ alg: ES256, kid }` token validates in Node `jsonwebtoken.verify` against the EC public key. Unblocks APNs provider tokens.
+
 ### v0.4.62
-- feat: JWT `keyid`/`kid` header support + JSON-string payload passthrough — `js_jwt_sign` / `js_jwt_sign_es256` / `js_jwt_sign_rs256` now take an optional 4th `kid_ptr: *const StringHeader` arg threaded into `Header.kid` via `sign_common`. Codegen extracts `keyid` (alias `kid`) from a literal options object in `expr.rs` and passes the resolved StringHeader pointer (or 0). Also fixes a long-standing payload bug: when `args[0]` is `Expr::JsonStringify(_)`, `Expr::String(_)`, or a string-typed `LocalGet` (e.g. `jwt.sign(JSON.stringify({...}), pem, opts)`), the StringHeader is forwarded directly via `js_get_string_pointer_unified` instead of being re-stringified by `js_json_stringify` (which silently produced `{}` for string inputs). Verified end-to-end: a Perry-signed `{ alg: ES256, kid }` token validates in Node `jsonwebtoken.verify` against the EC public key. Unblocks APNs provider tokens.
+- fix: `Class.prototype` / `class Foo {}` used as a first-class value crashed Cranelift verifier — `Expr::ClassRef` fallback paths called `js_object_alloc_fast` with one i32 zero, but the runtime takes `(class_id: i32, field_count: i32)` (two i32 args). Both branches (class without ctor + unknown class) now pass two zero i32 args.
+- feat: JWT `keyid`/`kid` runtime side — `sign_common` in `perry-stdlib/src/jsonwebtoken.rs` accepts a `kid_ptr: *const StringHeader` (null = no `kid` field) and threads it into `Header.kid`; all three signers (`js_jwt_sign` / `_es256` / `_rs256`) take a 4th arg. The codegen + runtime_decls bits were missed in this commit and follow in v0.4.63.
 
 ### v0.4.61
 - feat: `--minimal-stdlib` rebuilds perry-stdlib with only the Cargo features the project's imports actually need — collects native module specifiers into a new `CompilationContext.native_module_imports` set, maps each via `commands/stdlib_features.rs` (e.g. `mysql2`→`database-mysql`, `fastify`→`http-server`, `mongodb`→`database-mongodb`, `crypto`→`crypto`, fetch usage→`http-client`), then `cargo build --release -p perry-stdlib --no-default-features --features <list>` into `target/perry-stdlib-minimal/`. Both the symbol-stub scan and the link path now share one `stdlib_lib_resolved` so they see the same archive. Falls back to the prebuilt full stdlib if cargo isn't on PATH, the Perry workspace source isn't on disk, or the rebuild fails — never breaks the user's compile. Measured 4.2 MB → 3.4 MB (19% smaller) on a fetch-only program; the stdlib archive itself drops from 191 MB to 56 MB for `http-client` only and 34 MB for no optional features.

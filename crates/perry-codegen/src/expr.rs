@@ -22665,33 +22665,77 @@ pub(crate) fn compile_expr(
                     match method.as_str() {
                         "sign" => {
                             // sign(payload, secret, options?)
-                            // js_jwt_sign(payload_json: i64, secret: i64, expiry: f64) -> i64
-                            let mut args = Vec::new();
+                            // js_jwt_sign(payload_json: i64, secret: i64, expiry: f64, kid: i64) -> i64
+                            let mut call_args = Vec::new();
                             if !arg_vals.is_empty() {
-                                // payload (object) - JSON-stringify it so the Rust side gets a JSON string
-                                let payload_f64 = ensure_f64(builder, arg_vals[0]);
-                                let type_hint = builder.ins().iconst(types::I32, 1); // 1 = object
-                                let stringify_func = extern_funcs.get("js_json_stringify")
-                                    .ok_or_else(|| anyhow!("js_json_stringify not declared"))?;
-                                let stringify_ref = module.declare_func_in_func(*stringify_func, builder.func);
-                                let stringify_call = builder.ins().call(stringify_ref, &[payload_f64, type_hint]);
-                                let payload_json_ptr = builder.inst_results(stringify_call)[0];
-                                args.push(payload_json_ptr);
+                                // Detect a payload that's already a JSON string. Node's
+                                // jsonwebtoken.sign() accepts both objects and JSON strings — Perry
+                                // historically only handled objects (re-stringifying everything via
+                                // js_json_stringify with object type-hint, which silently produced
+                                // `{}` for string inputs). The APNs example below relies on the
+                                // string form, so detect those cases and pass the StringHeader
+                                // pointer through directly.
+                                //
+                                //   jwt.sign(JSON.stringify({...}), key, opts)   // ← Expr::JsonStringify
+                                //   jwt.sign("...", key, opts)                   // ← Expr::String
+                                //   jwt.sign(jsonStr, key, opts)                 // ← LocalGet(string)
+                                let is_payload_string = match &args[0] {
+                                    Expr::JsonStringify(_) | Expr::String(_) => true,
+                                    Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
+                                    _ => false,
+                                };
+                                if is_payload_string {
+                                    let payload_f64 = ensure_f64(builder, arg_vals[0]);
+                                    let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                        .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                    let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                    let call = builder.ins().call(get_str_ref, &[payload_f64]);
+                                    call_args.push(builder.inst_results(call)[0]);
+                                } else {
+                                    // payload (object) - JSON-stringify it so the Rust side gets a JSON string
+                                    let payload_f64 = ensure_f64(builder, arg_vals[0]);
+                                    let type_hint = builder.ins().iconst(types::I32, 1); // 1 = object
+                                    let stringify_func = extern_funcs.get("js_json_stringify")
+                                        .ok_or_else(|| anyhow!("js_json_stringify not declared"))?;
+                                    let stringify_ref = module.declare_func_in_func(*stringify_func, builder.func);
+                                    let stringify_call = builder.ins().call(stringify_ref, &[payload_f64, type_hint]);
+                                    let payload_json_ptr = builder.inst_results(stringify_call)[0];
+                                    call_args.push(payload_json_ptr);
+                                }
                             }
                             if arg_vals.len() > 1 {
                                 // secret (string) - needs to be i64 (raw ptr)
-                                args.push(ensure_i64(builder, arg_vals[1]));
+                                call_args.push(ensure_i64(builder, arg_vals[1]));
                             }
                             // expiry - if options provided, try to extract expiresIn
                             // For now, default to 0.0 which means no expiry in the runtime
-                            if arg_vals.len() > 2 {
-                                // Third arg is options object with expiresIn
-                                // For simplicity, pass 0.0 (no expiry) - full implementation would parse options
-                                args.push(builder.ins().f64const(0.0));
-                            } else {
-                                args.push(builder.ins().f64const(0.0)); // default no expiry
+                            call_args.push(builder.ins().f64const(0.0));
+
+                            // kid - extract from options.keyid (alias: kid). The value can be any
+                            // expression (literal string, local var, etc.) — we compile it here so
+                            // the runtime gets the StringHeader pointer for header.kid. Required by
+                            // APNs (Apple needs `kid` in the JWT header to identify the .p8 key).
+                            // `args` here is the outer HIR Vec<Expr> from the NativeMethodCall destructure.
+                            let mut kid_arg: Option<Value> = None;
+                            if args.len() > 2 {
+                                if let Expr::Object(fields) = &args[2] {
+                                    for (key, val) in fields {
+                                        if key == "keyid" || key == "kid" {
+                                            let kid_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, val, this_ctx)?;
+                                            // Extract raw StringHeader pointer from the (possibly NaN-boxed) value.
+                                            let kid_f64 = ensure_f64(builder, kid_val);
+                                            let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                            let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                            let call = builder.ins().call(get_str_ref, &[kid_f64]);
+                                            kid_arg = Some(builder.inst_results(call)[0]);
+                                            break;
+                                        }
+                                    }
+                                }
                             }
-                            args
+                            call_args.push(kid_arg.unwrap_or_else(|| builder.ins().iconst(types::I64, 0)));
+                            call_args
                         }
                         "verify" => {
                             // verify(token, secret) -> payload

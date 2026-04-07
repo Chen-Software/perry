@@ -5660,13 +5660,15 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_dotenv_parse"), func_id);
         }
 
-        // js_jwt_sign(payload: i64, secret: i64, expiry: f64) -> i64
+        // js_jwt_sign(payload: i64, secret: i64, expiry: f64, kid: i64) -> i64
         // Same signature for js_jwt_sign_es256 (EC PEM key) and js_jwt_sign_rs256 (RSA PEM key).
+        // `kid` is an optional StringHeader pointer (0 = no `kid` header field).
         for fname in ["js_jwt_sign", "js_jwt_sign_es256", "js_jwt_sign_rs256"] {
             let mut sig = self.module.make_signature();
             sig.params.push(AbiParam::new(types::I64)); // payload
             sig.params.push(AbiParam::new(types::I64)); // secret / pem key
             sig.params.push(AbiParam::new(types::F64)); // expiry seconds
+            sig.params.push(AbiParam::new(types::I64)); // kid (StringHeader ptr or 0)
             sig.returns.push(AbiParam::new(types::I64)); // token string
             let func_id = self.module.declare_function(fname, Linkage::Import, &sig)?;
             self.extern_funcs.insert(Cow::Borrowed(fname), func_id);
