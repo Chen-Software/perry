@@ -58,13 +58,7 @@ pub fn create() -> i64 {
         let _: () = msg_send![&*scroll, setTranslatesAutoresizingMaskIntoConstraints: false];
     }
     let view: Retained<NSView> = unsafe { Retained::cast_unchecked(scroll) };
-    let handle = super::register_widget(view);
-    #[cfg(feature = "geisterhand")]
-    {
-        extern "C" { fn perry_geisterhand_register(h: i64, wt: u8, ck: u8, cb: f64, lbl: *const u8); }
-        unsafe { perry_geisterhand_register(handle, 8, 0, 0.0, std::ptr::null()); }
-    }
-    handle
+    super::register_widget(view)
 }
 
 /// Set the document (content) view of a scroll view.

@@ -526,39 +526,44 @@ pub extern "C" fn perry_geisterhand_request_screenshot(out_len: *mut usize) -> *
     }
 }
 
-/// Request a widget value read. Called from the HTTP server thread.
-/// Queues a ReadValue action and blocks until the main thread completes it.
-#[no_mangle]
-pub extern "C" fn perry_geisterhand_request_value(handle: i64, out_len: *mut usize) -> *mut u8 {
-    if let Ok(mut requested) = VALUE_REQUESTED.lock() {
-        if *requested {
+/// Shared request-on-main-thread helper for string results (value reads, tree queries).
+/// Queues an action, waits on the condvar, returns a Box-allocated buffer for the caller
+/// to free with `perry_geisterhand_free_string`.
+fn request_string_from_main(
+    requested: &Mutex<bool>,
+    result: &Mutex<Option<String>>,
+    condvar: &Condvar,
+    action: PendingAction,
+    out_len: *mut usize,
+) -> *mut u8 {
+    if let Ok(mut r) = requested.lock() {
+        if *r {
             unsafe { *out_len = 0; }
             return std::ptr::null_mut();
         }
-        *requested = true;
+        *r = true;
     }
-    if let Ok(mut result) = VALUE_RESULT.lock() {
-        *result = None;
+    if let Ok(mut r) = result.lock() {
+        *r = None;
     }
     if let Ok(mut q) = PENDING_ACTIONS.lock() {
-        q.push(PendingAction::ReadValue { handle });
+        q.push(action);
     }
-    let value_str = {
-        let result = VALUE_RESULT.lock().unwrap();
-        let (result, timeout) = VALUE_CONDVAR
-            .wait_timeout_while(result, std::time::Duration::from_secs(5), |r| r.is_none())
+    let string_result = {
+        let guard = result.lock().unwrap();
+        let (guard, timeout) = condvar
+            .wait_timeout_while(guard, std::time::Duration::from_secs(5), |r| r.is_none())
             .unwrap();
-        if timeout.timed_out() { None } else { result.clone() }
+        if timeout.timed_out() { None } else { guard.clone() }
     };
-    if let Ok(mut requested) = VALUE_REQUESTED.lock() {
-        *requested = false;
+    if let Ok(mut r) = requested.lock() {
+        *r = false;
     }
-    match value_str {
+    match string_result {
         Some(s) if !s.is_empty() => {
             let bytes = s.into_bytes();
             let len = bytes.len();
-            let boxed = bytes.into_boxed_slice();
-            let raw = Box::into_raw(boxed);
+            let raw = Box::into_raw(bytes.into_boxed_slice());
             unsafe { *out_len = len; }
             raw as *mut u8
         }
@@ -569,50 +574,31 @@ pub extern "C" fn perry_geisterhand_request_value(handle: i64, out_len: *mut usi
     }
 }
 
-/// Get the closure_f64 for a given handle and callback kind.
+/// Request a widget value read. Called from the HTTP server thread.
+#[no_mangle]
+pub extern "C" fn perry_geisterhand_request_value(handle: i64, out_len: *mut usize) -> *mut u8 {
+    request_string_from_main(
+        &VALUE_REQUESTED,
+        &VALUE_RESULT,
+        &VALUE_CONDVAR,
+        PendingAction::ReadValue { handle },
+        out_len,
+    )
+}
+
 /// Request widget tree with visibility/frame data. Called from HTTP server thread.
 #[no_mangle]
 pub extern "C" fn perry_geisterhand_request_tree(out_len: *mut usize) -> *mut u8 {
-    if let Ok(mut requested) = TREE_REQUESTED.lock() {
-        if *requested {
-            unsafe { *out_len = 0; }
-            return std::ptr::null_mut();
-        }
-        *requested = true;
-    }
-    if let Ok(mut result) = TREE_RESULT.lock() {
-        *result = None;
-    }
-    if let Ok(mut q) = PENDING_ACTIONS.lock() {
-        q.push(PendingAction::QueryWidgetTree);
-    }
-    let tree_json = {
-        let result = TREE_RESULT.lock().unwrap();
-        let (result, timeout) = TREE_CONDVAR
-            .wait_timeout_while(result, std::time::Duration::from_secs(5), |r| r.is_none())
-            .unwrap();
-        if timeout.timed_out() { None } else { result.clone() }
-    };
-    if let Ok(mut requested) = TREE_REQUESTED.lock() {
-        *requested = false;
-    }
-    match tree_json {
-        Some(s) if !s.is_empty() => {
-            let bytes = s.into_bytes();
-            let len = bytes.len();
-            let boxed = bytes.into_boxed_slice();
-            let raw = Box::into_raw(boxed);
-            unsafe { *out_len = len; }
-            raw as *mut u8
-        }
-        _ => {
-            unsafe { *out_len = 0; }
-            std::ptr::null_mut()
-        }
-    }
+    request_string_from_main(
+        &TREE_REQUESTED,
+        &TREE_RESULT,
+        &TREE_CONDVAR,
+        PendingAction::QueryWidgetTree,
+        out_len,
+    )
 }
 
-/// Returns 0.0 if not found.
+/// Get the closure_f64 for a given handle and callback kind. Returns 0.0 if not found.
 #[no_mangle]
 pub extern "C" fn perry_geisterhand_get_closure(handle: i64, callback_kind: u8) -> f64 {
     match REGISTRY.lock() {

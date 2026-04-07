@@ -115,23 +115,20 @@ pub fn run_server(port: u16) {
         }
 
         let response = match (method, path) {
-            // GET /widgets — list all registered widgets
-            // Supports: ?label=, ?type= filters, ?tree=true for visibility+frame data
-            (Method::Get, "/widgets") => {
-                // Check for tree mode first
-                let tree_mode = query_param(&full_url, "tree").map(|v| v == "true").unwrap_or(false);
-                if tree_mode {
-                    let mut len: usize = 0;
-                    let ptr = unsafe { perry_geisterhand_request_tree(&mut len) };
-                    if !ptr.is_null() && len > 0 {
-                        let tree_json = unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(ptr, len)).into_owned() };
-                        unsafe { perry_geisterhand_free_string(ptr, len); }
-                        ok_json(&tree_json)
-                    } else {
-                        ok_json("[]")
-                    }
+            // GET /widgets — list all registered widgets.
+            // Supports ?label=, ?type= filters and ?tree=true for visibility/frame data.
+            (Method::Get, "/widgets") if query_param(&full_url, "tree") == Some("true") => {
+                let mut len: usize = 0;
+                let ptr = unsafe { perry_geisterhand_request_tree(&mut len) };
+                if !ptr.is_null() && len > 0 {
+                    let tree_json = unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(ptr, len)).into_owned() };
+                    unsafe { perry_geisterhand_free_string(ptr, len); }
+                    ok_json(&tree_json)
                 } else {
-
+                    ok_json("[]")
+                }
+            }
+            (Method::Get, "/widgets") => {
                 let mut len: usize = 0;
                 let ptr = unsafe { perry_geisterhand_get_registry_json(&mut len) };
                 let json = if !ptr.is_null() && len > 0 {
@@ -142,43 +139,33 @@ pub fn run_server(port: u16) {
                     "[]".to_string()
                 };
 
-                // Apply query param filters
-                let label_filter = query_param(&full_url, "label");
-                let type_filter = query_param(&full_url, "type")
-                    .and_then(|t| widget_type_from_name(t));
-
-                if label_filter.is_some() || type_filter.is_some() {
-                    if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&json) {
-                        let filtered: Vec<&serde_json::Value> = arr.iter().filter(|w| {
-                            if let Some(label) = label_filter {
-                                if let Some(wl) = w.get("label").and_then(|l| l.as_str()) {
-                                    if !wl.to_lowercase().contains(&label.to_lowercase()) {
-                                        return false;
-                                    }
-                                } else {
-                                    return false;
-                                }
-                            }
-                            if let Some(wt) = type_filter {
-                                if let Some(wt_val) = w.get("widget_type").and_then(|t| t.as_u64()) {
-                                    if wt_val != wt as u64 {
-                                        return false;
-                                    }
-                                } else {
-                                    return false;
-                                }
-                            }
-                            true
-                        }).collect();
-                        ok_json(&serde_json::to_string(&filtered).unwrap_or_else(|_| "[]".to_string()))
-                    } else {
-                        ok_json(&json)
-                    }
+                let label_filter = query_param(&full_url, "label").map(|s| s.to_lowercase());
+                let type_filter = query_param(&full_url, "type").and_then(widget_type_from_name);
+                let body = if label_filter.is_none() && type_filter.is_none() {
+                    json
                 } else {
-                    ok_json(&json)
-                }
-
-                } // else (non-tree mode)
+                    serde_json::from_str::<Vec<serde_json::Value>>(&json)
+                        .map(|arr| {
+                            let kept: Vec<&serde_json::Value> = arr.iter().filter(|w| {
+                                if let Some(ref needle) = label_filter {
+                                    let hit = w.get("label").and_then(|l| l.as_str())
+                                        .map(|l| l.to_lowercase().contains(needle))
+                                        .unwrap_or(false);
+                                    if !hit { return false; }
+                                }
+                                if let Some(wt) = type_filter {
+                                    let hit = w.get("widget_type").and_then(|t| t.as_u64())
+                                        .map(|v| v == wt as u64)
+                                        .unwrap_or(false);
+                                    if !hit { return false; }
+                                }
+                                true
+                            }).collect();
+                            serde_json::to_string(&kept).unwrap_or_else(|_| "[]".to_string())
+                        })
+                        .unwrap_or(json)
+                };
+                ok_json(&body)
             }
 
             // POST /click/:handle — fire onClick
@@ -436,6 +423,7 @@ pub fn run_server(port: u16) {
                 if label.is_empty() {
                     error_json(400, "missing label field")
                 } else {
+                    let needle = label.to_lowercase();
                     let start = std::time::Instant::now();
                     let timeout = std::time::Duration::from_millis(timeout_ms);
                     loop {
@@ -447,7 +435,7 @@ pub fn run_server(port: u16) {
                             if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&json) {
                                 if let Some(w) = arr.iter().find(|w| {
                                     w.get("label").and_then(|l| l.as_str())
-                                        .map(|l| l.to_lowercase().contains(&label.to_lowercase()))
+                                        .map(|l| l.to_lowercase().contains(&needle))
                                         .unwrap_or(false)
                                 }) {
                                     break ok_json(&serde_json::to_string(w).unwrap_or_else(|_| "{}".to_string()));

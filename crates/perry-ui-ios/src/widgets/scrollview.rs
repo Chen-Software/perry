@@ -96,6 +96,18 @@ pub fn create() -> i64 {
     }
 }
 
+/// Set both x and y scroll offsets. Used by geisterhand for programmatic scrolling.
+#[no_mangle]
+pub extern "C" fn perry_ui_scroll_set_offset(scroll_handle: i64, x: f64, y: f64) {
+    if let Some(scroll_view) = super::get_widget(scroll_handle) {
+        unsafe {
+            use objc2_core_foundation::CGPoint;
+            let point = CGPoint { x, y };
+            let _: () = objc2::msg_send![&*scroll_view, setContentOffset: point, animated: false];
+        }
+    }
+}
+
 /// Set the content child of a UIScrollView.
 pub fn set_child(scroll_handle: i64, child_handle: i64) {
     if let (Some(scroll_view), Some(child)) = (super::get_widget(scroll_handle), super::get_widget(child_handle)) {
@@ -168,20 +180,6 @@ pub fn set_offset(scroll_handle: i64, offset: f64) {
         unsafe {
             let point = CGPoint::new(0.0, offset);
             let _: () = msg_send![&*scroll_view, setContentOffset: point, animated: true];
-        }
-    }
-}
-
-/// Set both x and y scroll offsets. Used by geisterhand for programmatic scrolling.
-#[no_mangle]
-pub extern "C" fn perry_ui_scroll_set_offset(scroll_handle: i64, x: f64, y: f64) {
-    if let Some(scroll_view) = super::get_widget(scroll_handle) {
-        unsafe {
-            #[repr(C)]
-            #[derive(Copy, Clone)]
-            struct CGPoint { x: f64, y: f64 }
-            let point = CGPoint { x, y };
-            let _: () = objc2::msg_send![&*scroll_view, setContentOffset: point animated: false];
         }
     }
 }

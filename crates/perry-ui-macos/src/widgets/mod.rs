@@ -118,6 +118,7 @@ pub extern "C" fn perry_ui_read_widget_value(handle: i64, out_len: *mut usize) -
 #[cfg(feature = "geisterhand")]
 #[no_mangle]
 pub extern "C" fn perry_ui_query_widget_tree(out_len: *mut usize) -> *mut u8 {
+    use objc2_core_foundation::CGRect;
     let json = WIDGETS.with(|w| {
         let widgets = w.borrow();
         let mut s = String::from("[");
@@ -127,13 +128,10 @@ pub extern "C" fn perry_ui_query_widget_tree(out_len: *mut usize) -> *mut u8 {
             unsafe {
                 let hidden: bool = msg_send![&**view, isHidden];
                 let visible = !hidden;
-                #[repr(C)]
-                #[derive(Copy, Clone)]
-                struct CGRect { x: f64, y: f64, w: f64, h: f64 }
                 let frame: CGRect = msg_send![&**view, frame];
                 s.push_str(&format!(
                     r#"{{"handle":{},"visible":{},"frame":{{"x":{:.0},"y":{:.0},"width":{:.0},"height":{:.0}}}}}"#,
-                    handle, visible, frame.x, frame.y, frame.w, frame.h
+                    handle, visible, frame.origin.x, frame.origin.y, frame.size.width, frame.size.height
                 ));
             }
         }
