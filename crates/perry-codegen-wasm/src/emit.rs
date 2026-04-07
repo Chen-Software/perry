@@ -6598,6 +6598,42 @@ impl<'a> FuncEmitCtx<'a> {
             Expr::PathDelimiter => {
                 self.emit_memcall(func, "path_delimiter", 0);
             }
+            // --- WeakRef and FinalizationRegistry (stub: routes to host runtime) ---
+            Expr::WeakRefNew(target) => {
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, target);
+                self.emit_memcall(func, "weakref_new", 1);
+            }
+            Expr::WeakRefDeref(weakref_expr) => {
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, weakref_expr);
+                self.emit_memcall(func, "weakref_deref", 1);
+            }
+            Expr::FinalizationRegistryNew(callback) => {
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, callback);
+                self.emit_memcall(func, "finreg_new", 1);
+            }
+            Expr::FinalizationRegistryRegister { registry, target, held, token } => {
+                self.emit_frame_begin(func, 4);
+                self.emit_store_arg(func, 0, registry);
+                self.emit_store_arg(func, 1, target);
+                self.emit_store_arg(func, 2, held);
+                if let Some(t) = token {
+                    self.emit_store_arg(func, 3, t);
+                } else {
+                    self.emit_slot_addr(func, 3);
+                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
+                    func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                }
+                self.emit_memcall(func, "finreg_register", 4);
+            }
+            Expr::FinalizationRegistryUnregister { registry, token } => {
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, registry);
+                self.emit_store_arg(func, 1, token);
+                self.emit_memcall(func, "finreg_unregister", 2);
+            }
             // --- Buffer/TypedArray ---
             Expr::BufferAlloc { ref size, .. } => {
                 self.emit_frame_begin(func, 1);

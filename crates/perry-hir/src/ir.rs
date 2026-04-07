@@ -1029,6 +1029,18 @@ pub enum Expr {
     PathSep,                             // path.sep constant
     PathDelimiter,                       // path.delimiter constant
 
+    // WeakRef and FinalizationRegistry
+    WeakRefNew(Box<Expr>),                                                                     // new WeakRef(obj) -> WeakRef
+    WeakRefDeref(Box<Expr>),                                                                   // ref.deref() -> object | undefined
+    FinalizationRegistryNew(Box<Expr>),                                                        // new FinalizationRegistry(callback) -> registry
+    FinalizationRegistryRegister {                                                             // registry.register(target, held, token?)
+        registry: Box<Expr>,
+        target: Box<Expr>,
+        held: Box<Expr>,
+        token: Option<Box<Expr>>,
+    },
+    FinalizationRegistryUnregister { registry: Box<Expr>, token: Box<Expr> },                  // registry.unregister(token) -> bool
+
     // URL operations
     FileURLToPath(Box<Expr>),            // url.fileURLToPath(url) -> string
 

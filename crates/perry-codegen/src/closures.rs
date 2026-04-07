@@ -244,6 +244,20 @@ fn collect_referenced_locals_expr(expr: &Expr, out: &mut std::collections::HashS
             collect_referenced_locals_expr(errors, out);
             collect_referenced_locals_expr(message, out);
         }
+        // WeakRef and FinalizationRegistry
+        Expr::WeakRefNew(inner) | Expr::WeakRefDeref(inner) | Expr::FinalizationRegistryNew(inner) => {
+            collect_referenced_locals_expr(inner, out);
+        }
+        Expr::FinalizationRegistryRegister { registry, target, held, token } => {
+            collect_referenced_locals_expr(registry, out);
+            collect_referenced_locals_expr(target, out);
+            collect_referenced_locals_expr(held, out);
+            if let Some(t) = token { collect_referenced_locals_expr(t, out); }
+        }
+        Expr::FinalizationRegistryUnregister { registry, token } => {
+            collect_referenced_locals_expr(registry, out);
+            collect_referenced_locals_expr(token, out);
+        }
         // Leaf nodes with no LocalId references
         _ => {}
     }
@@ -814,6 +828,20 @@ impl crate::codegen::Compiler {
                 if let Some(s) = signal {
                     self.collect_closures_from_expr(s, closures, enclosing_class);
                 }
+            }
+            // WeakRef and FinalizationRegistry
+            Expr::WeakRefNew(inner) | Expr::WeakRefDeref(inner) | Expr::FinalizationRegistryNew(inner) => {
+                self.collect_closures_from_expr(inner, closures, enclosing_class);
+            }
+            Expr::FinalizationRegistryRegister { registry, target, held, token } => {
+                self.collect_closures_from_expr(registry, closures, enclosing_class);
+                self.collect_closures_from_expr(target, closures, enclosing_class);
+                self.collect_closures_from_expr(held, closures, enclosing_class);
+                if let Some(t) = token { self.collect_closures_from_expr(t, closures, enclosing_class); }
+            }
+            Expr::FinalizationRegistryUnregister { registry, token } => {
+                self.collect_closures_from_expr(registry, closures, enclosing_class);
+                self.collect_closures_from_expr(token, closures, enclosing_class);
             }
             // JSON operations
             Expr::JsonParse(expr) | Expr::JsonStringify(expr) => {

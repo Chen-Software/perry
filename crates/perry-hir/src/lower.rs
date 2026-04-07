@@ -125,6 +125,19 @@ pub struct LoweringContext {
     pub(crate) imported_functions_index: HashMap<String, usize>,
     /// Shadow index: local alias name -> index in `builtin_module_aliases` Vec
     pub(crate) builtin_module_aliases_index: HashMap<String, usize>,
+    /// Local names whose value is a `WeakRef` instance (so `x.deref()` routes to
+    /// `Expr::WeakRefDeref`). Pragmatic tracking — populated when lowering
+    /// `let/const x = new WeakRef(...)`. Cleared on scope exit.
+    pub(crate) weakref_locals: HashSet<String>,
+    /// Local names whose value is a `FinalizationRegistry` instance (so
+    /// `x.register(...)` / `x.unregister(...)` route to the dedicated HIR variants).
+    pub(crate) finreg_locals: HashSet<String>,
+    /// Local names whose value is a `WeakMap` instance — used to route
+    /// `x.set/get/has/delete` to the existing Map HIR variants and to throw
+    /// on primitive keys.
+    pub(crate) weakmap_locals: HashSet<String>,
+    /// Local names whose value is a `WeakSet` instance.
+    pub(crate) weakset_locals: HashSet<String>,
 }
 
 impl LoweringContext {
@@ -178,6 +191,10 @@ impl LoweringContext {
             classes_index: HashMap::new(),
             imported_functions_index: HashMap::new(),
             builtin_module_aliases_index: HashMap::new(),
+            weakref_locals: HashSet::new(),
+            finreg_locals: HashSet::new(),
+            weakmap_locals: HashSet::new(),
+            weakset_locals: HashSet::new(),
         }
     }
 
@@ -666,6 +683,123 @@ pub fn lower_module(ast_module: &ast::Module, name: &str, source_file_path: &str
     lower_module_with_class_id(ast_module, name, source_file_path, 1).map(|(module, _)| module)
 }
 
+/// Walks the entire AST and records `let/const x = new WeakRef(...)` and
+/// `let/const x = new FinalizationRegistry(...)` bindings into the lowering
+/// context. This is used by `obj.method()` lowering to recognise these instances
+/// without requiring type inference (Perry's existing var-decl type inference
+/// doesn't extend to WeakRef/FinalizationRegistry).
+fn pre_scan_weakref_locals(ast_module: &ast::Module, ctx: &mut LoweringContext) {
+    fn classify_new(new_expr: &ast::NewExpr) -> Option<&'static str> {
+        if let ast::Expr::Ident(ident) = new_expr.callee.as_ref() {
+            match ident.sym.as_ref() {
+                "WeakRef" => Some("WeakRef"),
+                "FinalizationRegistry" => Some("FinalizationRegistry"),
+                "WeakMap" => Some("WeakMap"),
+                "WeakSet" => Some("WeakSet"),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+    fn unwrap_init<'a>(mut e: &'a ast::Expr) -> &'a ast::Expr {
+        loop {
+            match e {
+                ast::Expr::TsAs(ts_as) => e = &ts_as.expr,
+                ast::Expr::TsTypeAssertion(ta) => e = &ta.expr,
+                ast::Expr::TsNonNull(nn) => e = &nn.expr,
+                ast::Expr::TsConstAssertion(ca) => e = &ca.expr,
+                ast::Expr::Paren(p) => e = &p.expr,
+                _ => break,
+            }
+        }
+        e
+    }
+    fn record_var(decl: &ast::VarDeclarator, ctx: &mut LoweringContext) {
+        if let (ast::Pat::Ident(ident), Some(init)) = (&decl.name, decl.init.as_ref()) {
+            let init_unwrapped = unwrap_init(init);
+            if let ast::Expr::New(new_expr) = init_unwrapped {
+                let name = ident.id.sym.to_string();
+                match classify_new(new_expr) {
+                    Some("WeakRef") => { ctx.weakref_locals.insert(name); }
+                    Some("FinalizationRegistry") => { ctx.finreg_locals.insert(name); }
+                    Some("WeakMap") => { ctx.weakmap_locals.insert(name); }
+                    Some("WeakSet") => { ctx.weakset_locals.insert(name); }
+                    _ => {}
+                }
+            }
+        }
+    }
+    fn walk_stmt(stmt: &ast::Stmt, ctx: &mut LoweringContext) {
+        match stmt {
+            ast::Stmt::Decl(ast::Decl::Var(var_decl)) => {
+                for decl in &var_decl.decls {
+                    record_var(decl, ctx);
+                }
+            }
+            ast::Stmt::Block(block) => {
+                for s in &block.stmts {
+                    walk_stmt(s, ctx);
+                }
+            }
+            ast::Stmt::If(if_stmt) => {
+                walk_stmt(&if_stmt.cons, ctx);
+                if let Some(alt) = &if_stmt.alt {
+                    walk_stmt(alt, ctx);
+                }
+            }
+            ast::Stmt::While(w) => walk_stmt(&w.body, ctx),
+            ast::Stmt::DoWhile(w) => walk_stmt(&w.body, ctx),
+            ast::Stmt::For(f) => {
+                if let Some(ast::VarDeclOrExpr::VarDecl(vd)) = &f.init {
+                    for decl in &vd.decls {
+                        record_var(decl, ctx);
+                    }
+                }
+                walk_stmt(&f.body, ctx);
+            }
+            ast::Stmt::ForIn(f) => walk_stmt(&f.body, ctx),
+            ast::Stmt::ForOf(f) => walk_stmt(&f.body, ctx),
+            ast::Stmt::Try(t) => {
+                for s in &t.block.stmts {
+                    walk_stmt(s, ctx);
+                }
+                if let Some(catch) = &t.handler {
+                    for s in &catch.body.stmts {
+                        walk_stmt(s, ctx);
+                    }
+                }
+                if let Some(finalizer) = &t.finalizer {
+                    for s in &finalizer.stmts {
+                        walk_stmt(s, ctx);
+                    }
+                }
+            }
+            ast::Stmt::Switch(s) => {
+                for case in &s.cases {
+                    for s in &case.cons {
+                        walk_stmt(s, ctx);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    for item in &ast_module.body {
+        match item {
+            ast::ModuleItem::Stmt(stmt) => walk_stmt(stmt, ctx),
+            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportDecl(export_decl)) => {
+                if let ast::Decl::Var(var_decl) = &export_decl.decl {
+                    for decl in &var_decl.decls {
+                        record_var(decl, ctx);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 pub fn lower_module_with_class_id(ast_module: &ast::Module, name: &str, source_file_path: &str, start_class_id: ClassId) -> Result<(Module, ClassId)> {
     lower_module_with_class_id_and_types(ast_module, name, source_file_path, start_class_id, None)
 }
@@ -674,6 +808,11 @@ pub fn lower_module_with_class_id_and_types(ast_module: &ast::Module, name: &str
     let mut ctx = LoweringContext::with_class_id_start(source_file_path, start_class_id);
     ctx.resolved_types = resolved_types;
     let mut module = Module::new(name);
+
+    // Pre-scan for WeakRef/FinalizationRegistry variable declarations so subsequent
+    // method-call lowering (`x.deref()`, `x.register(...)`, `x.unregister(...)`) can
+    // route via the dedicated HIR variants without relying on type inference.
+    pre_scan_weakref_locals(ast_module, &mut ctx);
 
     // For .tsx files, pre-register JSX runtime symbols so JSX expressions can be lowered.
     // This injects an automatic import of { jsx, jsxs } from "react/jsx-runtime"
@@ -3532,7 +3671,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                     && name != "Array" && name != "String" && name != "Number" && name != "Boolean"
                     && name != "Error" && name != "TypeError" && name != "RangeError" && name != "Promise"
                     && name != "Map" && name != "Set" && name != "RegExp" && name != "Symbol"
-                    && name != "WeakMap" && name != "WeakSet" && name != "Proxy" && name != "Reflect"
+                    && name != "WeakMap" && name != "WeakSet" && name != "WeakRef" && name != "FinalizationRegistry" && name != "Proxy" && name != "Reflect"
                     && name != "Uint8Array" && name != "Int8Array" && name != "TextEncoder" && name != "TextDecoder"
                     && name != "URL" && name != "URLSearchParams" && name != "AbortController" && name != "FormData"
                     && name != "Headers" && name != "fetch" && name != "crypto" && name != "performance"
@@ -3552,6 +3691,21 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
 
             // Handle instanceof specially - needs to extract class name
             if matches!(bin.op, ast::BinaryOp::InstanceOf) {
+                // WeakRef / FinalizationRegistry: Perry doesn't register a runtime class id,
+                // so generic InstanceOf would always return false. Pre-scan tracks bindings
+                // explicitly, so `local instanceof WeakRef|FinalizationRegistry` can be folded
+                // at lowering time when we recognise the receiver.
+                if let ast::Expr::Ident(class_ident) = bin.right.as_ref() {
+                    let class_name = class_ident.sym.as_ref();
+                    if class_name == "WeakRef" || class_name == "FinalizationRegistry" {
+                        if let ast::Expr::Ident(left_ident) = bin.left.as_ref() {
+                            let local_name = left_ident.sym.to_string();
+                            let is_match = (class_name == "WeakRef" && ctx.weakref_locals.contains(&local_name))
+                                || (class_name == "FinalizationRegistry" && ctx.finreg_locals.contains(&local_name));
+                            return Ok(Expr::Bool(is_match));
+                        }
+                    }
+                }
                 let expr = Box::new(lower_expr(ctx, &bin.left)?);
                 // Right side can be an identifier (ClassName) or member expression (Module.ClassName)
                 let ty = match bin.right.as_ref() {
@@ -4908,6 +5062,128 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                     }
                                 }
                                 _ => {} // Fall through to other handling
+                            }
+                        }
+
+                        // Check for WeakRef.deref() / FinalizationRegistry.register() / .unregister()
+                        // dispatch BEFORE the generic array method dispatch — these receivers were
+                        // tracked in the pre-scan pass.
+                        if let ast::MemberProp::Ident(method_ident) = &member.prop {
+                            let method_name = method_ident.sym.as_ref();
+                            if let ast::Expr::Ident(recv_ident) = member.obj.as_ref() {
+                                let recv_name = recv_ident.sym.to_string();
+                                if ctx.weakref_locals.contains(&recv_name) && method_name == "deref" {
+                                    return Ok(Expr::WeakRefDeref(Box::new(Expr::LocalGet(
+                                        ctx.lookup_local(&recv_name).unwrap_or(0),
+                                    ))));
+                                }
+                                if ctx.finreg_locals.contains(&recv_name) {
+                                    let registry_id = ctx.lookup_local(&recv_name).unwrap_or(0);
+                                    match method_name {
+                                        "register" => {
+                                            if args.len() >= 2 {
+                                                let mut iter = args.into_iter();
+                                                let target = iter.next().unwrap();
+                                                let held = iter.next().unwrap();
+                                                let token = iter.next().map(Box::new);
+                                                return Ok(Expr::FinalizationRegistryRegister {
+                                                    registry: Box::new(Expr::LocalGet(registry_id)),
+                                                    target: Box::new(target),
+                                                    held: Box::new(held),
+                                                    token,
+                                                });
+                                            }
+                                        }
+                                        "unregister" => {
+                                            if args.len() >= 1 {
+                                                let token = args.into_iter().next().unwrap();
+                                                return Ok(Expr::FinalizationRegistryUnregister {
+                                                    registry: Box::new(Expr::LocalGet(registry_id)),
+                                                    token: Box::new(token),
+                                                });
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                // WeakMap/WeakSet — route to dedicated runtime functions
+                                // (NOT the regular Map/Set HIR variants) so reference-equality
+                                // works for object keys. Primitive keys/values throw via
+                                // js_weak_throw_primitive when the AST shows a bare literal.
+                                let make_extern_call = |name: &str, args: Vec<Expr>| -> Expr {
+                                    Expr::Call {
+                                        callee: Box::new(Expr::ExternFuncRef {
+                                            name: name.to_string(),
+                                            param_types: Vec::new(),
+                                            return_type: Type::Any,
+                                        }),
+                                        args,
+                                        type_args: Vec::new(),
+                                    }
+                                };
+                                let throw_primitive_expr = || -> Expr {
+                                    Expr::Call {
+                                        callee: Box::new(Expr::ExternFuncRef {
+                                            name: "js_weak_throw_primitive".to_string(),
+                                            param_types: Vec::new(),
+                                            return_type: Type::Any,
+                                        }),
+                                        args: Vec::new(),
+                                        type_args: Vec::new(),
+                                    }
+                                };
+                                if ctx.weakmap_locals.contains(&recv_name) {
+                                    let map_id = ctx.lookup_local(&recv_name).unwrap_or(0);
+                                    let recv = Expr::LocalGet(map_id);
+                                    match method_name {
+                                        "set" if args.len() >= 2 => {
+                                            let key_is_primitive_lit = matches!(
+                                                call.args.get(0).map(|a| a.expr.as_ref()),
+                                                Some(ast::Expr::Lit(_))
+                                            );
+                                            if key_is_primitive_lit {
+                                                return Ok(throw_primitive_expr());
+                                            }
+                                            let mut iter = args.into_iter();
+                                            let key = iter.next().unwrap();
+                                            let value = iter.next().unwrap();
+                                            return Ok(make_extern_call("js_weakmap_set", vec![recv, key, value]));
+                                        }
+                                        "get" if args.len() >= 1 => {
+                                            return Ok(make_extern_call("js_weakmap_get", vec![recv, args.into_iter().next().unwrap()]));
+                                        }
+                                        "has" if args.len() >= 1 => {
+                                            return Ok(make_extern_call("js_weakmap_has", vec![recv, args.into_iter().next().unwrap()]));
+                                        }
+                                        "delete" if args.len() >= 1 => {
+                                            return Ok(make_extern_call("js_weakmap_delete", vec![recv, args.into_iter().next().unwrap()]));
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                if ctx.weakset_locals.contains(&recv_name) {
+                                    let set_id = ctx.lookup_local(&recv_name).unwrap_or(0);
+                                    let recv = Expr::LocalGet(set_id);
+                                    match method_name {
+                                        "add" if args.len() >= 1 => {
+                                            let value_is_primitive_lit = matches!(
+                                                call.args.get(0).map(|a| a.expr.as_ref()),
+                                                Some(ast::Expr::Lit(_))
+                                            );
+                                            if value_is_primitive_lit {
+                                                return Ok(throw_primitive_expr());
+                                            }
+                                            return Ok(make_extern_call("js_weakset_add", vec![recv, args.into_iter().next().unwrap()]));
+                                        }
+                                        "has" if args.len() >= 1 => {
+                                            return Ok(make_extern_call("js_weakset_has", vec![recv, args.into_iter().next().unwrap()]));
+                                        }
+                                        "delete" if args.len() >= 1 => {
+                                            return Ok(make_extern_call("js_weakset_delete", vec![recv, args.into_iter().next().unwrap()]));
+                                        }
+                                        _ => {}
+                                    }
+                                }
                             }
                         }
 
@@ -7386,6 +7662,31 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                             .unwrap_or_default();
                         let init_arg = args.into_iter().next();
                         return Ok(Expr::UrlSearchParamsNew(init_arg.map(Box::new)));
+                    }
+
+                    // Handle WeakRef class — wraps a value (object) in a weak reference object.
+                    // Pragmatic implementation: stores a strong reference and `deref()` always returns it.
+                    if class_name == "WeakRef" {
+                        let args = new_expr.args.as_ref()
+                            .map(|args| args.iter().map(|a| lower_expr(ctx, &a.expr)).collect::<Result<Vec<_>>>())
+                            .transpose()?
+                            .unwrap_or_default();
+                        let target = args.into_iter().next()
+                            .ok_or_else(|| anyhow!("WeakRef constructor requires 1 argument"))?;
+                        return Ok(Expr::WeakRefNew(Box::new(target)));
+                    }
+
+                    // Handle FinalizationRegistry class — registers cleanup callbacks invoked when
+                    // tracked targets are GC'd. Pragmatic implementation: stores registrations but
+                    // never fires the callback (Perry's GC doesn't track weak references yet).
+                    if class_name == "FinalizationRegistry" {
+                        let args = new_expr.args.as_ref()
+                            .map(|args| args.iter().map(|a| lower_expr(ctx, &a.expr)).collect::<Result<Vec<_>>>())
+                            .transpose()?
+                            .unwrap_or_default();
+                        let cb = args.into_iter().next()
+                            .ok_or_else(|| anyhow!("FinalizationRegistry constructor requires a callback argument"))?;
+                        return Ok(Expr::FinalizationRegistryNew(Box::new(cb)));
                     }
 
                     // Handle Uint8Array constructor

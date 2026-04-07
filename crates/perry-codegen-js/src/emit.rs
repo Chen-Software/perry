@@ -1300,6 +1300,43 @@ impl JsEmitter {
                 self.output.push_str("__perry.path.delimiter");
             }
 
+            // --- WeakRef and FinalizationRegistry ---
+            Expr::WeakRefNew(target) => {
+                self.output.push_str("new WeakRef(");
+                self.emit_expr(target);
+                self.output.push(')');
+            }
+            Expr::WeakRefDeref(weakref_expr) => {
+                self.output.push('(');
+                self.emit_expr(weakref_expr);
+                self.output.push_str(").deref()");
+            }
+            Expr::FinalizationRegistryNew(callback) => {
+                self.output.push_str("new FinalizationRegistry(");
+                self.emit_expr(callback);
+                self.output.push(')');
+            }
+            Expr::FinalizationRegistryRegister { registry, target, held, token } => {
+                self.output.push('(');
+                self.emit_expr(registry);
+                self.output.push_str(").register(");
+                self.emit_expr(target);
+                self.output.push_str(", ");
+                self.emit_expr(held);
+                if let Some(t) = token {
+                    self.output.push_str(", ");
+                    self.emit_expr(t);
+                }
+                self.output.push(')');
+            }
+            Expr::FinalizationRegistryUnregister { registry, token } => {
+                self.output.push('(');
+                self.emit_expr(registry);
+                self.output.push_str(").unregister(");
+                self.emit_expr(token);
+                self.output.push(')');
+            }
+
             // --- URL ---
             Expr::FileURLToPath(u) => {
                 self.output.push_str("(new URL(");

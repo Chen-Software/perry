@@ -1211,6 +1211,67 @@ pub(crate) fn compile_expr(
             let result_ptr = builder.inst_results(call)[0];
             Ok(inline_nanbox_string(builder, result_ptr))
         }
+        Expr::WeakRefNew(target) => {
+            // Compile target value, NaN-box it, allocate WeakRef wrapper object.
+            let target_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, target, this_ctx)?;
+            let target_f64 = ensure_f64(builder, target_val);
+            let func = extern_funcs.get("js_weakref_new")
+                .ok_or_else(|| anyhow!("js_weakref_new not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[target_f64]);
+            let obj_ptr = builder.inst_results(call)[0];
+            Ok(inline_nanbox_pointer(builder, obj_ptr))
+        }
+        Expr::WeakRefDeref(weakref_expr) => {
+            // Returns the wrapped value, or undefined if collected (always wrapped in stub).
+            let wr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, weakref_expr, this_ctx)?;
+            let wr_f64 = ensure_f64(builder, wr_val);
+            let func = extern_funcs.get("js_weakref_deref")
+                .ok_or_else(|| anyhow!("js_weakref_deref not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[wr_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::FinalizationRegistryNew(callback) => {
+            let cb_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, callback, this_ctx)?;
+            let cb_f64 = ensure_f64(builder, cb_val);
+            let func = extern_funcs.get("js_finreg_new")
+                .ok_or_else(|| anyhow!("js_finreg_new not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[cb_f64]);
+            let obj_ptr = builder.inst_results(call)[0];
+            Ok(inline_nanbox_pointer(builder, obj_ptr))
+        }
+        Expr::FinalizationRegistryRegister { registry, target, held, token } => {
+            let reg_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, registry, this_ctx)?;
+            let target_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, target, this_ctx)?;
+            let held_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, held, this_ctx)?;
+            let reg_f64 = ensure_f64(builder, reg_val);
+            let target_f64 = ensure_f64(builder, target_val);
+            let held_f64 = ensure_f64(builder, held_val);
+            let token_f64 = if let Some(token_expr) = token {
+                let token_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, token_expr, this_ctx)?;
+                ensure_f64(builder, token_val)
+            } else {
+                builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001u64))
+            };
+            let func = extern_funcs.get("js_finreg_register")
+                .ok_or_else(|| anyhow!("js_finreg_register not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[reg_f64, target_f64, held_f64, token_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::FinalizationRegistryUnregister { registry, token } => {
+            let reg_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, registry, this_ctx)?;
+            let token_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, token, this_ctx)?;
+            let reg_f64 = ensure_f64(builder, reg_val);
+            let token_f64 = ensure_f64(builder, token_val);
+            let func = extern_funcs.get("js_finreg_unregister")
+                .ok_or_else(|| anyhow!("js_finreg_unregister not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[reg_f64, token_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
         Expr::FileURLToPath(url_expr) => {
             // fileURLToPath takes a NaN-boxed string (f64) and returns a NaN-boxed string (f64)
             let url_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, url_expr, this_ctx)?;
@@ -14494,28 +14555,25 @@ pub(crate) fn compile_expr(
                 return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), set_ptr));
             }
 
-            // new WeakMap() - WeakMaps are essentially Maps with weak references (not fully supported yet)
-            // For now, we use a regular Map as a fallback
+            // new WeakMap() / new WeakSet() — uses a separate runtime backed by an
+            // entries array with raw NaN-box bit equality (avoids js_map_set's
+            // string-content key comparison which would collapse distinct empty
+            // objects onto the same slot).
             if class_name == "WeakMap" {
-                let alloc_func = extern_funcs.get("js_map_alloc")
-                    .ok_or_else(|| anyhow!("js_map_alloc not declared"))?;
+                let alloc_func = extern_funcs.get("js_weakmap_new")
+                    .ok_or_else(|| anyhow!("js_weakmap_new not declared"))?;
                 let func_ref = module.declare_func_in_func(*alloc_func, builder.func);
-                let cap = builder.ins().iconst(types::I32, 0);
-                let call = builder.ins().call(func_ref, &[cap]);
+                let call = builder.ins().call(func_ref, &[]);
                 let map_ptr = builder.inst_results(call)[0];
-                return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), map_ptr));
+                return Ok(inline_nanbox_pointer(builder, map_ptr));
             }
-
-            // new WeakSet() - WeakSets are essentially Sets with weak references (not fully supported yet)
-            // For now, we use a regular Set as a fallback
             if class_name == "WeakSet" {
-                let alloc_func = extern_funcs.get("js_set_alloc")
-                    .ok_or_else(|| anyhow!("js_set_alloc not declared"))?;
+                let alloc_func = extern_funcs.get("js_weakset_new")
+                    .ok_or_else(|| anyhow!("js_weakset_new not declared"))?;
                 let func_ref = module.declare_func_in_func(*alloc_func, builder.func);
-                let cap = builder.ins().iconst(types::I32, 0);
-                let call = builder.ins().call(func_ref, &[cap]);
+                let call = builder.ins().call(func_ref, &[]);
                 let set_ptr = builder.inst_results(call)[0];
-                return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), set_ptr));
+                return Ok(inline_nanbox_pointer(builder, set_ptr));
             }
 
             // new RegExp(pattern, flags?) - call js_regexp_new(pattern, flags)

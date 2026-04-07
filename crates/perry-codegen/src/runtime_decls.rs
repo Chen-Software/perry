@@ -2506,6 +2506,93 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_path_delimiter_get"), func_id);
         }
 
+        // WeakRef and FinalizationRegistry runtime functions
+        // js_weakref_new(target: f64) -> *mut ObjectHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_weakref_new", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_weakref_new"), func_id);
+        }
+        // js_weakref_deref(weakref: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_weakref_deref", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_weakref_deref"), func_id);
+        }
+        // js_finreg_new(callback: f64) -> *mut ObjectHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_finreg_new", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_finreg_new"), func_id);
+        }
+        // js_finreg_register(registry: f64, target: f64, held: f64, token: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_finreg_register", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_finreg_register"), func_id);
+        }
+        // js_finreg_unregister(registry: f64, token: f64) -> f64 (NaN-boxed bool)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_finreg_unregister", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_finreg_unregister"), func_id);
+        }
+        // js_weak_throw_primitive() -> f64 (never returns; throws TypeError)
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_weak_throw_primitive", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_weak_throw_primitive"), func_id);
+        }
+        // WeakMap / WeakSet runtime — parallel to Map/Set but use raw pointer
+        // (NaN-box bit) equality so distinct empty objects don't collide.
+        // js_weakmap_new() -> *mut ObjectHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_weakmap_new", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_weakmap_new"), func_id);
+        }
+        // js_weakset_new() -> *mut ObjectHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_weakset_new", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_weakset_new"), func_id);
+        }
+        // js_weakmap_set(map: f64, key: f64, value: f64) -> f64
+        // js_weakmap_get / js_weakmap_has / js_weakmap_delete same arity (2)
+        // js_weakset_add(set: f64, value: f64) -> f64
+        // js_weakset_has / js_weakset_delete same arity
+        for name in [
+            "js_weakmap_set", "js_weakmap_get", "js_weakmap_has", "js_weakmap_delete",
+            "js_weakset_add", "js_weakset_has", "js_weakset_delete",
+        ] {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            if name == "js_weakmap_set" {
+                sig.params.push(AbiParam::new(types::F64));
+            }
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function(name, Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed(name), func_id);
+        }
+
         // BigInt runtime functions
         // js_bigint_from_string(data: *const u8, len: u32) -> *mut BigIntHeader
         {

@@ -37,6 +37,7 @@ pub mod child_process;
 pub mod net;
 pub mod json;
 pub mod i18n;
+pub mod weakref;
 pub mod static_plugins;
 #[cfg(not(feature = "stdlib"))]
 pub mod stdlib_stubs;
