@@ -29,18 +29,27 @@ pub unsafe extern "C" fn js_handle_method_dispatch(
     } else {
         &[]
     };
+    // `_` prefixes silence unused-variable warnings when every dispatch
+    // arm below is compiled out (e.g. minimal-stdlib without http-server
+    // / database-redis).
+    let _ = method_name;
+    let _ = args;
+    let _ = handle;
 
     // Try Fastify app dispatch
+    #[cfg(feature = "http-server")]
     if with_handle::<crate::fastify::FastifyApp, bool, _>(handle, |_| true).unwrap_or(false) {
         return dispatch_fastify_app(handle, method_name, args);
     }
 
     // Try Fastify context dispatch (request/reply)
+    #[cfg(feature = "http-server")]
     if with_handle::<crate::fastify::FastifyContext, bool, _>(handle, |_| true).unwrap_or(false) {
         return dispatch_fastify_context(handle, method_name, args);
     }
 
     // Try ioredis Redis client dispatch
+    #[cfg(feature = "database-redis")]
     if with_handle::<crate::ioredis::RedisClient, bool, _>(handle, |_| true).unwrap_or(false) {
         return dispatch_ioredis(handle, method_name, args);
     }
@@ -50,6 +59,7 @@ pub unsafe extern "C" fn js_handle_method_dispatch(
 }
 
 /// Dispatch method calls on Fastify app handles
+#[cfg(feature = "http-server")]
 unsafe fn dispatch_fastify_app(handle: i64, method: &str, args: &[f64]) -> f64 {
     match method {
         "get" if args.len() >= 2 => {
@@ -131,6 +141,7 @@ unsafe fn dispatch_fastify_app(handle: i64, method: &str, args: &[f64]) -> f64 {
 }
 
 /// Dispatch method calls on Fastify context handles (request/reply)
+#[cfg(feature = "http-server")]
 unsafe fn dispatch_fastify_context(handle: i64, method: &str, args: &[f64]) -> f64 {
     use perry_runtime::JSValue;
 
@@ -190,6 +201,7 @@ pub unsafe extern "C" fn js_handle_property_dispatch(
     property_name_ptr: *const u8,
     property_name_len: usize,
 ) -> f64 {
+    #[cfg(feature = "http-server")]
     use perry_runtime::JSValue;
 
     let property_name = if property_name_ptr.is_null() || property_name_len == 0 {
@@ -198,8 +210,11 @@ pub unsafe extern "C" fn js_handle_property_dispatch(
         std::str::from_utf8(std::slice::from_raw_parts(property_name_ptr, property_name_len))
             .unwrap_or("")
     };
+    let _ = property_name;
+    let _ = handle;
 
     // Try Fastify context dispatch (request/reply properties)
+    #[cfg(feature = "http-server")]
     if with_handle::<crate::fastify::FastifyContext, bool, _>(handle, |_| true).unwrap_or(false) {
         return match property_name {
             "query" => {
@@ -254,6 +269,7 @@ pub unsafe extern "C" fn js_handle_property_dispatch(
 }
 
 /// Dispatch method calls on ioredis Redis client handles
+#[cfg(feature = "database-redis")]
 unsafe fn dispatch_ioredis(handle: i64, method: &str, args: &[f64]) -> f64 {
     // Helper: extract raw StringHeader pointer from NaN-boxed f64
     fn get_string_ptr(val: f64) -> *const perry_runtime::StringHeader {
@@ -350,8 +366,12 @@ pub unsafe extern "C" fn js_handle_property_set_dispatch(
         std::str::from_utf8(std::slice::from_raw_parts(property_name_ptr, property_name_len))
             .unwrap_or("")
     };
+    let _ = property_name;
+    let _ = handle;
+    let _ = value;
 
     // Try Fastify context dispatch (request/reply properties)
+    #[cfg(feature = "http-server")]
     if with_handle::<crate::fastify::FastifyContext, bool, _>(handle, |_| true).unwrap_or(false) {
         match property_name {
             "user" => {

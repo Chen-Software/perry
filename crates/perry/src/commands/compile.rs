@@ -4,7 +4,7 @@ use anyhow::{anyhow, Result};
 use clap::Args;
 use perry_hir::{Module as HirModule, ModuleKind};
 use perry_transform::{inline_functions, transform_generators};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -90,6 +90,15 @@ pub struct CompileArgs {
     /// Implies --enable-geisterhand.
     #[arg(long)]
     pub geisterhand_port: Option<u16>,
+
+    /// Rebuild perry-stdlib with only the Cargo features this project's
+    /// imports actually need (databases, http server/client, crypto, …).
+    /// Drops megabytes from binaries that don't pull in mongodb / mysql /
+    /// image processing / etc. Requires a Rust toolchain and the Perry
+    /// workspace source on disk; falls back to the prebuilt full stdlib
+    /// when either is missing.
+    #[arg(long)]
+    pub minimal_stdlib: bool,
 }
 
 /// Information about a JavaScript module that will be interpreted at runtime
@@ -139,6 +148,13 @@ pub struct CompilationContext {
     pub needs_geisterhand: bool,
     /// Port for geisterhand HTTP server (default 7676)
     pub geisterhand_port: u16,
+    /// Set of native module specifiers actually imported by this project
+    /// (e.g. "mysql2", "fastify", "ws"). Used by `--minimal-stdlib` to
+    /// compute the smallest perry-stdlib feature set that satisfies them.
+    pub native_module_imports: BTreeSet<String>,
+    /// Whether any TS module calls global `fetch()` (which routes to
+    /// reqwest in perry-stdlib's http-client feature).
+    pub uses_fetch: bool,
 }
 
 impl std::fmt::Debug for CompilationContext {
@@ -171,6 +187,8 @@ impl CompilationContext {
             node_modules_cache: HashMap::new(),
             needs_geisterhand: false,
             geisterhand_port: 7676,
+            native_module_imports: BTreeSet::new(),
+            uses_fetch: false,
         }
     }
 }
@@ -947,6 +965,134 @@ fn build_geisterhand_libs(target: Option<&str>, format: OutputFormat) -> Result<
         OutputFormat::Json => {}
     }
     Ok(())
+}
+
+/// Rebuild perry-stdlib with only the Cargo features the project's
+/// imports actually need, and return the path to the resulting
+/// `libperry_stdlib.a`. Used by `--minimal-stdlib`.
+///
+/// Falls back to `find_stdlib_library` (and returns its result) when:
+///   • the Perry workspace source isn't on disk (cargo install of just
+///     the binary), or
+///   • `cargo` isn't on PATH, or
+///   • the rebuild fails for any reason — we'd rather link the prebuilt
+///     full stdlib than fail the user's compile.
+fn build_minimal_stdlib(
+    ctx: &CompilationContext,
+    target: Option<&str>,
+    format: OutputFormat,
+) -> Option<PathBuf> {
+    use super::stdlib_features::{compute_required_features, features_to_cargo_arg};
+
+    let features = compute_required_features(&ctx.native_module_imports, ctx.uses_fetch);
+    let feature_arg = features_to_cargo_arg(&features);
+
+    // Locate the workspace. Without source we can't rebuild.
+    let workspace_root = match find_perry_workspace_root() {
+        Some(p) => p,
+        None => {
+            if matches!(format, OutputFormat::Text) {
+                eprintln!(
+                    "  --minimal-stdlib: Perry workspace source not found, \
+                     falling back to prebuilt libperry_stdlib.a"
+                );
+            }
+            return find_stdlib_library(target);
+        }
+    };
+
+    if matches!(format, OutputFormat::Text) {
+        if features.is_empty() {
+            println!(
+                "  --minimal-stdlib: rebuilding perry-stdlib with no optional \
+                 features (project imports nothing heavy)"
+            );
+        } else {
+            println!(
+                "  --minimal-stdlib: rebuilding perry-stdlib with features: {}",
+                feature_arg
+            );
+        }
+    }
+
+    // Use a separate CARGO_TARGET_DIR so the minimal build doesn't clobber
+    // the workspace's normal `target/release/libperry_stdlib.a`. Cargo
+    // caches per (target dir, feature set), so consecutive runs with the
+    // same feature set are no-ops after the first build.
+    let target_dir = workspace_root.join("target/perry-stdlib-minimal");
+
+    let mut cargo_cmd = Command::new("cargo");
+    cargo_cmd
+        .current_dir(&workspace_root)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .arg("build")
+        .arg("--release")
+        .arg("-p").arg("perry-stdlib")
+        .arg("--no-default-features");
+    if !feature_arg.is_empty() {
+        cargo_cmd.arg("--features").arg(&feature_arg);
+    }
+    if let Some(triple) = rust_target_triple(target) {
+        cargo_cmd.arg("--target").arg(triple);
+    }
+
+    let status = match cargo_cmd.status() {
+        Ok(s) => s,
+        Err(e) => {
+            if matches!(format, OutputFormat::Text) {
+                eprintln!(
+                    "  --minimal-stdlib: failed to spawn cargo ({}), falling back \
+                     to prebuilt libperry_stdlib.a",
+                    e
+                );
+            }
+            return find_stdlib_library(target);
+        }
+    };
+    if !status.success() {
+        if matches!(format, OutputFormat::Text) {
+            eprintln!(
+                "  --minimal-stdlib: cargo build failed (exit {}), falling back \
+                 to prebuilt libperry_stdlib.a",
+                status
+            );
+        }
+        return find_stdlib_library(target);
+    }
+
+    // Locate the freshly-built archive.
+    let lib_name = match target {
+        Some("windows") => "perry_stdlib.lib",
+        #[cfg(target_os = "windows")]
+        None => "perry_stdlib.lib",
+        _ => "libperry_stdlib.a",
+    };
+    let candidate = if let Some(triple) = rust_target_triple(target) {
+        target_dir.join(triple).join("release").join(lib_name)
+    } else {
+        target_dir.join("release").join(lib_name)
+    };
+    if candidate.exists() {
+        if matches!(format, OutputFormat::Text) {
+            if let Ok(meta) = std::fs::metadata(&candidate) {
+                println!(
+                    "  --minimal-stdlib: built {} ({:.1} MB)",
+                    candidate.display(),
+                    meta.len() as f64 / (1024.0 * 1024.0)
+                );
+            }
+        }
+        Some(candidate)
+    } else {
+        if matches!(format, OutputFormat::Text) {
+            eprintln!(
+                "  --minimal-stdlib: cargo build succeeded but {} not found, \
+                 falling back to prebuilt libperry_stdlib.a",
+                candidate.display()
+            );
+        }
+        find_stdlib_library(target)
+    }
 }
 
 /// Find the Perry workspace root by searching upward from the executable location.
@@ -1799,6 +1945,13 @@ fn collect_modules(
             }
             if perry_hir::requires_stdlib(&import.source) {
                 ctx.needs_stdlib = true;
+                // Track for `--minimal-stdlib` feature computation. Strip
+                // any "node:" prefix so the mapping table sees the bare
+                // module name.
+                let normalized = import.source.strip_prefix("node:")
+                    .unwrap_or(&import.source)
+                    .to_string();
+                ctx.native_module_imports.insert(normalized);
             }
             continue;
         }
@@ -1949,26 +2102,30 @@ fn collect_modules(
     }
 
     // Detect fetch() usage — js_fetch_with_options lives in perry-stdlib
-    if !ctx.needs_stdlib && hir_module.uses_fetch {
+    if hir_module.uses_fetch {
         ctx.needs_stdlib = true;
+        ctx.uses_fetch = true;
     }
 
     // Detect ioredis usage (detected by class name, not import path)
-    if !ctx.needs_stdlib {
-        for (_, module_name, _) in &hir_module.exported_native_instances {
+    let mut found_ioredis = false;
+    for (_, module_name, _) in &hir_module.exported_native_instances {
+        if module_name == "ioredis" {
+            found_ioredis = true;
+            break;
+        }
+    }
+    if !found_ioredis {
+        for (_, module_name, _) in &hir_module.exported_func_return_native_instances {
             if module_name == "ioredis" {
-                ctx.needs_stdlib = true;
+                found_ioredis = true;
                 break;
             }
         }
-        if !ctx.needs_stdlib {
-            for (_, module_name, _) in &hir_module.exported_func_return_native_instances {
-                if module_name == "ioredis" {
-                    ctx.needs_stdlib = true;
-                    break;
-                }
-            }
-        }
+    }
+    if found_ioredis {
+        ctx.needs_stdlib = true;
+        ctx.native_module_imports.insert("ioredis".to_string());
     }
 
     ctx.native_modules.insert(canonical, hir_module);
@@ -3918,13 +4075,22 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         }
     }
 
+    // Resolve the stdlib archive once so the symbol-stub scan and the
+    // final link see the same .a file. With `--minimal-stdlib` this is a
+    // freshly-built minimal archive; otherwise the prebuilt full one.
+    let stdlib_lib_resolved: Option<PathBuf> = if args.minimal_stdlib && ctx.needs_stdlib {
+        build_minimal_stdlib(&ctx, target.as_deref(), format)
+    } else {
+        find_stdlib_library(target.as_deref())
+    };
+
     // Generate stubs for missing symbols from unresolved imports (npm packages etc.)
     {
         use std::collections::HashSet;
         let mut undefined_syms: HashSet<String> = HashSet::new();
         let mut defined_syms: HashSet<String> = HashSet::new();
         let runtime_lib_path = find_runtime_library(target.as_deref()).ok();
-        let stdlib_lib_path = find_stdlib_library(target.as_deref());
+        let stdlib_lib_path = stdlib_lib_resolved.clone();
         // Check if jsruntime will be used - if so, don't generate stubs for its symbols
         let use_jsruntime = ctx.needs_js_runtime || args.enable_js_runtime;
         // Check if stdlib will be linked - if so, it provides perry_runtime symbols (no stubs needed)
@@ -4188,7 +4354,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     } else {
         find_runtime_library(target.as_deref())?
     };
-    let stdlib_lib = find_stdlib_library(target.as_deref());
+    let stdlib_lib = stdlib_lib_resolved.clone();
     let is_watchos = matches!(target.as_deref(), Some("watchos") | Some("watchos-simulator"));
     let is_tvos = matches!(target.as_deref(), Some("tvos") | Some("tvos-simulator"));
     // Cross-compile tvOS from Linux — mirrors is_cross_ios / is_cross_macos.

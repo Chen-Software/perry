@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.60
+**Current Version:** 0.4.61
 
 ## Workflow Requirements
 
@@ -139,6 +139,10 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.61
+- feat: `--minimal-stdlib` rebuilds perry-stdlib with only the Cargo features the project's imports actually need — collects native module specifiers into a new `CompilationContext.native_module_imports` set, maps each via `commands/stdlib_features.rs` (e.g. `mysql2`→`database-mysql`, `fastify`→`http-server`, `mongodb`→`database-mongodb`, `crypto`→`crypto`, fetch usage→`http-client`), then `cargo build --release -p perry-stdlib --no-default-features --features <list>` into `target/perry-stdlib-minimal/`. Both the symbol-stub scan and the link path now share one `stdlib_lib_resolved` so they see the same archive. Falls back to the prebuilt full stdlib if cargo isn't on PATH, the Perry workspace source isn't on disk, or the rebuild fails — never breaks the user's compile. Measured 4.2 MB → 3.4 MB (19% smaller) on a fetch-only program; the stdlib archive itself drops from 191 MB to 56 MB for `http-client` only and 34 MB for no optional features.
+- fix: perry-stdlib couldn't compile without `default = ["full"]` — `common/handle.rs` used `dashmap` unconditionally (now a non-optional dependency since the handle registry is always-on), `common/dispatch.rs` referenced `crate::fastify::*`/`crate::ioredis::*` without cfg gates (now `#[cfg(feature = "http-server")]`/`#[cfg(feature = "database-redis")]`), and `common/async_bridge.rs` imported `tokio` always (now `#[cfg(feature = "async-runtime")]`-gated in `common/mod.rs`). `crypto` feature now implies `async-runtime` + `ids` because bcrypt offloads to `tokio::task::spawn_blocking` and `crypto.randomUUID()` delegates to the `uuid` crate. `database-mongodb` now pulls in `dep:futures-util` for `Cursor::try_collect`.
 
 ### v0.4.60
 - feat: `js_jwt_sign_es256` / `js_jwt_sign_rs256` + reqwest `http2` feature — new ES256 (EC PEM key) and RS256 (RSA PEM key) JWT signers in `perry-stdlib/src/jsonwebtoken.rs` via shared `sign_common` helper using `EncodingKey::from_ec_pem`/`from_rsa_pem`. Codegen detects `jwt.sign(payload, key, { algorithm: 'ES256' | 'RS256' })` literal in `expr.rs` and reroutes `func_name` to the appropriate signer (HS256 stays default). Both registered in `runtime_decls.rs` (loop over the three names, identical signature) and stubbed in Android `stdlib_stubs.rs`. Also enables reqwest `http2` feature in `perry-stdlib/Cargo.toml`. Unblocks FCM (Firebase Cloud Messaging) OAuth assertion signing.

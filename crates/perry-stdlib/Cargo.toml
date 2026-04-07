@@ -19,7 +19,8 @@ full = ["http-server", "http-client", "database", "crypto", "compression", "emai
 core = []
 
 # HTTP server (hyper-based native framework)
-http-server = ["dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:bytes", "dep:dashmap", "async-runtime"]
+# Note: dashmap is now always-on (used by core handle registry), no longer listed here.
+http-server = ["dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:bytes", "async-runtime"]
 
 # HTTP client (node-fetch, axios)
 http-client = ["dep:reqwest", "async-runtime"]
@@ -33,10 +34,13 @@ database-postgres = ["dep:sqlx", "async-runtime"]
 database-mysql = ["dep:sqlx", "async-runtime"]
 database-sqlite = ["dep:rusqlite"]
 database-redis = ["dep:redis", "async-runtime"]
-database-mongodb = ["dep:mongodb", "dep:bson", "async-runtime"]
+database-mongodb = ["dep:mongodb", "dep:bson", "dep:futures-util", "async-runtime"]
 
 # Crypto (sha256, md5, bcrypt, jwt, etc.)
-crypto = ["dep:sha2", "dep:md-5", "dep:hex", "dep:hmac", "dep:bcrypt", "dep:jsonwebtoken", "dep:aes", "dep:cbc", "dep:scrypt", "dep:pbkdf2", "dep:argon2", "dep:base64", "dep:x25519-dalek", "dep:aes-gcm", "dep:hkdf"]
+# Implies `async-runtime` because bcrypt/jwt/argon2 hashing offloads to
+# `tokio::task::spawn_blocking`, and `ids` because `crypto.randomUUID()`
+# delegates to the `uuid` crate.
+crypto = ["dep:sha2", "dep:md-5", "dep:hex", "dep:hmac", "dep:bcrypt", "dep:jsonwebtoken", "dep:aes", "dep:cbc", "dep:scrypt", "dep:pbkdf2", "dep:argon2", "dep:base64", "dep:x25519-dalek", "dep:aes-gcm", "dep:hkdf", "async-runtime", "ids"]
 
 # Compression (zlib)
 compression = ["dep:flate2"]
@@ -91,7 +95,9 @@ hyper = { version = "1.4", features = ["server", "http1", "http2"], optional = t
 hyper-util = { version = "0.1", features = ["server", "server-auto", "tokio"], optional = true }
 http-body-util = { version = "0.1", optional = true }
 bytes = { version = "1.5", optional = true }
-dashmap = { version = "6.0", optional = true }
+# DashMap is used by the always-on handle registry (`common/handle.rs`),
+# so it must NOT be optional — every minimal-stdlib build needs it.
+dashmap = "6.0"
 
 # HTTP Client
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "http2"], default-features = false, optional = true }

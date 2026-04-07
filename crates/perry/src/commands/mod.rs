@@ -15,6 +15,7 @@ pub mod login;
 pub mod publish;
 pub mod run;
 pub mod setup;
+pub mod stdlib_features;
 pub mod typecheck;
 pub mod update;
 pub mod verify;
