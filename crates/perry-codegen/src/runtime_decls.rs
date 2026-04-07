@@ -7684,6 +7684,27 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_json_stringify"), func_id);
         }
 
+        // js_json_stringify_pretty(value: f64, replacer: i64, space: f64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // value (NaN-boxed)
+            sig.params.push(AbiParam::new(types::I64)); // replacer closure ptr (0 = null)
+            sig.params.push(AbiParam::new(types::F64)); // space (number or NaN-boxed string)
+            sig.returns.push(AbiParam::new(types::I64)); // result string
+            let func_id = self.module.declare_function("js_json_stringify_pretty", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_json_stringify_pretty"), func_id);
+        }
+
+        // js_json_parse_reviver(text: i64, reviver: i64) -> i64 (JSValue bits)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // text string ptr
+            sig.params.push(AbiParam::new(types::I64)); // reviver closure ptr
+            sig.returns.push(AbiParam::new(types::I64)); // result JSValue bits
+            let func_id = self.module.declare_function("js_json_parse_reviver", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_json_parse_reviver"), func_id);
+        }
+
         // JSON stringify functions (various types) -> i64 (string)
         for name in &["js_json_stringify_null"] {
             let mut sig = self.module.make_signature();

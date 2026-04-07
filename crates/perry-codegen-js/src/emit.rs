@@ -1355,6 +1355,22 @@ impl JsEmitter {
                 self.emit_expr(val);
                 self.output.push(')');
             }
+            Expr::JsonStringifyPretty { value, replacer, space } => {
+                self.output.push_str("JSON.stringify(");
+                self.emit_expr(value);
+                self.output.push_str(", ");
+                if let Some(r) = replacer { self.emit_expr(r); } else { self.output.push_str("null"); }
+                self.output.push_str(", ");
+                self.emit_expr(space);
+                self.output.push(')');
+            }
+            Expr::JsonParseReviver { text, reviver } => {
+                self.output.push_str("JSON.parse(");
+                self.emit_expr(text);
+                self.output.push_str(", ");
+                self.emit_expr(reviver);
+                self.output.push(')');
+            }
 
             // --- Math ---
             Expr::MathFloor(x) => { self.emit_math_unary("Math.floor", x); }

@@ -1196,3 +1196,141 @@ pub unsafe extern "C" fn js_json_stringify_with_replacer(
     js_string_from_bytes(buf.as_ptr(), buf.len() as u32)
 }
 
+/// JSON.stringify(value, replacer?, space) — pretty-printing and/or replacer support.
+#[no_mangle]
+pub unsafe extern "C" fn js_json_stringify_pretty(
+    value: f64,
+    replacer_ptr: i64,
+    space_f64: f64,
+) -> *mut StringHeader {
+    // First, produce the compact JSON (with or without replacer)
+    let compact = if replacer_ptr != 0 {
+        js_json_stringify_with_replacer(value, 0, replacer_ptr)
+    } else {
+        js_json_stringify(value, 0)
+    };
+    if compact.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    // Determine the indent string from the space parameter
+    let space_bits = space_f64.to_bits();
+    let space_tag = space_bits & 0xFFFF_0000_0000_0000;
+    let indent: String = if space_tag == STRING_TAG {
+        // String indent (e.g. "\t")
+        let ptr = (space_bits & POINTER_MASK) as *const StringHeader;
+        let len = (*ptr).length as usize;
+        let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+        std::str::from_utf8(std::slice::from_raw_parts(data, len)).unwrap_or("").to_string()
+    } else {
+        // Numeric indent
+        let n = if space_f64.is_nan() || space_f64 <= 0.0 { 0 } else { space_f64 as usize };
+        if n == 0 { return compact; }
+        " ".repeat(n.min(10))
+    };
+
+    if indent.is_empty() {
+        return compact;
+    }
+
+    // Re-format the compact JSON with indentation using serde_json
+    let compact_len = (*compact).length as usize;
+    let compact_data = (compact as *const u8).add(std::mem::size_of::<StringHeader>());
+    let compact_bytes = std::slice::from_raw_parts(compact_data, compact_len);
+    let compact_str = std::str::from_utf8(compact_bytes).unwrap_or("");
+    match serde_json::from_str::<serde_json::Value>(compact_str) {
+        Ok(parsed) => {
+            let mut writer = Vec::new();
+            let formatter = serde_json::ser::PrettyFormatter::with_indent(indent.as_bytes());
+            let mut ser = serde_json::Serializer::with_formatter(&mut writer, formatter);
+            if serde_json::to_writer(&mut writer, &parsed).is_err() {
+                // Fallback: try with the formatter
+                writer.clear();
+            }
+            // Re-do with the custom formatter
+            writer.clear();
+            {
+                use std::io::Write;
+                // Manual pretty-print by re-serializing
+                let pretty_str = serde_json::to_string_pretty(&parsed).unwrap_or_default();
+                // serde_json::to_string_pretty uses 2-space indent. If indent != "  ", we need to replace.
+                let default_indent = "  ";
+                let result = if indent == default_indent {
+                    pretty_str
+                } else {
+                    // Replace each indent level
+                    let mut output = String::new();
+                    for line in pretty_str.lines() {
+                        let stripped = line.trim_start_matches(' ');
+                        let spaces = line.len() - stripped.len();
+                        let level = spaces / 2;
+                        for _ in 0..level { output.push_str(&indent); }
+                        output.push_str(stripped);
+                        output.push('\n');
+                    }
+                    if output.ends_with('\n') { output.pop(); }
+                    output
+                };
+                let _ = write!(writer, "{}", result);
+            }
+            if !writer.is_empty() {
+                return js_string_from_bytes(writer.as_ptr(), writer.len() as u32);
+            }
+            compact
+        }
+        Err(_) => compact,
+    }
+}
+
+/// JSON.parse(text, reviver) — parse JSON then apply reviver to each key/value pair.
+#[no_mangle]
+pub unsafe extern "C" fn js_json_parse_reviver(
+    text_ptr: *const StringHeader,
+    reviver_ptr: i64,
+) -> i64 {
+    // First parse normally — result is JSValue bits as i64
+    let result = js_json_parse(text_ptr);
+    let result_bits = {
+        // JSValue is repr(transparent) u64, so transmute is safe
+        let v: u64 = std::mem::transmute(result);
+        v
+    };
+
+    if result.is_undefined() || reviver_ptr == 0 {
+        return result_bits as i64;
+    }
+
+    let reviver = reviver_ptr as *const crate::ClosureHeader;
+    if reviver.is_null() {
+        return result_bits as i64;
+    }
+
+    let result_f64 = f64::from_bits(result_bits);
+
+    // Walk the parsed value and apply reviver to each property
+    let tag = result_bits & 0xFFFF_0000_0000_0000;
+    if tag == POINTER_TAG {
+        let obj_ptr = (result_bits & POINTER_MASK) as *mut crate::object::ObjectHeader;
+        if !obj_ptr.is_null() && (obj_ptr as usize) > 0x10000 {
+            let field_count = (*obj_ptr).field_count;
+            let keys_arr = (*obj_ptr).keys_array;
+            if !keys_arr.is_null() {
+                let keys_data = (keys_arr as *const u8).add(8) as *const f64;
+                let fields_base = (obj_ptr as *mut u8).add(std::mem::size_of::<crate::object::ObjectHeader>()) as *mut u64;
+                for i in 0..field_count as usize {
+                    let key_f64 = *keys_data.add(i);
+                    let old_val = f64::from_bits(*fields_base.add(i));
+                    let new_val = crate::closure::js_closure_call2(reviver, key_f64, old_val);
+                    *fields_base.add(i) = new_val.to_bits();
+                }
+            }
+        }
+    }
+
+    // Call reviver with ("", root) for the root value
+    let empty_str = js_string_from_bytes(b"".as_ptr(), 0);
+    let empty_key = crate::value::js_nanbox_string(empty_str as i64);
+    let final_val = crate::closure::js_closure_call2(reviver, empty_key, result_f64);
+    final_val.to_bits() as i64
+}
+

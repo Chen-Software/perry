@@ -1410,6 +1410,37 @@ pub(crate) fn compile_expr(
                 Ok(inline_nanbox_string(builder, result_ptr))
             }
         }
+        Expr::JsonStringifyPretty { value, replacer, space } => {
+            // JSON.stringify(value, replacer?, space)
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
+            let val_f64 = ensure_f64(builder, val);
+            let replacer_i64 = if let Some(repl) = replacer {
+                let r = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, repl, this_ctx)?;
+                ensure_i64(builder, r)
+            } else {
+                builder.ins().iconst(types::I64, 0) // null = no replacer
+            };
+            let sp = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, space, this_ctx)?;
+            let sp_f64 = ensure_f64(builder, sp);
+            let func = extern_funcs.get("js_json_stringify_pretty")
+                .ok_or_else(|| anyhow!("js_json_stringify_pretty not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64, replacer_i64, sp_f64]);
+            let result_ptr = builder.inst_results(call)[0];
+            Ok(inline_nanbox_string(builder, result_ptr))
+        }
+        Expr::JsonParseReviver { text, reviver } => {
+            let text_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, text, this_ctx)?;
+            let text_ptr = ensure_i64(builder, text_val);
+            let rev_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, reviver, this_ctx)?;
+            let rev_i64 = ensure_i64(builder, rev_val);
+            let func = extern_funcs.get("js_json_parse_reviver")
+                .ok_or_else(|| anyhow!("js_json_parse_reviver not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[text_ptr, rev_i64]);
+            let result_bits = builder.inst_results(call)[0];
+            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_bits))
+        }
         // Math operations - using Cranelift's built-in floating-point instructions
         // Use js_number_coerce to handle null→0, undefined→NaN, boolean→0/1 (JS ToNumber semantics)
         Expr::MathFloor(expr) => {

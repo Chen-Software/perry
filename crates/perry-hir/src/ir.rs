@@ -1046,7 +1046,9 @@ pub enum Expr {
 
     // JSON operations
     JsonParse(Box<Expr>),                // JSON.parse(string) -> value
+    JsonParseReviver { text: Box<Expr>, reviver: Box<Expr> }, // JSON.parse(str, reviver) -> value
     JsonStringify(Box<Expr>),            // JSON.stringify(value) -> string
+    JsonStringifyPretty { value: Box<Expr>, replacer: Option<Box<Expr>>, space: Box<Expr> }, // JSON.stringify(v, r, space)
 
     // Math operations
     MathFloor(Box<Expr>),                // Math.floor(x) -> number
