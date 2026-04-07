@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.70
+**Current Version:** 0.4.71
 
 ## Workflow Requirements
 
@@ -140,8 +140,11 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 
 ## Recent Changes
 
+### v0.4.71
+- feat: `process.pid` / `process.ppid` / `process.version` / `process.versions` / `process.hrtime.bigint()` / `process.nextTick(cb)` / `process.on('exit', cb)` / `process.chdir(dir)` / `process.kill(pid, sig?)` — new HIR variants `ProcessPid`, `ProcessPpid`, `ProcessVersion`, `ProcessVersions`, `ProcessHrtimeBigint`, `ProcessNextTick`, `ProcessOn`, `ProcessChdir`, `ProcessKill` and runtime functions in `crates/perry-runtime/src/os.rs`. `process.versions` builds a `{ node, v8, perry }` shape object via `js_object_alloc_with_shape`. `process.hrtime.bigint()` returns a NaN-boxed BigInt of nanoseconds. `process.nextTick(cb)` schedules `cb` via the existing promise microtask machinery. `test_gap_node_process.ts` passes against Node with zero diffs.
+
 ### v0.4.70
-- feat: `Error` subclasses + `cause` + `AggregateError` — full ES2022 error surface. New `ErrorHeader` fields `error_kind`, `cause` (raw f64), and `errors` (array pointer). New runtime constructors `js_error_new_with_cause` / `js_typeerror_new` / `js_rangeerror_new` / `js_referenceerror_new` / `js_syntaxerror_new` / `js_aggregateerror_new`, plus accessors `js_error_get_cause` / `js_error_get_errors`. New HIR variants `ErrorNewWithCause` / `TypeErrorNew` / `RangeErrorNew` / `ReferenceErrorNew` / `SyntaxErrorNew` / `AggregateErrorNew`. `js_instanceof` now recognizes built-in error types via `error_kind` discriminator, and user classes extending `Error`/`TypeError`/etc. register via new `js_register_class_extends_error`. `super(msg)` in classes extending built-in errors sets `this.message`/`this.name`/`this.stack`. `test_gap_error_extensions.ts` passes with zero diff vs Node.
+- feat: `Error` subclasses + `cause` + `AggregateError` — full ES2022 error surface. New `ErrorHeader` fields `error_kind`, `cause` (raw f64), and `errors` (array pointer). New runtime constructors `js_error_new_with_cause` / `js_typeerror_new` / `js_rangeerror_new` / `js_referenceerror_new` / `js_syntaxerror_new` / `js_aggregateerror_new`, plus accessors `js_error_get_cause` / `js_error_get_errors`. `js_instanceof` now recognizes built-in error types via `error_kind` discriminator, and user classes extending `Error`/`TypeError`/etc. register via new `js_register_class_extends_error`. `super(msg)` in classes extending built-in errors sets `this.message`/`this.name`/`this.stack`. `test_gap_error_extensions.ts` passes with zero diff vs Node.
 
 ### v0.4.69
 - fix: `return crossModuleAsyncFn()` inside an `async` wrapper corrupted the resolved value to nulls. New `IMPORTED_ASYNC_FUNCS` thread-local + `exported_async_funcs` BTreeSet tracks exported async functions; `is_promise_expr` now handles `Expr::ExternFuncRef` by checking the set first then falling back to a `Promise<T>` return-type check. Same-module `return innerAsync()` still works.

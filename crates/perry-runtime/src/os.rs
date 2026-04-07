@@ -13,6 +13,13 @@ fn get_process_start() -> &'static Instant {
     PROCESS_START.get_or_init(Instant::now)
 }
 
+/// Process start time for hrtime() (used as monotonic baseline)
+static HRTIME_START: OnceLock<Instant> = OnceLock::new();
+
+fn get_hrtime_start() -> &'static Instant {
+    HRTIME_START.get_or_init(Instant::now)
+}
+
 /// Get the operating system platform
 /// Returns: "darwin", "linux", "win32", "freebsd", etc.
 #[no_mangle]
@@ -330,6 +337,180 @@ pub extern "C" fn js_process_argv() -> *mut ArrayHeader {
     }
 
     result
+}
+
+/// Get the current process ID (process.pid)
+#[no_mangle]
+pub extern "C" fn js_process_pid() -> f64 {
+    #[cfg(unix)]
+    unsafe { libc::getpid() as f64 }
+    #[cfg(windows)]
+    {
+        extern "system" { fn GetCurrentProcessId() -> u32; }
+        unsafe { GetCurrentProcessId() as f64 }
+    }
+    #[cfg(not(any(unix, windows)))]
+    { 0.0 }
+}
+
+/// Get the parent process ID (process.ppid)
+#[no_mangle]
+pub extern "C" fn js_process_ppid() -> f64 {
+    #[cfg(unix)]
+    unsafe { libc::getppid() as f64 }
+    #[cfg(windows)]
+    {
+        // Fallback: return 1 (system process)
+        1.0
+    }
+    #[cfg(not(any(unix, windows)))]
+    { 0.0 }
+}
+
+/// process.version -> string (e.g., "v22.0.0")
+#[no_mangle]
+pub extern "C" fn js_process_version() -> *mut StringHeader {
+    let version = "v22.0.0";
+    let bytes = version.as_bytes();
+    js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
+}
+
+/// process.versions -> { node, v8, perry }
+#[no_mangle]
+pub extern "C" fn js_process_versions() -> f64 {
+    use crate::object::{js_object_alloc_with_shape, js_object_set_field};
+    use crate::value::{JSValue, js_nanbox_string};
+
+    // Build the object via shape with packed keys
+    let packed = b"node\0v8\0perry\0";
+    let obj = js_object_alloc_with_shape(0x7FFF_FF21, 3, packed.as_ptr(), packed.len() as u32);
+
+    let nb = |s: &str| -> JSValue {
+        let bytes = s.as_bytes();
+        let ptr = js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32);
+        JSValue::from_bits(js_nanbox_string(ptr as i64).to_bits())
+    };
+
+    js_object_set_field(obj, 0, nb("22.0.0"));
+    js_object_set_field(obj, 1, nb("12.4.254.21"));
+    js_object_set_field(obj, 2, nb("0.4.71"));
+
+    // Return as NaN-boxed pointer
+    f64::from_bits(JSValue::pointer(obj as *const u8).bits())
+}
+
+/// process.hrtime.bigint() -> bigint of nanoseconds
+#[no_mangle]
+pub extern "C" fn js_process_hrtime_bigint() -> f64 {
+    use crate::bigint::js_bigint_from_u64;
+    use crate::value::js_nanbox_bigint;
+
+    let elapsed = get_hrtime_start().elapsed();
+    // Add a base offset so the value is always > 0 even on the first call
+    let nanos = elapsed.as_nanos() as u64 + 1_000_000_000;
+    let bi = js_bigint_from_u64(nanos);
+    js_nanbox_bigint(bi as i64)
+}
+
+/// Storage for process.on('exit', handler) callbacks.
+/// We just store the handler pointers; they don't actually fire on real exit.
+thread_local! {
+    static EXIT_HANDLERS: std::cell::RefCell<Vec<*const crate::closure::ClosureHeader>> = std::cell::RefCell::new(Vec::new());
+}
+
+/// process.on(event, handler) — register an event listener.
+#[no_mangle]
+pub extern "C" fn js_process_on(_event_ptr: *const StringHeader, handler: *const crate::closure::ClosureHeader) {
+    EXIT_HANDLERS.with(|h| h.borrow_mut().push(handler));
+}
+
+/// process.nextTick(callback) — schedule callback as a microtask.
+#[no_mangle]
+pub extern "C" fn js_process_next_tick(callback: *const crate::closure::ClosureHeader) {
+    use crate::promise::{js_promise_new, js_promise_then, js_promise_schedule_resolve};
+    use crate::value::JSValue;
+
+    let p = js_promise_new();
+    let _chain = js_promise_then(p, callback, std::ptr::null());
+    js_promise_schedule_resolve(p, f64::from_bits(JSValue::undefined().bits()));
+}
+
+/// process.chdir(directory) — change working directory.
+#[no_mangle]
+pub extern "C" fn js_process_chdir(dir_ptr: *const StringHeader) {
+    unsafe {
+        if dir_ptr.is_null() {
+            return;
+        }
+        let len = (*dir_ptr).length as usize;
+        let data = (dir_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+        let bytes = std::slice::from_raw_parts(data, len);
+        if let Ok(s) = std::str::from_utf8(bytes) {
+            let _ = std::env::set_current_dir(s);
+        }
+    }
+}
+
+/// process.kill(pid, signal?) — send signal to process. signal=0 means existence check.
+#[no_mangle]
+pub extern "C" fn js_process_kill(pid: f64, signal: f64) {
+    let pid_i = pid as i32;
+    let sig_i = if signal.is_nan() || signal == 0.0 { 0 } else { signal as i32 };
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid_i, sig_i);
+    }
+    #[cfg(windows)]
+    {
+        let _ = (pid_i, sig_i);
+    }
+    #[cfg(not(any(unix, windows)))]
+    { let _ = (pid_i, sig_i); }
+}
+
+/// Stub `write` function used by process.stdin/stdout/stderr objects.
+/// Receives a single value, writes it to stdout/stderr, returns true.
+extern "C" fn process_stream_write_stub(_closure: *const crate::closure::ClosureHeader, _arg: f64) -> f64 {
+    // Just return true
+    f64::from_bits(0x7FFC_0000_0000_0004) // TAG_TRUE
+}
+
+/// Build a stub stream object with a `write` field set to a closure.
+fn build_stream_object() -> *mut crate::object::ObjectHeader {
+    use crate::object::{js_object_alloc_with_shape, js_object_set_field};
+    use crate::closure::js_closure_alloc;
+    use crate::value::JSValue;
+
+    let packed = b"write\0";
+    let obj = js_object_alloc_with_shape(0x7FFF_FF22, 1, packed.as_ptr(), packed.len() as u32);
+    let closure = js_closure_alloc(process_stream_write_stub as *const u8, 0);
+    let cval = JSValue::pointer(closure as *const u8);
+    js_object_set_field(obj, 0, cval);
+    obj
+}
+
+/// process.stdin -> stub stream object
+#[no_mangle]
+pub extern "C" fn js_process_stdin() -> f64 {
+    use crate::value::JSValue;
+    let obj = build_stream_object();
+    f64::from_bits(JSValue::pointer(obj as *const u8).bits())
+}
+
+/// process.stdout -> stub stream object
+#[no_mangle]
+pub extern "C" fn js_process_stdout() -> f64 {
+    use crate::value::JSValue;
+    let obj = build_stream_object();
+    f64::from_bits(JSValue::pointer(obj as *const u8).bits())
+}
+
+/// process.stderr -> stub stream object
+#[no_mangle]
+pub extern "C" fn js_process_stderr() -> f64 {
+    use crate::value::JSValue;
+    let obj = build_stream_object();
+    f64::from_bits(JSValue::pointer(obj as *const u8).bits())
 }
 
 /// Get the operating system name

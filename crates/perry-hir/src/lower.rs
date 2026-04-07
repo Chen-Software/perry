@@ -3685,6 +3685,25 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                         }
                     }
 
+                    // Check for nested process member calls like process.hrtime.bigint()
+                    if let ast::Expr::Member(outer_member) = expr.as_ref() {
+                        if let ast::Expr::Member(inner_member) = outer_member.obj.as_ref() {
+                            if let ast::Expr::Ident(inner_obj) = inner_member.obj.as_ref() {
+                                if inner_obj.sym.as_ref() == "process" {
+                                    if let ast::MemberProp::Ident(inner_prop) = &inner_member.prop {
+                                        if inner_prop.sym.as_ref() == "hrtime" {
+                                            if let ast::MemberProp::Ident(method_ident) = &outer_member.prop {
+                                                if method_ident.sym.as_ref() == "bigint" {
+                                                    return Ok(Expr::ProcessHrtimeBigint);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Check for native module method calls (e.g., mysql.createConnection())
                     if let ast::Expr::Member(member) = expr.as_ref() {
                         if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
@@ -3698,6 +3717,42 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                         "uptime" => return Ok(Expr::ProcessUptime),
                                         "cwd" => return Ok(Expr::ProcessCwd),
                                         "memoryUsage" => return Ok(Expr::ProcessMemoryUsage),
+                                        "nextTick" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::ProcessNextTick(
+                                                    Box::new(args.into_iter().next().unwrap())
+                                                ));
+                                            }
+                                        }
+                                        "on" => {
+                                            if args.len() >= 2 {
+                                                let mut iter = args.into_iter();
+                                                let event = iter.next().unwrap();
+                                                let handler = iter.next().unwrap();
+                                                return Ok(Expr::ProcessOn {
+                                                    event: Box::new(event),
+                                                    handler: Box::new(handler),
+                                                });
+                                            }
+                                        }
+                                        "chdir" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::ProcessChdir(
+                                                    Box::new(args.into_iter().next().unwrap())
+                                                ));
+                                            }
+                                        }
+                                        "kill" => {
+                                            if args.len() >= 1 {
+                                                let mut iter = args.into_iter();
+                                                let pid = iter.next().unwrap();
+                                                let signal = iter.next().map(Box::new);
+                                                return Ok(Expr::ProcessKill {
+                                                    pid: Box::new(pid),
+                                                    signal,
+                                                });
+                                            }
+                                        }
                                         _ => {} // Fall through to generic handling
                                     }
                                 }
@@ -6477,6 +6532,13 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                             "argv" => return Ok(Expr::ProcessArgv),
                             "platform" => return Ok(Expr::OsPlatform),
                             "arch" => return Ok(Expr::OsArch),
+                            "pid" => return Ok(Expr::ProcessPid),
+                            "ppid" => return Ok(Expr::ProcessPpid),
+                            "version" => return Ok(Expr::ProcessVersion),
+                            "versions" => return Ok(Expr::ProcessVersions),
+                            "stdin" => return Ok(Expr::ProcessStdin),
+                            "stdout" => return Ok(Expr::ProcessStdout),
+                            "stderr" => return Ok(Expr::ProcessStderr),
                             _ => {}
                         }
                     }

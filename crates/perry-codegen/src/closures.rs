@@ -801,6 +801,20 @@ impl crate::codegen::Compiler {
                 self.collect_closures_from_expr(to, closures, enclosing_class);
             }
             Expr::PathSep | Expr::PathDelimiter => {}
+            // Process module method calls with sub-expressions
+            Expr::ProcessNextTick(cb) | Expr::ProcessChdir(cb) => {
+                self.collect_closures_from_expr(cb, closures, enclosing_class);
+            }
+            Expr::ProcessOn { event, handler } => {
+                self.collect_closures_from_expr(event, closures, enclosing_class);
+                self.collect_closures_from_expr(handler, closures, enclosing_class);
+            }
+            Expr::ProcessKill { pid, signal } => {
+                self.collect_closures_from_expr(pid, closures, enclosing_class);
+                if let Some(s) = signal {
+                    self.collect_closures_from_expr(s, closures, enclosing_class);
+                }
+            }
             // JSON operations
             Expr::JsonParse(expr) | Expr::JsonStringify(expr) => {
                 self.collect_closures_from_expr(expr, closures, enclosing_class);
@@ -1001,6 +1015,8 @@ impl crate::codegen::Compiler {
             Expr::NativeModuleRef(_) | Expr::StaticFieldGet { .. } | Expr::This |
             Expr::EnumMember { .. } | Expr::ClassRef(_) | Expr::EnvGet(_) |
             Expr::ProcessUptime | Expr::ProcessCwd | Expr::ProcessArgv | Expr::ProcessMemoryUsage |
+            Expr::ProcessPid | Expr::ProcessPpid | Expr::ProcessVersion | Expr::ProcessVersions |
+            Expr::ProcessHrtimeBigint | Expr::ProcessStdin | Expr::ProcessStdout | Expr::ProcessStderr |
             Expr::MathRandom | Expr::CryptoRandomUUID |
             Expr::OsPlatform | Expr::OsArch | Expr::OsHostname | Expr::OsHomedir |
             Expr::OsTmpdir | Expr::OsTotalmem | Expr::OsFreemem | Expr::OsUptime |

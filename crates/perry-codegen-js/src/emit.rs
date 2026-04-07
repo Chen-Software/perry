@@ -1158,6 +1158,58 @@ impl JsEmitter {
             Expr::ProcessMemoryUsage => {
                 self.output.push_str("(typeof process !== 'undefined' ? process.memoryUsage() : {rss: 0, heapTotal: 0, heapUsed: 0, external: 0, arrayBuffers: 0})");
             }
+            Expr::ProcessPid => {
+                self.output.push_str("(typeof process !== 'undefined' ? process.pid : 0)");
+            }
+            Expr::ProcessPpid => {
+                self.output.push_str("(typeof process !== 'undefined' ? process.ppid : 0)");
+            }
+            Expr::ProcessVersion => {
+                self.output.push_str("(typeof process !== 'undefined' ? process.version : 'v22.0.0')");
+            }
+            Expr::ProcessVersions => {
+                self.output.push_str("(typeof process !== 'undefined' ? process.versions : {node:'22.0.0', v8:'12.4.254.21'})");
+            }
+            Expr::ProcessHrtimeBigint => {
+                self.output.push_str("(typeof process !== 'undefined' ? process.hrtime.bigint() : BigInt(Date.now()) * 1000000n)");
+            }
+            Expr::ProcessNextTick(cb) => {
+                self.output.push_str("(typeof process !== 'undefined' ? process.nextTick(");
+                self.emit_expr(cb);
+                self.output.push_str(") : queueMicrotask(");
+                self.emit_expr(cb);
+                self.output.push_str("))");
+            }
+            Expr::ProcessOn { event, handler } => {
+                self.output.push_str("(typeof process !== 'undefined' ? process.on(");
+                self.emit_expr(event);
+                self.output.push_str(", ");
+                self.emit_expr(handler);
+                self.output.push_str(") : undefined)");
+            }
+            Expr::ProcessChdir(dir) => {
+                self.output.push_str("(typeof process !== 'undefined' ? process.chdir(");
+                self.emit_expr(dir);
+                self.output.push_str(") : undefined)");
+            }
+            Expr::ProcessKill { pid, signal } => {
+                self.output.push_str("(typeof process !== 'undefined' ? process.kill(");
+                self.emit_expr(pid);
+                if let Some(s) = signal {
+                    self.output.push_str(", ");
+                    self.emit_expr(s);
+                }
+                self.output.push_str(") : undefined)");
+            }
+            Expr::ProcessStdin => {
+                self.output.push_str("(typeof process !== 'undefined' ? process.stdin : { write: () => true })");
+            }
+            Expr::ProcessStdout => {
+                self.output.push_str("(typeof process !== 'undefined' ? process.stdout : { write: (s) => { console.log(s); return true; } })");
+            }
+            Expr::ProcessStderr => {
+                self.output.push_str("(typeof process !== 'undefined' ? process.stderr : { write: (s) => { console.error(s); return true; } })");
+            }
 
             // --- File System (web-compatible stubs) ---
             Expr::FsReadFileSync(path) => {

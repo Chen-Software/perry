@@ -6501,10 +6501,16 @@ impl<'a> FuncEmitCtx<'a> {
                 self.emit_memcall(func, "os_platform", 0);
             }
             Expr::ProcessUptime | Expr::ProcessMemoryUsage |
+            Expr::ProcessPid | Expr::ProcessPpid | Expr::ProcessVersion | Expr::ProcessVersions |
+            Expr::ProcessHrtimeBigint | Expr::ProcessStdin | Expr::ProcessStdout | Expr::ProcessStderr |
             Expr::OsArch | Expr::OsHostname | Expr::OsHomedir | Expr::OsTmpdir |
             Expr::OsTotalmem | Expr::OsFreemem | Expr::OsUptime |
             Expr::OsType | Expr::OsRelease | Expr::OsCpus | Expr::OsNetworkInterfaces |
             Expr::OsUserInfo | Expr::OsEOL => {
+                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
+            }
+            Expr::ProcessNextTick(_) | Expr::ProcessChdir(_) |
+            Expr::ProcessOn { .. } | Expr::ProcessKill { .. } => {
                 func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
             Expr::EnvGet(_) | Expr::EnvGetDynamic(_) => {

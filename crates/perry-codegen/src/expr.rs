@@ -1891,6 +1891,107 @@ pub(crate) fn compile_expr(
             let call = builder.ins().call(func_ref, &[]);
             Ok(builder.inst_results(call)[0])
         }
+        Expr::ProcessPid => {
+            let func = extern_funcs.get("js_process_pid")
+                .ok_or_else(|| anyhow!("js_process_pid not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::ProcessPpid => {
+            let func = extern_funcs.get("js_process_ppid")
+                .ok_or_else(|| anyhow!("js_process_ppid not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::ProcessVersion => {
+            let func = extern_funcs.get("js_process_version")
+                .ok_or_else(|| anyhow!("js_process_version not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[]);
+            let result_ptr = builder.inst_results(call)[0];
+            Ok(inline_nanbox_string(builder, result_ptr))
+        }
+        Expr::ProcessVersions => {
+            let func = extern_funcs.get("js_process_versions")
+                .ok_or_else(|| anyhow!("js_process_versions not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::ProcessHrtimeBigint => {
+            let func = extern_funcs.get("js_process_hrtime_bigint")
+                .ok_or_else(|| anyhow!("js_process_hrtime_bigint not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::ProcessNextTick(callback_expr) => {
+            let cb_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, callback_expr, this_ctx)?;
+            let cb_ptr = ensure_i64(builder, cb_val);
+            let func = extern_funcs.get("js_process_next_tick")
+                .ok_or_else(|| anyhow!("js_process_next_tick not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            builder.ins().call(func_ref, &[cb_ptr]);
+            Ok(builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001)))
+        }
+        Expr::ProcessOn { event, handler } => {
+            let event_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, event, this_ctx)?;
+            let handler_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, handler, this_ctx)?;
+            let event_ptr = get_raw_string_ptr(builder, event_val);
+            let handler_ptr = ensure_i64(builder, handler_val);
+            let func = extern_funcs.get("js_process_on")
+                .ok_or_else(|| anyhow!("js_process_on not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            builder.ins().call(func_ref, &[event_ptr, handler_ptr]);
+            Ok(builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001)))
+        }
+        Expr::ProcessChdir(dir_expr) => {
+            let dir_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, dir_expr, this_ctx)?;
+            let dir_ptr = get_raw_string_ptr(builder, dir_val);
+            let func = extern_funcs.get("js_process_chdir")
+                .ok_or_else(|| anyhow!("js_process_chdir not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            builder.ins().call(func_ref, &[dir_ptr]);
+            Ok(builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001)))
+        }
+        Expr::ProcessKill { pid, signal } => {
+            let pid_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, pid, this_ctx)?;
+            let pid_f64 = ensure_f64(builder, pid_val);
+            let signal_f64 = if let Some(sig_expr) = signal {
+                let v = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, sig_expr, this_ctx)?;
+                ensure_f64(builder, v)
+            } else {
+                builder.ins().f64const(15.0)
+            };
+            let func = extern_funcs.get("js_process_kill")
+                .ok_or_else(|| anyhow!("js_process_kill not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            builder.ins().call(func_ref, &[pid_f64, signal_f64]);
+            Ok(builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001)))
+        }
+        Expr::ProcessStdin => {
+            let func = extern_funcs.get("js_process_stdin")
+                .ok_or_else(|| anyhow!("js_process_stdin not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::ProcessStdout => {
+            let func = extern_funcs.get("js_process_stdout")
+                .ok_or_else(|| anyhow!("js_process_stdout not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::ProcessStderr => {
+            let func = extern_funcs.get("js_process_stderr")
+                .ok_or_else(|| anyhow!("js_process_stderr not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[]);
+            Ok(builder.inst_results(call)[0])
+        }
         Expr::OsType => {
             let func = extern_funcs.get("js_os_type")
                 .ok_or_else(|| anyhow!("js_os_type not declared"))?;

@@ -4450,6 +4450,88 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_process_memory_usage"), func_id);
         }
 
+        // js_process_pid() -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_process_pid", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_process_pid"), func_id);
+        }
+
+        // js_process_ppid() -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_process_ppid", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_process_ppid"), func_id);
+        }
+
+        // js_process_version() -> i64 (string ptr)
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_process_version", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_process_version"), func_id);
+        }
+
+        // js_process_versions() -> f64 (NaN-boxed object pointer)
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_process_versions", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_process_versions"), func_id);
+        }
+
+        // js_process_hrtime_bigint() -> f64 (NaN-boxed bigint)
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_process_hrtime_bigint", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_process_hrtime_bigint"), func_id);
+        }
+
+        // js_process_next_tick(callback: *const ClosureHeader)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_process_next_tick", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_process_next_tick"), func_id);
+        }
+
+        // js_process_on(event: *const StringHeader, handler: *const ClosureHeader)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_process_on", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_process_on"), func_id);
+        }
+
+        // js_process_chdir(dir: *const StringHeader)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_process_chdir", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_process_chdir"), func_id);
+        }
+
+        // js_process_kill(pid: f64, signal: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_process_kill", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_process_kill"), func_id);
+        }
+
+        // js_process_stdin/stdout/stderr() -> f64 (NaN-boxed object pointer)
+        for name in &["js_process_stdin", "js_process_stdout", "js_process_stderr"] {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function(name, Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Owned(name.to_string()), func_id);
+        }
+
         // js_os_type() -> i64 (string ptr)
         {
             let mut sig = self.module.make_signature();

@@ -979,6 +979,30 @@ pub enum Expr {
     ProcessArgv,
     // Process memory usage: process.memoryUsage() -> object { rss, heapTotal, heapUsed, external, arrayBuffers }
     ProcessMemoryUsage,
+    // Process PID: process.pid -> number
+    ProcessPid,
+    // Process parent PID: process.ppid -> number
+    ProcessPpid,
+    // Process Node version string: process.version -> string (e.g. "v22.0.0")
+    ProcessVersion,
+    // Process versions object: process.versions -> { node, v8, ... }
+    ProcessVersions,
+    // process.hrtime.bigint() -> bigint (nanoseconds since arbitrary point)
+    ProcessHrtimeBigint,
+    // process.nextTick(callback) -> void
+    ProcessNextTick(Box<Expr>),
+    // process.on(event, handler) -> void (registers an event listener)
+    ProcessOn { event: Box<Expr>, handler: Box<Expr> },
+    // process.chdir(directory) -> void
+    ProcessChdir(Box<Expr>),
+    // process.kill(pid, signal?) -> void
+    ProcessKill { pid: Box<Expr>, signal: Option<Box<Expr>> },
+    // process.stdin -> stub object { write: fn }
+    ProcessStdin,
+    // process.stdout -> stub object { write: fn }
+    ProcessStdout,
+    // process.stderr -> stub object { write: fn }
+    ProcessStderr,
 
     // File system operations
     FsReadFileSync(Box<Expr>),           // fs.readFileSync(path) -> string
