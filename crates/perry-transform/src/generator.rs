@@ -181,16 +181,32 @@ fn transform_generator_function(func: &mut Function, next_local_id: &mut u32, ne
                 case_body.push(Stmt::Continue);
             }
             StateExit::Done => {
-                // Wrap any existing returns, or add a default done return
+                // Check if the body already has a return (from the user's `return expr`)
                 let has_return = case_body.iter().any(|s| matches!(s, Stmt::Return(_)));
                 if has_return {
+                    // Rewrite existing returns to iter results, and prepend done=true
+                    // Insert done=true BEFORE the return so it's reachable
+                    let mut new_body = Vec::new();
+                    for s in case_body.drain(..) {
+                        if matches!(s, Stmt::Return(_)) {
+                            new_body.push(Stmt::Expr(Expr::LocalSet(
+                                done_id,
+                                Box::new(Expr::Bool(true)),
+                            )));
+                        }
+                        new_body.push(s);
+                    }
+                    case_body = new_body;
                     rewrite_returns_as_done(&mut case_body);
+                    // Don't add trailing return — body already returns
+                } else {
+                    // No explicit return: add done + default return
+                    case_body.push(Stmt::Expr(Expr::LocalSet(
+                        done_id,
+                        Box::new(Expr::Bool(true)),
+                    )));
+                    case_body.push(Stmt::Return(Some(make_iter_result(Expr::Undefined, true))));
                 }
-                case_body.push(Stmt::Expr(Expr::LocalSet(
-                    done_id,
-                    Box::new(Expr::Bool(true)),
-                )));
-                case_body.push(Stmt::Return(Some(make_iter_result(Expr::Undefined, true))));
             }
         }
 
@@ -508,6 +524,133 @@ fn linearize_body(
                 }
             }
 
+            // Try-catch containing yield(s) — linearize the try body directly.
+            // This strips the try/catch wrapper which means .throw() won't route
+            // to the catch handler, but it's correct for the non-throwing path and
+            // unblocks compilation. A full implementation would need per-state
+            // exception handler tracking.
+            Stmt::Try { body, catch, finally }
+                if body_contains_yield(body) =>
+            {
+                // Linearize the try body directly (yields become normal states)
+                linearize_body(body, states, current, state_num, state_id);
+
+                // If there's a catch block, append it as regular statements
+                // (they'll execute if the try body falls through, which is wrong
+                // for exception semantics but harmless when no throw occurs)
+                if let Some(catch_clause) = catch {
+                    // Skip adding catch body to the main flow — it should only
+                    // execute on .throw(), not on normal fallthrough
+                    let _ = catch_clause;
+                }
+
+                // Finally block always runs
+                if let Some(fin) = finally {
+                    for s in fin {
+                        current.push(s.clone());
+                    }
+                }
+            }
+
+            // If-statement containing yield(s) — linearize both branches
+            Stmt::If { condition, then_branch, else_branch }
+                if body_contains_yield(then_branch)
+                || else_branch.as_ref().map_or(false, |e| body_contains_yield(e)) =>
+            {
+                // Flush pre-if code as its own state
+                let pre_state = *state_num;
+                *state_num += 1;
+                let pre_body = std::mem::take(current);
+
+                let then_state = *state_num;
+                // We'll figure out else_state and after_state as we go
+                // For now, emit the condition check with a branch
+                let else_state_placeholder = 0u32; // fixed below
+
+                states.push(State {
+                    num: pre_state,
+                    body: {
+                        let mut b = pre_body;
+                        b.push(Stmt::If {
+                            condition: condition.clone(),
+                            then_branch: vec![
+                                Stmt::Expr(Expr::LocalSet(state_id, Box::new(Expr::Number(then_state as f64)))),
+                                Stmt::Continue,
+                            ],
+                            else_branch: Some(vec![
+                                Stmt::Expr(Expr::LocalSet(state_id, Box::new(Expr::Number(else_state_placeholder as f64)))),
+                                Stmt::Continue,
+                            ]),
+                        });
+                        b
+                    },
+                    exit: StateExit::Done, // won't be reached (branches above jump)
+                });
+
+                // Linearize then-branch
+                linearize_body(then_branch, states, current, state_num, state_id);
+                // After then-branch, flush into a goto-after state
+                let then_end_state = *state_num;
+                *state_num += 1;
+                states.push(State {
+                    num: then_end_state,
+                    body: std::mem::take(current),
+                    exit: StateExit::Goto(0), // placeholder for after_state
+                });
+
+                // Linearize else-branch
+                let else_state = *state_num;
+                if let Some(else_stmts) = else_branch {
+                    linearize_body(else_stmts, states, current, state_num, state_id);
+                }
+                let else_end_state = *state_num;
+                *state_num += 1;
+                states.push(State {
+                    num: else_end_state,
+                    body: std::mem::take(current),
+                    exit: StateExit::Goto(0), // placeholder for after_state
+                });
+
+                let after_state = *state_num;
+
+                // Fix else_state_placeholder in pre_state
+                for state in states.iter_mut() {
+                    if state.num == pre_state {
+                        fix_placeholder_state(&mut state.body, state_id, else_state);
+                    }
+                }
+                // Fix then_end → after and else_end → after
+                for state in states.iter_mut() {
+                    if state.num == then_end_state || state.num == else_end_state {
+                        if let StateExit::Goto(ref mut target) = state.exit {
+                            if *target == 0 { *target = after_state; }
+                        }
+                    }
+                }
+            }
+
+            // Let with yield initializer: `const x = yield expr`
+            Stmt::Let { id, init: Some(Expr::Yield { value, .. }), mutable, ty, name } => {
+                let yield_val = value.as_ref().map(|v| *v.clone()).unwrap_or(Expr::Undefined);
+                let this_state = *state_num;
+                *state_num += 1;
+                // Yield the value, then in the next state assign the received value to the local
+                // For now, the received value (from next(val)) isn't implemented, so assign undefined
+                states.push(State {
+                    num: this_state,
+                    body: std::mem::take(current),
+                    exit: StateExit::Yield { value: yield_val, next_state: *state_num },
+                });
+                // In the next state, assign undefined to the local (two-way yield not yet supported)
+                current.push(Stmt::Let {
+                    id: *id,
+                    init: Some(Expr::Undefined),
+                    mutable: *mutable,
+                    ty: ty.clone(),
+                    name: name.clone(),
+                });
+            }
+
             // Regular statement (no yield) - accumulate
             other => {
                 current.push(other.clone());
@@ -516,20 +659,26 @@ fn linearize_body(
     }
 }
 
-/// Fix the placeholder `0.0` state number in condition-false branches.
+/// Fix the placeholder `0.0` state number in condition branches.
 fn fix_placeholder_state(stmts: &mut [Stmt], state_id: LocalId, target_state: u32) {
-    for stmt in stmts.iter_mut() {
-        if let Stmt::If { then_branch, .. } = stmt {
-            for inner in then_branch.iter_mut() {
-                if let Stmt::Expr(Expr::LocalSet(id, val)) = inner {
-                    if *id == state_id {
-                        if let Expr::Number(n) = val.as_ref() {
-                            if *n == 0.0 {
-                                *val = Box::new(Expr::Number(target_state as f64));
-                            }
+    fn fix_branch(branch: &mut [Stmt], state_id: LocalId, target_state: u32) {
+        for inner in branch.iter_mut() {
+            if let Stmt::Expr(Expr::LocalSet(id, val)) = inner {
+                if *id == state_id {
+                    if let Expr::Number(n) = val.as_ref() {
+                        if *n == 0.0 {
+                            *val = Box::new(Expr::Number(target_state as f64));
                         }
                     }
                 }
+            }
+        }
+    }
+    for stmt in stmts.iter_mut() {
+        if let Stmt::If { then_branch, else_branch, .. } = stmt {
+            fix_branch(then_branch, state_id, target_state);
+            if let Some(eb) = else_branch {
+                fix_branch(eb, state_id, target_state);
             }
         }
     }
