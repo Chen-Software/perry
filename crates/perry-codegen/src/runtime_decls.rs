@@ -539,6 +539,35 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_dynamic_object_keys"), func_id);
         }
 
+        // js_object_from_entries(entries: f64) -> f64 (NaN-boxed object pointer)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_object_from_entries", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_object_from_entries"), func_id);
+        }
+
+        // js_object_is(a: f64, b: f64) -> f64 (NaN-boxed boolean)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_object_is", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_object_is"), func_id);
+        }
+
+        // js_object_has_own(obj: f64, key: f64) -> f64 (NaN-boxed boolean)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_object_has_own", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_object_has_own"), func_id);
+        }
+
         // js_object_values(obj: i64) -> *mut ArrayHeader (array of values)
         {
             let mut sig = self.module.make_signature();

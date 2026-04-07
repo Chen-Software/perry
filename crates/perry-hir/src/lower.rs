@@ -3834,6 +3834,22 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             }
                                             return Ok(Expr::ObjectSpread { parts });
                                         }
+                                        "fromEntries" => {
+                                            let entries = args.into_iter().next().unwrap_or(Expr::Undefined);
+                                            return Ok(Expr::ObjectFromEntries(Box::new(entries)));
+                                        }
+                                        "is" => {
+                                            let mut iter = args.into_iter();
+                                            let a = iter.next().unwrap_or(Expr::Undefined);
+                                            let b = iter.next().unwrap_or(Expr::Undefined);
+                                            return Ok(Expr::ObjectIs(Box::new(a), Box::new(b)));
+                                        }
+                                        "hasOwn" => {
+                                            let mut iter = args.into_iter();
+                                            let obj = iter.next().unwrap_or(Expr::Undefined);
+                                            let key = iter.next().unwrap_or(Expr::Undefined);
+                                            return Ok(Expr::ObjectHasOwn(Box::new(obj), Box::new(key)));
+                                        }
                                         _ => {} // Fall through to generic handling
                                     }
                                 }

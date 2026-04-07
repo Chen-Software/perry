@@ -2558,3 +2558,129 @@ unsafe fn dispatch_bigint_binary_method(
         }
     }
 }
+
+/// Object.fromEntries(entries) — build an object from an array of [key, value] pairs.
+/// `entries` is an array of arrays. Returns a NaN-boxed pointer to a new object.
+#[no_mangle]
+pub extern "C" fn js_object_from_entries(entries_value: f64) -> f64 {
+    // Get the entries array pointer
+    let arr_ptr = if (entries_value.to_bits() & 0xFFFF_0000_0000_0000) == 0x7FFD_0000_0000_0000 {
+        (entries_value.to_bits() & 0x0000_FFFF_FFFF_FFFF) as *const ArrayHeader
+    } else {
+        // Try as raw pointer
+        let bits = entries_value.to_bits();
+        if bits == 0 || bits > 0x0000_FFFF_FFFF_FFFF {
+            return f64::from_bits(crate::value::TAG_UNDEFINED);
+        }
+        bits as *const ArrayHeader
+    };
+    if arr_ptr.is_null() {
+        return f64::from_bits(crate::value::TAG_UNDEFINED);
+    }
+    unsafe {
+        let length = (*arr_ptr).length as usize;
+        // Allocate empty object — class_id 0 = generic object
+        let obj = js_object_alloc(0, length as u32);
+        if obj.is_null() {
+            return f64::from_bits(crate::value::TAG_UNDEFINED);
+        }
+        // Iterate entries: each entry is itself an array [key, value]
+        let entries_data = (arr_ptr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
+        for i in 0..length {
+            let entry_val = *entries_data.add(i);
+            // Get the inner entry array
+            let entry_bits = entry_val.to_bits();
+            let entry_arr = if (entry_bits & 0xFFFF_0000_0000_0000) == 0x7FFD_0000_0000_0000 {
+                (entry_bits & 0x0000_FFFF_FFFF_FFFF) as *const ArrayHeader
+            } else if entry_bits != 0 && entry_bits <= 0x0000_FFFF_FFFF_FFFF {
+                entry_bits as *const ArrayHeader
+            } else {
+                continue;
+            };
+            if entry_arr.is_null() || (*entry_arr).length < 2 {
+                continue;
+            }
+            let entry_data = (entry_arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
+            let key_val = *entry_data;
+            let val_val = *entry_data.add(1);
+            // Convert key to string
+            let key_str = crate::builtins::js_string_coerce(key_val);
+            if key_str.is_null() { continue; }
+            js_object_set_field_by_name(obj, key_str, val_val);
+        }
+        // Return as NaN-boxed pointer
+        let bits = (obj as u64) | 0x7FFD_0000_0000_0000;
+        f64::from_bits(bits)
+    }
+}
+
+/// Object.is(a, b) — SameValue algorithm
+/// Like ===, except: NaN === NaN (true) and +0 !== -0 (false).
+/// Returns NaN-boxed boolean.
+#[no_mangle]
+pub extern "C" fn js_object_is(a: f64, b: f64) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+    let a_bits = a.to_bits();
+    let b_bits = b.to_bits();
+
+    // Handle NaN: SameValue treats NaN as equal to NaN
+    let a_jsval = crate::JSValue::from_bits(a_bits);
+    let b_jsval = crate::JSValue::from_bits(b_bits);
+
+    if a_jsval.is_number() && b_jsval.is_number() {
+        let an = a_jsval.as_number();
+        let bn = b_jsval.as_number();
+        if an.is_nan() && bn.is_nan() {
+            return f64::from_bits(TAG_TRUE);
+        }
+        // Distinguish +0 / -0 by bit pattern
+        if an == 0.0 && bn == 0.0 {
+            if a_bits == b_bits { return f64::from_bits(TAG_TRUE); }
+            return f64::from_bits(TAG_FALSE);
+        }
+        if an == bn { return f64::from_bits(TAG_TRUE); }
+        return f64::from_bits(TAG_FALSE);
+    }
+
+    // For strings, do content comparison
+    if a_jsval.is_string() && b_jsval.is_string() {
+        let result = crate::string::js_string_equals(
+            a_jsval.as_string_ptr() as *const crate::StringHeader,
+            b_jsval.as_string_ptr() as *const crate::StringHeader,
+        );
+        if result != 0 { return f64::from_bits(TAG_TRUE); }
+        return f64::from_bits(TAG_FALSE);
+    }
+
+    // For everything else, bit-pattern equality
+    if a_bits == b_bits { f64::from_bits(TAG_TRUE) } else { f64::from_bits(TAG_FALSE) }
+}
+
+/// Object.hasOwn(obj, key) — check if obj has its own property `key`.
+/// Returns NaN-boxed boolean.
+#[no_mangle]
+pub extern "C" fn js_object_has_own(obj_value: f64, key_value: f64) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+    let obj_jsval = crate::JSValue::from_bits(obj_value.to_bits());
+    if !obj_jsval.is_pointer() {
+        return f64::from_bits(TAG_FALSE);
+    }
+    let obj_ptr = obj_jsval.as_pointer::<ObjectHeader>() as *const ObjectHeader;
+    if obj_ptr.is_null() {
+        return f64::from_bits(TAG_FALSE);
+    }
+    // Convert key to string
+    let key_str = crate::builtins::js_string_coerce(key_value);
+    if key_str.is_null() {
+        return f64::from_bits(TAG_FALSE);
+    }
+    let result = js_object_get_field_by_name(obj_ptr, key_str);
+    // If property exists (not undefined), return true
+    if result.is_undefined() {
+        f64::from_bits(TAG_FALSE)
+    } else {
+        f64::from_bits(TAG_TRUE)
+    }
+}

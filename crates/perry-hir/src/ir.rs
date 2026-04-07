@@ -1394,6 +1394,13 @@ pub enum Expr {
     },
 
     // Object operations
+    /// Object.fromEntries(entries) -> object
+    ObjectFromEntries(Box<Expr>),
+    /// Object.is(a, b) -> boolean (SameValue algorithm)
+    ObjectIs(Box<Expr>, Box<Expr>),
+    /// Object.hasOwn(obj, key) -> boolean
+    ObjectHasOwn(Box<Expr>, Box<Expr>),
+
     /// Object.keys(obj) -> string[]
     /// Returns an array of the object's own enumerable property names
     ObjectKeys(Box<Expr>),

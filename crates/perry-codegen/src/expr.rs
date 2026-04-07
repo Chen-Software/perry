@@ -17831,6 +17831,10 @@ pub(crate) fn compile_expr(
                 let box_alloc_ref = module.declare_func_in_func(*box_alloc_func, builder.func);
 
                 for (i, capture_id) in captures.iter().enumerate() {
+                    if !locals.contains_key(capture_id) {
+                        eprintln!("[CLOSURE BUG] capture id={} idx={} NOT in locals at closure construction — slot will be 0.0 and crash on use",
+                            capture_id, i);
+                    }
                     if let Some(info) = locals.get(capture_id) {
                         let val = builder.use_var(info.var);
 
@@ -23491,6 +23495,43 @@ pub(crate) fn compile_expr(
             // Undefined is represented as NaN-boxed TAG_UNDEFINED (0x7FFC_0000_0000_0001)
             const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
             Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)))
+        }
+        Expr::ObjectFromEntries(entries_expr) => {
+            let entries_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, entries_expr, this_ctx)?;
+            let entries_f64 = ensure_f64(builder, entries_val);
+            let func = extern_funcs.get("js_object_from_entries")
+                .ok_or_else(|| anyhow!("js_object_from_entries not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[entries_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::ObjectIs(a_expr, b_expr) => {
+            let a = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, a_expr, this_ctx)?;
+            let b = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, b_expr, this_ctx)?;
+            let a_f64 = ensure_f64(builder, a);
+            let b_f64 = ensure_f64(builder, b);
+            let func = extern_funcs.get("js_object_is")
+                .ok_or_else(|| anyhow!("js_object_is not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[a_f64, b_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::ObjectHasOwn(obj_expr, key_expr) => {
+            let obj = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, obj_expr, this_ctx)?;
+            let key = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, key_expr, this_ctx)?;
+            // For obj, we need NaN-boxed pointer
+            let obj_f64 = if builder.func.dfg.value_type(obj) == types::I64 {
+                inline_nanbox_pointer(builder, obj)
+            } else { obj };
+            // For key, ensure it's a NaN-boxed string
+            let key_f64 = if builder.func.dfg.value_type(key) == types::I64 {
+                inline_nanbox_string(builder, key)
+            } else { key };
+            let func = extern_funcs.get("js_object_has_own")
+                .ok_or_else(|| anyhow!("js_object_has_own not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[obj_f64, key_f64]);
+            Ok(builder.inst_results(call)[0])
         }
         Expr::ObjectKeys(obj_expr) => {
             // Object.keys(obj) - returns an array of string keys

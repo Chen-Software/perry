@@ -1980,6 +1980,25 @@ impl JsEmitter {
                 self.emit_expr(obj);
                 self.output.push(')');
             }
+            Expr::ObjectFromEntries(entries) => {
+                self.output.push_str("Object.fromEntries(");
+                self.emit_expr(entries);
+                self.output.push(')');
+            }
+            Expr::ObjectIs(a, b) => {
+                self.output.push_str("Object.is(");
+                self.emit_expr(a);
+                self.output.push(',');
+                self.emit_expr(b);
+                self.output.push(')');
+            }
+            Expr::ObjectHasOwn(obj, key) => {
+                self.output.push_str("Object.hasOwn(");
+                self.emit_expr(obj);
+                self.output.push(',');
+                self.emit_expr(key);
+                self.output.push(')');
+            }
             Expr::ObjectRest { object, exclude_keys } => {
                 self.output.push_str("(({");
                 for (i, key) in exclude_keys.iter().enumerate() {
