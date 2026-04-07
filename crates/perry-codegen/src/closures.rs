@@ -772,8 +772,15 @@ impl crate::codegen::Compiler {
             Expr::MathAbs(expr) | Expr::MathSqrt(expr) |
             Expr::MathLog(expr) | Expr::MathLog2(expr) | Expr::MathLog10(expr) |
             Expr::MathSin(expr) | Expr::MathCos(expr) | Expr::MathTan(expr) |
-            Expr::MathAsin(expr) | Expr::MathAcos(expr) | Expr::MathAtan(expr) => {
+            Expr::MathAsin(expr) | Expr::MathAcos(expr) | Expr::MathAtan(expr) |
+            Expr::MathCbrt(expr) | Expr::MathFround(expr) | Expr::MathClz32(expr) |
+            Expr::MathExpm1(expr) | Expr::MathLog1p(expr) |
+            Expr::MathSinh(expr) | Expr::MathCosh(expr) | Expr::MathTanh(expr) |
+            Expr::MathAsinh(expr) | Expr::MathAcosh(expr) | Expr::MathAtanh(expr) => {
                 self.collect_closures_from_expr(expr, closures, enclosing_class);
+            }
+            Expr::MathHypot(args) => {
+                for a in args { self.collect_closures_from_expr(a, closures, enclosing_class); }
             }
             // Crypto operations
             Expr::CryptoRandomBytes(inner) | Expr::CryptoSha256(inner) | Expr::CryptoMd5(inner) => {

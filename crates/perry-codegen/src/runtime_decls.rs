@@ -7237,7 +7237,9 @@ impl Compiler {
         }
 
         // Trig functions: js_math_sin/cos/tan/asin/acos/atan(x: f64) -> f64
-        for name in &["js_math_sin", "js_math_cos", "js_math_tan", "js_math_asin", "js_math_acos", "js_math_atan"] {
+        for name in &["js_math_sin", "js_math_cos", "js_math_tan", "js_math_asin", "js_math_acos", "js_math_atan",
+                       "js_math_cbrt", "js_math_fround", "js_math_clz32", "js_math_expm1", "js_math_log1p",
+                       "js_math_sinh", "js_math_cosh", "js_math_tanh", "js_math_asinh", "js_math_acosh", "js_math_atanh"] {
             let mut sig = self.module.make_signature();
             sig.params.push(AbiParam::new(types::F64));
             sig.returns.push(AbiParam::new(types::F64));

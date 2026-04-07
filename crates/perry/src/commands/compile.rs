@@ -2903,13 +2903,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         }
     }
 
-    // --- Web target: emit JavaScript instead of native code ---
-    if args.target.as_deref() == Some("web") {
-        return compile_for_web(&ctx, &args, format);
-    }
-
-    // --- WebAssembly target: emit WASM binary + JS runtime bridge ---
-    if args.target.as_deref() == Some("wasm") {
+    // --- Web/WASM target: emit WASM binary + JS runtime bridge ---
+    if matches!(args.target.as_deref(), Some("web") | Some("wasm")) {
         return compile_for_wasm(&ctx, &args, format);
     }
 

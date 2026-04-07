@@ -4291,6 +4291,18 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                 return Ok(Expr::MathAtan2(Box::new(y), Box::new(x)));
                                             }
                                         }
+                                        "cbrt" => { if args.len() >= 1 { return Ok(Expr::MathCbrt(Box::new(args.into_iter().next().unwrap()))); } }
+                                        "hypot" => { return Ok(Expr::MathHypot(args)); }
+                                        "fround" => { if args.len() >= 1 { return Ok(Expr::MathFround(Box::new(args.into_iter().next().unwrap()))); } }
+                                        "clz32" => { if args.len() >= 1 { return Ok(Expr::MathClz32(Box::new(args.into_iter().next().unwrap()))); } }
+                                        "expm1" => { if args.len() >= 1 { return Ok(Expr::MathExpm1(Box::new(args.into_iter().next().unwrap()))); } }
+                                        "log1p" => { if args.len() >= 1 { return Ok(Expr::MathLog1p(Box::new(args.into_iter().next().unwrap()))); } }
+                                        "sinh" => { if args.len() >= 1 { return Ok(Expr::MathSinh(Box::new(args.into_iter().next().unwrap()))); } }
+                                        "cosh" => { if args.len() >= 1 { return Ok(Expr::MathCosh(Box::new(args.into_iter().next().unwrap()))); } }
+                                        "tanh" => { if args.len() >= 1 { return Ok(Expr::MathTanh(Box::new(args.into_iter().next().unwrap()))); } }
+                                        "asinh" => { if args.len() >= 1 { return Ok(Expr::MathAsinh(Box::new(args.into_iter().next().unwrap()))); } }
+                                        "acosh" => { if args.len() >= 1 { return Ok(Expr::MathAcosh(Box::new(args.into_iter().next().unwrap()))); } }
+                                        "atanh" => { if args.len() >= 1 { return Ok(Expr::MathAtanh(Box::new(args.into_iter().next().unwrap()))); } }
                                         _ => {} // Fall through to generic handling
                                     }
                                 }

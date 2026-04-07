@@ -2400,18 +2400,22 @@ function perry_ui_app_create(titleOrOpts, width, height) {
   if (bodyH !== undefined) { const bodyEl = uiGet(bodyH); if (bodyEl) root.appendChild(bodyEl); }
   return h;
 }
-function perry_ui_vstack_create(spacing) {
+function perry_ui_vstack_create(spacing, children) {
   const el = document.createElement("div");
   el.style.display = "flex"; el.style.flexDirection = "column";
   if (spacing) el.style.gap = spacing + "px";
   el.style.flex = "1 1 0%"; el.style.minHeight = "0"; el.style.overflow = "auto";
-  return uiAlloc(el);
+  const h = uiAlloc(el);
+  if (Array.isArray(children)) { for (var i = 0; i < children.length; i++) { var c = uiGet(children[i]); if (c) el.appendChild(c); } }
+  return h;
 }
-function perry_ui_hstack_create(spacing) {
+function perry_ui_hstack_create(spacing, children) {
   const el = document.createElement("div");
   el.style.display = "flex"; el.style.flexDirection = "row"; el.style.alignItems = "center";
   if (spacing) el.style.gap = spacing + "px";
-  return uiAlloc(el);
+  const h = uiAlloc(el);
+  if (Array.isArray(children)) { for (var i = 0; i < children.length; i++) { var c = uiGet(children[i]); if (c) el.appendChild(c); } }
+  return h;
 }
 function perry_ui_zstack_create() {
   const el = document.createElement("div");

@@ -1425,6 +1425,112 @@ pub(crate) fn compile_expr(
             let call = builder.ins().call(func_ref, &[y_f64, x_f64]);
             Ok(builder.inst_results(call)[0])
         }
+        // Unary Math functions that just delegate to a runtime fn taking f64 -> f64.
+        // Match each variant separately so we can pick the correct runtime function.
+        Expr::MathCbrt(inner) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, inner, this_ctx)?;
+            let val_f64 = ensure_f64(builder, val);
+            let func = extern_funcs.get("js_math_cbrt").ok_or_else(|| anyhow!("js_math_cbrt not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::MathFround(inner) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, inner, this_ctx)?;
+            let val_f64 = ensure_f64(builder, val);
+            let func = extern_funcs.get("js_math_fround").ok_or_else(|| anyhow!("js_math_fround not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::MathClz32(inner) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, inner, this_ctx)?;
+            let val_f64 = ensure_f64(builder, val);
+            let func = extern_funcs.get("js_math_clz32").ok_or_else(|| anyhow!("js_math_clz32 not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::MathExpm1(inner) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, inner, this_ctx)?;
+            let val_f64 = ensure_f64(builder, val);
+            let func = extern_funcs.get("js_math_expm1").ok_or_else(|| anyhow!("js_math_expm1 not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::MathLog1p(inner) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, inner, this_ctx)?;
+            let val_f64 = ensure_f64(builder, val);
+            let func = extern_funcs.get("js_math_log1p").ok_or_else(|| anyhow!("js_math_log1p not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::MathSinh(inner) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, inner, this_ctx)?;
+            let val_f64 = ensure_f64(builder, val);
+            let func = extern_funcs.get("js_math_sinh").ok_or_else(|| anyhow!("js_math_sinh not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::MathCosh(inner) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, inner, this_ctx)?;
+            let val_f64 = ensure_f64(builder, val);
+            let func = extern_funcs.get("js_math_cosh").ok_or_else(|| anyhow!("js_math_cosh not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::MathTanh(inner) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, inner, this_ctx)?;
+            let val_f64 = ensure_f64(builder, val);
+            let func = extern_funcs.get("js_math_tanh").ok_or_else(|| anyhow!("js_math_tanh not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::MathAsinh(inner) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, inner, this_ctx)?;
+            let val_f64 = ensure_f64(builder, val);
+            let func = extern_funcs.get("js_math_asinh").ok_or_else(|| anyhow!("js_math_asinh not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::MathAcosh(inner) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, inner, this_ctx)?;
+            let val_f64 = ensure_f64(builder, val);
+            let func = extern_funcs.get("js_math_acosh").ok_or_else(|| anyhow!("js_math_acosh not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::MathAtanh(inner) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, inner, this_ctx)?;
+            let val_f64 = ensure_f64(builder, val);
+            let func = extern_funcs.get("js_math_atanh").ok_or_else(|| anyhow!("js_math_atanh not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::MathHypot(args) => {
+            // Math.hypot(a, b, c, ...) = sqrt(a*a + b*b + c*c + ...)
+            // Edge cases: hypot() = 0, hypot(Infinity, ...) = Infinity, hypot(NaN, ...) = NaN
+            if args.is_empty() {
+                Ok(builder.ins().f64const(0.0))
+            } else {
+                let mut sum_sq = builder.ins().f64const(0.0);
+                for arg in args {
+                    let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, arg, this_ctx)?;
+                    let v = ensure_f64(builder, val);
+                    let sq = builder.ins().fmul(v, v);
+                    sum_sq = builder.ins().fadd(sum_sq, sq);
+                }
+                Ok(builder.ins().sqrt(sum_sq))
+            }
+        }
         Expr::MathPow(base_expr, exp_expr) => {
             let base = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, base_expr, this_ctx)?;
             let exp = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, exp_expr, this_ctx)?;

@@ -1254,6 +1254,18 @@ impl JsEmitter {
                 self.emit_expr(x);
                 self.output.push(')');
             }
+            Expr::MathCbrt(x) => { self.emit_math_unary("Math.cbrt", x); }
+            Expr::MathFround(x) => { self.emit_math_unary("Math.fround", x); }
+            Expr::MathClz32(x) => { self.emit_math_unary("Math.clz32", x); }
+            Expr::MathExpm1(x) => { self.emit_math_unary("Math.expm1", x); }
+            Expr::MathLog1p(x) => { self.emit_math_unary("Math.log1p", x); }
+            Expr::MathSinh(x) => { self.emit_math_unary("Math.sinh", x); }
+            Expr::MathCosh(x) => { self.emit_math_unary("Math.cosh", x); }
+            Expr::MathTanh(x) => { self.emit_math_unary("Math.tanh", x); }
+            Expr::MathAsinh(x) => { self.emit_math_unary("Math.asinh", x); }
+            Expr::MathAcosh(x) => { self.emit_math_unary("Math.acosh", x); }
+            Expr::MathAtanh(x) => { self.emit_math_unary("Math.atanh", x); }
+            Expr::MathHypot(args) => { self.emit_math_variadic("Math.hypot", args); }
             Expr::MathPow(base, exp) => {
                 self.output.push_str("Math.pow(");
                 self.emit_expr(base);

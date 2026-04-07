@@ -1028,6 +1028,18 @@ pub enum Expr {
     MathAcos(Box<Expr>),                 // Math.acos(x) -> number
     MathAtan(Box<Expr>),                 // Math.atan(x) -> number
     MathAtan2(Box<Expr>, Box<Expr>),     // Math.atan2(y, x) -> number
+    MathCbrt(Box<Expr>),                 // Math.cbrt(x) -> number
+    MathHypot(Vec<Expr>),                // Math.hypot(...values) -> number
+    MathFround(Box<Expr>),               // Math.fround(x) -> number
+    MathClz32(Box<Expr>),                // Math.clz32(x) -> number
+    MathExpm1(Box<Expr>),                // Math.expm1(x) -> number
+    MathLog1p(Box<Expr>),                // Math.log1p(x) -> number
+    MathSinh(Box<Expr>),                 // Math.sinh(x) -> number
+    MathCosh(Box<Expr>),                 // Math.cosh(x) -> number
+    MathTanh(Box<Expr>),                 // Math.tanh(x) -> number
+    MathAsinh(Box<Expr>),                // Math.asinh(x) -> number
+    MathAcosh(Box<Expr>),                // Math.acosh(x) -> number
+    MathAtanh(Box<Expr>),                // Math.atanh(x) -> number
 
     // Crypto operations
     CryptoRandomBytes(Box<Expr>),        // crypto.randomBytes(size) -> string (hex)

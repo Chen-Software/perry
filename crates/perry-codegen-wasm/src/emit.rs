@@ -355,10 +355,10 @@ fn map_ui_method(method: &str, class_name: Option<&str>) -> &'static str {
         "setOnHover" | "set_on_hover" => "perry_ui_set_on_hover",
         "setOnDoubleClick" | "set_on_double_click" => "perry_ui_set_on_double_click",
         // State
-        "create" | "createState" | "state_create" => "perry_ui_state_create",
+        "State" | "create" | "createState" | "state_create" => "perry_ui_state_create",
         "get" if class_name.map_or(false, |c| c == "State") => "perry_ui_state_get",
         "set" if class_name.map_or(false, |c| c == "State") => "perry_ui_state_set",
-        "value" if class_name.map_or(false, |c| c == "State") => "perry_ui_state_get",
+        "value" => "perry_ui_state_get",
         "onChange" | "state_on_change" => "perry_ui_state_on_change",
         // State bindings
         "bindText" | "state_bind_text" => "perry_ui_state_bind_text",
@@ -1676,8 +1676,8 @@ impl WasmModuleEmitter {
 
             let num_locals = init_locals.len() as u32;
             let start_temp_local = num_locals;
-            let start_temp_i32 = num_locals + 1;
-            let locals = vec![(num_locals + 1, ValType::I64), (1, ValType::I32)];
+            let start_temp_i32 = num_locals + 2;
+            let locals = vec![(num_locals + 2, ValType::I64), (1, ValType::I32)];
             let mut func = Function::new(locals);
 
             // Call __init_strings first
@@ -1827,8 +1827,8 @@ impl WasmModuleEmitter {
         collect_locals(&hir_func.body, &mut local_map, &mut extra_locals, param_count);
 
         let temp_local_idx = param_count + extra_locals;
-        let temp_i32_idx = temp_local_idx + 1;
-        let locals = vec![(extra_locals + 1, ValType::I64), (1, ValType::I32)];
+        let temp_i32_idx = temp_local_idx + 2;
+        let locals = vec![(extra_locals + 2, ValType::I64), (1, ValType::I32)];
         let mut func = Function::new(locals);
 
         let has_ret = hir_func.body.iter().any(|s| has_return(s));
@@ -1870,8 +1870,8 @@ impl WasmModuleEmitter {
         collect_locals(body, &mut local_map, &mut extra_locals, param_idx);
 
         let temp_local_idx = param_idx + extra_locals;
-        let temp_i32_idx = temp_local_idx + 1;
-        let locals = vec![(extra_locals + 1, ValType::I64), (1, ValType::I32)];
+        let temp_i32_idx = temp_local_idx + 2;
+        let locals = vec![(extra_locals + 2, ValType::I64), (1, ValType::I32)];
         let mut func = Function::new(locals);
 
         let mut ctx = FuncEmitCtx::new(self, &local_map, temp_local_idx, temp_i32_idx);
@@ -1901,8 +1901,8 @@ impl WasmModuleEmitter {
         collect_locals(&ctor.body, &mut local_map, &mut extra_locals, param_count as u32);
 
         let temp_local_idx = param_count as u32 + extra_locals;
-        let temp_i32_idx = temp_local_idx + 1;
-        let locals = vec![(extra_locals + 1, ValType::I64), (1, ValType::I32)];
+        let temp_i32_idx = temp_local_idx + 2;
+        let locals = vec![(extra_locals + 2, ValType::I64), (1, ValType::I32)];
         let mut func = Function::new(locals);
         let _rt = self.rt.as_ref().unwrap();
 
@@ -1955,8 +1955,8 @@ impl WasmModuleEmitter {
         collect_locals(&method.body, &mut local_map, &mut extra_locals, param_count as u32);
 
         let temp_local_idx = param_count as u32 + extra_locals;
-        let temp_i32_idx = temp_local_idx + 1;
-        let locals = vec![(extra_locals + 1, ValType::I64), (1, ValType::I32)];
+        let temp_i32_idx = temp_local_idx + 2;
+        let locals = vec![(extra_locals + 2, ValType::I64), (1, ValType::I32)];
         let mut func = Function::new(locals);
         let has_ret = method.body.iter().any(|s| has_return(s));
         let mut ctx = FuncEmitCtx::new(self, &local_map, temp_local_idx, temp_i32_idx);
@@ -2421,7 +2421,7 @@ impl WasmModuleEmitter {
                 let args_js: Vec<String> = args.iter()
                     .map(|a| format!("toJsValue({})", self.emit_js_expr(a, locals)))
                     .collect();
-                format!("fromJsValue(new (toJsValue(fromJsValue('{}')))({})))", class_name, args_js.join(", "))
+                format!("fromJsValue(new (toJsValue(fromJsValue('{}')))({}))", class_name, args_js.join(", "))
             }
             Expr::InstanceOf { expr, ty } => {
                 let e = self.emit_js_expr(expr, locals);
@@ -2934,6 +2934,8 @@ struct FuncEmitCtx<'a> {
     temp_local: u32,
     /// Index of a temp i32 local (for mem_call base address)
     temp_local_i32: u32,
+    /// Index of a second temp i64 local for emit_store_arg
+    temp_store_local: u32,
     /// Current frame size for emit_store_arg address computation
     current_frame_size: u32,
     /// Stack of saved frame sizes for nested frame support
@@ -2953,6 +2955,7 @@ impl<'a> FuncEmitCtx<'a> {
             current_class: None,
             temp_local,
             temp_local_i32,
+            temp_store_local: temp_local + 1,
             current_frame_size: 0,
             frame_stack: Vec::new(),
         }
@@ -2997,9 +3000,12 @@ impl<'a> FuncEmitCtx<'a> {
                 func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
             }
             _ => {
-                self.emit_slot_addr(func, slot);
+                // Evaluate expression first, save to dedicated temp_store_local.
+                // Prevents slot address (i32) from sitting on stack during nested memcalls.
                 self.emit_expr(func, expr);
-                // Values are already i64, no conversion needed
+                func.instruction(&Instruction::LocalSet(self.temp_store_local));
+                self.emit_slot_addr(func, slot);
+                func.instruction(&Instruction::LocalGet(self.temp_store_local));
                 func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
             }
         }
