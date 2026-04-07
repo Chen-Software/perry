@@ -10,7 +10,13 @@ crate-type = ["rlib", "staticlib"]
 
 [features]
 default = ["full"]
-full = ["dep:hostname", "dep:dirs", "dep:whoami", "dep:postgres", "dep:redis"]
+# `full` only opt-ins the small Node-API helpers (os.hostname / os.homedir).
+# `postgres`, `redis`, `whoami` were previously listed here but were either
+# unimported (postgres, whoami) or only used by a now-deleted `redis_client.rs`
+# whose `js_redis_*` symbols nothing in codegen ever resolved (perry-stdlib's
+# ioredis.rs is the live Redis path). Removing them drops ~1.5+ MB from every
+# Perry binary that links libperry_runtime.a.
+full = ["dep:hostname", "dep:dirs"]
 # When perry-stdlib is the consumer, exclude no-op stubs to avoid duplicate symbols
 stdlib = []
 # Enable geisterhand in-process fuzzer (callback registry + dispatch queue)
@@ -29,13 +35,8 @@ ryu = "1"
 base64 = "0.22"
 hostname = { version = "0.4", optional = true }
 dirs = { version = "5", optional = true }
-whoami = { version = "1", optional = true }
 lazy_static = "1.4"
 
-# Database clients
-postgres = { version = "0.19", features = ["with-serde_json-1"], optional = true }
-redis = { version = "0.25", optional = true }
-# mongodb = { version = "2", default-features = false, features = ["sync"] }
 serde_json = "1"
 
 # We'll add GC bindings later

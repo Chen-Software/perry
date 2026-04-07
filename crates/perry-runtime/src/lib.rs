@@ -41,8 +41,6 @@ pub mod static_plugins;
 #[cfg(not(feature = "stdlib"))]
 pub mod stdlib_stubs;
 #[cfg(feature = "full")]
-pub mod redis_client;
-#[cfg(feature = "full")]
 pub mod plugin;
 pub mod thread;
 pub mod geisterhand_registry;

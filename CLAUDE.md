@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.63
+**Current Version:** 0.4.64
 
 ## Workflow Requirements
 
@@ -139,6 +139,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.64
+- perf/cleanup: drop dead `postgres`/`redis`/`whoami` deps from `perry-runtime` — `perry-runtime/Cargo.toml` had `default = ["full"]` which transitively pulled `dep:postgres`, `dep:redis`, and `dep:whoami` into every Perry binary that links libperry_runtime.a. Verified via grep that none were imported: `postgres` and `whoami` had zero references anywhere, `redis` was only used by `redis_client.rs` whose `js_redis_*` symbols nothing in codegen ever resolved (perry-stdlib's `ioredis.rs` is the live Redis path via `js_ioredis_*`). Deleted `redis_client.rs`, removed the three `dep:` entries from the `full` feature list and from `[dependencies]`. Real Redis/Mongo/Postgres support is unchanged — perry-stdlib's `ioredis.rs`/`mongodb.rs`/`pg.rs` (sqlx) all still build and link end-to-end with `--minimal-stdlib`. Measured: minimal-stdlib `libperry_stdlib.a` for `--features http-client` shrank 56 MB → 55 MB and the `perry_runtime-*` member shrank 3.24 MB → 3.10 MB; final binary unchanged because `-dead_strip` was already removing the orphaned redis code at link time, but build time, archive size, and dep hygiene all improve.
 
 ### v0.4.63
 - fix: complete JWT `keyid`/`kid` codegen wiring — v0.4.62 landed the runtime side (`sign_common` accepts `kid_ptr`, all three signers take a 4th arg) but the matching codegen + runtime_decls were missed, so the call site still passed 3 args to a 4-arg function and the kid was never set. This commit adds the missing pieces: `runtime_decls.rs` declares the 4th `i64` (kid StringHeader ptr), `expr.rs` jsonwebtoken.sign branch extracts `keyid` (alias `kid`) from a literal options object via `compile_expr` + `js_get_string_pointer_unified`, and also fixes a long-standing payload bug where `jwt.sign(JSON.stringify({...}), key, opts)` produced `{}` because the codegen always re-stringified via `js_json_stringify` with object type-hint — now `Expr::JsonStringify(_)` / `Expr::String(_)` / string-typed `LocalGet` payloads are forwarded as raw StringHeader pointers. Verified end-to-end: a Perry-signed `{ alg: ES256, kid }` token validates in Node `jsonwebtoken.verify` against the EC public key. Unblocks APNs provider tokens.
