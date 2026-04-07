@@ -132,6 +132,16 @@ pub(crate) fn compile_async_stmt(
             let value = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, expr, None)?;
             let promise_ptr = builder.use_var(promise_var);
 
+            // Helper: does the type look like a Promise<T> (either the dedicated Promise variant
+            // or the generic-instantiation form with base == "Promise")?
+            fn is_promise_type(ty: &perry_types::Type) -> bool {
+                match ty {
+                    perry_types::Type::Promise(_) => true,
+                    perry_types::Type::Generic { base, .. } if base == "Promise" => true,
+                    _ => false,
+                }
+            }
+
             // Helper to detect if an expression returns a Promise
             // This is needed for Promise unwrapping - when returning a Promise from async function
             fn is_promise_expr(expr: &Expr, async_func_ids: &HashSet<u32>) -> bool {
@@ -140,12 +150,38 @@ pub(crate) fn compile_async_stmt(
                     Expr::New { class_name, .. } if class_name == "Promise" => true,
                     // Calling an async function returns a Promise
                     Expr::Call { callee, .. } => {
-                        if let Expr::FuncRef(func_id) = callee.as_ref() {
-                            async_func_ids.contains(func_id)
-                        } else {
-                            false
+                        match callee.as_ref() {
+                            // Same-module call: look up the FuncId in the in-flight async set.
+                            Expr::FuncRef(func_id) => async_func_ids.contains(func_id),
+                            // Cross-module call: look up the imported function's name in the
+                            // thread-local IMPORTED_ASYNC_FUNCS set, populated at compile_module
+                            // entry from the per-module export scan in compile.rs.
+                            // Without this, `return crossModuleAsyncFn()` falls through to the
+                            // plain js_promise_resolve path which stores the inner Promise pointer
+                            // as the resolved value, so the caller's `await` reads garbage fields
+                            // (success: null, messageId: null) off a Promise object instead of
+                            // the actual resolved object.
+                            Expr::ExternFuncRef { name, return_type, .. } => {
+                                if IMPORTED_ASYNC_FUNCS.with(|p| p.borrow().contains(name)) {
+                                    return true;
+                                }
+                                // Fallback for imported functions that weren't tracked by the
+                                // per-module async scan (e.g. dynamically declared) but whose
+                                // return type annotation is explicitly `Promise<T>`.
+                                if is_promise_type(return_type) {
+                                    return true;
+                                }
+                                IMPORTED_FUNC_RETURN_TYPES.with(|p| {
+                                    p.borrow().get(name).map(is_promise_type).unwrap_or(false)
+                                })
+                            }
+                            _ => false,
                         }
                     }
+                    // `await someAsyncFn()` itself produces the resolved value, NOT a Promise.
+                    // (This branch exists so that nested `return await x` doesn't accidentally
+                    // get treated as Promise-chaining.)
+                    Expr::Await(_) => false,
                     _ => false,
                 }
             }

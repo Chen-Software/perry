@@ -95,6 +95,10 @@ pub struct Compiler {
     /// Imported function return types: function name -> HIR return type
     /// Used to resolve types for await expressions on cross-module async function calls
     pub(crate) imported_func_return_types: HashMap<String, perry_types::Type>,
+    /// Imported function names that were declared `async` in their source module.
+    /// Used by `is_promise_expr` so that `return crossModuleAsyncFn()` correctly
+    /// chains the promises via `js_promise_resolve_with_promise`.
+    pub(crate) imported_async_funcs: HashSet<String>,
     /// Module symbol prefix for scoping cross-module symbols (sanitized module path)
     pub(crate) module_symbol_prefix: String,
     /// Mapping from imported function name -> source module's symbol prefix
@@ -286,6 +290,7 @@ impl Compiler {
             module_level_locals: HashMap::new(),
             imported_func_param_counts: HashMap::new(),
             imported_func_return_types: HashMap::new(),
+            imported_async_funcs: HashSet::new(),
             module_symbol_prefix: String::new(),
             import_module_prefixes: HashMap::new(),
             import_local_to_scoped: HashMap::new(),
@@ -387,6 +392,14 @@ impl Compiler {
     /// Used to resolve types for await expressions on cross-module async function calls.
     pub fn register_imported_func_return_type(&mut self, func_name: String, return_type: perry_types::Type) {
         self.imported_func_return_types.insert(func_name, return_type);
+    }
+
+    /// Mark an imported function as `async`. This is needed (in addition to the return
+    /// type) because some async functions are declared without an explicit
+    /// `Promise<T>` annotation, in which case `func.return_type` is the inner type or
+    /// `Type::Any` and the call site has no other way to know it produces a promise.
+    pub fn register_imported_async_func(&mut self, func_name: String) {
+        self.imported_async_funcs.insert(func_name);
     }
 
     /// Register external native library FFI functions from package manifests.
@@ -1097,6 +1110,16 @@ impl Compiler {
             map.clear();
             for (k, v) in &self.imported_func_return_types {
                 map.insert(k.clone(), v.clone());
+            }
+        });
+
+        // Populate thread-local imported async function name set for use by compile_async_stmt's
+        // is_promise_expr — needed so `return crossModuleAsyncFn()` chains promises correctly.
+        IMPORTED_ASYNC_FUNCS.with(|p| {
+            let mut set = p.borrow_mut();
+            set.clear();
+            for name in &self.imported_async_funcs {
+                set.insert(name.clone());
             }
         });
 

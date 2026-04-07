@@ -31,6 +31,12 @@ thread_local! {
     /// Imported function return types: maps function name -> HIR return type.
     /// Used by compile_stmt to resolve types for await expressions on cross-module async calls.
     pub(crate) static IMPORTED_FUNC_RETURN_TYPES: RefCell<HashMap<String, perry_types::Type>> = RefCell::new(HashMap::new());
+    /// Imported async function names. An imported function name is in this set iff the
+    /// function it refers to was declared `async` in its source module.
+    /// Used by `is_promise_expr` in `compile_async_stmt` so that
+    /// `return crossModuleAsyncFn()` chains promises via `js_promise_resolve_with_promise`
+    /// instead of resolving the outer promise with the inner Promise pointer as its value.
+    pub(crate) static IMPORTED_ASYNC_FUNCS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
     /// Maps local import name -> full scoped export name for imports where local != export name.
     /// E.g., `import bs58 from 'bs58'` maps "bs58" -> "__export_{bs58_prefix}__default".
     pub(crate) static IMPORT_LOCAL_TO_SCOPED: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());

@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.68
+**Current Version:** 0.4.69
 
 ## Workflow Requirements
 
@@ -139,6 +139,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.69
+- fix: `return crossModuleAsyncFn()` inside an `async` wrapper corrupted the resolved value to nulls. The `is_promise_expr` helper in `compile_async_stmt` (`stmt.rs`) only matched same-module `Expr::FuncRef` callees, so the `Expr::Call { callee: ExternFuncRef }` cross-module path fell through to plain `js_promise_resolve` and stored the *inner Promise pointer* as the outer promise's resolved value — the caller's `await` then read fields off a `JSPromise` struct instead of the actual object (`{success: null, messageId: null, ...}`). Fixed by tracking which exported functions were declared `async` in their source module: new `BTreeSet<(String,String)> exported_async_funcs` in `compile.rs` (collected at the same site as `exported_func_return_types`, propagated through the same `ExportAll`/`ReExport`/`Named` chain loop), new `Compiler::imported_async_funcs: HashSet<String>` field + `register_imported_async_func` method, new `IMPORTED_ASYNC_FUNCS` thread-local in `util.rs` populated at `compile_module` entry alongside `IMPORTED_FUNC_RETURN_TYPES`. `is_promise_expr` now also handles `Expr::ExternFuncRef` by checking `IMPORTED_ASYNC_FUNCS` first, then falling back to a `Promise<T>` check on the return type (covers `Type::Promise(_)` and `Type::Generic { base: "Promise", .. }`) so even imports that weren't tracked by the per-module scan are caught when the user wrote an explicit annotation. Verified end-to-end: a 3-module reproducer (`inner.ts` → `wrapper.ts` → `main.ts`) with both annotated and unannotated async wrappers, and a `Promise<PushToken[]>` array-returning case from gscmaster-api, both round-trip correctly. Same-module `return innerAsync()` still works (existing path untouched).
 
 ### v0.4.68
 - feat: `console.time` / `timeEnd` / `timeLog` / `count` / `countReset` / `group` / `groupEnd` / `groupCollapsed` / `assert` / `dir` / `clear` — new runtime functions in `builtins.rs` backed by two thread-locals (`CONSOLE_TIMERS: HashMap<String, Instant>` and `CONSOLE_COUNTERS: HashMap<String, u64>`). Codegen dispatch added at the property-method site in `expr.rs` next to the existing `console.log` branch. Group methods print the label without indentation tracking yet (a follow-up could add the indent counter once ALL `js_console_log*` paths are taught to read it). `console.dir` is treated as an alias for `console.log` of the first argument. `console.clear` writes the ANSI clear sequence.

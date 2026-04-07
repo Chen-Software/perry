@@ -3563,12 +3563,20 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     let mut exported_func_param_counts: BTreeMap<(String, String), usize> = BTreeMap::new();
     // Build a map of all exported functions with their return types from all modules
     let mut exported_func_return_types: BTreeMap<(String, String), perry_types::Type> = BTreeMap::new();
+    // Set of exported functions that were declared `async` in their source module.
+    // We track this separately because users routinely write `async function f() { ... }`
+    // without an explicit `Promise<T>` annotation, in which case `func.return_type` is the
+    // inner type or `Type::Any` and importers can't infer async-ness from the return type alone.
+    let mut exported_async_funcs: BTreeSet<(String, String)> = BTreeSet::new();
     for (path, hir_module) in &ctx.native_modules {
         let path_str = path.to_string_lossy().to_string();
         for func in &hir_module.functions {
             if func.is_exported {
                 exported_func_param_counts.insert((path_str.clone(), func.name.clone()), func.params.len());
                 exported_func_return_types.insert((path_str.clone(), func.name.clone()), func.return_type.clone());
+                if func.is_async {
+                    exported_async_funcs.insert((path_str.clone(), func.name.clone()));
+                }
             }
         }
         // Also register exported_functions aliases (e.g., "default" → actual function)
@@ -3577,7 +3585,10 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             if let Some(func) = hir_module.functions.iter().find(|f| f.id == *func_id) {
                 let key = (path_str.clone(), export_name.clone());
                 exported_func_param_counts.entry(key.clone()).or_insert(func.params.len());
-                exported_func_return_types.entry(key).or_insert_with(|| func.return_type.clone());
+                exported_func_return_types.entry(key.clone()).or_insert_with(|| func.return_type.clone());
+                if func.is_async {
+                    exported_async_funcs.insert(key);
+                }
             }
         }
         // Debug: print superstruct exports
@@ -3597,9 +3608,12 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         for stmt in &hir_module.init {
             if let perry_hir::ir::Stmt::Let { name, init: Some(expr), .. } = stmt {
                 if exported_set.contains(name) {
-                    if let perry_hir::ir::Expr::Closure { params, return_type, .. } = expr {
+                    if let perry_hir::ir::Expr::Closure { params, return_type, is_async, .. } = expr {
                         exported_func_param_counts.insert((path_str.clone(), name.clone()), params.len());
                         exported_func_return_types.insert((path_str.clone(), name.clone()), return_type.clone());
+                        if *is_async {
+                            exported_async_funcs.insert((path_str.clone(), name.clone()));
+                        }
                     }
                 }
             }
@@ -3792,9 +3806,12 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         }
     }
 
-    // Propagate exported_func_return_types through ExportAll/ReExport/Named chains
+    // Propagate exported_func_return_types through ExportAll/ReExport/Named chains.
+    // exported_async_funcs is propagated in the same loop so that re-exported async
+    // functions remain marked async at every step in the chain.
     loop {
         let mut new_func_entries: Vec<((String, String), perry_types::Type)> = Vec::new();
+        let mut new_async_entries: Vec<(String, String)> = Vec::new();
         for (path, hir_module) in &ctx.native_modules {
             let path_str = path.to_string_lossy().to_string();
             for export in &hir_module.exports {
@@ -3806,7 +3823,14 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                                 if src_path == &source_path_str {
                                     let key = (path_str.clone(), func_name.clone());
                                     if !exported_func_return_types.contains_key(&key) {
-                                        new_func_entries.push((key, return_type.clone()));
+                                        new_func_entries.push((key.clone(), return_type.clone()));
+                                    }
+                                    let async_key = (source_path_str.clone(), func_name.clone());
+                                    let propagated_async_key = (path_str.clone(), func_name.clone());
+                                    if exported_async_funcs.contains(&async_key)
+                                        && !exported_async_funcs.contains(&propagated_async_key)
+                                    {
+                                        new_async_entries.push(propagated_async_key);
                                     }
                                 }
                             }
@@ -3819,7 +3843,14 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                                 if src_path == &source_path_str && func_name == imported {
                                     let key = (path_str.clone(), exported.clone());
                                     if !exported_func_return_types.contains_key(&key) {
-                                        new_func_entries.push((key, return_type.clone()));
+                                        new_func_entries.push((key.clone(), return_type.clone()));
+                                    }
+                                    let async_key = (source_path_str.clone(), func_name.clone());
+                                    let propagated_async_key = (path_str.clone(), exported.clone());
+                                    if exported_async_funcs.contains(&async_key)
+                                        && !exported_async_funcs.contains(&propagated_async_key)
+                                    {
+                                        new_async_entries.push(propagated_async_key);
                                     }
                                 }
                             }
@@ -3842,7 +3873,13 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                                         if let Some(return_type) = exported_func_return_types.get(&key_src) {
                                             let key = (path_str.clone(), exported.clone());
                                             if !exported_func_return_types.contains_key(&key) {
-                                                new_func_entries.push((key, return_type.clone()));
+                                                new_func_entries.push((key.clone(), return_type.clone()));
+                                            }
+                                            let propagated_async_key = (path_str.clone(), exported.clone());
+                                            if exported_async_funcs.contains(&key_src)
+                                                && !exported_async_funcs.contains(&propagated_async_key)
+                                            {
+                                                new_async_entries.push(propagated_async_key);
                                             }
                                         }
                                     }
@@ -3854,9 +3891,12 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 }
             }
         }
-        if new_func_entries.is_empty() { break; }
+        if new_func_entries.is_empty() && new_async_entries.is_empty() { break; }
         for (key, return_type) in new_func_entries {
             exported_func_return_types.insert(key, return_type);
+        }
+        for key in new_async_entries {
+            exported_async_funcs.insert(key);
         }
     }
 
@@ -4105,6 +4145,14 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                     }
                     if let Some(return_type) = exported_func_return_types.get(&key) {
                         compiler.register_imported_func_return_type(local_name.clone(), return_type.clone());
+                    }
+                    if exported_async_funcs.contains(&key) {
+                        compiler.register_imported_async_func(local_name.clone());
+                        // Also register under the exported name (e.g. for re-exports where the
+                        // call site references the original symbol).
+                        if local_name != exported_name {
+                            compiler.register_imported_async_func(exported_name.clone());
+                        }
                     }
 
                     let _ = compiler.pre_declare_import_export(&exported_name, &local_name, &effective_prefix);
