@@ -525,11 +525,25 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
 
         // -------- Unary operators --------
         Expr::Unary { op, operand } => {
+            let numeric = is_numeric_expr(ctx, operand);
             let v = lower_expr(ctx, operand)?;
             let blk = ctx.block();
             match op {
-                UnaryOp::Neg => Ok(blk.fneg(&v)),
-                UnaryOp::Pos => Ok(v), // unary + is a no-op for numbers
+                UnaryOp::Neg => {
+                    if numeric {
+                        Ok(blk.fneg(&v))
+                    } else {
+                        let coerced = blk.call(DOUBLE, "js_number_coerce", &[(DOUBLE, &v)]);
+                        Ok(blk.fneg(&coerced))
+                    }
+                }
+                UnaryOp::Pos => {
+                    if numeric {
+                        Ok(v)
+                    } else {
+                        Ok(blk.call(DOUBLE, "js_number_coerce", &[(DOUBLE, &v)]))
+                    }
+                }
                 UnaryOp::Not => {
                     // !x: truthiness inverted, then NaN-box as a JS
                     // boolean (TAG_TRUE / TAG_FALSE) so console.log
