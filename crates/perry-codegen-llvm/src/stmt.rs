@@ -47,9 +47,7 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
             Ok(())
         }
 
-        Stmt::Let {
-            id, init, ..
-        } => {
+        Stmt::Let { id, init, ty, .. } => {
             // Allocate a stack slot, then store the initializer if present.
             let slot = ctx.block().alloca(DOUBLE);
             if let Some(init_expr) = init {
@@ -57,6 +55,10 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
                 ctx.block().store(DOUBLE, &v, &slot);
             }
             ctx.locals.insert(*id, slot);
+            // Track the static type so type-aware lowering paths
+            // (string concat, future array dispatch, etc.) can detect
+            // string-typed locals via `LocalGet`.
+            ctx.local_types.insert(*id, ty.clone());
             Ok(())
         }
 

@@ -169,9 +169,18 @@ fn compile_function(
         map
     };
 
+    // Param types feed local_types so type-aware dispatch (e.g. string
+    // concat detection on a `: string` parameter) works inside the body.
+    let local_types: HashMap<u32, perry_types::Type> = f
+        .params
+        .iter()
+        .map(|p| (p.id, p.ty.clone()))
+        .collect();
+
     let mut ctx = FnCtx {
         func: lf,
         locals,
+        local_types,
         current_block: 0,
         func_names,
         strings,
@@ -216,6 +225,7 @@ fn compile_main(
     let mut ctx = FnCtx {
         func: main,
         locals: HashMap::new(),
+        local_types: HashMap::new(),
         current_block: 0,
         func_names,
         strings,

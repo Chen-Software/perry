@@ -10,6 +10,7 @@
 
 use anyhow::{anyhow, bail, Result};
 use perry_hir::{BinaryOp, CompareOp, Expr, UpdateOp};
+use perry_types::Type as HirType;
 
 use crate::block::LlBlock;
 use crate::function::LlFunction;
@@ -23,6 +24,11 @@ pub(crate) struct FnCtx<'a> {
     pub func: &'a mut LlFunction,
     /// Map from HIR LocalId → LLVM alloca pointer (e.g. `%r3`).
     pub locals: std::collections::HashMap<u32, String>,
+    /// Map from HIR LocalId → static HIR Type. Used by `is_string_expr` and
+    /// future type-aware dispatch sites (Phase B's "native instance flag
+    /// tracking" extension). Populated from function params and `Stmt::Let`
+    /// declarations as they're lowered.
+    pub local_types: std::collections::HashMap<u32, HirType>,
     /// Index into `func.blocks()` pointing at the block currently receiving
     /// instructions. Lowering fns update this when control flow splits.
     pub current_block: usize,
@@ -137,14 +143,12 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // -------- Arithmetic --------
         // String concatenation (Phase B): if Add receives two operands that
         // are statically known to be strings, route through `js_string_concat`
-        // instead of fadd. Type detection is structural at this stage —
-        // `is_string_expr` recognizes literal strings and recursive
-        // string-typed Adds. String-typed locals come in a later Phase B
-        // slice when LocalInfo gains type tracking.
+        // instead of fadd. Type detection consults `ctx.local_types` for
+        // LocalGet operands and recurses through nested Adds.
         Expr::Binary { op, left, right } => {
             if matches!(op, BinaryOp::Add)
-                && is_string_expr(left)
-                && is_string_expr(right)
+                && is_string_expr(ctx, left)
+                && is_string_expr(ctx, right)
             {
                 return lower_string_concat(ctx, left, right);
             }
@@ -268,18 +272,19 @@ fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> Result<Strin
 }
 
 /// Statically determine whether an expression is a string. Conservative —
-/// returns `false` for anything that requires runtime type tracking we
-/// don't have yet (LocalGet of string-typed locals, function calls
-/// returning strings, dynamic property access).
+/// returns `false` for anything that requires type information we don't
+/// track (function-call returns, dynamic property access).
 ///
-/// Currently recognizes: literal strings, and recursive Add of strings
-/// (so `"a" + "b" + "c"` is detected). Phase B's later slices will extend
-/// this once `LocalInfo` gains type tracking.
-fn is_string_expr(e: &Expr) -> bool {
+/// Recognizes:
+/// - literal strings (`"foo"`)
+/// - LocalGet of string-typed locals (params with `: string`, `let x = "a"`)
+/// - recursive Add of strings (`"a" + "b" + s`)
+fn is_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
     match e {
         Expr::String(_) => true,
+        Expr::LocalGet(id) => matches!(ctx.local_types.get(id), Some(HirType::String)),
         Expr::Binary { op: BinaryOp::Add, left, right } => {
-            is_string_expr(left) && is_string_expr(right)
+            is_string_expr(ctx, left) && is_string_expr(ctx, right)
         }
         _ => false,
     }
