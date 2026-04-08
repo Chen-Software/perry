@@ -90,6 +90,14 @@ pub(crate) struct FnCtx<'a> {
     /// `lower_call` to dispatch `obj.method(args)` to the right
     /// `perry_method_<class>_<name>` function.
     pub methods: &'a std::collections::HashMap<(String, String), String>,
+    /// Module-level globals: `LocalId → global symbol name (without @)`.
+    /// Built by `compile_module` from top-level `Stmt::Let` declarations
+    /// in `hir.init`. Used by `LocalGet`/`LocalSet`/`Update`/`Stmt::Let`
+    /// — when a local id is in this map, it refers to a module-level
+    /// `internal global double 0.0` instead of a stack alloca, so the
+    /// value is visible to all functions in the module (essential for
+    /// patterns like `let failures = 0; function eq() { failures++; }`).
+    pub module_globals: &'a std::collections::HashMap<u32, String>,
 }
 
 impl<'a> FnCtx<'a> {
@@ -174,13 +182,19 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         }
 
         // -------- Variables --------
+        // LocalGet checks function-local alloca slots first, then falls
+        // back to module-level globals. This lets functions read
+        // module-scope `let` variables (the ones in `hir.init` at the
+        // top level).
         Expr::LocalGet(id) => {
-            let slot = ctx
-                .locals
-                .get(id)
-                .ok_or_else(|| anyhow!("LocalGet({}): local not in scope", id))?
-                .clone();
-            Ok(ctx.block().load(DOUBLE, &slot))
+            if let Some(slot) = ctx.locals.get(id).cloned() {
+                Ok(ctx.block().load(DOUBLE, &slot))
+            } else if let Some(global_name) = ctx.module_globals.get(id).cloned() {
+                let g_ref = format!("@{}", global_name);
+                Ok(ctx.block().load(DOUBLE, &g_ref))
+            } else {
+                Err(anyhow!("LocalGet({}): local not in scope", id))
+            }
         }
 
         // `total = expr` — store the new value into the local's alloca slot
@@ -206,32 +220,35 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 }
             }
             let v = lower_expr(ctx, value)?;
-            let slot = ctx
-                .locals
-                .get(id)
-                .ok_or_else(|| anyhow!("LocalSet({}): local not in scope", id))?
-                .clone();
-            ctx.block().store(DOUBLE, &v, &slot);
+            // Locals first, then module globals.
+            if let Some(slot) = ctx.locals.get(id).cloned() {
+                ctx.block().store(DOUBLE, &v, &slot);
+            } else if let Some(global_name) = ctx.module_globals.get(id).cloned() {
+                let g_ref = format!("@{}", global_name);
+                ctx.block().store(DOUBLE, &v, &g_ref);
+            } else {
+                return Err(anyhow!("LocalSet({}): local not in scope", id));
+            }
             Ok(v)
         }
 
         // `i++` / `++i` / `i--` / `--i`. Postfix returns the OLD value,
-        // prefix returns the NEW value. Inside a for-loop update slot the
-        // result is discarded, but we honor JS semantics in case it's used
-        // somewhere like `let x = i++`.
+        // prefix returns the NEW value. Locals first, then module globals.
         Expr::Update { id, op, prefix } => {
-            let slot = ctx
-                .locals
-                .get(id)
-                .ok_or_else(|| anyhow!("Update({}): local not in scope", id))?
-                .clone();
+            let storage = if let Some(slot) = ctx.locals.get(id).cloned() {
+                slot
+            } else if let Some(global_name) = ctx.module_globals.get(id).cloned() {
+                format!("@{}", global_name)
+            } else {
+                return Err(anyhow!("Update({}): local not in scope", id));
+            };
             let blk = ctx.block();
-            let old = blk.load(DOUBLE, &slot);
+            let old = blk.load(DOUBLE, &storage);
             let new = match op {
                 UpdateOp::Increment => blk.fadd(&old, "1.0"),
                 UpdateOp::Decrement => blk.fsub(&old, "1.0"),
             };
-            blk.store(DOUBLE, &new, &slot);
+            blk.store(DOUBLE, &new, &storage);
             Ok(if *prefix { new } else { old })
         }
 
@@ -648,6 +665,46 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
 
             // super() evaluates to undefined in JS.
             Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
+        }
+
+        // -------- Math.* unary helpers (Phase B.15) --------
+        Expr::MathSqrt(operand) => {
+            let v = lower_expr(ctx, operand)?;
+            Ok(ctx.block().call(DOUBLE, "js_math_sqrt", &[(DOUBLE, &v)]))
+        }
+        Expr::MathFloor(operand) => {
+            let v = lower_expr(ctx, operand)?;
+            Ok(ctx.block().call(DOUBLE, "js_math_floor", &[(DOUBLE, &v)]))
+        }
+        Expr::MathCeil(operand) => {
+            let v = lower_expr(ctx, operand)?;
+            Ok(ctx.block().call(DOUBLE, "js_math_ceil", &[(DOUBLE, &v)]))
+        }
+        Expr::MathRound(operand) => {
+            let v = lower_expr(ctx, operand)?;
+            Ok(ctx.block().call(DOUBLE, "js_math_round", &[(DOUBLE, &v)]))
+        }
+        Expr::MathAbs(operand) => {
+            let v = lower_expr(ctx, operand)?;
+            Ok(ctx.block().call(DOUBLE, "js_math_abs", &[(DOUBLE, &v)]))
+        }
+
+        // `JSON.stringify(value)` (3-arg form with indent ignored for now).
+        Expr::JsonStringifyFull(value, _replacer, _indent) => {
+            let v = lower_expr(ctx, value)?;
+            let blk = ctx.block();
+            // type_hint=0 means "use the value's NaN tag to dispatch".
+            let zero = "0".to_string();
+            let handle = blk.call(I64, "js_json_stringify", &[(DOUBLE, &v), (I32, &zero)]);
+            Ok(nanbox_string_inline(blk, &handle))
+        }
+
+        // `new Map()` — alloc with default capacity 8 (the runtime grows
+        // as needed). Result is NaN-boxed with POINTER_TAG.
+        Expr::MapNew => {
+            let cap = "8".to_string();
+            let handle = ctx.block().call(I64, "js_map_alloc", &[(I32, &cap)]);
+            Ok(nanbox_pointer_inline(ctx.block(), &handle))
         }
 
         // -------- Logical operators (Phase B.6) --------
@@ -1242,8 +1299,38 @@ fn lower_logical(
     left: &Expr,
     right: &Expr,
 ) -> Result<String> {
+    // ?? — nullish coalesce. Inline test: bitcast left to i64, compare
+    // against TAG_NULL_I64 and TAG_UNDEFINED_I64. If either matches, the
+    // value is "nullish" and we return the right side; otherwise return
+    // the left.
     if matches!(op, LogicalOp::Coalesce) {
-        bail!("perry-codegen-llvm Phase B.6: `??` (nullish coalesce) not yet supported");
+        let l = lower_expr(ctx, left)?;
+        let l_block_label = ctx.block().label.clone();
+        let blk = ctx.block();
+        let l_bits = blk.bitcast_double_to_i64(&l);
+        let is_null = blk.icmp_eq(I64, &l_bits, crate::nanbox::TAG_NULL_I64);
+        let is_undef = blk.icmp_eq(I64, &l_bits, crate::nanbox::TAG_UNDEFINED_I64);
+        let is_nullish = blk.or(crate::types::I1, &is_null, &is_undef);
+
+        let then_idx = ctx.new_block("coalesce.right");
+        let merge_idx = ctx.new_block("coalesce.merge");
+        let then_label = ctx.block_label(then_idx);
+        let merge_label = ctx.block_label(merge_idx);
+
+        ctx.block().cond_br(&is_nullish, &then_label, &merge_label);
+
+        ctx.current_block = then_idx;
+        let r = lower_expr(ctx, right)?;
+        let r_block_label = ctx.block().label.clone();
+        if !ctx.block().is_terminated() {
+            ctx.block().br(&merge_label);
+        }
+
+        ctx.current_block = merge_idx;
+        return Ok(ctx.block().phi(
+            DOUBLE,
+            &[(&l, &l_block_label), (&r, &r_block_label)],
+        ));
     }
 
     // Lower left in the current block.

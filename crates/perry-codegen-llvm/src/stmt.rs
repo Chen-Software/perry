@@ -48,16 +48,29 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
         }
 
         Stmt::Let { id, init, ty, .. } => {
-            // Allocate a stack slot, then store the initializer if present.
+            // If the local id is registered as a module-level global
+            // (pre-walked by compile_module from hir.init top-level lets),
+            // store the init value directly into the global instead of
+            // allocating a fresh stack slot. This is what makes
+            // `let counter = 0; function bump() { counter++; }` work —
+            // both main's Let and bump's Update target the same storage.
+            if let Some(global_name) = ctx.module_globals.get(id).cloned() {
+                if let Some(init_expr) = init {
+                    let v = lower_expr(ctx, init_expr)?;
+                    let g_ref = format!("@{}", global_name);
+                    ctx.block().store(DOUBLE, &v, &g_ref);
+                }
+                ctx.local_types.insert(*id, ty.clone());
+                return Ok(());
+            }
+            // Otherwise: regular function-local. Allocate a stack slot,
+            // store the initializer if present.
             let slot = ctx.block().alloca(DOUBLE);
             if let Some(init_expr) = init {
                 let v = lower_expr(ctx, init_expr)?;
                 ctx.block().store(DOUBLE, &v, &slot);
             }
             ctx.locals.insert(*id, slot);
-            // Track the static type so type-aware lowering paths
-            // (string concat, future array dispatch, etc.) can detect
-            // string-typed locals via `LocalGet`.
             ctx.local_types.insert(*id, ty.clone());
             Ok(())
         }

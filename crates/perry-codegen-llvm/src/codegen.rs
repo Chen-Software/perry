@@ -104,6 +104,62 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         .map(|c| (c.name.clone(), c))
         .collect();
 
+    // Module-level globals registry. Pre-walk:
+    //   1. Collect every LocalId referenced from any function or method
+    //      body (LocalGet / LocalSet / Update). Those that aren't a
+    //      function/method's own param or Let must be module-level.
+    //   2. Walk hir.init's top-level Lets and globalize ONLY the ones in
+    //      that set. Lets that are only referenced from main itself stay
+    //      as cheap stack alloca (preserves perf for the bench
+    //      benchmarks that don't share state with helper functions).
+    let mut referenced_from_fn: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    for f in &hir.functions {
+        let mut local_defs: std::collections::HashSet<u32> = f.params.iter().map(|p| p.id).collect();
+        collect_let_ids(&f.body, &mut local_defs);
+        let mut refs: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        collect_ref_ids_in_stmts(&f.body, &mut refs);
+        for r in refs {
+            if !local_defs.contains(&r) {
+                referenced_from_fn.insert(r);
+            }
+        }
+    }
+    for c in &hir.classes {
+        for m in &c.methods {
+            let mut local_defs: std::collections::HashSet<u32> = m.params.iter().map(|p| p.id).collect();
+            collect_let_ids(&m.body, &mut local_defs);
+            let mut refs: std::collections::HashSet<u32> = std::collections::HashSet::new();
+            collect_ref_ids_in_stmts(&m.body, &mut refs);
+            for r in refs {
+                if !local_defs.contains(&r) {
+                    referenced_from_fn.insert(r);
+                }
+            }
+        }
+        if let Some(ctor) = &c.constructor {
+            let mut local_defs: std::collections::HashSet<u32> = ctor.params.iter().map(|p| p.id).collect();
+            collect_let_ids(&ctor.body, &mut local_defs);
+            let mut refs: std::collections::HashSet<u32> = std::collections::HashSet::new();
+            collect_ref_ids_in_stmts(&ctor.body, &mut refs);
+            for r in refs {
+                if !local_defs.contains(&r) {
+                    referenced_from_fn.insert(r);
+                }
+            }
+        }
+    }
+
+    let mut module_globals: HashMap<u32, String> = HashMap::new();
+    for s in &hir.init {
+        if let perry_hir::Stmt::Let { id, .. } = s {
+            if referenced_from_fn.contains(id) {
+                let name = format!("perry_global_{}", id);
+                llmod.add_internal_global(&name, DOUBLE, "0.0");
+                module_globals.insert(*id, name);
+            }
+        }
+    }
+
     // Method registry: (class_name, method_name) → LLVM function name.
     // Built from `class.methods` so the dispatch in `lower_call` knows
     // which mangled function name to call for `obj.method(args)`.
@@ -130,7 +186,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
 
     // Lower each user function into the module.
     for f in &hir.functions {
-        compile_function(&mut llmod, f, &func_names, &mut strings, &class_table, &method_names)
+        compile_function(&mut llmod, f, &func_names, &mut strings, &class_table, &method_names, &module_globals)
             .with_context(|| format!("lowering function '{}'", f.name))?;
     }
 
@@ -139,14 +195,14 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     // LLVM functions; the dispatch in `lower_call` calls them directly.
     for class in &hir.classes {
         for method in &class.methods {
-            compile_method(&mut llmod, class, method, &func_names, &mut strings, &class_table, &method_names)
+            compile_method(&mut llmod, class, method, &func_names, &mut strings, &class_table, &method_names, &module_globals)
                 .with_context(|| format!("lowering method '{}::{}'", class.name, method.name))?;
         }
     }
 
     // Emit `int main()` that bootstraps GC, runs the string-pool init,
     // then runs init statements.
-    compile_main(&mut llmod, hir, &func_names, &mut strings, &class_table, &method_names)
+    compile_main(&mut llmod, hir, &func_names, &mut strings, &class_table, &method_names, &module_globals)
         .with_context(|| format!("lowering main of module '{}'", hir.name))?;
 
     // After all user code is lowered, the string pool's contents are final.
@@ -174,6 +230,7 @@ fn compile_function(
     strings: &mut StringPool,
     classes: &HashMap<String, &perry_hir::Class>,
     methods: &HashMap<(String, String), String>,
+    module_globals: &HashMap<u32, String>,
 ) -> Result<()> {
     let llvm_name = func_names
         .get(&f.id)
@@ -226,6 +283,7 @@ fn compile_function(
         this_stack: Vec::new(),
         class_stack: Vec::new(),
         methods,
+        module_globals,
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of '{}'", f.name))?;
@@ -252,6 +310,7 @@ fn compile_method(
     strings: &mut StringPool,
     classes: &HashMap<String, &perry_hir::Class>,
     methods: &HashMap<(String, String), String>,
+    module_globals: &HashMap<u32, String>,
 ) -> Result<()> {
     let llvm_name = methods
         .get(&(class.name.clone(), method.name.clone()))
@@ -307,6 +366,7 @@ fn compile_method(
         this_stack: vec![this_slot],
         class_stack: vec![class.name.clone()],
         methods,
+        module_globals,
     };
 
     stmt::lower_stmts(&mut ctx, &method.body)
@@ -332,6 +392,7 @@ fn compile_main(
     strings: &mut StringPool,
     classes: &HashMap<String, &perry_hir::Class>,
     methods: &HashMap<(String, String), String>,
+    module_globals: &HashMap<u32, String>,
 ) -> Result<()> {
     let main = llmod.define_function("main", I32, vec![]);
     let _ = main.create_block("entry");
@@ -357,6 +418,7 @@ fn compile_main(
         this_stack: Vec::new(),
         class_stack: Vec::new(),
         methods,
+        module_globals,
     };
     stmt::lower_stmts(&mut ctx, &hir.init)
         .with_context(|| format!("lowering init statements of module '{}'", hir.name))?;
@@ -421,6 +483,155 @@ fn emit_string_pool(llmod: &mut LlModule, strings: &StringPool) {
     }
 
     blk.ret_void();
+}
+
+/// Walk a sequence of statements and collect all LocalIds defined by
+/// `Stmt::Let` (function-local declarations). Used by the module-globals
+/// pre-walk to distinguish "this id is the function's own local" from
+/// "this id refers to a module-level let".
+fn collect_let_ids(stmts: &[perry_hir::Stmt], out: &mut std::collections::HashSet<u32>) {
+    for s in stmts {
+        match s {
+            perry_hir::Stmt::Let { id, .. } => {
+                out.insert(*id);
+            }
+            perry_hir::Stmt::If { then_branch, else_branch, .. } => {
+                collect_let_ids(then_branch, out);
+                if let Some(eb) = else_branch {
+                    collect_let_ids(eb, out);
+                }
+            }
+            perry_hir::Stmt::For { init, body, .. } => {
+                if let Some(init_stmt) = init {
+                    collect_let_ids(std::slice::from_ref(init_stmt), out);
+                }
+                collect_let_ids(body, out);
+            }
+            perry_hir::Stmt::While { body, .. } | perry_hir::Stmt::DoWhile { body, .. } => {
+                collect_let_ids(body, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Walk a sequence of statements and collect all LocalIds referenced via
+/// `LocalGet`, `LocalSet`, or `Update`. Used together with `collect_let_ids`
+/// to detect references to module-level lets that need globalization.
+fn collect_ref_ids_in_stmts(stmts: &[perry_hir::Stmt], out: &mut std::collections::HashSet<u32>) {
+    for s in stmts {
+        match s {
+            perry_hir::Stmt::Expr(e) | perry_hir::Stmt::Throw(e) => collect_ref_ids_in_expr(e, out),
+            perry_hir::Stmt::Return(opt) => {
+                if let Some(e) = opt {
+                    collect_ref_ids_in_expr(e, out);
+                }
+            }
+            perry_hir::Stmt::Let { init, .. } => {
+                if let Some(e) = init {
+                    collect_ref_ids_in_expr(e, out);
+                }
+            }
+            perry_hir::Stmt::If { condition, then_branch, else_branch } => {
+                collect_ref_ids_in_expr(condition, out);
+                collect_ref_ids_in_stmts(then_branch, out);
+                if let Some(eb) = else_branch {
+                    collect_ref_ids_in_stmts(eb, out);
+                }
+            }
+            perry_hir::Stmt::While { condition, body } => {
+                collect_ref_ids_in_expr(condition, out);
+                collect_ref_ids_in_stmts(body, out);
+            }
+            perry_hir::Stmt::DoWhile { body, condition } => {
+                collect_ref_ids_in_stmts(body, out);
+                collect_ref_ids_in_expr(condition, out);
+            }
+            perry_hir::Stmt::For { init, condition, update, body } => {
+                if let Some(init_stmt) = init {
+                    collect_ref_ids_in_stmts(std::slice::from_ref(init_stmt), out);
+                }
+                if let Some(cond) = condition {
+                    collect_ref_ids_in_expr(cond, out);
+                }
+                if let Some(upd) = update {
+                    collect_ref_ids_in_expr(upd, out);
+                }
+                collect_ref_ids_in_stmts(body, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_ref_ids_in_expr(e: &perry_hir::Expr, out: &mut std::collections::HashSet<u32>) {
+    use perry_hir::Expr;
+    match e {
+        Expr::LocalGet(id) => {
+            out.insert(*id);
+        }
+        Expr::LocalSet(id, value) => {
+            out.insert(*id);
+            collect_ref_ids_in_expr(value, out);
+        }
+        Expr::Update { id, .. } => {
+            out.insert(*id);
+        }
+        Expr::Binary { left, right, .. } | Expr::Compare { left, right, .. } | Expr::Logical { left, right, .. } => {
+            collect_ref_ids_in_expr(left, out);
+            collect_ref_ids_in_expr(right, out);
+        }
+        Expr::Unary { operand, .. } | Expr::Void(operand) | Expr::TypeOf(operand) => {
+            collect_ref_ids_in_expr(operand, out);
+        }
+        Expr::Call { callee, args, .. } => {
+            collect_ref_ids_in_expr(callee, out);
+            for a in args {
+                collect_ref_ids_in_expr(a, out);
+            }
+        }
+        Expr::Conditional { condition, then_expr, else_expr } => {
+            collect_ref_ids_in_expr(condition, out);
+            collect_ref_ids_in_expr(then_expr, out);
+            collect_ref_ids_in_expr(else_expr, out);
+        }
+        Expr::PropertyGet { object, .. } => {
+            collect_ref_ids_in_expr(object, out);
+        }
+        Expr::PropertySet { object, value, .. } => {
+            collect_ref_ids_in_expr(object, out);
+            collect_ref_ids_in_expr(value, out);
+        }
+        Expr::IndexGet { object, index } => {
+            collect_ref_ids_in_expr(object, out);
+            collect_ref_ids_in_expr(index, out);
+        }
+        Expr::IndexSet { object, index, value } => {
+            collect_ref_ids_in_expr(object, out);
+            collect_ref_ids_in_expr(index, out);
+            collect_ref_ids_in_expr(value, out);
+        }
+        Expr::ArrayPush { array_id, value } => {
+            out.insert(*array_id);
+            collect_ref_ids_in_expr(value, out);
+        }
+        Expr::Array(elements) => {
+            for el in elements {
+                collect_ref_ids_in_expr(el, out);
+            }
+        }
+        Expr::Object(props) => {
+            for (_, v) in props {
+                collect_ref_ids_in_expr(v, out);
+            }
+        }
+        Expr::New { args, .. } => {
+            for a in args {
+                collect_ref_ids_in_expr(a, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Mangle a HIR function name into an LLVM symbol.

@@ -99,6 +99,22 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_string_substring", I64, &[I64, I32, I32]);
     module.declare_function("js_string_split", I64, &[I64, I64]);
     module.declare_function("js_math_pow", DOUBLE, &[DOUBLE, DOUBLE]);
+
+    // Math.* unary functions used by class methods (Phase B.15).
+    module.declare_function("js_math_sqrt", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_math_floor", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_math_ceil", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_math_round", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_math_abs", DOUBLE, &[DOUBLE]);
+
+    // JSON.stringify (Phase B.15). The 2-arg form is JsonStringifyFull
+    // in the HIR (value, type_hint, indent — actually 3 args; we use the
+    // simple 2-arg js_json_stringify for now).
+    module.declare_function("js_json_stringify", I64, &[DOUBLE, I32]);
+
+    // Map (Phase B.15). The runtime stores keys/values as NaN-boxed doubles.
+    // js_map_alloc returns a *mut MapHeader (i64 pointer).
+    module.declare_function("js_map_alloc", I64, &[I32]);
     // typeof: returns a string handle ("number"/"string"/"boolean"/"undefined"/"object"/"function")
     module.declare_function("js_value_typeof", I64, &[DOUBLE]);
     module.declare_function("js_string_starts_with", I32, &[I64, I64]);
