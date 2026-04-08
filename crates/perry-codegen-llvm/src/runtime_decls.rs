@@ -58,4 +58,19 @@ pub fn declare_phase2_1(module: &mut LlModule) {
 /// which the mark phase scans alongside the stack.
 pub fn declare_phase_a_strings(module: &mut LlModule) {
     module.declare_function("js_gc_register_global_root", VOID, &[I64]);
+
+    // Phase B (core types) additions live here too — split into a separate
+    // function once they grow.
+    declare_phase_b_strings(module);
+}
+
+/// Phase B string operations.
+///
+/// `js_string_concat(*const StringHeader, *const StringHeader) -> *mut StringHeader`
+/// — both arguments and the return value are raw i64 pointers in our ABI
+/// (no NaN-tag). The codegen unboxes the operands by `bitcast double → i64`
+/// and `and` with `POINTER_MASK` (0x0000_FFFF_FFFF_FFFF), then re-boxes the
+/// result with `js_nanbox_string`.
+pub fn declare_phase_b_strings(module: &mut LlModule) {
+    module.declare_function("js_string_concat", I64, &[I64, I64]);
 }

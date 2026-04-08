@@ -13,9 +13,9 @@ use perry_hir::{BinaryOp, CompareOp, Expr, UpdateOp};
 
 use crate::block::LlBlock;
 use crate::function::LlFunction;
-use crate::nanbox::double_literal;
+use crate::nanbox::{double_literal, POINTER_MASK_I64};
 use crate::strings::StringPool;
-use crate::types::DOUBLE;
+use crate::types::{DOUBLE, I64};
 
 /// Per-function codegen context. Held briefly during lowering, never stored.
 pub(crate) struct FnCtx<'a> {
@@ -135,7 +135,19 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         Expr::DateNow => Ok(ctx.block().call(DOUBLE, "js_date_now", &[])),
 
         // -------- Arithmetic --------
+        // String concatenation (Phase B): if Add receives two operands that
+        // are statically known to be strings, route through `js_string_concat`
+        // instead of fadd. Type detection is structural at this stage —
+        // `is_string_expr` recognizes literal strings and recursive
+        // string-typed Adds. String-typed locals come in a later Phase B
+        // slice when LocalInfo gains type tracking.
         Expr::Binary { op, left, right } => {
+            if matches!(op, BinaryOp::Add)
+                && is_string_expr(left)
+                && is_string_expr(right)
+            {
+                return lower_string_concat(ctx, left, right);
+            }
             let l = lower_expr(ctx, left)?;
             let r = lower_expr(ctx, right)?;
             let blk = ctx.block();
@@ -146,7 +158,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 BinaryOp::Div => blk.fdiv(&l, &r),
                 BinaryOp::Mod => blk.frem(&l, &r),
                 other => bail!(
-                    "perry-codegen-llvm Phase 2: BinaryOp::{:?} not yet supported",
+                    "perry-codegen-llvm Phase A: BinaryOp::{:?} not yet supported",
                     other
                 ),
             };
@@ -253,6 +265,59 @@ fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> Result<Strin
         "perry-codegen-llvm Phase 2: Call callee shape not supported ({})",
         variant_name(callee)
     )
+}
+
+/// Statically determine whether an expression is a string. Conservative —
+/// returns `false` for anything that requires runtime type tracking we
+/// don't have yet (LocalGet of string-typed locals, function calls
+/// returning strings, dynamic property access).
+///
+/// Currently recognizes: literal strings, and recursive Add of strings
+/// (so `"a" + "b" + "c"` is detected). Phase B's later slices will extend
+/// this once `LocalInfo` gains type tracking.
+fn is_string_expr(e: &Expr) -> bool {
+    match e {
+        Expr::String(_) => true,
+        Expr::Binary { op: BinaryOp::Add, left, right } => {
+            is_string_expr(left) && is_string_expr(right)
+        }
+        _ => false,
+    }
+}
+
+/// Lower a static `s1 + s2` string concatenation. Both operands must
+/// already be statically string-typed (caller's responsibility — see
+/// `is_string_expr`).
+///
+/// Pattern:
+/// ```llvm
+/// ; %l_box and %r_box are NaN-boxed strings (double values with STRING_TAG)
+/// %l_bits = bitcast double %l_box to i64
+/// %l_handle = and i64 %l_bits, 281474976710655   ; POINTER_MASK_I64
+/// %r_bits = bitcast double %r_box to i64
+/// %r_handle = and i64 %r_bits, 281474976710655
+/// %result_handle = call i64 @js_string_concat(i64 %l_handle, i64 %r_handle)
+/// %result_box = call double @js_nanbox_string(i64 %result_handle)
+/// ```
+///
+/// The bitcast+and is the inline-fast unboxing pattern. We avoid calling
+/// the slower `js_nanbox_get_pointer` (which does the same thing in Rust)
+/// to keep concat hot-path overhead minimal.
+fn lower_string_concat(ctx: &mut FnCtx<'_>, left: &Expr, right: &Expr) -> Result<String> {
+    let l_box = lower_expr(ctx, left)?;
+    let r_box = lower_expr(ctx, right)?;
+    let blk = ctx.block();
+    let l_bits = blk.bitcast_double_to_i64(&l_box);
+    let l_handle = blk.and(I64, &l_bits, POINTER_MASK_I64);
+    let r_bits = blk.bitcast_double_to_i64(&r_box);
+    let r_handle = blk.and(I64, &r_bits, POINTER_MASK_I64);
+    let result_handle = blk.call(
+        I64,
+        "js_string_concat",
+        &[(I64, &l_handle), (I64, &r_handle)],
+    );
+    let result_box = blk.call(DOUBLE, "js_nanbox_string", &[(I64, &result_handle)]);
+    Ok(result_box)
 }
 
 pub(crate) fn variant_name(e: &Expr) -> &'static str {
