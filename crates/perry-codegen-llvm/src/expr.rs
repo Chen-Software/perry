@@ -249,30 +249,39 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // (POINTER_TAG, not STRING_TAG).
         Expr::Array(elements) => lower_array_literal(ctx, elements),
 
-        // `arr[i]` index access. Currently number-typed only — assumes the
-        // receiver is an array of numbers and the result is a raw f64.
+        // `arr[i]` index access. INLINE FAST PATH for typed-Number arrays:
+        // skip the runtime function call, do the address arithmetic
+        // directly. The ArrayHeader layout is `{ length: u32, capacity:
+        // u32, elements: [f64; N] }` — elements start at offset 8.
+        //
+        // Equivalent to:
+        //   element_ptr = arr_ptr + 8 + idx*8
+        //   load double, ptr element_ptr
+        //
+        // Saves a function call (~5-10 ns) per access. For
+        // bench_array_ops with ~400K reads per iteration this is the
+        // bulk of the LLVM-vs-Cranelift gap.
         Expr::IndexGet { object, index } => {
             if !is_array_expr(ctx, object) {
                 bail!(
-                    "perry-codegen-llvm Phase B.3: IndexGet receiver must be a known array (got {})",
+                    "perry-codegen-llvm Phase B.9: IndexGet receiver must be a known array (got {})",
                     variant_name(object)
                 );
             }
             let arr_box = lower_expr(ctx, object)?;
             let idx_double = lower_expr(ctx, index)?;
             let blk = ctx.block();
-            // Unbox the array pointer: bitcast double → i64, mask off the
-            // POINTER_TAG bits with POINTER_MASK_I64.
             let arr_bits = blk.bitcast_double_to_i64(&arr_box);
             let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
-            // Index is a double in our value model; convert to i32 for the
-            // runtime ABI.
             let idx_i32 = blk.fptosi(DOUBLE, &idx_double, I32);
-            Ok(blk.call(
-                DOUBLE,
-                "js_array_get_f64",
-                &[(I64, &arr_handle), (I32, &idx_i32)],
-            ))
+            // Inline address arithmetic. uextend to i64, shift left 3
+            // (multiply by 8), add 8 for the ArrayHeader, add to base.
+            let idx_i64 = blk.zext(I32, &idx_i32, I64);
+            let byte_offset = blk.shl(I64, &idx_i64, "3");
+            let with_header = blk.add(I64, &byte_offset, "8");
+            let element_addr = blk.add(I64, &arr_handle, &with_header);
+            let element_ptr = blk.inttoptr(I64, &element_addr);
+            Ok(blk.load(DOUBLE, &element_ptr))
         }
 
         // `arr.length` — for arrays specifically. Strings, objects, and
@@ -289,20 +298,23 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
 
         // `arr[i] = v` — typed-Number array element write.
         //
-        // When the receiver is a LocalGet (the common case `arr[i] = v`),
-        // we use `js_array_set_f64_extend` which auto-grows the array if
-        // `i >= length`. The extend variant returns a possibly-realloc'd
-        // pointer that we must store back to the local slot — without
-        // the store-back, subsequent reads would dangle on the freed
-        // pre-realloc pointer.
+        // INLINE FAST PATH (matches Cranelift's expr.rs:18886+ pattern):
         //
-        // For non-LocalGet receivers (e.g. a function call result), we
-        // use the bounds-checked `js_array_set_f64` since there's no
-        // local to write the new pointer back to.
+        //   load length from arr_ptr+0
+        //   if idx < length: inline store, done
+        //   else if idx < capacity: inline store + bump length, done
+        //   else: call js_array_set_f64_extend (slow realloc path)
+        //
+        // The ArrayHeader layout is `{ length: u32, capacity: u32, ... }`
+        // (8 bytes), followed by `[f64; N]` elements at offset 8.
+        //
+        // For non-LocalGet receivers we still use bounds-checked
+        // `js_array_set_f64` (no return value, no realloc) since there's
+        // no local to write a possibly-realloc'd pointer back to.
         Expr::IndexSet { object, index, value } => {
             if !is_array_expr(ctx, object) {
                 bail!(
-                    "perry-codegen-llvm Phase B.8: IndexSet receiver must be a known array (got {})",
+                    "perry-codegen-llvm Phase B.9: IndexSet receiver must be a known array (got {})",
                     variant_name(object)
                 );
             }
@@ -310,39 +322,19 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let idx_double = lower_expr(ctx, index)?;
             let val_double = lower_expr(ctx, value)?;
 
-            // If the object is a LocalGet, capture the local id so we can
-            // write the new pointer back after the extending call. Doing
-            // this BEFORE the borrow of `ctx.block()` keeps the borrow
-            // checker happy.
             let local_id = if let Expr::LocalGet(id) = object.as_ref() {
                 Some(*id)
             } else {
                 None
             };
 
-            let blk = ctx.block();
-            let arr_bits = blk.bitcast_double_to_i64(&arr_box);
-            let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
-            let idx_i32 = blk.fptosi(DOUBLE, &idx_double, I32);
-
             if let Some(id) = local_id {
-                let new_handle = blk.call(
-                    I64,
-                    "js_array_set_f64_extend",
-                    &[(I64, &arr_handle), (I32, &idx_i32), (DOUBLE, &val_double)],
-                );
-                // Inline `or POINTER_TAG_I64; bitcast i64→double` instead of
-                // calling js_nanbox_pointer — `set_f64_extend` always
-                // returns a real heap pointer.
-                let new_box = nanbox_pointer_inline(blk, &new_handle);
-                let slot = ctx
-                    .locals
-                    .get(&id)
-                    .ok_or_else(|| anyhow!("IndexSet: local {} not in scope", id))?
-                    .clone();
-                ctx.block().store(DOUBLE, &new_box, &slot);
+                lower_index_set_fast(ctx, &arr_box, &idx_double, &val_double, id)?;
             } else {
-                // Non-LocalGet receiver: in-bounds write only.
+                let blk = ctx.block();
+                let arr_bits = blk.bitcast_double_to_i64(&arr_box);
+                let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
+                let idx_i32 = blk.fptosi(DOUBLE, &idx_double, I32);
                 blk.call_void(
                     "js_array_set_f64",
                     &[(I64, &arr_handle), (I32, &idx_i32), (DOUBLE, &val_double)],
@@ -811,6 +803,150 @@ fn lower_array_literal(ctx: &mut FnCtx<'_>, elements: &[Expr]) -> Result<String>
 
     // Inline NaN-box (POINTER_TAG) — alloc always returns a real heap ptr.
     Ok(nanbox_pointer_inline(ctx.block(), &current_arr))
+}
+
+/// Inline fast-path lowering for `local_arr[i] = v` (Phase B.9).
+///
+/// Mirrors Cranelift's `expr.rs:18886+` pattern. Compiles to:
+///
+/// ```text
+///   <current>:
+///     %arr_handle = unbox(arr_box)
+///     %length = load i32, ptr @ arr_handle+0
+///     %in_bounds = icmp ult %idx_i32, %length
+///     br i1 %in_bounds, label %fast_inbounds, label %check_capacity
+///
+///   fast_inbounds:
+///     ; element_ptr = arr_handle + 8 + idx*8
+///     store double %v, ptr %element_ptr
+///     br merge
+///
+///   check_capacity:
+///     %capacity = load i32, ptr @ arr_handle+4
+///     %within_cap = icmp ult %idx_i32, %capacity
+///     br i1 %within_cap, label %extend_inline, label %realloc
+///
+///   extend_inline:
+///     store double %v, ptr %element_ptr
+///     %new_len = add i32 %idx, 1
+///     store i32 %new_len, ptr @ arr_handle+0
+///     br merge
+///
+///   realloc:
+///     %new_handle = call i64 @js_array_set_f64_extend(...)
+///     %new_box = nanbox_pointer_inline(new_handle)
+///     store double %new_box, ptr %local_slot
+///     br merge
+///
+///   merge:
+///     <continues here>
+/// ```
+///
+/// The first two paths are pure inline IR — no function calls, no extra
+/// memory loads. The third path only fires when the array actually has
+/// to grow (~17 times for a 100K-element build with doubling growth).
+fn lower_index_set_fast(
+    ctx: &mut FnCtx<'_>,
+    arr_box: &str,
+    idx_double: &str,
+    val_double: &str,
+    local_id: u32,
+) -> Result<()> {
+    // Capture the local slot for the realloc path.
+    let slot = ctx
+        .locals
+        .get(&local_id)
+        .ok_or_else(|| anyhow!("IndexSet: local {} not in scope", local_id))?
+        .clone();
+
+    // Unbox the array pointer.
+    let blk = ctx.block();
+    let arr_bits = blk.bitcast_double_to_i64(arr_box);
+    let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
+    let idx_i32 = blk.fptosi(DOUBLE, idx_double, I32);
+
+    // Load length from offset 0. We need a ptr typed value, so inttoptr.
+    let arr_ptr = blk.inttoptr(I64, &arr_handle);
+    let length = blk.load(I32, &arr_ptr);
+    let in_bounds = blk.icmp_ult(I32, &idx_i32, &length);
+
+    let inbounds_idx = ctx.new_block("idxset.inbounds");
+    let check_cap_idx = ctx.new_block("idxset.check_cap");
+    let extend_inline_idx = ctx.new_block("idxset.extend_inline");
+    let realloc_idx = ctx.new_block("idxset.realloc");
+    let merge_idx = ctx.new_block("idxset.merge");
+
+    let inbounds_label = ctx.block_label(inbounds_idx);
+    let check_cap_label = ctx.block_label(check_cap_idx);
+    let extend_inline_label = ctx.block_label(extend_inline_idx);
+    let realloc_label = ctx.block_label(realloc_idx);
+    let merge_label = ctx.block_label(merge_idx);
+
+    ctx.block().cond_br(&in_bounds, &inbounds_label, &check_cap_label);
+
+    // Helper: compute element_ptr = arr_ptr + 8 + idx*8 and emit a store.
+    fn store_element(
+        blk: &mut LlBlock,
+        arr_handle: &str,
+        idx_i32: &str,
+        val_double: &str,
+    ) {
+        let idx_i64 = blk.zext(I32, idx_i32, I64);
+        let byte_offset = blk.shl(I64, &idx_i64, "3"); // *8
+        let with_header = blk.add(I64, &byte_offset, "8"); // +8 for header
+        let element_addr = blk.add(I64, arr_handle, &with_header);
+        let element_ptr = blk.inttoptr(I64, &element_addr);
+        blk.store(DOUBLE, val_double, &element_ptr);
+    }
+
+    // FASTEST: in-bounds path. Store directly, jump to merge.
+    ctx.current_block = inbounds_idx;
+    {
+        let blk = ctx.block();
+        store_element(blk, &arr_handle, &idx_i32, val_double);
+        blk.br(&merge_label);
+    }
+
+    // MEDIUM: idx >= length but < capacity. Store + bump length.
+    ctx.current_block = check_cap_idx;
+    let capacity = {
+        let blk = ctx.block();
+        // Load capacity from offset 4 — we need a typed pointer that
+        // points 4 bytes into the array header. Use inttoptr after add.
+        let cap_addr = blk.add(I64, &arr_handle, "4");
+        let cap_ptr = blk.inttoptr(I64, &cap_addr);
+        blk.load(I32, &cap_ptr)
+    };
+    let within_cap = ctx.block().icmp_ult(I32, &idx_i32, &capacity);
+    ctx.block().cond_br(&within_cap, &extend_inline_label, &realloc_label);
+
+    ctx.current_block = extend_inline_idx;
+    {
+        let blk = ctx.block();
+        store_element(blk, &arr_handle, &idx_i32, val_double);
+        // Bump length: store idx+1 to arr_ptr+0.
+        let new_len = blk.add(I32, &idx_i32, "1");
+        let len_ptr = blk.inttoptr(I64, &arr_handle); // length is at offset 0
+        blk.store(I32, &new_len, &len_ptr);
+        blk.br(&merge_label);
+    }
+
+    // SLOW: realloc needed. Call the runtime, write new ptr to local.
+    ctx.current_block = realloc_idx;
+    {
+        let blk = ctx.block();
+        let new_handle = blk.call(
+            I64,
+            "js_array_set_f64_extend",
+            &[(I64, &arr_handle), (I32, &idx_i32), (DOUBLE, val_double)],
+        );
+        let new_box = nanbox_pointer_inline(blk, &new_handle);
+        blk.store(DOUBLE, &new_box, &slot);
+        blk.br(&merge_label);
+    }
+
+    ctx.current_block = merge_idx;
+    Ok(())
 }
 
 /// Lower `string + non_string` (or vice versa) concat with runtime

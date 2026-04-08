@@ -159,6 +159,24 @@ impl LlBlock {
         r
     }
 
+    pub fn icmp_ult(&mut self, ty: LlvmType, a: &str, b: &str) -> String {
+        let r = self.reg();
+        self.emit(format!("{} = icmp ult {} {}, {}", r, ty, a, b));
+        r
+    }
+
+    pub fn icmp_ule(&mut self, ty: LlvmType, a: &str, b: &str) -> String {
+        let r = self.reg();
+        self.emit(format!("{} = icmp ule {} {}, {}", r, ty, a, b));
+        r
+    }
+
+    pub fn icmp_ugt(&mut self, ty: LlvmType, a: &str, b: &str) -> String {
+        let r = self.reg();
+        self.emit(format!("{} = icmp ugt {} {}, {}", r, ty, a, b));
+        r
+    }
+
     pub fn icmp_sge(&mut self, ty: LlvmType, a: &str, b: &str) -> String {
         let r = self.reg();
         self.emit(format!("{} = icmp sge {} {}, {}", r, ty, a, b));
