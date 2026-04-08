@@ -5301,6 +5301,20 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                 }
                             }
 
+                            // Check for AbortSignal.timeout(ms) static method call
+                            if obj_ident.sym.as_ref() == "AbortSignal" {
+                                if let ast::MemberProp::Ident(method_ident) = &member.prop {
+                                    let method_name = method_ident.sym.as_ref();
+                                    if method_name == "timeout" {
+                                        return Ok(Expr::StaticMethodCall {
+                                            class_name: "AbortSignal".to_string(),
+                                            method_name: "timeout".to_string(),
+                                            args,
+                                        });
+                                    }
+                                }
+                            }
+
                             // Check for Date.now() / Date.parse() / Date.UTC() static method calls
                             if obj_ident.sym.as_ref() == "Date" {
                                 if let ast::MemberProp::Ident(method_ident) = &member.prop {

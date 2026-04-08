@@ -710,6 +710,22 @@ pub(crate) fn compile_expr(
             }
         }
         Expr::StaticMethodCall { class_name, method_name, args } => {
+            // AbortSignal.timeout(ms) — runtime-provided, not a user class.
+            if class_name == "AbortSignal" && method_name == "timeout" {
+                let ms_val = if args.is_empty() {
+                    builder.ins().f64const(0.0)
+                } else {
+                    let v = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[0], this_ctx)?;
+                    ensure_f64(builder, v)
+                };
+                let func = extern_funcs.get("js_abort_signal_timeout")
+                    .ok_or_else(|| anyhow!("js_abort_signal_timeout not declared"))?;
+                let func_ref = module.declare_func_in_func(*func, builder.func);
+                let call = builder.ins().call(func_ref, &[ms_val]);
+                let handle = builder.inst_results(call)[0];
+                // NaN-box with POINTER_TAG so later property access recognises it.
+                return Ok(inline_nanbox_pointer(builder, handle));
+            }
             if let Some(class_meta) = classes.get(class_name) {
                 let method_id = class_meta.static_method_ids.get(method_name)
                     .ok_or_else(|| anyhow!("Unknown static method: {}.{}", class_name, method_name))?;
@@ -1213,8 +1229,16 @@ pub(crate) fn compile_expr(
         }
         Expr::WeakRefNew(target) => {
             // Compile target value, NaN-box it, allocate WeakRef wrapper object.
+            // Must NaN-box raw I64 pointers (arrays/objects) with POINTER_TAG so
+            // `deref()` returns a properly tagged value the caller can use directly
+            // (`.length`, method calls, etc.). A bare `ensure_f64` bitcast would leave
+            // the value as a subnormal float that later dispatch paths don't recognise.
             let target_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, target, this_ctx)?;
-            let target_f64 = ensure_f64(builder, target_val);
+            let target_f64 = if builder.func.dfg.value_type(target_val) == types::I64 {
+                inline_nanbox_pointer(builder, target_val)
+            } else {
+                target_val
+            };
             let func = extern_funcs.get("js_weakref_new")
                 .ok_or_else(|| anyhow!("js_weakref_new not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
@@ -10943,6 +10967,64 @@ pub(crate) fn compile_expr(
                                     }
                                     _ => {}
                                 }
+                            }
+                        }
+                    }
+
+                    // controller.signal.addEventListener("abort", cb) fast path.
+                    // Runtime-provided class — match the shape explicitly: the method name is
+                    // addEventListener, the receiver is a PropertyGet .signal, and its object
+                    // is a local typed as AbortController.
+                    if property == "addEventListener" {
+                        if let Expr::PropertyGet { object: inner_obj, property: inner_prop } = object.as_ref() {
+                            if inner_prop == "signal" {
+                                if let Expr::LocalGet(id) = inner_obj.as_ref() {
+                                    if let Some(info) = locals.get(id) {
+                                        if info.class_name.as_deref() == Some("AbortController") && arg_vals.len() >= 2 {
+                                            let ctrl_val = builder.use_var(info.var);
+                                            let ctrl_ptr = ensure_i64(builder, ctrl_val);
+                                            let signal_func = extern_funcs.get("js_abort_controller_signal")
+                                                .ok_or_else(|| anyhow!("js_abort_controller_signal not declared"))?;
+                                            let sig_ref = module.declare_func_in_func(*signal_func, builder.func);
+                                            let call = builder.ins().call(sig_ref, &[ctrl_ptr]);
+                                            let signal_ptr = builder.inst_results(call)[0];
+                                            let type_val = ensure_f64(builder, arg_vals[0]);
+                                            let listener_val = ensure_f64(builder, arg_vals[1]);
+                                            let add_func = extern_funcs.get("js_abort_signal_add_listener")
+                                                .ok_or_else(|| anyhow!("js_abort_signal_add_listener not declared"))?;
+                                            let add_ref = module.declare_func_in_func(*add_func, builder.func);
+                                            builder.ins().call(add_ref, &[signal_ptr, type_val, listener_val]);
+                                            return Ok(builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001u64)));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // AbortController.abort() / abort(reason) fast path.
+                    // AbortController is a runtime-provided class (not in `classes`), so the
+                    // general dispatch below wouldn't find it — intercept by class_name.
+                    if let Expr::LocalGet(id) = object.as_ref() {
+                        if let Some(info) = locals.get(id) {
+                            if info.class_name.as_deref() == Some("AbortController")
+                                && property == "abort"
+                            {
+                                let ctrl_val = builder.use_var(info.var);
+                                let ctrl_ptr = ensure_i64(builder, ctrl_val);
+                                if arg_vals.is_empty() {
+                                    let abort_func = extern_funcs.get("js_abort_controller_abort")
+                                        .ok_or_else(|| anyhow!("js_abort_controller_abort not declared"))?;
+                                    let func_ref = module.declare_func_in_func(*abort_func, builder.func);
+                                    builder.ins().call(func_ref, &[ctrl_ptr]);
+                                } else {
+                                    let reason_val = ensure_f64(builder, arg_vals[0]);
+                                    let abort_func = extern_funcs.get("js_abort_controller_abort_reason")
+                                        .ok_or_else(|| anyhow!("js_abort_controller_abort_reason not declared"))?;
+                                    let func_ref = module.declare_func_in_func(*abort_func, builder.func);
+                                    builder.ins().call(func_ref, &[ctrl_ptr, reason_val]);
+                                }
+                                return Ok(builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001u64)));
                             }
                         }
                     }
@@ -25855,27 +25937,30 @@ pub(crate) fn compile_expr(
             // 2. Compile the object expression
             let obj_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
 
-            // Ensure object is f64 (NaN-boxed pointer)
-            let obj_f64 = if builder.func.dfg.value_type(obj_val) == types::F64 {
-                // Object literals return raw pointers bitcast to f64 - need to NaN-box
-                let obj_ptr = ensure_i64(builder, obj_val);
-                let nanbox_func = extern_funcs.get("js_nanbox_pointer")
-                    .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
-                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
-                let call = builder.ins().call(nanbox_ref, &[obj_ptr]);
-                builder.inst_results(call)[0]
-            } else if builder.func.dfg.value_type(obj_val) == types::I64 {
-                // Pointer value - NaN-box it
+            // Ensure object is f64 (NaN-boxed pointer).
+            // IMPORTANT: If the value is already F64, pass it directly — it may already
+            // be NaN-boxed (including TAG_UNDEFINED, TAG_NULL, POINTER_TAG, etc). Running
+            // it through ensure_i64 + js_nanbox_pointer would corrupt undefined into
+            // a bogus POINTER_TAG(0x1) and crash when js_object_has_property dereferences it.
+            // Only I64 raw pointers need NaN-boxing.
+            let obj_f64 = if builder.func.dfg.value_type(obj_val) == types::I64 {
+                // Raw pointer value - NaN-box it as a generic object pointer
                 let nanbox_func = extern_funcs.get("js_nanbox_pointer")
                     .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
                 let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
                 let call = builder.ins().call(nanbox_ref, &[obj_val]);
                 builder.inst_results(call)[0]
             } else {
+                // Already f64 (NaN-boxed pointer, undefined, null, number, etc.)
                 obj_val
             };
 
             // 3. Call js_object_has_property(obj, key) -> f64 (1.0 or 0.0)
+            if let Some(cp_func) = extern_funcs.get("js_checkpoint") {
+                let cp_ref = module.declare_func_in_func(*cp_func, builder.func);
+                let cp_num = builder.ins().iconst(types::I32, 9999);
+                builder.ins().call(cp_ref, &[cp_num]);
+            }
             let has_prop_func = extern_funcs.get("js_object_has_property")
                 .ok_or_else(|| anyhow!("js_object_has_property not declared"))?;
             let has_prop_ref = module.declare_func_in_func(*has_prop_func, builder.func);

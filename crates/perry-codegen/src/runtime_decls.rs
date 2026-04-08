@@ -8757,6 +8757,34 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_abort_controller_abort"), func_id);
         }
 
+        // js_abort_controller_abort_reason(controller: *mut ObjectHeader, reason: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // controller pointer
+            sig.params.push(AbiParam::new(types::F64)); // reason (NaN-boxed)
+            let func_id = self.module.declare_function("js_abort_controller_abort_reason", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_abort_controller_abort_reason"), func_id);
+        }
+
+        // js_abort_signal_add_listener(signal: *mut ObjectHeader, type: f64, listener: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // signal pointer
+            sig.params.push(AbiParam::new(types::F64)); // event type (NaN-boxed string)
+            sig.params.push(AbiParam::new(types::F64)); // listener (NaN-boxed closure)
+            let func_id = self.module.declare_function("js_abort_signal_add_listener", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_abort_signal_add_listener"), func_id);
+        }
+
+        // js_abort_signal_timeout(ms: f64) -> *mut ObjectHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // ms
+            sig.returns.push(AbiParam::new(types::I64)); // signal pointer
+            let func_id = self.module.declare_function("js_abort_signal_timeout", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_abort_signal_timeout"), func_id);
+        }
+
         // RegExp runtime functions
         // js_regexp_new(pattern: *const StringHeader, flags: *const StringHeader) -> *mut RegExpHeader
         {

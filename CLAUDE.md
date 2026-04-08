@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.86
+**Current Version:** 0.4.87
 
 ## Workflow Requirements
 
@@ -141,6 +141,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.87
+- feat: `AbortController` / `AbortSignal` extensions — `controller.abort(reason)` records the reason; `signal.addEventListener("abort", cb)` registers a listener fired on abort; `AbortSignal.timeout(ms)` returns a signal that auto-aborts after the timeout. New runtime functions `js_abort_controller_abort_reason`, `js_abort_signal_add_listener`, `js_abort_signal_timeout` in `perry-runtime/src/url.rs`. Codegen detects `controller.signal.addEventListener(...)` as a fast path in expr.rs and routes through `js_abort_controller_signal` + the listener registration. `AbortSignal.timeout(ms)` lowered as a `StaticMethodCall` in lower.rs. (WIP from earlier session — committed for clean repo state.)
 
 ### v0.4.86
 - feat: real `Object.defineProperty` / `freeze` / `seal` / `preventExtensions` semantics — descriptor side table (`PROPERTY_DESCRIPTORS`) tracks per-property `writable`/`enumerable`/`configurable`; `js_object_set_field_by_name` enforces `writable: false` and the freeze/seal/no-extend `GcHeader._reserved` flags; `Object.keys` filters out non-enumerable keys; `getOwnPropertyDescriptor` returns the real attribute bits. Removed the no-op `freeze`/`seal`/`preventExtensions`/`create` early-return in `lower.rs` that was making every Object.* dispatch unreachable. Fixed `js_object_get_own_property_names` signature mismatch (was `i64→i64`, codegen declared `f64→f64`) so it now returns a real NaN-boxed array. `Expr::ObjectGetOwnPropertyNames` plus `ObjectKeys/Values/Entries` now mark their result locals as `is_array=true` in `stmt.rs`. `test_gap_object_methods` 76 → 36 diffs (-53%).
