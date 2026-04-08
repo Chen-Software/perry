@@ -88,6 +88,26 @@ impl LlModule {
             .push(format!("@{} = internal global {} {}", name, ty, init));
     }
 
+    /// Add a string constant with a caller-controlled name. Used by the
+    /// `StringPool` so that emission order matches the pool's interned
+    /// indices and the bytes globals can be referenced by name from
+    /// `__perry_init_strings`.
+    ///
+    /// `escaped_lit` is the full LLVM IR literal *including* the surrounding
+    /// `c"…"` and the trailing `\00`. `total_bytes` is the array length
+    /// (= byte_len + 1 for the null terminator).
+    pub fn add_named_string_constant(
+        &mut self,
+        name: &str,
+        total_bytes: usize,
+        escaped_lit: &str,
+    ) {
+        self.string_constants.push(format!(
+            "@{} = private unnamed_addr constant [{} x i8] {}",
+            name, total_bytes, escaped_lit
+        ));
+    }
+
     /// Add a UTF-8 string constant to the module's constant pool. Returns
     /// `(global_name, byte_length)` — the byte length is what Perry passes as
     /// the `len` argument to `js_string_from_bytes`.

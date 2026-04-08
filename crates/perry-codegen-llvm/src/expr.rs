@@ -14,6 +14,7 @@ use perry_hir::{BinaryOp, CompareOp, Expr, UpdateOp};
 use crate::block::LlBlock;
 use crate::function::LlFunction;
 use crate::nanbox::double_literal;
+use crate::strings::StringPool;
 use crate::types::DOUBLE;
 
 /// Per-function codegen context. Held briefly during lowering, never stored.
@@ -28,6 +29,11 @@ pub(crate) struct FnCtx<'a> {
     /// HIR FuncId → LLVM function name. Resolved at the top of
     /// `compile_module` so `FuncRef(id)` calls know what to emit.
     pub func_names: &'a std::collections::HashMap<u32, String>,
+    /// Module-wide string literal pool. Disjoint borrow from `func` because
+    /// it lives in `codegen.rs` as a separate variable, not inside the
+    /// LlModule that `func` was derived from. See `crate::strings` for the
+    /// design rationale.
+    pub strings: &'a mut StringPool,
 }
 
 impl<'a> FnCtx<'a> {
@@ -63,6 +69,21 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // -------- Literals --------
         Expr::Integer(i) => Ok(double_literal(*i as f64)),
         Expr::Number(f) => Ok(double_literal(*f)),
+
+        // String literals are pre-allocated at module init via the
+        // StringPool's hoisting strategy (see `crate::strings`). At the use
+        // site we just load the cached NaN-boxed handle from the pool's
+        // `.handle` global. ONE instruction, no per-use allocation.
+        Expr::String(s) => {
+            let idx = ctx.strings.intern(s);
+            let entry = ctx.strings.entry(idx);
+            // Clone the global name out so we don't keep `entry` borrowed
+            // across the call to `ctx.block()` (which mutably borrows
+            // `ctx.func`, distinct from `ctx.strings` but the borrow checker
+            // sees `entry` as borrowing `ctx`).
+            let handle_global = format!("@{}", entry.handle_global);
+            Ok(ctx.block().load(DOUBLE, &handle_global))
+        }
 
         // -------- Variables --------
         Expr::LocalGet(id) => {
@@ -196,15 +217,33 @@ fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> Result<Strin
         if matches!(object.as_ref(), Expr::GlobalGet(_)) && property == "log" {
             if args.len() != 1 {
                 bail!(
-                    "perry-codegen-llvm Phase 2: console.log expects 1 numeric arg, got {}",
+                    "perry-codegen-llvm Phase A: console.log expects 1 arg, got {}",
                     args.len()
                 );
             }
-            let v = lower_expr(ctx, &args[0])?;
-            ctx.block()
-                .call_void("js_console_log_number", &[(DOUBLE, &v)]);
-            // console.log returns undefined. Phase 2 has no notion of
-            // undefined, so we return 0.0 as a sentinel — it's only valid
+            // For statically-known number literals, take the optimized
+            // `js_console_log_number` path which prints the f64 directly
+            // without going through the NaN-tag dispatch. For everything
+            // else (string literals, computed values whose runtime type
+            // we don't track at codegen time, locals from union types),
+            // route through `js_console_log_dynamic` which inspects the
+            // NaN tag at runtime and dispatches to the right printer.
+            //
+            // js_console_log_dynamic falls through to the regular-number
+            // printer when the value isn't NaN-tagged, so passing a raw
+            // f64 (e.g. fibonacci(40)'s 102334155.0) still prints
+            // correctly — verified in `crates/perry-runtime/src/builtins.rs:81`.
+            let arg = &args[0];
+            let is_number_literal = matches!(arg, Expr::Integer(_) | Expr::Number(_));
+            let v = lower_expr(ctx, arg)?;
+            let runtime_fn = if is_number_literal {
+                "js_console_log_number"
+            } else {
+                "js_console_log_dynamic"
+            };
+            ctx.block().call_void(runtime_fn, &[(DOUBLE, &v)]);
+            // console.log returns undefined. Phase A has no notion of
+            // undefined; we return 0.0 as a sentinel — it's only valid
             // inside an Expr statement and the caller discards it.
             return Ok("0.0".to_string());
         }

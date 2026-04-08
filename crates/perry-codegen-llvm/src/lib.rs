@@ -12,6 +12,7 @@
 
 pub mod types;
 pub mod nanbox;
+pub mod strings;
 pub mod block;
 pub mod function;
 pub mod module;

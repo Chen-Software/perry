@@ -11,20 +11,30 @@
 //! Perry's existing linking stage in `crates/perry/src/commands/compile.rs`
 //! picks them up identically to the Cranelift output.
 //!
-//! ## Phase 2 scope
+//! ## Phase A scope (in progress — primary-backend migration)
 //!
-//! - User functions with typed `double` ABI (all params and returns are
-//!   `double`; no NaN-boxing yet)
+//! Building toward feature parity with the Cranelift backend so LLVM can
+//! become Perry's primary build platform. See
+//! `/Users/amlug/.claude/plans/sorted-noodling-quilt.md` for the full
+//! migration plan.
+//!
+//! Currently supported (Phases 1, 2, 2.1, A-strings):
+//!
+//! - User functions with typed `double` ABI
 //! - Recursive and forward calls via `FuncRef`
-//! - If/else with straight-line or terminating branches
-//! - `let`/`const` numeric locals (alloca + mem2reg pattern)
-//! - Binary arithmetic (add/sub/mul/div/mod)
-//! - Comparisons (lifted to 0.0/1.0 doubles)
-//! - `console.log(<numeric expr>)` sink at statement level
+//! - If/else, for loops, let, return
+//! - Binary arithmetic (add/sub/mul/div/mod) and compare
+//! - Update (++/--) and LocalSet
+//! - `Date.now()` via `js_date_now`
+//! - **String literals** via the hoisted `StringPool` (one allocation per
+//!   literal at module init time, registered as a permanent GC root via
+//!   `js_gc_register_global_root`; use sites are a single `load`)
+//! - `console.log(<expr>)` — uses `js_console_log_number` for static number
+//!   literals (optimized path) and `js_console_log_dynamic` for everything
+//!   else (NaN-tag dispatch at runtime)
 //!
-//! Anything richer (strings, objects, closures, loops, Date.now, classes,
-//! imports) errors with an actionable message from `expr::lower_expr` or
-//! `stmt::lower_stmt`.
+//! Anything else (objects, arrays, classes, closures, async, imports, …)
+//! errors with an actionable "Phase X not yet supported" message.
 
 use std::collections::HashMap;
 
@@ -35,7 +45,8 @@ use crate::expr::FnCtx;
 use crate::module::LlModule;
 use crate::runtime_decls;
 use crate::stmt;
-use crate::types::{DOUBLE, I32, LlvmType};
+use crate::strings::StringPool;
+use crate::types::{DOUBLE, I32, I64, LlvmType, PTR, VOID};
 
 /// Options mirrored from the Cranelift backend's setter API.
 #[derive(Debug, Clone, Default)]
@@ -55,28 +66,35 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     let mut llmod = LlModule::new(&triple);
     runtime_decls::declare_phase1(&mut llmod);
 
-    // Phase 2 still only supports single-file entry modules.
+    // Phase A still only supports single-file entry modules — multi-module
+    // imports land in Phase F.
     if !opts.is_entry_module {
         return Err(anyhow!(
-            "perry-codegen-llvm Phase 2 only supports the entry module; \
+            "perry-codegen-llvm Phase A only supports the entry module; \
              non-entry module '{}' is not yet supported",
             hir.name
         ));
     }
     if !hir.imports.is_empty() {
         return Err(anyhow!(
-            "perry-codegen-llvm Phase 2 does not support imports; module '{}' has {} imports",
+            "perry-codegen-llvm Phase A does not support imports; module '{}' has {} imports",
             hir.name,
             hir.imports.len()
         ));
     }
     if !hir.classes.is_empty() {
         return Err(anyhow!(
-            "perry-codegen-llvm Phase 2 does not support classes; module '{}' has {} classes",
+            "perry-codegen-llvm Phase A does not support classes; module '{}' has {} classes",
             hir.name,
             hir.classes.len()
         ));
     }
+
+    // Module-wide string literal pool. Owned by the codegen so that
+    // `compile_function` and `compile_main` can take split borrows of
+    // (&mut LlFunction, &mut StringPool) without confusing the borrow
+    // checker — the pool lives outside LlModule.
+    let mut strings = StringPool::new();
 
     // Resolve user function names up-front so body lowering can emit
     // forward/recursive calls without worrying about emission order.
@@ -87,19 +105,28 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
 
     // Lower each user function into the module.
     for f in &hir.functions {
-        compile_function(&mut llmod, f, &func_names)
+        compile_function(&mut llmod, f, &func_names, &mut strings)
             .with_context(|| format!("lowering function '{}'", f.name))?;
     }
 
-    // Emit `int main()` that bootstraps GC and runs init statements.
-    compile_main(&mut llmod, hir, &func_names)
+    // Emit `int main()` that bootstraps GC, runs the string-pool init,
+    // then runs init statements.
+    compile_main(&mut llmod, hir, &func_names, &mut strings)
         .with_context(|| format!("lowering main of module '{}'", hir.name))?;
+
+    // After all user code is lowered, the string pool's contents are final.
+    // Emit the bytes globals, handle globals, and the `__perry_init_strings`
+    // function that runs once at startup. We do this AFTER `compile_main`
+    // so the string pool sees every literal — including those in init
+    // statements and inside the main function body.
+    emit_string_pool(&mut llmod, &strings);
 
     let ll_text = llmod.to_ir();
     log::debug!(
-        "perry-codegen-llvm: emitted {} bytes of LLVM IR for '{}'",
+        "perry-codegen-llvm: emitted {} bytes of LLVM IR for '{}' ({} interned strings)",
         ll_text.len(),
-        hir.name
+        hir.name,
+        strings.len()
     );
     crate::linker::compile_ll_to_object(&ll_text, opts.target.as_deref())
 }
@@ -109,13 +136,14 @@ fn compile_function(
     llmod: &mut LlModule,
     f: &Function,
     func_names: &HashMap<u32, String>,
+    strings: &mut StringPool,
 ) -> Result<()> {
     let llvm_name = func_names
         .get(&f.id)
         .cloned()
         .ok_or_else(|| anyhow!("function name not resolved for {}", f.name))?;
 
-    // Phase 2 assumes all user-function params are `double`. Parameter
+    // Phase A assumes all user-function params are `double`. Parameter
     // registers are named `%arg{LocalId}` so the body can store them into
     // alloca slots keyed by the same HIR LocalId.
     let params: Vec<(LlvmType, String)> = f
@@ -146,6 +174,7 @@ fn compile_function(
         locals,
         current_block: 0,
         func_names,
+        strings,
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of '{}'", f.name))?;
@@ -159,17 +188,29 @@ fn compile_function(
     Ok(())
 }
 
-/// Emit `int main() { js_gc_init(); <init stmts>; return 0; }`.
+/// Emit `int main() { js_gc_init(); __perry_init_strings(); <init stmts>; return 0; }`.
+///
+/// The `__perry_init_strings()` call is added unconditionally — if there
+/// are no string literals in the program, `emit_string_pool` will skip
+/// emitting the init function entirely and the call here would dangle.
+/// To handle that, we defer the call insertion until AFTER the string pool
+/// is finalized: see `emit_string_pool` for the patch logic.
 fn compile_main(
     llmod: &mut LlModule,
     hir: &HirModule,
     func_names: &HashMap<u32, String>,
+    strings: &mut StringPool,
 ) -> Result<()> {
     let main = llmod.define_function("main", I32, vec![]);
     let _ = main.create_block("entry");
     {
         let blk = main.block_mut(0).unwrap();
         blk.call_void("js_gc_init", &[]);
+        // String-pool init call — see `emit_string_pool`. We always emit
+        // the call; if the pool turns out to be empty, `emit_string_pool`
+        // emits an empty `__perry_init_strings()` body which clang -O2
+        // collapses to nothing.
+        blk.call_void("__perry_init_strings", &[]);
     }
 
     let mut ctx = FnCtx {
@@ -177,17 +218,71 @@ fn compile_main(
         locals: HashMap::new(),
         current_block: 0,
         func_names,
+        strings,
     };
     stmt::lower_stmts(&mut ctx, &hir.init)
         .with_context(|| format!("lowering init statements of module '{}'", hir.name))?;
 
     // `main` returns i32, but stmt lowering emits `ret double` for explicit
-    // returns. Phase 2 doesn't allow explicit returns at top level, so we
+    // returns. Phase A doesn't allow explicit returns at top level, so we
     // just append `ret i32 0` if the block didn't terminate.
     if !ctx.block().is_terminated() {
         ctx.block().ret(I32, "0");
     }
     Ok(())
+}
+
+/// Emit the string pool into the module: byte-array constants, handle
+/// globals, and the `__perry_init_strings()` function that allocates +
+/// NaN-boxes + GC-roots each handle exactly once at startup.
+///
+/// Always emits `__perry_init_strings`, even when the pool is empty —
+/// `compile_main` already injected the unconditional call, and removing
+/// the call after the fact is awkward. An empty body (`ret void`) costs
+/// nothing at runtime and clang -O2 inlines/dead-strips the empty call.
+fn emit_string_pool(llmod: &mut LlModule, strings: &StringPool) {
+    // Emit per-literal globals.
+    for entry in strings.iter() {
+        // .rodata bytes — `[N+1 x i8]` because we include the null terminator.
+        llmod.add_named_string_constant(
+            &entry.bytes_global,
+            entry.byte_len + 1,
+            &entry.escaped_ir,
+        );
+        // Mutable handle global initialized to 0.0; populated by
+        // __perry_init_strings.
+        llmod.add_internal_global(&entry.handle_global, DOUBLE, "0.0");
+    }
+
+    // Build __perry_init_strings function. One block, straight-line code:
+    // for each entry, allocate via js_string_from_bytes, NaN-box, store
+    // into the handle global, register as GC root.
+    let init_fn = llmod.define_function("__perry_init_strings", VOID, vec![]);
+    let _ = init_fn.create_block("entry");
+    let blk = init_fn.block_mut(0).unwrap();
+
+    for entry in strings.iter() {
+        let bytes_ref = format!("@{}", entry.bytes_global);
+        let handle_ref = format!("@{}", entry.handle_global);
+        let len_str = entry.byte_len.to_string();
+
+        // %h = call i64 @js_string_from_bytes(ptr @.str.N.bytes, i32 N)
+        let handle = blk.call(
+            I64,
+            "js_string_from_bytes",
+            &[(PTR, &bytes_ref), (I32, &len_str)],
+        );
+        // %b = call double @js_nanbox_string(i64 %h)
+        let nanboxed = blk.call(DOUBLE, "js_nanbox_string", &[(I64, &handle)]);
+        // store double %b, ptr @.str.N.handle
+        blk.store(DOUBLE, &nanboxed, &handle_ref);
+        // %addr = ptrtoint ptr @.str.N.handle to i64
+        let addr_i64 = blk.ptrtoint(&handle_ref, I64);
+        // call void @js_gc_register_global_root(i64 %addr)
+        blk.call_void("js_gc_register_global_root", &[(I64, &addr_i64)]);
+    }
+
+    blk.ret_void();
 }
 
 /// Mangle a HIR function name into an LLVM symbol.

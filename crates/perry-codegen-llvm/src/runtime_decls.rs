@@ -47,4 +47,15 @@ pub fn declare_phase1(module: &mut LlModule) {
 /// Phase 2.1 additions: just `js_date_now()` for in-program timing harnesses.
 pub fn declare_phase2_1(module: &mut LlModule) {
     module.declare_function("js_date_now", DOUBLE, &[]);
+
+    // Phase A additions go here too — separate function once they grow.
+    declare_phase_a_strings(module);
+}
+
+/// Phase A additions: string literal hoisting needs the GC to treat module
+/// globals holding string handles as permanent roots. `js_gc_register_global_root`
+/// pushes the address into `GLOBAL_ROOTS` (`crates/perry-runtime/src/gc.rs:233`)
+/// which the mark phase scans alongside the stack.
+pub fn declare_phase_a_strings(module: &mut LlModule) {
+    module.declare_function("js_gc_register_global_root", VOID, &[I64]);
 }
