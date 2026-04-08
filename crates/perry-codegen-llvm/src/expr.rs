@@ -1886,6 +1886,39 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         Expr::Uint8ArrayGet { .. } => Ok(double_literal(0.0)),
         Expr::Uint8ArraySet { value, .. } => lower_expr(ctx, value),
 
+        // -------- More cheap stubs --------
+        Expr::PathResolve(p) | Expr::PathNormalize(p) => lower_expr(ctx, p),
+        Expr::ObjectCreate(p) => lower_expr(ctx, p),
+        Expr::MathClz32(o) => {
+            let _ = lower_expr(ctx, o)?;
+            Ok(double_literal(0.0))
+        }
+        Expr::FsReadFileSync(p) => {
+            let _ = lower_expr(ctx, p)?;
+            // Return an empty-string-equivalent sentinel.
+            Ok(double_literal(0.0))
+        }
+        Expr::FinalizationRegistryNew(_) => Ok(double_literal(0.0)),
+        Expr::FinalizationRegistryRegister { .. } => Ok(double_literal(0.0)),
+        Expr::FinalizationRegistryUnregister { .. } => Ok(double_literal(0.0)),
+        Expr::ErrorNewWithCause { message, .. } => {
+            // Drop the cause; emit a regular Error with the message.
+            let msg = lower_expr(ctx, message)?;
+            let blk = ctx.block();
+            let msg_handle = unbox_to_i64(blk, &msg);
+            let err_handle = blk.call(I64, "js_error_new_with_message", &[(I64, &msg_handle)]);
+            Ok(nanbox_pointer_inline(blk, &err_handle))
+        }
+        Expr::EnvGet(_name) => Ok(double_literal(0.0)),
+        Expr::EnvGetDynamic(_e) => Ok(double_literal(0.0)),
+        Expr::DateToISOString(_d) => Ok(double_literal(0.0)),
+        Expr::DateParse(_s) => Ok(double_literal(0.0)),
+        Expr::ProcessVersions => Ok(double_literal(0.0)),
+        Expr::ProcessUptime | Expr::ProcessCwd => Ok(double_literal(0.0)),
+        Expr::OsEOL => Ok(double_literal(0.0)),
+        Expr::BufferFrom { data, .. } => lower_expr(ctx, data),
+        Expr::BufferAlloc { .. } => Ok(double_literal(0.0)),
+
         // -------- ProcessPid / ProcessPpid stubs --------
         Expr::ProcessPid | Expr::ProcessPpid => Ok(double_literal(0.0)),
 
