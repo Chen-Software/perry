@@ -1841,11 +1841,64 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             ))
         }
 
-        // -------- delete obj.prop stub --------
-        // Lower the operand for side effects, return true (1.0).
+        // -------- delete obj.prop / delete obj["prop"] --------
+        // Recognize the two common shapes:
+        //   - PropertyGet { object, property: <static name> }
+        //   - IndexGet { object, index: <string literal or local> }
+        // Both lower to js_object_delete_field with the static or
+        // dynamic key. Anything else is a no-op stub returning true.
         Expr::Delete(operand) => {
-            let _ = lower_expr(ctx, operand)?;
-            Ok(double_literal(1.0))
+            match operand.as_ref() {
+                Expr::PropertyGet { object, property } => {
+                    let obj_box = lower_expr(ctx, object)?;
+                    let key_idx = ctx.strings.intern(property);
+                    let key_handle_global =
+                        format!("@{}", ctx.strings.entry(key_idx).handle_global);
+                    let blk = ctx.block();
+                    let obj_handle = unbox_to_i64(blk, &obj_box);
+                    let key_box = blk.load(DOUBLE, &key_handle_global);
+                    let key_handle = unbox_to_i64(blk, &key_box);
+                    let i32_v = blk.call(
+                        I32,
+                        "js_object_delete_field",
+                        &[(I64, &obj_handle), (I64, &key_handle)],
+                    );
+                    let bit = blk.icmp_ne(I32, &i32_v, "0");
+                    let tagged = blk.select(
+                        crate::types::I1,
+                        &bit,
+                        I64,
+                        crate::nanbox::TAG_TRUE_I64,
+                        crate::nanbox::TAG_FALSE_I64,
+                    );
+                    Ok(blk.bitcast_i64_to_double(&tagged))
+                }
+                Expr::IndexGet { object, index } if is_string_expr(ctx, index) => {
+                    let obj_box = lower_expr(ctx, object)?;
+                    let key_box = lower_expr(ctx, index)?;
+                    let blk = ctx.block();
+                    let obj_handle = unbox_to_i64(blk, &obj_box);
+                    let key_handle = unbox_to_i64(blk, &key_box);
+                    let i32_v = blk.call(
+                        I32,
+                        "js_object_delete_field",
+                        &[(I64, &obj_handle), (I64, &key_handle)],
+                    );
+                    let bit = blk.icmp_ne(I32, &i32_v, "0");
+                    let tagged = blk.select(
+                        crate::types::I1,
+                        &bit,
+                        I64,
+                        crate::nanbox::TAG_TRUE_I64,
+                        crate::nanbox::TAG_FALSE_I64,
+                    );
+                    Ok(blk.bitcast_i64_to_double(&tagged))
+                }
+                _ => {
+                    let _ = lower_expr(ctx, operand)?;
+                    Ok(double_literal(1.0))
+                }
+            }
         }
 
         // -------- Sequence (comma operator) --------
