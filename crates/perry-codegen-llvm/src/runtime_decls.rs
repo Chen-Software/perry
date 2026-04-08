@@ -100,12 +100,17 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_string_split", I64, &[I64, I64]);
     module.declare_function("js_math_pow", DOUBLE, &[DOUBLE, DOUBLE]);
 
-    // Math.* unary functions used by class methods (Phase B.15).
-    module.declare_function("js_math_sqrt", DOUBLE, &[DOUBLE]);
-    module.declare_function("js_math_floor", DOUBLE, &[DOUBLE]);
-    module.declare_function("js_math_ceil", DOUBLE, &[DOUBLE]);
-    module.declare_function("js_math_round", DOUBLE, &[DOUBLE]);
-    module.declare_function("js_math_abs", DOUBLE, &[DOUBLE]);
+    // Math.* unary functions: use LLVM intrinsics directly so we
+    // get hardware instructions / libm calls instead of depending
+    // on `js_math_*` runtime symbols (which the auto-optimize
+    // dead-strip removes from libperry_runtime.a).
+    module.declare_function("llvm.sqrt.f64", DOUBLE, &[DOUBLE]);
+    module.declare_function("llvm.floor.f64", DOUBLE, &[DOUBLE]);
+    module.declare_function("llvm.ceil.f64", DOUBLE, &[DOUBLE]);
+    module.declare_function("llvm.fabs.f64", DOUBLE, &[DOUBLE]);
+    module.declare_function("llvm.copysign.f64", DOUBLE, &[DOUBLE, DOUBLE]);
+    // Keep js_math_pow for now — Math.pow has overflow / NaN
+    // semantics that the libm pow doesn't quite match.
 
     // JSON.stringify (Phase B.15). The 2-arg form is JsonStringifyFull
     // in the HIR (value, type_hint, indent — actually 3 args; we use the
@@ -188,6 +193,9 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_bigint_from_string", I64, &[PTR, I32]);
     module.declare_function("js_instanceof", DOUBLE, &[DOUBLE, I32]);
     module.declare_function("js_fs_unlink_sync", I32, &[DOUBLE]);
+    module.declare_function("js_object_values", I64, &[I64]);
+    module.declare_function("js_object_entries", I64, &[I64]);
+    module.declare_function("js_path_join", I64, &[I64, I64]);
 
     declare_phase_b_arrays(module);
 }

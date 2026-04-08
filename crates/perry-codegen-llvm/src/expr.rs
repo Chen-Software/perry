@@ -1145,25 +1145,40 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         }
 
         // -------- Math.* unary helpers (Phase B.15) --------
+        // Math.* unary functions: use LLVM intrinsics directly so the
+        // generated code becomes a single hardware instruction (or
+        // libm call resolved at link time, which is always present).
+        // Avoids depending on `js_math_*` runtime symbols which the
+        // auto-optimizer's dead-stripping was removing from the
+        // built `libperry_runtime.a`.
+        //
+        // Mirrors Cranelift's approach (`crates/perry-codegen/src/expr.rs:1497`)
+        // which uses `builder.ins().floor()` etc.
         Expr::MathSqrt(operand) => {
             let v = lower_expr(ctx, operand)?;
-            Ok(ctx.block().call(DOUBLE, "js_math_sqrt", &[(DOUBLE, &v)]))
+            Ok(ctx.block().call(DOUBLE, "llvm.sqrt.f64", &[(DOUBLE, &v)]))
         }
         Expr::MathFloor(operand) => {
             let v = lower_expr(ctx, operand)?;
-            Ok(ctx.block().call(DOUBLE, "js_math_floor", &[(DOUBLE, &v)]))
+            Ok(ctx.block().call(DOUBLE, "llvm.floor.f64", &[(DOUBLE, &v)]))
         }
         Expr::MathCeil(operand) => {
             let v = lower_expr(ctx, operand)?;
-            Ok(ctx.block().call(DOUBLE, "js_math_ceil", &[(DOUBLE, &v)]))
+            Ok(ctx.block().call(DOUBLE, "llvm.ceil.f64", &[(DOUBLE, &v)]))
         }
         Expr::MathRound(operand) => {
+            // JS Math.round: round-half-toward-positive-infinity. We
+            // emulate via floor(x + 0.5) then fcopysign to preserve
+            // the -0 case (matching Cranelift's expr.rs:1521 approach).
             let v = lower_expr(ctx, operand)?;
-            Ok(ctx.block().call(DOUBLE, "js_math_round", &[(DOUBLE, &v)]))
+            let blk = ctx.block();
+            let half = blk.fadd(&v, "0.5");
+            let floored = blk.call(DOUBLE, "llvm.floor.f64", &[(DOUBLE, &half)]);
+            Ok(blk.call(DOUBLE, "llvm.copysign.f64", &[(DOUBLE, &floored), (DOUBLE, &v)]))
         }
         Expr::MathAbs(operand) => {
             let v = lower_expr(ctx, operand)?;
-            Ok(ctx.block().call(DOUBLE, "js_math_abs", &[(DOUBLE, &v)]))
+            Ok(ctx.block().call(DOUBLE, "llvm.fabs.f64", &[(DOUBLE, &v)]))
         }
 
         // `JSON.stringify(value)` (3-arg form with indent ignored for now).
@@ -1543,6 +1558,66 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         Expr::ArrayFrom(iter) => lower_expr(ctx, iter),
         Expr::ArrayFromMapped { iterable, .. } => lower_expr(ctx, iterable),
         Expr::Uint8ArrayFrom(iter) => lower_expr(ctx, iter),
+
+        // -------- Object.values / Object.entries --------
+        Expr::ObjectValues(obj) => {
+            let obj_box = lower_expr(ctx, obj)?;
+            let blk = ctx.block();
+            let obj_handle = unbox_to_i64(blk, &obj_box);
+            let arr_handle = blk.call(I64, "js_object_values", &[(I64, &obj_handle)]);
+            Ok(nanbox_pointer_inline(blk, &arr_handle))
+        }
+        Expr::ObjectEntries(obj) => {
+            let obj_box = lower_expr(ctx, obj)?;
+            let blk = ctx.block();
+            let obj_handle = unbox_to_i64(blk, &obj_box);
+            let arr_handle = blk.call(I64, "js_object_entries", &[(I64, &obj_handle)]);
+            Ok(nanbox_pointer_inline(blk, &arr_handle))
+        }
+
+        // -------- path.join(a, b) -> string --------
+        // The HIR variant is binary; multi-arg path.join lowers to
+        // chained PathJoin in the HIR.
+        Expr::PathJoin(a, b) => {
+            let a_box = lower_expr(ctx, a)?;
+            let b_box = lower_expr(ctx, b)?;
+            let blk = ctx.block();
+            let a_handle = unbox_to_i64(blk, &a_box);
+            let b_handle = unbox_to_i64(blk, &b_box);
+            let result = blk.call(I64, "js_path_join", &[(I64, &a_handle), (I64, &b_handle)]);
+            Ok(nanbox_string_inline(blk, &result))
+        }
+
+        // -------- queueMicrotask(fn) / process.nextTick(fn) stubs --------
+        // Real microtask scheduling needs the runtime's queue. For
+        // now we lower the callback for side effects (it might be a
+        // closure expression that needs to register slots) and
+        // return undefined.
+        Expr::QueueMicrotask(cb) | Expr::ProcessNextTick(cb) => {
+            let _ = lower_expr(ctx, cb)?;
+            Ok(double_literal(0.0))
+        }
+
+        // -------- RegExpTest / RegExpExec stubs --------
+        // Real regex matching needs js_regexp_test / js_regexp_exec
+        // dispatch with the right return shape. For now we return
+        // false / null sentinels.
+        Expr::RegExpTest { regex, string } => {
+            let _ = lower_expr(ctx, regex)?;
+            let _ = lower_expr(ctx, string)?;
+            Ok(double_literal(0.0))
+        }
+        Expr::RegExpExec { regex, string } => {
+            let _ = lower_expr(ctx, regex)?;
+            let _ = lower_expr(ctx, string)?;
+            Ok(double_literal(0.0))
+        }
+
+        // -------- GlobalGet stub --------
+        // Most uses of GlobalGet are inside `PropertyGet { GlobalGet, ... }`
+        // which is handled separately. Bare GlobalGet (e.g. passing
+        // `console` as a value) returns a sentinel.
+        Expr::GlobalGet(_) => Ok(double_literal(0.0)),
 
         // -------- fs.unlinkSync(path) --------
         Expr::FsUnlinkSync(path) => {
