@@ -73,6 +73,13 @@ pub(crate) struct FnCtx<'a> {
     /// the next iteration); break → exit block.
     /// For `while`/`do-while`: continue → cond block; break → exit block.
     pub loop_targets: Vec<(String, String)>,
+    /// Map from class name → HIR Class definition. Built once in
+    /// `compile_module` from `hir.classes`. Used by `Expr::New` to look up
+    /// the field count, constructor body, and (eventually) method table.
+    pub classes: &'a std::collections::HashMap<String, &'a perry_hir::Class>,
+    /// Stack of `this` slot pointers — set when lowering inside a class
+    /// constructor body. `Expr::This` loads from the top entry.
+    pub this_stack: Vec<String>,
 }
 
 impl<'a> FnCtx<'a> {
@@ -483,6 +490,25 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(new_box)
         }
 
+        // -------- Classes (Phase C.1) --------
+        // `new ClassName(args...)` — allocate an anonymous object,
+        // inline-execute the constructor body with `this` bound to the
+        // new object, return the NaN-boxed object. No method tables yet,
+        // no inheritance — just data classes with constructor field
+        // assignments.
+        Expr::New { class_name, args, .. } => lower_new(ctx, class_name, args),
+
+        // `this` — load from the topmost `this` slot in the constructor
+        // stack. Errors outside any constructor body.
+        Expr::This => {
+            let slot = ctx
+                .this_stack
+                .last()
+                .cloned()
+                .ok_or_else(|| anyhow!("`this` used outside any constructor body"))?;
+            Ok(ctx.block().load(DOUBLE, &slot))
+        }
+
         // -------- Logical operators (Phase B.6) --------
         // `a && b` and `a || b` short-circuit. We compile `a` first, branch
         // on its truthiness (treating 0.0 as false / non-zero as true),
@@ -649,6 +675,86 @@ fn is_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
         }
         _ => false,
     }
+}
+
+/// Lower `new ClassName(args…)` — Phase C.1.
+///
+/// Strategy: allocate an anonymous object via `js_object_alloc(0, N)`
+/// where N is the field count, NaN-box the pointer, then inline the
+/// constructor body with:
+/// - a fresh local-id-keyed alloca slot for each constructor parameter
+///   (pre-populated with the lowered argument value)
+/// - a `this_stack` entry pointing at a slot holding the new object
+///
+/// `Expr::This` then loads from the top of `this_stack`. `this.x = v`
+/// goes through the existing `Expr::PropertySet` path which targets
+/// `js_object_set_field_by_name`.
+///
+/// Limitations of this first slice:
+/// - No inheritance (parent classes ignored)
+/// - No method calls on instances (just field reads/writes via the
+///   existing PropertyGet/PropertySet paths)
+/// - Constructor cannot use `return <expr>` (would terminate the
+///   enclosing function, not the constructor body)
+/// - No method dispatch or vtables — those land in Phase C.2/C.3
+fn lower_new(
+    ctx: &mut FnCtx<'_>,
+    class_name: &str,
+    args: &[Expr],
+) -> Result<String> {
+    let class = ctx
+        .classes
+        .get(class_name)
+        .copied()
+        .ok_or_else(|| anyhow!("`new {}`: class not found in module", class_name))?;
+
+    // Lower the args first (constructor params).
+    let mut lowered_args: Vec<String> = Vec::with_capacity(args.len());
+    for a in args {
+        lowered_args.push(lower_expr(ctx, a)?);
+    }
+
+    // Allocate the object. class_id = 0 (anonymous; we don't have proper
+    // class IDs in the LLVM backend yet — Phase C.2 adds the registry).
+    let field_count = class.fields.len() as u32;
+    let zero = "0".to_string();
+    let n_str = field_count.to_string();
+    let obj_handle = ctx
+        .block()
+        .call(I64, "js_object_alloc", &[(I32, &zero), (I32, &n_str)]);
+    let obj_box = nanbox_pointer_inline(ctx.block(), &obj_handle);
+
+    // Allocate a `this` slot and store the new object there.
+    let this_slot = ctx.block().alloca(DOUBLE);
+    ctx.block().store(DOUBLE, &obj_box, &this_slot);
+    ctx.this_stack.push(this_slot);
+
+    // If there's a constructor, inline its body. We allocate slots for
+    // each constructor parameter and pre-populate them with the lowered
+    // argument values. Locals/local_types are saved and restored to keep
+    // the constructor's bindings scoped to its body — they don't leak
+    // back into the enclosing function.
+    if let Some(ctor) = &class.constructor {
+        let saved_locals = ctx.locals.clone();
+        let saved_local_types = ctx.local_types.clone();
+
+        for (param, arg_val) in ctor.params.iter().zip(lowered_args.iter()) {
+            let slot = ctx.block().alloca(DOUBLE);
+            ctx.block().store(DOUBLE, arg_val, &slot);
+            ctx.locals.insert(param.id, slot);
+            ctx.local_types.insert(param.id, param.ty.clone());
+        }
+
+        // Lower the constructor body. Errors propagate.
+        crate::stmt::lower_stmts(ctx, &ctor.body)?;
+
+        // Restore the enclosing function's local scope.
+        ctx.locals = saved_locals;
+        ctx.local_types = saved_local_types;
+    }
+
+    ctx.this_stack.pop();
+    Ok(obj_box)
 }
 
 /// Lower the `str = str + rhs` self-append pattern. Uses the in-place

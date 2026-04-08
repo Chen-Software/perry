@@ -82,12 +82,23 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
             hir.imports.len()
         ));
     }
-    if !hir.classes.is_empty() {
-        return Err(anyhow!(
-            "perry-codegen-llvm Phase A does not support classes; module '{}' has {} classes",
-            hir.name,
-            hir.classes.len()
-        ));
+    // Phase C.1: classes are supported (data classes + simple
+    // constructors). Inheritance and methods land in Phase C.2/C.3.
+    // We bail only if a class has features beyond the first slice.
+    for c in &hir.classes {
+        if !c.methods.is_empty() {
+            return Err(anyhow!(
+                "perry-codegen-llvm Phase C.1: class '{}' has {} instance methods (Phase C.2)",
+                c.name,
+                c.methods.len()
+            ));
+        }
+        if c.extends.is_some() || c.extends_name.is_some() {
+            return Err(anyhow!(
+                "perry-codegen-llvm Phase C.1: class '{}' uses inheritance (Phase C.3)",
+                c.name
+            ));
+        }
     }
 
     // Module-wide string literal pool. Owned by the codegen so that
@@ -95,6 +106,14 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     // (&mut LlFunction, &mut StringPool) without confusing the borrow
     // checker — the pool lives outside LlModule.
     let mut strings = StringPool::new();
+
+    // Class lookup table for `Expr::New`. Indexed by class name —
+    // the HIR has unique names per module.
+    let class_table: HashMap<String, &perry_hir::Class> = hir
+        .classes
+        .iter()
+        .map(|c| (c.name.clone(), c))
+        .collect();
 
     // Resolve user function names up-front so body lowering can emit
     // forward/recursive calls without worrying about emission order.
@@ -105,13 +124,13 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
 
     // Lower each user function into the module.
     for f in &hir.functions {
-        compile_function(&mut llmod, f, &func_names, &mut strings)
+        compile_function(&mut llmod, f, &func_names, &mut strings, &class_table)
             .with_context(|| format!("lowering function '{}'", f.name))?;
     }
 
     // Emit `int main()` that bootstraps GC, runs the string-pool init,
     // then runs init statements.
-    compile_main(&mut llmod, hir, &func_names, &mut strings)
+    compile_main(&mut llmod, hir, &func_names, &mut strings, &class_table)
         .with_context(|| format!("lowering main of module '{}'", hir.name))?;
 
     // After all user code is lowered, the string pool's contents are final.
@@ -137,6 +156,7 @@ fn compile_function(
     f: &Function,
     func_names: &HashMap<u32, String>,
     strings: &mut StringPool,
+    classes: &HashMap<String, &perry_hir::Class>,
 ) -> Result<()> {
     let llvm_name = func_names
         .get(&f.id)
@@ -185,6 +205,8 @@ fn compile_function(
         func_names,
         strings,
         loop_targets: Vec::new(),
+        classes,
+        this_stack: Vec::new(),
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of '{}'", f.name))?;
@@ -210,6 +232,7 @@ fn compile_main(
     hir: &HirModule,
     func_names: &HashMap<u32, String>,
     strings: &mut StringPool,
+    classes: &HashMap<String, &perry_hir::Class>,
 ) -> Result<()> {
     let main = llmod.define_function("main", I32, vec![]);
     let _ = main.create_block("entry");
@@ -231,6 +254,8 @@ fn compile_main(
         func_names,
         strings,
         loop_targets: Vec::new(),
+        classes,
+        this_stack: Vec::new(),
     };
     stmt::lower_stmts(&mut ctx, &hir.init)
         .with_context(|| format!("lowering init statements of module '{}'", hir.name))?;
