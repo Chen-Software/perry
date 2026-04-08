@@ -144,11 +144,25 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     // Phase B.16 / D follow-ups: more runtime functions discovered
     // by the test-files sweep histogram.
     module.declare_function("js_array_map", I64, &[I64, I64]);
+    module.declare_function("js_array_filter", I64, &[I64, I64]);
+    module.declare_function("js_array_concat", I64, &[I64, I64]);
     module.declare_function("js_error_new", I64, &[]);
     module.declare_function("js_error_new_with_message", I64, &[I64]);
     module.declare_function("js_map_set", I64, &[I64, DOUBLE, DOUBLE]);
     module.declare_function("js_map_get", DOUBLE, &[I64, DOUBLE]);
     module.declare_function("js_map_has", I32, &[I64, DOUBLE]);
+    module.declare_function("js_map_delete", I32, &[I64, DOUBLE]);
+    module.declare_function("js_object_keys", I64, &[I64]);
+    module.declare_function("js_is_finite", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_is_undefined_or_bare_nan", I32, &[DOUBLE]);
+    module.declare_function("js_math_min_array", DOUBLE, &[I64]);
+    module.declare_function("js_math_max_array", DOUBLE, &[I64]);
+    module.declare_function("js_string_coerce", I64, &[DOUBLE]);
+    module.declare_function("js_array_slice", I64, &[I64, I32, I32]);
+    module.declare_function("js_array_shift_f64", DOUBLE, &[I64]);
+    module.declare_function("js_set_alloc", I64, &[I32]);
+    module.declare_function("js_object_has_property", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_fs_write_file_sync", I32, &[DOUBLE, DOUBLE]);
 
     declare_phase_b_arrays(module);
 }

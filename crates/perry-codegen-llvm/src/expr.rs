@@ -140,6 +140,43 @@ impl<'a> FnCtx<'a> {
 
 }
 
+/// Compute the effective list of capture LocalIds for a closure. Starts
+/// with the HIR's `captures` list (which may be empty if the closure
+/// conversion pass missed it), then walks the body to find any LocalGet/
+/// LocalSet/Update on ids that aren't params, inner-lets, or module
+/// globals — those are the auto-detected captures.
+///
+/// Both the closure creation site (`Expr::Closure` lowering in
+/// `lower_expr`) and the closure body site (`compile_closure` in
+/// `codegen.rs`) call this so they agree on the slot indices.
+pub(crate) fn compute_auto_captures(
+    ctx: &FnCtx<'_>,
+    params: &[perry_hir::Param],
+    body: &[perry_hir::Stmt],
+    explicit: &[u32],
+) -> Vec<u32> {
+    let mut out: Vec<u32> = explicit.to_vec();
+    let mut referenced: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    crate::codegen::collect_ref_ids_in_stmts_pub(body, &mut referenced);
+    let mut inner_lets: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    crate::codegen::collect_let_ids_pub(body, &mut inner_lets);
+    let param_ids: std::collections::HashSet<u32> = params.iter().map(|p| p.id).collect();
+    let already: std::collections::HashSet<u32> = out.iter().copied().collect();
+    // Sort for determinism (HashSet iteration order is unspecified).
+    let mut sorted: Vec<u32> = referenced.into_iter().collect();
+    sorted.sort();
+    for id in sorted {
+        if !param_ids.contains(&id)
+            && !inner_lets.contains(&id)
+            && !already.contains(&id)
+            && !ctx.module_globals.contains_key(&id)
+        {
+            out.push(id);
+        }
+    }
+    out
+}
+
 /// Lower an expression to a raw LLVM `double` value. Returns the string form
 /// of the value (either a `%rN` register or a literal like `42.0`).
 pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
@@ -454,6 +491,41 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // (POINTER_TAG, not STRING_TAG).
         Expr::Array(elements) => lower_array_literal(ctx, elements),
 
+        // `[a, ...b, c]` literal with spread elements. Each Spread
+        // element calls `js_array_concat(dest, src)` to copy from
+        // source; each Expr element calls `js_array_push_f64`. Both
+        // may realloc, so we thread the pointer through.
+        Expr::ArraySpread(elements) => {
+            use perry_hir::ArrayElement;
+            let cap_str = (elements.len() as u32).to_string();
+            let mut current_arr = ctx
+                .block()
+                .call(I64, "js_array_alloc", &[(I32, &cap_str)]);
+            for elem in elements {
+                match elem {
+                    ArrayElement::Expr(e) => {
+                        let v = lower_expr(ctx, e)?;
+                        current_arr = ctx.block().call(
+                            I64,
+                            "js_array_push_f64",
+                            &[(I64, &current_arr), (DOUBLE, &v)],
+                        );
+                    }
+                    ArrayElement::Spread(e) => {
+                        let src_box = lower_expr(ctx, e)?;
+                        let blk = ctx.block();
+                        let src_handle = unbox_to_i64(blk, &src_box);
+                        current_arr = blk.call(
+                            I64,
+                            "js_array_concat",
+                            &[(I64, &current_arr), (I64, &src_handle)],
+                        );
+                    }
+                }
+            }
+            Ok(nanbox_pointer_inline(ctx.block(), &current_arr))
+        }
+
         // `arr[i]` index access. INLINE FAST PATH for typed-Number arrays:
         // skip the runtime function call, do the address arithmetic
         // directly. The ArrayHeader layout is `{ length: u32, capacity:
@@ -467,26 +539,65 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // bench_array_ops with ~400K reads per iteration this is the
         // bulk of the LLVM-vs-Cranelift gap.
         Expr::IndexGet { object, index } => {
-            if !is_array_expr(ctx, object) {
-                bail!(
-                    "perry-codegen-llvm Phase B.9: IndexGet receiver must be a known array (got {})",
-                    variant_name(object)
-                );
+            // Three cases:
+            //   1. Receiver is a known array → inline f64 element load
+            //   2. Index is a string (literal or string-typed local) →
+            //      generic object field access via js_object_get_field_by_name_f64
+            //   3. Anything else → fall back to dynamic object field
+            //      access by stringifying the index at runtime
+            if is_array_expr(ctx, object) {
+                let arr_box = lower_expr(ctx, object)?;
+                let idx_double = lower_expr(ctx, index)?;
+                let blk = ctx.block();
+                let arr_bits = blk.bitcast_double_to_i64(&arr_box);
+                let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
+                let idx_i32 = blk.fptosi(DOUBLE, &idx_double, I32);
+                let idx_i64 = blk.zext(I32, &idx_i32, I64);
+                let byte_offset = blk.shl(I64, &idx_i64, "3");
+                let with_header = blk.add(I64, &byte_offset, "8");
+                let element_addr = blk.add(I64, &arr_handle, &with_header);
+                let element_ptr = blk.inttoptr(I64, &element_addr);
+                return Ok(blk.load(DOUBLE, &element_ptr));
             }
-            let arr_box = lower_expr(ctx, object)?;
-            let idx_double = lower_expr(ctx, index)?;
-            let blk = ctx.block();
-            let arr_bits = blk.bitcast_double_to_i64(&arr_box);
-            let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
-            let idx_i32 = blk.fptosi(DOUBLE, &idx_double, I32);
-            // Inline address arithmetic. uextend to i64, shift left 3
-            // (multiply by 8), add 8 for the ArrayHeader, add to base.
-            let idx_i64 = blk.zext(I32, &idx_i32, I64);
-            let byte_offset = blk.shl(I64, &idx_i64, "3");
-            let with_header = blk.add(I64, &byte_offset, "8");
-            let element_addr = blk.add(I64, &arr_handle, &with_header);
-            let element_ptr = blk.inttoptr(I64, &element_addr);
-            Ok(blk.load(DOUBLE, &element_ptr))
+            // Generic dynamic object access: stringify the index (no-op
+            // for already-string keys, format for numeric keys) and
+            // call js_object_get_field_by_name_f64.
+            if let Expr::String(literal) = index.as_ref() {
+                // Static string key: use the interned StringPool entry
+                // so we get the same handle as obj["foo"].
+                let obj_box = lower_expr(ctx, object)?;
+                let key_idx = ctx.strings.intern(literal);
+                let key_handle_global =
+                    format!("@{}", ctx.strings.entry(key_idx).handle_global);
+                let blk = ctx.block();
+                let obj_bits = blk.bitcast_double_to_i64(&obj_box);
+                let obj_handle = blk.and(I64, &obj_bits, POINTER_MASK_I64);
+                let key_box = blk.load(DOUBLE, &key_handle_global);
+                let key_bits = blk.bitcast_double_to_i64(&key_box);
+                let key_raw = blk.and(I64, &key_bits, POINTER_MASK_I64);
+                return Ok(blk.call(
+                    DOUBLE,
+                    "js_object_get_field_by_name_f64",
+                    &[(I64, &obj_handle), (I64, &key_raw)],
+                ));
+            }
+            if is_string_expr(ctx, index) {
+                // Dynamic string key: unbox both pointers and call.
+                let obj_box = lower_expr(ctx, object)?;
+                let key_box = lower_expr(ctx, index)?;
+                let blk = ctx.block();
+                let obj_handle = unbox_to_i64(blk, &obj_box);
+                let key_handle = unbox_to_i64(blk, &key_box);
+                return Ok(blk.call(
+                    DOUBLE,
+                    "js_object_get_field_by_name_f64",
+                    &[(I64, &obj_handle), (I64, &key_handle)],
+                ));
+            }
+            bail!(
+                "perry-codegen-llvm Phase B.9: IndexGet receiver must be a known array (got {})",
+                variant_name(object)
+            )
         }
 
         // `arr.length` / `str.length` — INLINE. Both ArrayHeader and
@@ -522,36 +633,67 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // `js_array_set_f64` (no return value, no realloc) since there's
         // no local to write a possibly-realloc'd pointer back to.
         Expr::IndexSet { object, index, value } => {
-            if !is_array_expr(ctx, object) {
-                bail!(
-                    "perry-codegen-llvm Phase B.9: IndexSet receiver must be a known array (got {})",
-                    variant_name(object)
-                );
+            // Same dispatch tree as IndexGet: known array → fast inline,
+            // string key on dynamic receiver → object field set, otherwise
+            // bail with a clear error.
+            if is_array_expr(ctx, object) {
+                let arr_box = lower_expr(ctx, object)?;
+                let idx_double = lower_expr(ctx, index)?;
+                let val_double = lower_expr(ctx, value)?;
+                let local_id = if let Expr::LocalGet(id) = object.as_ref() {
+                    Some(*id)
+                } else {
+                    None
+                };
+                if let Some(id) = local_id {
+                    lower_index_set_fast(ctx, &arr_box, &idx_double, &val_double, id)?;
+                } else {
+                    let blk = ctx.block();
+                    let arr_bits = blk.bitcast_double_to_i64(&arr_box);
+                    let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
+                    let idx_i32 = blk.fptosi(DOUBLE, &idx_double, I32);
+                    blk.call_void(
+                        "js_array_set_f64",
+                        &[(I64, &arr_handle), (I32, &idx_i32), (DOUBLE, &val_double)],
+                    );
+                }
+                return Ok(val_double);
             }
-            let arr_box = lower_expr(ctx, object)?;
-            let idx_double = lower_expr(ctx, index)?;
-            let val_double = lower_expr(ctx, value)?;
-
-            let local_id = if let Expr::LocalGet(id) = object.as_ref() {
-                Some(*id)
-            } else {
-                None
-            };
-
-            if let Some(id) = local_id {
-                lower_index_set_fast(ctx, &arr_box, &idx_double, &val_double, id)?;
-            } else {
+            if let Expr::String(literal) = index.as_ref() {
+                let obj_box = lower_expr(ctx, object)?;
+                let val_double = lower_expr(ctx, value)?;
+                let key_idx = ctx.strings.intern(literal);
+                let key_handle_global =
+                    format!("@{}", ctx.strings.entry(key_idx).handle_global);
                 let blk = ctx.block();
-                let arr_bits = blk.bitcast_double_to_i64(&arr_box);
-                let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
-                let idx_i32 = blk.fptosi(DOUBLE, &idx_double, I32);
+                let obj_bits = blk.bitcast_double_to_i64(&obj_box);
+                let obj_handle = blk.and(I64, &obj_bits, POINTER_MASK_I64);
+                let key_box = blk.load(DOUBLE, &key_handle_global);
+                let key_bits = blk.bitcast_double_to_i64(&key_box);
+                let key_raw = blk.and(I64, &key_bits, POINTER_MASK_I64);
                 blk.call_void(
-                    "js_array_set_f64",
-                    &[(I64, &arr_handle), (I32, &idx_i32), (DOUBLE, &val_double)],
+                    "js_object_set_field_by_name",
+                    &[(I64, &obj_handle), (I64, &key_raw), (DOUBLE, &val_double)],
                 );
+                return Ok(val_double);
             }
-            // Assignment expressions evaluate to the assigned value.
-            Ok(val_double)
+            if is_string_expr(ctx, index) {
+                let obj_box = lower_expr(ctx, object)?;
+                let key_box = lower_expr(ctx, index)?;
+                let val_double = lower_expr(ctx, value)?;
+                let blk = ctx.block();
+                let obj_handle = unbox_to_i64(blk, &obj_box);
+                let key_handle = unbox_to_i64(blk, &key_box);
+                blk.call_void(
+                    "js_object_set_field_by_name",
+                    &[(I64, &obj_handle), (I64, &key_handle), (DOUBLE, &val_double)],
+                );
+                return Ok(val_double);
+            }
+            bail!(
+                "perry-codegen-llvm Phase B.9: IndexSet receiver must be a known array (got {})",
+                variant_name(object)
+            )
         }
 
         // `obj.field = v` — generic object field write.
@@ -617,27 +759,39 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // pointer, and store it back into the slot so subsequent uses
         // see the up-to-date pointer.
         Expr::ArrayPush { array_id, value } => {
-            let slot = ctx
-                .locals
-                .get(array_id)
-                .ok_or_else(|| anyhow!("ArrayPush({}): local not in scope", array_id))?
-                .clone();
+            // Resolve the array storage in priority order: closure
+            // capture (slot in the closure header), local alloca slot,
+            // module-level global. The realloc-pointer write-back must
+            // go to whichever storage we read from.
             let v = lower_expr(ctx, value)?;
+            let arr_box = lower_expr(ctx, &Expr::LocalGet(*array_id))?;
             let blk = ctx.block();
-            let arr_box = blk.load(DOUBLE, &slot);
-            let arr_bits = blk.bitcast_double_to_i64(&arr_box);
-            let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
+            let arr_handle = unbox_to_i64(blk, &arr_box);
             let new_handle = blk.call(
                 I64,
                 "js_array_push_f64",
                 &[(I64, &arr_handle), (DOUBLE, &v)],
             );
-            // Inline nanbox_pointer — push always returns a real heap ptr.
             let new_box = nanbox_pointer_inline(blk, &new_handle);
-            // Write the (possibly-reallocated) pointer back to the local
-            // slot — without this, subsequent reads would use the stale
-            // pre-realloc pointer and crash on access.
-            blk.store(DOUBLE, &new_box, &slot);
+            // Write back to whichever storage backs the local.
+            if let Some(&capture_idx) = ctx.closure_captures.get(array_id) {
+                let closure_ptr = ctx
+                    .current_closure_ptr
+                    .clone()
+                    .ok_or_else(|| anyhow!("ArrayPush captured but no current_closure_ptr"))?;
+                let idx_str = capture_idx.to_string();
+                ctx.block().call_void(
+                    "js_closure_set_capture_f64",
+                    &[(I64, &closure_ptr), (I32, &idx_str), (DOUBLE, &new_box)],
+                );
+            } else if let Some(slot) = ctx.locals.get(array_id).cloned() {
+                ctx.block().store(DOUBLE, &new_box, &slot);
+            } else if let Some(global_name) = ctx.module_globals.get(array_id).cloned() {
+                let g_ref = format!("@{}", global_name);
+                ctx.block().store(DOUBLE, &new_box, &g_ref);
+            } else {
+                return Err(anyhow!("ArrayPush({}): local not in scope", array_id));
+            }
             Ok(new_box)
         }
 
@@ -651,6 +805,8 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // `compile_module` via the `compile_closure` pass.
         Expr::Closure {
             func_id,
+            params,
+            body,
             captures,
             mutable_captures,
             captures_this,
@@ -668,22 +824,25 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             // the captured variable after the closure is created.
             let _ = mutable_captures;
 
+            // Auto-detect captures from the body. The HIR's captures
+            // list is sometimes empty for closures passed as arguments
+            // (the closure conversion pass doesn't visit every site).
+            // We must detect the same set as `compile_closure` so the
+            // creation site and the body lower with consistent slot
+            // indices.
+            let auto_captures = compute_auto_captures(ctx, params, body, captures);
+
             // Lower each captured value from the OUTER scope (this is
             // an outer-scope access, NOT a closure capture access — at
             // closure creation we're still outside the closure body).
-            // Each capture's value gets stored into the closure's slot
-            // via js_closure_set_capture_f64.
-            let mut captured_values: Vec<String> = Vec::with_capacity(captures.len());
-            for cap_id in captures {
+            let mut captured_values: Vec<String> = Vec::with_capacity(auto_captures.len());
+            for cap_id in &auto_captures {
                 let v = lower_expr(ctx, &Expr::LocalGet(*cap_id))?;
                 captured_values.push(v);
             }
 
             // Compute the closure function name BEFORE taking the
-            // mutable block borrow — `ctx.strings.module_prefix()` is
-            // an immutable borrow on ctx.strings, but `ctx.block()` is
-            // a mutable borrow on ctx.func; the borrow checker treats
-            // them as overlapping borrows on `*ctx`.
+            // mutable block borrow.
             let func_name = format!(
                 "perry_closure_{}__{}",
                 ctx.strings.module_prefix(),
@@ -691,17 +850,13 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             );
 
             let blk = ctx.block();
-            // js_closure_alloc(func_ptr, capture_count) → i64
-            // The function pointer is the address of the closure body,
-            // which we emit as `perry_closure_<modprefix>__<func_id>`.
             let func_ref = format!("@{}", func_name);
-            let cap_count = captures.len().to_string();
+            let cap_count = auto_captures.len().to_string();
             let closure_handle = blk.call(
                 I64,
                 "js_closure_alloc",
                 &[(PTR, &func_ref), (I32, &cap_count)],
             );
-            // Set each capture slot.
             for (idx, val) in captured_values.iter().enumerate() {
                 let idx_str = idx.to_string();
                 blk.call_void(
@@ -709,7 +864,6 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     &[(I64, &closure_handle), (I32, &idx_str), (DOUBLE, val)],
                 );
             }
-            // NaN-box the closure pointer with POINTER_TAG.
             Ok(nanbox_pointer_inline(blk, &closure_handle))
         }
 
@@ -843,13 +997,11 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // empty); shift removes from the front. We currently support
         // pop only.
         Expr::ArrayPop(array_id) => {
-            let slot = ctx
-                .locals
-                .get(array_id)
-                .ok_or_else(|| anyhow!("ArrayPop({}): local not in scope", array_id))?
-                .clone();
+            // pop is a read-only access for the storage; we don't need
+            // to write back. Resolve via LocalGet so closure captures
+            // and module globals work transparently.
+            let arr_box = lower_expr(ctx, &Expr::LocalGet(*array_id))?;
             let blk = ctx.block();
-            let arr_box = blk.load(DOUBLE, &slot);
             let arr_handle = unbox_to_i64(blk, &arr_box);
             Ok(blk.call(DOUBLE, "js_array_pop_f64", &[(I64, &arr_handle)]))
         }
@@ -951,6 +1103,214 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // `??` (Coalesce) requires NaN-tag inspection (null/undefined
         // checks), so it lands in a later slice.
         Expr::Logical { op, left, right } => lower_logical(ctx, *op, left, right),
+
+        // -------- arr.filter(callback) --------
+        // Mirrors ArrayMap: takes a closure header pointer, returns
+        // a new array.
+        Expr::ArrayFilter { array, callback } => {
+            let arr_box = lower_expr(ctx, array)?;
+            let cb_box = lower_expr(ctx, callback)?;
+            let blk = ctx.block();
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+            let cb_handle = unbox_to_i64(blk, &cb_box);
+            let result = blk.call(I64, "js_array_filter", &[(I64, &arr_handle), (I64, &cb_handle)]);
+            Ok(nanbox_pointer_inline(blk, &result))
+        }
+
+        // -------- arr.join(separator?) -> string --------
+        // The runtime takes a separator StringHeader (nullable). We
+        // intern "," as the default when no separator is given so the
+        // runtime side never sees a null pointer.
+        Expr::ArrayJoin { array, separator } => {
+            let arr_box = lower_expr(ctx, array)?;
+            let sep_box = if let Some(sep_expr) = separator {
+                lower_expr(ctx, sep_expr)?
+            } else {
+                let key_idx = ctx.strings.intern(",");
+                let handle_global =
+                    format!("@{}", ctx.strings.entry(key_idx).handle_global);
+                ctx.block().load(DOUBLE, &handle_global)
+            };
+            let blk = ctx.block();
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+            let sep_handle = unbox_to_i64(blk, &sep_box);
+            let result = blk.call(I64, "js_array_join", &[(I64, &arr_handle), (I64, &sep_handle)]);
+            Ok(nanbox_string_inline(blk, &result))
+        }
+
+        // -------- map.delete(key) -> boolean --------
+        Expr::MapDelete { map, key } => {
+            let m_box = lower_expr(ctx, map)?;
+            let k_box = lower_expr(ctx, key)?;
+            let blk = ctx.block();
+            let m_handle = unbox_to_i64(blk, &m_box);
+            let i32_v = blk.call(I32, "js_map_delete", &[(I64, &m_handle), (DOUBLE, &k_box)]);
+            Ok(blk.sitofp(I32, &i32_v, DOUBLE))
+        }
+
+        // -------- Object.keys(obj) -> string[] --------
+        Expr::ObjectKeys(obj) => {
+            let obj_box = lower_expr(ctx, obj)?;
+            let blk = ctx.block();
+            let obj_handle = unbox_to_i64(blk, &obj_box);
+            let arr_handle = blk.call(I64, "js_object_keys", &[(I64, &obj_handle)]);
+            Ok(nanbox_pointer_inline(blk, &arr_handle))
+        }
+
+        // -------- isFinite(x) / Number.isFinite(x) --------
+        // The runtime returns the standard JS truthy double (1.0/0.0).
+        Expr::IsFinite(operand) | Expr::NumberIsFinite(operand) => {
+            let v = lower_expr(ctx, operand)?;
+            Ok(ctx.block().call(DOUBLE, "js_is_finite", &[(DOUBLE, &v)]))
+        }
+
+        // -------- internal: is value === undefined OR a bare-NaN double --------
+        Expr::IsUndefinedOrBareNan(operand) => {
+            let v = lower_expr(ctx, operand)?;
+            let blk = ctx.block();
+            let i32_v = blk.call(I32, "js_is_undefined_or_bare_nan", &[(DOUBLE, &v)]);
+            Ok(blk.sitofp(I32, &i32_v, DOUBLE))
+        }
+
+        // -------- Math.min(...args) --------
+        // Two HIR shapes: variadic (Vec<Expr>) and spread-from-array
+        // (single Expr that is an array). Both build/use an array and
+        // call js_math_min_array. The variadic form materializes a
+        // temporary fixed-size array via js_array_alloc + push.
+        Expr::MathMin(values) => {
+            let cap = (values.len() as u32).to_string();
+            let arr_handle_v = ctx.block().call(I64, "js_array_alloc", &[(I32, &cap)]);
+            // Push each value. push_f64 may realloc, so we thread the
+            // returned pointer through.
+            let mut current = arr_handle_v;
+            for v_expr in values {
+                let v_box = lower_expr(ctx, v_expr)?;
+                let blk = ctx.block();
+                current = blk.call(
+                    I64,
+                    "js_array_push_f64",
+                    &[(I64, &current), (DOUBLE, &v_box)],
+                );
+            }
+            let blk = ctx.block();
+            Ok(blk.call(DOUBLE, "js_math_min_array", &[(I64, &current)]))
+        }
+        Expr::MathMinSpread(arr_expr) => {
+            let arr_box = lower_expr(ctx, arr_expr)?;
+            let blk = ctx.block();
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+            Ok(blk.call(DOUBLE, "js_math_min_array", &[(I64, &arr_handle)]))
+        }
+
+        // -------- Math.max(...args) — same shape as Math.min --------
+        Expr::MathMax(values) => {
+            let cap = (values.len() as u32).to_string();
+            let mut current = ctx.block().call(I64, "js_array_alloc", &[(I32, &cap)]);
+            for v_expr in values {
+                let v_box = lower_expr(ctx, v_expr)?;
+                let blk = ctx.block();
+                current = blk.call(
+                    I64,
+                    "js_array_push_f64",
+                    &[(I64, &current), (DOUBLE, &v_box)],
+                );
+            }
+            let blk = ctx.block();
+            Ok(blk.call(DOUBLE, "js_math_max_array", &[(I64, &current)]))
+        }
+        Expr::MathMaxSpread(arr_expr) => {
+            let arr_box = lower_expr(ctx, arr_expr)?;
+            let blk = ctx.block();
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+            Ok(blk.call(DOUBLE, "js_math_max_array", &[(I64, &arr_handle)]))
+        }
+
+        // -------- String(value) coercion --------
+        Expr::StringCoerce(operand) => {
+            let v = lower_expr(ctx, operand)?;
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_string_coerce", &[(DOUBLE, &v)]);
+            Ok(nanbox_string_inline(blk, &handle))
+        }
+
+        // -------- Boolean(value) coercion --------
+        // js_is_truthy is exactly the JS Boolean(value) coercion: it
+        // returns 1 for truthy, 0 for falsy. We just need to convert
+        // the i32 result to a double for our boolean ABI.
+        Expr::BooleanCoerce(operand) => {
+            let v = lower_expr(ctx, operand)?;
+            let blk = ctx.block();
+            let i32_v = blk.call(I32, "js_is_truthy", &[(DOUBLE, &v)]);
+            Ok(blk.sitofp(I32, &i32_v, DOUBLE))
+        }
+
+        // -------- arr.slice(start, end?) -- new array slice --------
+        Expr::ArraySlice { array, start, end } => {
+            let arr_box = lower_expr(ctx, array)?;
+            let start_d = lower_expr(ctx, start)?;
+            let end_d = if let Some(end_expr) = end {
+                lower_expr(ctx, end_expr)?
+            } else {
+                // No end → pass i32::MAX so the runtime clamps to length.
+                // Encode as 2147483647.0 → fptosi → i32 max.
+                "2147483647.0".to_string()
+            };
+            let blk = ctx.block();
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+            let start_i32 = blk.fptosi(DOUBLE, &start_d, I32);
+            let end_i32 = blk.fptosi(DOUBLE, &end_d, I32);
+            let result = blk.call(
+                I64,
+                "js_array_slice",
+                &[(I64, &arr_handle), (I32, &start_i32), (I32, &end_i32)],
+            );
+            Ok(nanbox_pointer_inline(blk, &result))
+        }
+
+        // -------- arr.shift() (HIR variant takes a LocalId) --------
+        Expr::ArrayShift(array_id) => {
+            let arr_box = lower_expr(ctx, &Expr::LocalGet(*array_id))?;
+            let blk = ctx.block();
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+            Ok(blk.call(DOUBLE, "js_array_shift_f64", &[(I64, &arr_handle)]))
+        }
+
+        // -------- new Set() / new Set(arr) --------
+        Expr::SetNew => {
+            let cap = "8".to_string();
+            let handle = ctx.block().call(I64, "js_set_alloc", &[(I32, &cap)]);
+            Ok(nanbox_pointer_inline(ctx.block(), &handle))
+        }
+
+        // -------- "key" in obj --------
+        // js_object_has_property takes two NaN-boxed doubles and returns
+        // a NaN-boxed boolean (1.0/0.0 already in our ABI).
+        Expr::In { property, object } => {
+            let key = lower_expr(ctx, property)?;
+            let obj = lower_expr(ctx, object)?;
+            Ok(ctx.block().call(
+                DOUBLE,
+                "js_object_has_property",
+                &[(DOUBLE, &obj), (DOUBLE, &key)],
+            ))
+        }
+
+        // -------- fs.writeFileSync(path, content) --------
+        // The runtime takes both args as NaN-boxed doubles directly.
+        // Returns i32 (1=success); we drop the result and return 0.0
+        // since the HIR-level fs.writeFileSync is void in JS.
+        Expr::FsWriteFileSync(path, content) => {
+            let p = lower_expr(ctx, path)?;
+            let c = lower_expr(ctx, content)?;
+            // js_fs_write_file_sync returns i32 (1=success). Discard the
+            // result; fs.writeFileSync is void in JS.
+            let _ = ctx.block().call(
+                I32,
+                "js_fs_write_file_sync",
+                &[(DOUBLE, &p), (DOUBLE, &c)],
+            );
+            Ok(double_literal(0.0))
+        }
 
         // -------- NativeMethodCall (Phase H.1) --------
         // Perry's HIR uses NativeMethodCall { module, method, object, args }

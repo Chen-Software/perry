@@ -471,9 +471,32 @@ fn compile_closure(
         .collect();
 
     // Build the capture map: each captured LocalId gets the index it
-    // occupies in the closure's capture array (matching the order they
-    // were stored at the creation site).
-    let closure_captures: HashMap<u32, u32> = captures
+    // occupies in the closure's capture array. Identical logic to the
+    // `compute_auto_captures` helper used by the closure creation site
+    // — they MUST agree on the slot indices, otherwise the body reads
+    // captures from the wrong slots. Sorting the auto-detected ids
+    // gives deterministic indexing across both call sites.
+    let mut auto_captures: Vec<u32> = captures.clone();
+    {
+        let mut referenced: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        collect_ref_ids_in_stmts(body, &mut referenced);
+        let mut inner_lets: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        collect_let_ids(body, &mut inner_lets);
+        let param_ids: std::collections::HashSet<u32> = params.iter().map(|p| p.id).collect();
+        let already: std::collections::HashSet<u32> = auto_captures.iter().copied().collect();
+        let mut sorted: Vec<u32> = referenced.into_iter().collect();
+        sorted.sort();
+        for id in sorted {
+            if !param_ids.contains(&id)
+                && !inner_lets.contains(&id)
+                && !already.contains(&id)
+                && !module_globals.contains_key(&id)
+            {
+                auto_captures.push(id);
+            }
+        }
+    }
+    let closure_captures: HashMap<u32, u32> = auto_captures
         .iter()
         .enumerate()
         .map(|(i, id)| (*id, i as u32))
@@ -1005,6 +1028,23 @@ fn collect_extern_func_refs_in_expr(
 /// `Stmt::Let` (function-local declarations). Used by the module-globals
 /// pre-walk to distinguish "this id is the function's own local" from
 /// "this id refers to a module-level let".
+/// Public re-export for `expr::compute_auto_captures` (which lives in
+/// `expr.rs` but needs the same walker as `compile_closure`).
+pub(crate) fn collect_let_ids_pub(
+    stmts: &[perry_hir::Stmt],
+    out: &mut std::collections::HashSet<u32>,
+) {
+    collect_let_ids(stmts, out)
+}
+
+/// Public re-export for `expr::compute_auto_captures`.
+pub(crate) fn collect_ref_ids_in_stmts_pub(
+    stmts: &[perry_hir::Stmt],
+    out: &mut std::collections::HashSet<u32>,
+) {
+    collect_ref_ids_in_stmts(stmts, out)
+}
+
 fn collect_let_ids(stmts: &[perry_hir::Stmt], out: &mut std::collections::HashSet<u32>) {
     for s in stmts {
         match s {
