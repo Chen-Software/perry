@@ -188,6 +188,11 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_array_includes_f64", I32, &[I64, DOUBLE]);
     module.declare_function("js_map_size", I32, &[I64]);
     module.declare_function("js_map_clear", VOID, &[I64]);
+    // Splice is unusual: takes an out-pointer for the deleted array
+    // and returns the modified-in-place input (the splice point may
+    // realloc). Param order is (arr, start, delete_count, items_ptr,
+    // items_count, out_arr_ptr).
+    module.declare_function("js_array_splice", I64, &[I64, I32, I32, PTR, I32, PTR]);
     module.declare_function("js_parse_int", DOUBLE, &[I64, DOUBLE]);
     module.declare_function("js_parse_float", DOUBLE, &[I64]);
     module.declare_function("js_array_reduce", DOUBLE, &[I64, I64, I32, DOUBLE]);

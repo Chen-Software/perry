@@ -1818,17 +1818,62 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(blk.bitcast_i64_to_double(&tagged))
         }
 
-        // -------- arr.splice(start, deleteCount?, ...items) stub --------
+        // -------- arr.splice(start, deleteCount?, ...items) --------
+        // Real call to js_array_splice. The runtime returns the
+        // (possibly realloc'd) modified array via the function
+        // return, and the deleted elements via an out-parameter.
+        // For the no-insert form `arr.splice(start, count)` we
+        // pass a null items pointer and 0 count.
         Expr::ArraySplice { array_id, start, delete_count, items } => {
-            let _ = lower_expr(ctx, &Expr::LocalGet(*array_id))?;
-            let _ = lower_expr(ctx, start)?;
-            if let Some(d) = delete_count {
-                let _ = lower_expr(ctx, d)?;
-            }
+            let arr_box = lower_expr(ctx, &Expr::LocalGet(*array_id))?;
+            let start_d = lower_expr(ctx, start)?;
+            let count_d = if let Some(d) = delete_count {
+                lower_expr(ctx, d)?
+            } else {
+                "0.0".to_string()
+            };
+            // Materialize items (if any) into a heap f64 array. We
+            // skip the proper data layout and just pass null for the
+            // common no-insert form. Insert-items is a follow-up.
             for it in items {
                 let _ = lower_expr(ctx, it)?;
             }
-            Ok(double_literal(0.0))
+            let blk = ctx.block();
+            let out_slot = blk.alloca(I64);
+            blk.store(I64, "0", &out_slot);
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+            let start_i32 = blk.fptosi(DOUBLE, &start_d, I32);
+            let count_i32 = blk.fptosi(DOUBLE, &count_d, I32);
+            let null_ptr = "null".to_string();
+            let zero_count = "0".to_string();
+            // Note: js_array_splice's return value is the DELETED
+            // array; the modified-in-place arr is written to *out_arr.
+            // (Reversed from what you'd guess from the signature.)
+            let deleted_handle = blk.call(
+                I64,
+                "js_array_splice",
+                &[
+                    (I64, &arr_handle),
+                    (I32, &start_i32),
+                    (I32, &count_i32),
+                    (PTR, &null_ptr),
+                    (I32, &zero_count),
+                    (PTR, &out_slot),
+                ],
+            );
+            // Read the modified array from the out slot and write it
+            // back to the source local.
+            let modified_handle = ctx.block().load(I64, &out_slot);
+            let modified_box = nanbox_pointer_inline(ctx.block(), &modified_handle);
+            if let Some(slot) = ctx.locals.get(array_id).cloned() {
+                ctx.block().store(DOUBLE, &modified_box, &slot);
+            } else if let Some(global_name) = ctx.module_globals.get(array_id).cloned() {
+                let g_ref = format!("@{}", global_name);
+                ctx.block().store(DOUBLE, &modified_box, &g_ref);
+            }
+            // Return the deleted array (NaN-boxed) as the splice
+            // expression's value.
+            Ok(nanbox_pointer_inline(ctx.block(), &deleted_handle))
         }
 
         // -------- ObjectFromEntries (passes through to runtime) --------
