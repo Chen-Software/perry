@@ -777,11 +777,11 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         Expr::PropertyGet { object, property }
             if property == "size" && is_map_expr(ctx, object) =>
         {
-            // js_map_size doesn't exist; use the generic getter via
-            // js_object_get_field_by_name_f64 if no map_size runtime
-            // — but that would return undefined. Return 0.0 stub.
-            let _ = lower_expr(ctx, object)?;
-            Ok(double_literal(0.0))
+            let recv_box = lower_expr(ctx, object)?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let i32_v = blk.call(I32, "js_map_size", &[(I64, &recv_handle)]);
+            Ok(blk.sitofp(I32, &i32_v, DOUBLE))
         }
 
         // `arr[i] = v` — typed-Number array element write.
