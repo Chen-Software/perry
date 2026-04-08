@@ -67,9 +67,16 @@ pub fn compile_ll_to_object(ll_text: &str, target_triple: Option<&str>) -> Resul
     let bytes = fs::read(&obj_path)
         .with_context(|| format!("Failed to read clang output at {}", obj_path.display()))?;
 
-    // Clean up temp files on success.
-    let _ = fs::remove_file(&ll_path);
-    let _ = fs::remove_file(&obj_path);
+    // Clean up temp files on success — unless PERRY_LLVM_KEEP_IR is set, in
+    // which case we leave the .ll around for debugging and print the path.
+    let keep = env::var_os("PERRY_LLVM_KEEP_IR").is_some();
+    if keep {
+        eprintln!("[perry-codegen-llvm] kept LLVM IR: {}", ll_path.display());
+        eprintln!("[perry-codegen-llvm] kept object:  {}", obj_path.display());
+    } else {
+        let _ = fs::remove_file(&ll_path);
+        let _ = fs::remove_file(&obj_path);
+    }
 
     Ok(bytes)
 }

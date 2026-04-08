@@ -58,6 +58,13 @@ pub struct CompileArgs {
     #[arg(long, default_value = "executable")]
     pub output_type: String,
 
+    /// Codegen backend: cranelift (default, stable) or llvm (experimental).
+    /// The llvm backend is under active development — it supports only a
+    /// tiny subset of Perry's HIR and is intended for perf/size/RAM
+    /// comparison experiments, not production use.
+    #[arg(long, default_value = "cranelift")]
+    pub backend: String,
+
     /// Bundle TypeScript extensions from directory.
     /// Scans subdirectories for package.json with openclaw.extensions entries
     /// and compiles them into the binary as static plugins.
@@ -4007,8 +4014,34 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         (table.translations.clone(), table.keys.len(), table.locale_count, table.locale_codes.clone())
     });
 
+    let use_llvm_backend = args.backend == "llvm";
     let compile_results: Vec<Result<(PathBuf, Vec<u8>), String>> = ctx.native_modules.par_iter()
         .map(|(path, hir_module)| {
+            // --backend llvm: experimental path. Phase 1 only supports single-
+            // module programs with no imports/classes — the LLVM backend
+            // currently bails with a clear error for anything more complex.
+            // We intentionally skip every Cranelift setter below; they're
+            // irrelevant to the LLVM scaffold and will be plumbed through as
+            // later phases need them.
+            if use_llvm_backend {
+                let is_entry = path == &entry_path;
+                let opts = perry_codegen_llvm::CompileOptions {
+                    target: target.clone(),
+                    is_entry_module: is_entry,
+                };
+                let object_code = perry_codegen_llvm::compile_module(hir_module, opts)
+                    .map_err(|e| format!(
+                        "Error compiling module '{}' ({}) with --backend llvm: {}",
+                        hir_module.name, path.display(), e
+                    ))?;
+                let obj_name = hir_module.name
+                    .replace(|c: char| !c.is_alphanumeric() && c != '_', "_")
+                    .trim_matches('_')
+                    .to_string();
+                let obj_path = PathBuf::from(format!("{}.o", obj_name));
+                return Ok((obj_path, object_code));
+            }
+
             // Propagate i18n table to this rayon worker thread
             if let Some((ref translations, key_count, locale_count, ref locale_codes)) = i18n_snapshot {
                 perry_codegen::set_i18n_table(translations.clone(), key_count, locale_count, locale_codes.clone());

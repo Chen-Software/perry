@@ -4231,6 +4231,7 @@ dependencies = [
  "perry-codegen",
  "perry-codegen-glance",
  "perry-codegen-js",
+ "perry-codegen-llvm",
  "perry-codegen-swiftui",
  "perry-codegen-wasm",
  "perry-codegen-wear-tiles",
