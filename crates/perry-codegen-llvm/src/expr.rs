@@ -119,6 +119,27 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             };
             Ok(double_literal(f64::from_bits(tag)))
         }
+        // `undefined` and `null` lower to their NaN-tagged bit patterns.
+        Expr::Undefined => Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED))),
+        Expr::Null => Ok(double_literal(f64::from_bits(crate::nanbox::TAG_NULL))),
+
+        // `void <expr>` — evaluate the operand for side effects, return
+        // undefined. Used both as `void 0` (a common idiom for `undefined`)
+        // and `void (sideEffect = 42)` for discarding an assignment value.
+        Expr::Void(operand) => {
+            let _ = lower_expr(ctx, operand)?;
+            Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
+        }
+
+        // `typeof <expr>` — calls js_value_typeof which returns a runtime
+        // string handle ("number", "string", "boolean", "undefined",
+        // "object", "function"). The result is NaN-boxed with STRING_TAG.
+        Expr::TypeOf(operand) => {
+            let v = lower_expr(ctx, operand)?;
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_value_typeof", &[(DOUBLE, &v)]);
+            Ok(nanbox_string_inline(blk, &handle))
+        }
 
         // String literals are pre-allocated at module init via the
         // StringPool's hoisting strategy (see `crate::strings`). At the use
@@ -743,15 +764,28 @@ fn lower_string_method(
             Ok(blk.sitofp(I32, &result_i32, DOUBLE))
         }
         "slice" | "substring" => {
-            if args.len() != 2 {
+            if args.is_empty() || args.len() > 2 {
                 bail!(
-                    "perry-codegen-llvm: String.{} expects 2 args, got {}",
+                    "perry-codegen-llvm: String.{} expects 1 or 2 args, got {}",
                     property,
                     args.len()
                 );
             }
             let start_d = lower_expr(ctx, &args[0])?;
-            let end_d = lower_expr(ctx, &args[1])?;
+            // 2-arg form: explicit end. 1-arg form: end defaults to the
+            // string's length, computed inline (load i32 at offset 0).
+            let end_d = if args.len() == 2 {
+                lower_expr(ctx, &args[1])?
+            } else {
+                // Inline length read on the receiver. Same pattern as
+                // the dedicated `str.length` arm.
+                let blk = ctx.block();
+                let recv_bits = blk.bitcast_double_to_i64(&recv_box);
+                let recv_handle = blk.and(I64, &recv_bits, POINTER_MASK_I64);
+                let len_ptr = blk.inttoptr(I64, &recv_handle);
+                let len_i32 = blk.load(I32, &len_ptr);
+                blk.sitofp(I32, &len_i32, DOUBLE)
+            };
             let blk = ctx.block();
             let recv_handle = unbox_to_i64(blk, &recv_box);
             let start_i32 = blk.fptosi(DOUBLE, &start_d, I32);
