@@ -1248,8 +1248,16 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let blk = ctx.block();
             let m_handle = unbox_to_i64(blk, &m_box);
             let i32_v = blk.call(I32, "js_map_has", &[(I64, &m_handle), (DOUBLE, &k_box)]);
-            // i32 0/1 → 0.0/1.0 double for our boolean ABI
-            Ok(blk.sitofp(I32, &i32_v, DOUBLE))
+            // NaN-tagged boolean for "true"/"false" printing.
+            let bit = blk.icmp_ne(I32, &i32_v, "0");
+            let tagged = blk.select(
+                crate::types::I1,
+                &bit,
+                I64,
+                crate::nanbox::TAG_TRUE_I64,
+                crate::nanbox::TAG_FALSE_I64,
+            );
+            Ok(blk.bitcast_i64_to_double(&tagged))
         }
 
         // -------- Math.* unary helpers (Phase B.15) --------
@@ -1380,7 +1388,15 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let blk = ctx.block();
             let m_handle = unbox_to_i64(blk, &m_box);
             let i32_v = blk.call(I32, "js_map_delete", &[(I64, &m_handle), (DOUBLE, &k_box)]);
-            Ok(blk.sitofp(I32, &i32_v, DOUBLE))
+            let bit = blk.icmp_ne(I32, &i32_v, "0");
+            let tagged = blk.select(
+                crate::types::I1,
+                &bit,
+                I64,
+                crate::nanbox::TAG_TRUE_I64,
+                crate::nanbox::TAG_FALSE_I64,
+            );
+            Ok(blk.bitcast_i64_to_double(&tagged))
         }
 
         // -------- Object.keys(obj) -> string[] --------
@@ -1470,13 +1486,22 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
 
         // -------- Boolean(value) coercion --------
         // js_is_truthy is exactly the JS Boolean(value) coercion: it
-        // returns 1 for truthy, 0 for falsy. We just need to convert
-        // the i32 result to a double for our boolean ABI.
+        // returns 1 for truthy, 0 for falsy. We convert the i32 to
+        // a NaN-tagged TAG_TRUE/TAG_FALSE so console.log prints
+        // "true"/"false" via the runtime's NaN-tag dispatch.
         Expr::BooleanCoerce(operand) => {
             let v = lower_expr(ctx, operand)?;
             let blk = ctx.block();
             let i32_v = blk.call(I32, "js_is_truthy", &[(DOUBLE, &v)]);
-            Ok(blk.sitofp(I32, &i32_v, DOUBLE))
+            let bit = blk.icmp_ne(I32, &i32_v, "0");
+            let tagged = blk.select(
+                crate::types::I1,
+                &bit,
+                I64,
+                crate::nanbox::TAG_TRUE_I64,
+                crate::nanbox::TAG_FALSE_I64,
+            );
+            Ok(blk.bitcast_i64_to_double(&tagged))
         }
 
         // -------- arr.slice(start, end?) -- new array slice --------
@@ -2770,7 +2795,15 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let blk = ctx.block();
             let s_handle = unbox_to_i64(blk, &s_box);
             let i32_v = blk.call(I32, "js_set_has", &[(I64, &s_handle), (DOUBLE, &v_box)]);
-            Ok(blk.sitofp(I32, &i32_v, DOUBLE))
+            let bit = blk.icmp_ne(I32, &i32_v, "0");
+            let tagged = blk.select(
+                crate::types::I1,
+                &bit,
+                I64,
+                crate::nanbox::TAG_TRUE_I64,
+                crate::nanbox::TAG_FALSE_I64,
+            );
+            Ok(blk.bitcast_i64_to_double(&tagged))
         }
 
         // -------- set.delete(value) -> boolean --------
@@ -2780,7 +2813,15 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let blk = ctx.block();
             let s_handle = unbox_to_i64(blk, &s_box);
             let i32_v = blk.call(I32, "js_set_delete", &[(I64, &s_handle), (DOUBLE, &v_box)]);
-            Ok(blk.sitofp(I32, &i32_v, DOUBLE))
+            let bit = blk.icmp_ne(I32, &i32_v, "0");
+            let tagged = blk.select(
+                crate::types::I1,
+                &bit,
+                I64,
+                crate::nanbox::TAG_TRUE_I64,
+                crate::nanbox::TAG_FALSE_I64,
+            );
+            Ok(blk.bitcast_i64_to_double(&tagged))
         }
 
         // -------- set.size -> number --------
