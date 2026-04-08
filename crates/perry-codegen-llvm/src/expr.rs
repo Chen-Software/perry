@@ -193,6 +193,12 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(blk.sitofp(crate::types::I64, &as_i64, DOUBLE))
         }
 
+        // -------- Objects (Phase B.4) --------
+        // `{ k1: v1, k2: v2, … }` literal: allocate, set each field by
+        // name (key string sourced from the StringPool), NaN-box the
+        // pointer via js_nanbox_pointer.
+        Expr::Object(props) => lower_object_literal(ctx, props),
+
         // -------- Arrays (Phase B.3) --------
         // `[a, b, c]` literal: allocate via js_array_alloc(N), then
         // sequentially push each element. js_array_push_f64 may return a
@@ -237,6 +243,34 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let len_i32 = blk.call(I32, "js_array_length", &[(I64, &arr_handle)]);
             // Convert i32 → double for our number ABI.
             Ok(blk.sitofp(I32, &len_i32, DOUBLE))
+        }
+
+        // `obj.field` — generic object field read. We get the key string
+        // handle from the StringPool (interned, so the same key across
+        // multiple sites shares one allocation), unbox both the object
+        // pointer and the key handle, then call
+        // `js_object_get_field_by_name_f64`. The result is a raw f64
+        // (which IS the NaN-boxed value for non-number fields — same bit
+        // pattern, runtime callers re-interpret based on context).
+        Expr::PropertyGet { object, property } if !matches!(object.as_ref(), Expr::GlobalGet(_)) => {
+            // The `!matches!` guard avoids stealing the `console.log`
+            // dispatch path (which has `object: GlobalGet(0)` for the
+            // `console` global) — that's still owned by `lower_call`.
+            let obj_box = lower_expr(ctx, object)?;
+            // Intern the field name and load its handle from the pool.
+            let key_idx = ctx.strings.intern(property);
+            let key_handle_global = format!("@{}", ctx.strings.entry(key_idx).handle_global);
+            let blk = ctx.block();
+            let obj_bits = blk.bitcast_double_to_i64(&obj_box);
+            let obj_handle = blk.and(I64, &obj_bits, POINTER_MASK_I64);
+            let key_box = blk.load(DOUBLE, &key_handle_global);
+            let key_bits = blk.bitcast_double_to_i64(&key_box);
+            let key_handle = blk.and(I64, &key_bits, POINTER_MASK_I64);
+            Ok(blk.call(
+                DOUBLE,
+                "js_object_get_field_by_name_f64",
+                &[(I64, &obj_handle), (I64, &key_handle)],
+            ))
         }
 
         // -------- Calls --------
@@ -344,6 +378,62 @@ fn is_array_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
         Expr::LocalGet(id) => matches!(ctx.local_types.get(id), Some(HirType::Array(_))),
         _ => false,
     }
+}
+
+/// Lower an object literal `{ k1: v1, k2: v2, … }`.
+///
+/// Pattern:
+/// ```llvm
+/// %obj = call i64 @js_object_alloc(i32 0, i32 N)   ; class_id=0, field_count=N
+/// ; for each (key, value):
+/// %k_box = load double, ptr @.str.K.handle           ; interned key
+/// %k_bits = bitcast double %k_box to i64
+/// %k_handle = and i64 %k_bits, 281474976710655        ; POINTER_MASK_I64
+/// %v = <lower value expression>                       ; double
+/// call void @js_object_set_field_by_name(i64 %obj, i64 %k_handle, double %v)
+/// %boxed = call double @js_nanbox_pointer(i64 %obj)
+/// ```
+///
+/// Field names are interned via the StringPool, so the same key across
+/// multiple object literals shares one global string allocation.
+/// `class_id=0` is the anonymous-object class. The runtime allocates at
+/// least 8 inline field slots regardless of `field_count` to prevent
+/// buffer overflow on later set_field calls
+/// (see `crates/perry-runtime/src/object.rs:500`).
+fn lower_object_literal(ctx: &mut FnCtx<'_>, props: &[(String, Expr)]) -> Result<String> {
+    let field_count = props.len() as u32;
+    let zero_str = "0".to_string();
+    let n_str = field_count.to_string();
+
+    // Allocate. Result is a raw i64 object pointer (NOT NaN-boxed).
+    let obj_handle = ctx
+        .block()
+        .call(I64, "js_object_alloc", &[(I32, &zero_str), (I32, &n_str)]);
+
+    for (key, value_expr) in props {
+        // Intern the key in the StringPool. This is a separate borrow
+        // from the function-level &mut ctx.func, so it's allowed.
+        let key_idx = ctx.strings.intern(key);
+        let key_handle_global = format!("@{}", ctx.strings.entry(key_idx).handle_global);
+
+        // Lower the value first (recursive lower_expr — borrows ctx).
+        let v = lower_expr(ctx, value_expr)?;
+
+        // Now load the key handle and call set_field.
+        let blk = ctx.block();
+        let key_box = blk.load(DOUBLE, &key_handle_global);
+        let key_bits = blk.bitcast_double_to_i64(&key_box);
+        let key_raw = blk.and(I64, &key_bits, POINTER_MASK_I64);
+        blk.call_void(
+            "js_object_set_field_by_name",
+            &[(I64, &obj_handle), (I64, &key_raw), (DOUBLE, &v)],
+        );
+    }
+
+    // NaN-box the final pointer with POINTER_TAG.
+    Ok(ctx
+        .block()
+        .call(DOUBLE, "js_nanbox_pointer", &[(I64, &obj_handle)]))
 }
 
 /// Lower an array literal `[a, b, c, …]`.

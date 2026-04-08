@@ -95,4 +95,33 @@ pub fn declare_phase_b_arrays(module: &mut LlModule) {
     module.declare_function("js_array_push_f64", I64, &[I64, DOUBLE]);
     module.declare_function("js_array_get_f64", DOUBLE, &[I64, I32]);
     module.declare_function("js_array_length", I32, &[I64]);
+
+    declare_phase_b_objects(module);
+}
+
+/// Phase B object operations (basic object literals + property get/set).
+///
+/// - `js_object_alloc(class_id, field_count) -> *mut ObjectHeader` —
+///   allocate with class_id=0 for anonymous object literals. The runtime
+///   pre-allocates at least 8 inline slots regardless of field_count
+///   (`crates/perry-runtime/src/object.rs:500`) to prevent buffer
+///   overflow on later set_field calls.
+/// - `js_object_set_field_by_name(obj, key, value)` — set field by string
+///   key. Both `obj` and `key` are raw i64 pointers; `value` is a
+///   NaN-boxed double.
+/// - `js_object_get_field_by_name_f64(obj, key) -> f64` — read field by
+///   string key, returning the raw f64 (or the NaN-boxed value for
+///   non-number fields — same bit pattern, just interpreted differently).
+///
+/// Field name strings are sourced from the same StringPool the literal
+/// strings use, so `obj.x` and `obj["x"]` and `let s = "x"; obj[s]` all
+/// share one allocation per unique key.
+///
+/// Phase C will replace the bare `js_object_alloc(0, N)` path with the
+/// shape-cached `js_object_alloc_with_shape` Cranelift uses
+/// (`crates/perry-codegen/src/expr.rs:17942`) for repeated literals.
+pub fn declare_phase_b_objects(module: &mut LlModule) {
+    module.declare_function("js_object_alloc", I64, &[I32, I32]);
+    module.declare_function("js_object_set_field_by_name", VOID, &[I64, I64, DOUBLE]);
+    module.declare_function("js_object_get_field_by_name_f64", DOUBLE, &[I64, I64]);
 }
