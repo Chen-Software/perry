@@ -203,6 +203,9 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("llvm.log.f64", DOUBLE, &[DOUBLE]);
     module.declare_function("llvm.log2.f64", DOUBLE, &[DOUBLE]);
     module.declare_function("llvm.log10.f64", DOUBLE, &[DOUBLE]);
+    module.declare_function("llvm.exp.f64", DOUBLE, &[DOUBLE]);
+    module.declare_function("llvm.sin.f64", DOUBLE, &[DOUBLE]);
+    module.declare_function("llvm.cos.f64", DOUBLE, &[DOUBLE]);
     module.declare_function("js_path_basename", I64, &[I64]);
     module.declare_function("js_json_parse", DOUBLE, &[I64]);
     module.declare_function("js_date_new", DOUBLE, &[]);
