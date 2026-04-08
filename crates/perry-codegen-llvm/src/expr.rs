@@ -952,6 +952,22 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // checks), so it lands in a later slice.
         Expr::Logical { op, left, right } => lower_logical(ctx, *op, left, right),
 
+        // -------- NativeMethodCall (Phase H.1) --------
+        // Perry's HIR uses NativeMethodCall { module, method, object, args }
+        // for method calls on natively-typed receivers — specifically for
+        // typed arrays (where `push`/`pop`/etc. on `T[]` get this shape
+        // instead of the generic ArrayPush/Pop variants), and for
+        // module-level calls (mysql.createConnection, redis.set, etc.).
+        //
+        // Phase H.1 handles the most common shape: `array.push_single`,
+        // `array.push`, `array.pop_back` on typed arrays. The object is
+        // a PropertyGet on a class instance (`this.items`) or a LocalGet.
+        // We chain a get + push + set so reallocations are reflected
+        // back in the source.
+        Expr::NativeMethodCall { module, method, object, args, .. } => {
+            lower_native_method_call(ctx, module, method, object.as_deref(), args)
+        }
+
         // -------- Calls --------
         Expr::Call { callee, args, .. } => lower_call(ctx, callee, args),
 
@@ -1359,6 +1375,106 @@ fn lower_string_self_append(
     Ok(new_box)
 }
 
+/// Lower a `NativeMethodCall { module, method, object, args }` (Phase H.1).
+///
+/// Currently supports:
+/// - `array.push_single` / `array.push` (single-arg push) on typed arrays
+/// - `array.pop_back` / `array.pop` on typed arrays
+///
+/// The receiver is either a `PropertyGet { object, property }` (the
+/// `this.items.push(x)` case) or a `LocalGet` (the `arr.push(x)` case).
+/// For both shapes we chain a get + push + write-back so reallocations
+/// are reflected in the source storage.
+fn lower_native_method_call(
+    ctx: &mut FnCtx<'_>,
+    module: &str,
+    method: &str,
+    object: Option<&Expr>,
+    args: &[Expr],
+) -> Result<String> {
+    let recv = object.ok_or_else(|| {
+        anyhow!(
+            "perry-codegen-llvm Phase H.1: NativeMethodCall {}::{} requires a receiver",
+            module,
+            method
+        )
+    })?;
+
+    if module == "array" && (method == "push_single" || method == "push") {
+        if args.len() != 1 {
+            bail!("array.push expects 1 arg, got {}", args.len());
+        }
+        let v = lower_expr(ctx, &args[0])?;
+        // Lower the receiver once. We'll use the resulting box for both
+        // the (Get → push → re-Set) cycle.
+        let arr_box = lower_expr(ctx, recv)?;
+        let blk = ctx.block();
+        let arr_handle = unbox_to_i64(blk, &arr_box);
+        let new_handle = blk.call(
+            I64,
+            "js_array_push_f64",
+            &[(I64, &arr_handle), (DOUBLE, &v)],
+        );
+        let new_box = nanbox_pointer_inline(blk, &new_handle);
+        // Write the (possibly-realloc'd) pointer back to the receiver.
+        // Two cases:
+        //   1. recv = LocalGet(id) → store back to the local's slot
+        //   2. recv = PropertyGet { obj, prop } → set obj.prop = new_box
+        // Anything else: skip the write-back (the array may dangle on
+        // realloc, but we don't crash at codegen).
+        match recv {
+            Expr::LocalGet(id) => {
+                if let Some(slot) = ctx.locals.get(id).cloned() {
+                    ctx.block().store(DOUBLE, &new_box, &slot);
+                } else if let Some(global_name) = ctx.module_globals.get(id).cloned() {
+                    let g_ref = format!("@{}", global_name);
+                    ctx.block().store(DOUBLE, &new_box, &g_ref);
+                }
+            }
+            Expr::PropertyGet { object: obj_expr, property } => {
+                let obj_box = lower_expr(ctx, obj_expr)?;
+                let key_idx = ctx.strings.intern(property);
+                let key_handle_global =
+                    format!("@{}", ctx.strings.entry(key_idx).handle_global);
+                let blk = ctx.block();
+                let obj_bits = blk.bitcast_double_to_i64(&obj_box);
+                let obj_handle = blk.and(I64, &obj_bits, POINTER_MASK_I64);
+                let key_box = blk.load(DOUBLE, &key_handle_global);
+                let key_bits = blk.bitcast_double_to_i64(&key_box);
+                let key_raw = blk.and(I64, &key_bits, POINTER_MASK_I64);
+                blk.call_void(
+                    "js_object_set_field_by_name",
+                    &[(I64, &obj_handle), (I64, &key_raw), (DOUBLE, &new_box)],
+                );
+            }
+            _ => {
+                // No write-back — the receiver is some computed value.
+                // The array may dangle on realloc, but the immediate
+                // call sees the right pointer.
+            }
+        }
+        // push returns the new length in JS spec; for now we return
+        // the new boxed pointer (statement context discards it).
+        return Ok(new_box);
+    }
+
+    if module == "array" && (method == "pop_back" || method == "pop") {
+        if !args.is_empty() {
+            bail!("array.pop expects 0 args, got {}", args.len());
+        }
+        let arr_box = lower_expr(ctx, recv)?;
+        let blk = ctx.block();
+        let arr_handle = unbox_to_i64(blk, &arr_box);
+        return Ok(blk.call(DOUBLE, "js_array_pop_f64", &[(I64, &arr_handle)]));
+    }
+
+    bail!(
+        "perry-codegen-llvm Phase H.1: NativeMethodCall '{}::{}' not yet supported",
+        module,
+        method
+    )
+}
+
 /// Helper: unbox a NaN-boxed string/object/array double into a raw i64
 /// pointer via inline `bitcast double → i64; and POINTER_MASK_I64`. Used by
 /// the method dispatch paths and the inline IndexGet/IndexSet/length code.
@@ -1712,11 +1828,64 @@ fn receiver_class_name(ctx: &FnCtx<'_>, e: &Expr) -> Option<String> {
 
 /// Statically determine whether an expression is an array. Used for
 /// dispatch on `arr.length` and `arr[i]`.
+///
+/// Recognizes:
+/// - literal arrays `[a, b, c]` and `Expr::ArraySpread`
+/// - LocalGet of an Array-typed local
+/// - **PropertyGet on a class instance where the field is Array-typed**
+///   (e.g. `this.items` when `Container.items: Item[]`)
+/// - **NativeMethodCall results where the runtime returns an array**
+///   (e.g. `arr.map(...)` — but those use the special Expr::ArrayMap
+///   variant which is already handled)
 fn is_array_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
+    matches!(static_type_of(ctx, e), Some(HirType::Array(_)))
+}
+
+/// Best-effort static type lookup for an expression. Returns the HIR
+/// type when it's cheap to determine (literals, locals, field accesses
+/// on known classes). Returns `None` when computing the type would
+/// require a fuller type-checker pass.
+fn static_type_of(ctx: &FnCtx<'_>, e: &Expr) -> Option<HirType> {
     match e {
-        Expr::Array(_) => true,
-        Expr::LocalGet(id) => matches!(ctx.local_types.get(id), Some(HirType::Array(_))),
-        _ => false,
+        Expr::Array(_) => Some(HirType::Array(Box::new(HirType::Any))),
+        Expr::String(_) => Some(HirType::String),
+        Expr::Number(_) | Expr::Integer(_) => Some(HirType::Number),
+        Expr::Bool(_) => Some(HirType::Boolean),
+        Expr::LocalGet(id) => ctx.local_types.get(id).cloned(),
+        Expr::PropertyGet { object, property } => {
+            // If the object is a known class instance, look up the field
+            // type from the class definition.
+            let receiver_class = receiver_class_name(ctx, object)?;
+            let class = ctx.classes.get(&receiver_class)?;
+            class
+                .fields
+                .iter()
+                .find(|f| f.name == *property)
+                .map(|f| f.ty.clone())
+                .or_else(|| {
+                    // Walk up the inheritance chain.
+                    let mut parent = class.extends_name.as_deref();
+                    while let Some(p) = parent {
+                        if let Some(pc) = ctx.classes.get(p) {
+                            if let Some(field) = pc.fields.iter().find(|f| f.name == *property) {
+                                return Some(field.ty.clone());
+                            }
+                            parent = pc.extends_name.as_deref();
+                        } else {
+                            break;
+                        }
+                    }
+                    None
+                })
+        }
+        Expr::This => {
+            let cls = ctx.class_stack.last()?.clone();
+            Some(HirType::Named(cls))
+        }
+        Expr::ArrayMap { .. } | Expr::ArrayFilter { .. } => {
+            Some(HirType::Array(Box::new(HirType::Any)))
+        }
+        _ => None,
     }
 }
 
