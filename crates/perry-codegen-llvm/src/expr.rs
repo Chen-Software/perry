@@ -138,6 +138,10 @@ pub(crate) struct FnCtx<'a> {
     /// unique non-zero id (anonymous objects use 0). Used by
     /// `lower_new` and the virtual method dispatch helper.
     pub class_ids: &'a std::collections::HashMap<String, u32>,
+    /// Per-function param signature: `(declared_param_count,
+    /// has_rest_param)`. Used by FuncRef call sites to know whether
+    /// to bundle trailing arguments into a rest array.
+    pub func_signatures: &'a std::collections::HashMap<u32, (usize, bool)>,
 }
 
 impl<'a> FnCtx<'a> {
@@ -3201,19 +3205,48 @@ fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> Result<Strin
     // User function call via FuncRef.
     if let Expr::FuncRef(fid) = callee {
         let Some(fname) = ctx.func_names.get(fid).cloned() else {
-            // Soft fallback: function id not in registry (closure-emitted
-            // function or re-export edge case). Lower args for side
-            // effects and return undefined.
             for a in args {
                 let _ = lower_expr(ctx, a)?;
             }
             return Ok(double_literal(0.0));
         };
 
-        // Lower all arguments first.
-        let mut lowered: Vec<String> = Vec::with_capacity(args.len());
-        for a in args {
-            lowered.push(lower_expr(ctx, a)?);
+        // Rest parameter handling: if the called function has a
+        // rest parameter, bundle all trailing args (those at and
+        // beyond the rest position) into an array literal and
+        // pass that as a single argument.
+        let sig = ctx.func_signatures.get(fid).copied();
+        let (declared_count, has_rest) = sig.unwrap_or((args.len(), false));
+        let mut lowered: Vec<String> = Vec::with_capacity(declared_count);
+        if has_rest {
+            // Rest is always the LAST declared param. Pass the
+            // first (declared_count - 1) args as-is, then bundle
+            // the rest into an array.
+            let fixed_count = declared_count.saturating_sub(1);
+            for a in args.iter().take(fixed_count) {
+                lowered.push(lower_expr(ctx, a)?);
+            }
+            // Materialize the rest array.
+            let rest_count = args.len().saturating_sub(fixed_count);
+            let cap = (rest_count as u32).to_string();
+            let mut current = ctx
+                .block()
+                .call(I64, "js_array_alloc", &[(I32, &cap)]);
+            for a in args.iter().skip(fixed_count) {
+                let v = lower_expr(ctx, a)?;
+                let blk = ctx.block();
+                current = blk.call(
+                    I64,
+                    "js_array_push_f64",
+                    &[(I64, &current), (DOUBLE, &v)],
+                );
+            }
+            let rest_box = nanbox_pointer_inline(ctx.block(), &current);
+            lowered.push(rest_box);
+        } else {
+            for a in args {
+                lowered.push(lower_expr(ctx, a)?);
+            }
         }
         let arg_slices: Vec<(crate::types::LlvmType, &str)> =
             lowered.iter().map(|s| (DOUBLE, s.as_str())).collect();
