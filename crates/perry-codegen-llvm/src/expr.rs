@@ -490,8 +490,20 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     return lower_string_coerce_concat(ctx, left, right, l_is_str, r_is_str);
                 }
             }
-            let l = lower_expr(ctx, left)?;
-            let r = lower_expr(ctx, right)?;
+            let l_raw = lower_expr(ctx, left)?;
+            let r_raw = lower_expr(ctx, right)?;
+            // Coerce non-numeric operands to numbers for arithmetic.
+            // JS: `true + true = 2`, `null + 1 = 1`, etc. Without
+            // this, fadd on NaN-tagged booleans propagates the NaN
+            // payload instead of computing 1.0 + 1.0 = 2.0.
+            let l_numeric = is_numeric_expr(ctx, left);
+            let r_numeric = is_numeric_expr(ctx, right);
+            let l = if l_numeric { l_raw } else {
+                ctx.block().call(DOUBLE, "js_number_coerce", &[(DOUBLE, &l_raw)])
+            };
+            let r = if r_numeric { r_raw } else {
+                ctx.block().call(DOUBLE, "js_number_coerce", &[(DOUBLE, &r_raw)])
+            };
             let blk = ctx.block();
             let v = match op {
                 BinaryOp::Add => blk.fadd(&l, &r),
