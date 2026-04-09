@@ -1060,9 +1060,16 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // StringHeader start with `length: u32` (`crates/perry-runtime/src
         // /array.rs` and `string.rs`). Same pattern: unbox pointer, load
         // u32 from offset 0, sitofp to double.
+        // `.length` — INLINE for array, string, and interface-typed
+        // receivers. Named types (interfaces, class instances) often
+        // wrap strings or arrays at runtime, where length is at offset 0.
         Expr::PropertyGet { object, property }
             if property == "length"
-                && (is_array_expr(ctx, object) || is_string_expr(ctx, object)) =>
+                && (is_array_expr(ctx, object) || is_string_expr(ctx, object)
+                    || matches!(
+                        crate::type_analysis::static_type_of(ctx, object),
+                        Some(HirType::Named(_))
+                    )) =>
         {
             let recv_box = lower_expr(ctx, object)?;
             let blk = ctx.block();
