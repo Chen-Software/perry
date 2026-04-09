@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.88
+**Current Version:** 0.4.89
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.89 (llvm-backend)
+- feat: LLVM backend Phase E.36–E.38 — boxed mutable captures for shared-state closures (`makeCounter` pattern), module-wide LocalId→Type map so closures see captured-var types (`items.length` inside a closure now finds the array fast path), generic class method dispatch via Generic base stripping, indexed string access (`arr[i].length`), string-vs-unknown `===` fallback via `js_string_equals` on both sides (catches `c === Color.Red` when Color is a `const` object). Array-mutating method calls (`push`/`pop`/`shift`/`unshift`/`splice`/`sort`/`reverse`/`fill`/`copyWithin`) inside closures count as writes on the receiver and trigger boxing. `ArrayPush` write-back goes through `js_box_set` when the array local is boxed. MATCH count 67 → 69 / 142 (test_edge_class_advanced, test_edge_enums_const, test_edge_higher_order, test_process_env, test_closure_capture_types all flipped). Commits 1d65e56, 2964723, eaf7129.
 
 ### v0.4.88 (llvm-backend)
 - feat: LLVM backend Phase E.32–E.35 — high-leverage parity sweep moved match count from 60 → 67/142. Bool-returning runtime calls (`regex.test`, `string.includes/startsWith/endsWith`, `fs.existsSync`, `Set.has`, etc.) wrapped in `i32_bool_to_nanbox` so `console.log(...)` prints `true`/`false` not `0`/`1`. FuncRef-as-value generates `__perry_wrap_<name>` thunks so `apply(add, 3, 4)` can route through `js_closure_call2`. Multi-arg `console.log` bundles into an array and calls `js_console_log_spread` (Node-style util.inspect). `console.table` dispatches to `js_console_table`. Switch on strings now uses `icmp_eq` on i64 bits (fcmp on NaN-tagged is always false). `process.env.X` wired to `js_getenv`. `readonly T` HIR type lowered to inner T (was `Any`). Generic class instances `new L<number>()` strip type args in `receiver_class_name` so `l.size()` finds the method. `is_string_expr` recognizes `arr[i]` on `Array<string>`, enum string members, and chained string-method calls. `Stmt::Try` lowers `try { throw V } catch(e) { ... }` as `bind e=V; run catch`. New string-comparison fast path via `js_string_compare` for `<`/`<=`/`>`/`>=`. Real `js_array_sort_default`/`reverse`/`flat`/`flatMap` dispatch (were stubs). `(255).toString(16)` via `js_jsvalue_to_string_radix`. `Math.random()` now real. Tests confirmed flipped to MATCH: `test_regex`, `test_try_catch`, `test_edge_classes`, `test_edge_class_advanced`, plus 3 others. (See commits 0cfb308, 80454c3, 2a7b51c, fcb5779.)
