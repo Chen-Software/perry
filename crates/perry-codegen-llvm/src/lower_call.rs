@@ -147,6 +147,36 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
                 blk.call(I64, "js_number_to_fixed", &[(DOUBLE, &v), (DOUBLE, &dec)]);
             return Ok(nanbox_string_inline(blk, &handle));
         }
+        // Number.prototype.toPrecision(digits)
+        if property == "toPrecision"
+            && args.len() == 1
+            && !is_string_expr(ctx, object)
+            && !is_array_expr(ctx, object)
+        {
+            let v = lower_expr(ctx, object)?;
+            let prec = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let handle =
+                blk.call(I64, "js_number_to_precision", &[(DOUBLE, &v), (DOUBLE, &prec)]);
+            return Ok(nanbox_string_inline(blk, &handle));
+        }
+        // Number.prototype.toExponential(decimals)
+        if property == "toExponential"
+            && args.len() <= 1
+            && !is_string_expr(ctx, object)
+            && !is_array_expr(ctx, object)
+        {
+            let v = lower_expr(ctx, object)?;
+            let dec = if args.is_empty() {
+                "0.0".to_string()
+            } else {
+                lower_expr(ctx, &args[0])?
+            };
+            let blk = ctx.block();
+            let handle =
+                blk.call(I64, "js_number_to_exponential", &[(DOUBLE, &v), (DOUBLE, &dec)]);
+            return Ok(nanbox_string_inline(blk, &handle));
+        }
         // Number.prototype.toString(radix) — special case where the
         // single arg is the radix (2..36). Routes through
         // js_jsvalue_to_string_radix so `(255).toString(16)` returns

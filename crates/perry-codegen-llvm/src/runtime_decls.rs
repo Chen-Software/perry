@@ -270,6 +270,8 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_path_extname", I64, &[I64]);
     module.declare_function("js_path_parse", I64, &[I64]);
     module.declare_function("js_json_parse", DOUBLE, &[I64]);
+    module.declare_function("js_number_to_precision", I64, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_number_to_exponential", I64, &[DOUBLE, DOUBLE]);
     module.declare_function("js_date_new", DOUBLE, &[]);
     module.declare_function("js_number_is_integer", DOUBLE, &[DOUBLE]);
     module.declare_function("js_object_is", DOUBLE, &[DOUBLE, DOUBLE]);
