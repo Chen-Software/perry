@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.96
+**Current Version:** 0.4.97
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.97 (llvm-backend)
+- feat: `for...of` iteration on Maps and Sets + `Map.forEach`/`Set.forEach` dispatch. LLVM backend now handles `Expr::MapEntries`/`MapKeys`/`MapValues`/`SetValues` (calling `js_map_entries`/`js_set_to_array` runtime functions). `lower_call.rs` intercepts `map.forEach(cb)`/`set.forEach(cb)` on Map/Set-typed receivers and routes to `js_map_foreach`/`js_set_foreach`. HIR `lower.rs` now wraps Set for...of iterables with `SetValues()` (was missing, only Map had `MapEntries` wrapping). Fixed runtime bug: `js_map_foreach`/`js_set_foreach` now mask NaN-box tag bits from callback pointer before calling `js_closure_call2`.
 
 ### v0.4.96 (llvm-backend)
 - feat: `Promise.then()` / `.catch()` / `.finally()` chaining — `Promise.resolve(10).then(x => x * 2).then(x => x + 5)` now produces 25. Added `is_promise_expr` type detection in `type_analysis.rs` and dispatch in `lower_call.rs` that routes through `js_promise_then(promise, on_fulfilled, on_rejected)`. `refine_type_from_init` recognizes promise-returning expressions so chained locals get typed as `Promise(Any)`. `test_edge_promises` now passes all 24 assertions.

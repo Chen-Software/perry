@@ -3443,7 +3443,8 @@ fn lower_stmt(
             let mut map_val_type: Option<Type> = None;
             let arr_expr = if let ast::Expr::Ident(ident) = &*for_of_stmt.right {
                 let name = ident.sym.to_string();
-                let map_type_args = ctx.lookup_local_type(&name)
+                let local_type = ctx.lookup_local_type(&name);
+                let map_type_args = local_type.as_ref()
                     .and_then(|ty| {
                         if let Type::Generic { base, type_args } = ty {
                             if base == "Map" { Some(type_args.clone()) } else { None }
@@ -3451,12 +3452,18 @@ fn lower_stmt(
                             None
                         }
                     });
+                let is_set = local_type.as_ref()
+                    .map(|ty| matches!(ty, Type::Generic { base, .. } if base == "Set"))
+                    .unwrap_or(false);
                 if let Some(type_args) = map_type_args {
                     if type_args.len() >= 2 {
                         map_key_type = Some(type_args[0].clone());
                         map_val_type = Some(type_args[1].clone());
                     }
                     Expr::MapEntries(Box::new(arr_expr))
+                } else if is_set {
+                    // Convert Set to Array for iteration: for (const x of mySet)
+                    Expr::SetValues(Box::new(arr_expr))
                 } else {
                     arr_expr
                 }

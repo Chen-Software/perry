@@ -234,6 +234,15 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_array_includes_f64", I32, &[I64, DOUBLE]);
     module.declare_function("js_map_size", I32, &[I64]);
     module.declare_function("js_map_clear", VOID, &[I64]);
+    // Map iteration: entries/keys/values all take a map pointer and return an array pointer.
+    module.declare_function("js_map_entries", I64, &[I64]);
+    module.declare_function("js_map_keys", I64, &[I64]);
+    module.declare_function("js_map_values", I64, &[I64]);
+    // Map/Set forEach: (collection_ptr, callback_nanboxed_f64) -> void
+    module.declare_function("js_map_foreach", VOID, &[I64, DOUBLE]);
+    module.declare_function("js_set_foreach", VOID, &[I64, DOUBLE]);
+    // Set to array conversion (for Set iteration via for...of)
+    module.declare_function("js_set_to_array", I64, &[I64]);
     // Splice is unusual: takes an out-pointer for the deleted array
     // and returns the modified-in-place input (the splice point may
     // realloc). Param order is (arr, start, delete_count, items_ptr,
