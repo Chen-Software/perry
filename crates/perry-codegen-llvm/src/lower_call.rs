@@ -276,7 +276,14 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
         // a method defined on at least one class in the registry,
         // emit a switch on class_id over all classes that have that
         // method.
-        let needs_dynamic_dispatch = match receiver_class_name(ctx, object) {
+        // Skip dynamic dispatch when the receiver is GlobalGet (e.g.
+        // `console.log`). GlobalGet is a module-level global object
+        // (console, Math, JSON, etc.), not a class instance. Without
+        // this guard, `console.log()` gets hijacked by the interface
+        // dispatch tower when a user class happens to have a method
+        // with the same name (like `SimpleLogger.log()`).
+        let is_global = matches!(object.as_ref(), Expr::GlobalGet(_));
+        let needs_dynamic_dispatch = !is_global && match receiver_class_name(ctx, object) {
             None => true,
             Some(name) => !ctx.classes.contains_key(&name),
         };

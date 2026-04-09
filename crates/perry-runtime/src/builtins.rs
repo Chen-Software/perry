@@ -568,29 +568,35 @@ fn format_jsvalue_for_json(value: f64, depth: usize) -> String {
                         format!("{}: {}", name_str, message_str)
                     }
                 } else {
-                    // Check if it's an object with keys
-                    let obj_ptr = ptr as *const crate::object::ObjectHeader;
-                    let keys_array = (*obj_ptr).keys_array;
+                    // Use GC type header to determine the actual type
+                    // instead of heuristic pointer checks which can
+                    // misinterpret arrays as objects or vice versa.
+                    let gc_header = (ptr as *const u8).sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+                    let gc_type = (*gc_header).obj_type;
 
-                    if !keys_array.is_null() {
-                        format_object_as_json(obj_ptr, depth)
-                    } else {
-                        // Check if array
+                    if gc_type == crate::gc::GC_TYPE_ARRAY {
                         let maybe_arr = ptr;
                         let length = (*maybe_arr).length as usize;
-                        let capacity = (*maybe_arr).capacity as usize;
-
-                        if capacity >= length && length < 1_000_000 && capacity < 10_000_000 {
-                            let data_ptr = (maybe_arr as *const u8).add(std::mem::size_of::<crate::array::ArrayHeader>()) as *const f64;
-                            let mut parts: Vec<String> = Vec::with_capacity(length);
-                            for i in 0..length {
-                                let elem_value = *data_ptr.add(i);
-                                parts.push(format_jsvalue_for_json(elem_value, depth + 1));
-                            }
-                            format!("[{}]", parts.join(", "))
+                        if length > 1_000_000 {
+                            return "[Array]".to_string();
+                        }
+                        let data_ptr = (maybe_arr as *const u8).add(std::mem::size_of::<crate::array::ArrayHeader>()) as *const f64;
+                        let mut parts: Vec<String> = Vec::with_capacity(length);
+                        for i in 0..length {
+                            let elem_value = *data_ptr.add(i);
+                            parts.push(format_jsvalue_for_json(elem_value, depth + 1));
+                        }
+                        format!("[{}]", parts.join(", "))
+                    } else if gc_type == crate::gc::GC_TYPE_OBJECT {
+                        let obj_ptr = ptr as *const crate::object::ObjectHeader;
+                        let keys_array = (*obj_ptr).keys_array;
+                        if !keys_array.is_null() && (keys_array as usize) > 0x10000 && ((keys_array as usize) >> 48) == 0 {
+                            format_object_as_json(obj_ptr, depth)
                         } else {
                             "[object Object]".to_string()
                         }
+                    } else {
+                        "[object Object]".to_string()
                     }
                 }
             }
