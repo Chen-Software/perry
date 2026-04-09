@@ -750,6 +750,57 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 );
                 return Ok(blk.bitcast_i64_to_double(&tagged));
             }
+            // "One side is statically string, other is unknown"
+            // fallback: `c === Color.Red` where Color is a const
+            // object. Neither js_eq (bit-compare, wrong for string
+            // content) nor fcmp (NaN-tagged, always false) works.
+            //
+            // Dispatch through js_string_equals after extracting
+            // both string pointers via js_get_string_pointer_unified.
+            // That helper returns null for non-string NaN-tagged
+            // values, which js_string_equals treats as "not equal"
+            // — the correct answer when the unknown side isn't a
+            // string at runtime.
+            let both_strings_check = is_string_expr(ctx, left) && is_string_expr(ctx, right);
+            let one_side_string = !both_strings_check
+                && ((is_string_expr(ctx, left) && !is_numeric_expr(ctx, right) && !is_bool_expr(ctx, right))
+                    || (is_string_expr(ctx, right) && !is_numeric_expr(ctx, left) && !is_bool_expr(ctx, left)));
+            if one_side_string
+                && matches!(op, CompareOp::Eq | CompareOp::LooseEq | CompareOp::Ne | CompareOp::LooseNe)
+            {
+                let l = lower_expr(ctx, left)?;
+                let r = lower_expr(ctx, right)?;
+                let blk = ctx.block();
+                let l_handle = blk.call(
+                    I64,
+                    "js_get_string_pointer_unified",
+                    &[(DOUBLE, &l)],
+                );
+                let r_handle = blk.call(
+                    I64,
+                    "js_get_string_pointer_unified",
+                    &[(DOUBLE, &r)],
+                );
+                let i32_eq = blk.call(
+                    I32,
+                    "js_string_equals",
+                    &[(I64, &l_handle), (I64, &r_handle)],
+                );
+                let bit = blk.icmp_ne(I32, &i32_eq, "0");
+                let bit_final = if matches!(op, CompareOp::Ne | CompareOp::LooseNe) {
+                    blk.xor(crate::types::I1, &bit, "true")
+                } else {
+                    bit
+                };
+                let tagged = blk.select(
+                    crate::types::I1,
+                    &bit_final,
+                    I64,
+                    crate::nanbox::TAG_TRUE_I64,
+                    crate::nanbox::TAG_FALSE_I64,
+                );
+                return Ok(blk.bitcast_i64_to_double(&tagged));
+            }
             // Generic equality fallback: when neither operand is
             // statically numeric, dispatch through js_eq which
             // handles strings, booleans, objects, null, undefined
