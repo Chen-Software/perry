@@ -1157,38 +1157,45 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 );
                 return Ok(val_double);
             }
-            // Dynamic key fallback: try object field set via
-            // js_get_string_pointer_unified. If the index is a string
-            // at runtime, the unified function extracts the
-            // StringHeader*. If not, it returns null and the set is
-            // a no-op. This handles `result[key] = val` where key
-            // comes from a closure call typed as Any.
-            {
-                let obj_box = lower_expr(ctx, object)?;
-                let key_box = lower_expr(ctx, index)?;
-                let val_double = lower_expr(ctx, value)?;
-                let blk = ctx.block();
-                let obj_handle = unbox_to_i64(blk, &obj_box);
-                let key_handle = blk.call(I64, "js_get_string_pointer_unified", &[(DOUBLE, &key_box)]);
-                blk.call_void(
-                    "js_object_set_field_by_name",
-                    &[(I64, &obj_handle), (I64, &key_handle), (DOUBLE, &val_double)],
-                );
-                return Ok(val_double);
-            }
-            // (Dead code below — kept as documentation of the old
-            // numeric-index array fallback.)
-            #[allow(unreachable_code)]
-            let arr_box = lower_expr(ctx, object)?;
-            let idx_double = lower_expr(ctx, index)?;
+            // Dynamic key fallback: if the index is a string at
+            // runtime, use object field set. Otherwise, use inline
+            // array-style write (same memory layout as IndexGet
+            // fallback: obj_ptr + 8 + idx*8).
+            let obj_box = lower_expr(ctx, object)?;
+            let key_box = lower_expr(ctx, index)?;
             let val_double = lower_expr(ctx, value)?;
             let blk = ctx.block();
-            let arr_handle = unbox_to_i64(blk, &arr_box);
-            let idx_i32 = blk.fptosi(DOUBLE, &idx_double, I32);
-            blk.call_void(
-                "js_array_set_f64",
-                &[(I64, &arr_handle), (I32, &idx_i32), (DOUBLE, &val_double)],
+            let obj_handle = unbox_to_i64(blk, &obj_box);
+            let key_handle = blk.call(I64, "js_get_string_pointer_unified", &[(DOUBLE, &key_box)]);
+            let is_str = blk.icmp_ne(I64, &key_handle, "0");
+            let str_set_idx = ctx.new_block("iset.str");
+            let num_set_idx = ctx.new_block("iset.num");
+            let set_merge_idx = ctx.new_block("iset.merge");
+            let str_lbl = ctx.block_label(str_set_idx);
+            let num_lbl = ctx.block_label(num_set_idx);
+            let merge_lbl = ctx.block_label(set_merge_idx);
+            ctx.block().cond_br(&is_str, &str_lbl, &num_lbl);
+            // String key → object field set.
+            ctx.current_block = str_set_idx;
+            ctx.block().call_void(
+                "js_object_set_field_by_name",
+                &[(I64, &obj_handle), (I64, &key_handle), (DOUBLE, &val_double)],
             );
+            ctx.block().br(&merge_lbl);
+            // Numeric key → inline array-style write (obj + 8 + idx*8).
+            ctx.current_block = num_set_idx;
+            {
+                let blk = ctx.block();
+                let idx_i32 = blk.fptosi(DOUBLE, &key_box, I32);
+                let idx_i64 = blk.zext(I32, &idx_i32, I64);
+                let byte_offset = blk.shl(I64, &idx_i64, "3");
+                let with_header = blk.add(I64, &byte_offset, "8");
+                let element_addr = blk.add(I64, &obj_handle, &with_header);
+                let element_ptr = blk.inttoptr(I64, &element_addr);
+                blk.store(DOUBLE, &val_double, &element_ptr);
+            }
+            ctx.block().br(&merge_lbl);
+            ctx.current_block = set_merge_idx;
             Ok(val_double)
         }
 
