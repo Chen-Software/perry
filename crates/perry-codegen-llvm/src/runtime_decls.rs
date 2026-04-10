@@ -171,6 +171,10 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_object_has_property", DOUBLE, &[DOUBLE, DOUBLE]);
     module.declare_function("js_fs_write_file_sync", I32, &[DOUBLE, DOUBLE]);
     module.declare_function("js_fs_exists_sync", I32, &[DOUBLE]);
+    // fs.readFileSync(path) with no encoding — returns a raw *mut BufferHeader
+    // that the runtime's format_jsvalue path recognizes via BUFFER_REGISTRY
+    // and prints as `<Buffer xx xx ...>`.
+    module.declare_function("js_fs_read_file_binary", I64, &[DOUBLE]);
     module.declare_function("js_number_coerce", DOUBLE, &[DOUBLE]);
     module.declare_function("js_set_add", I64, &[I64, DOUBLE]);
     module.declare_function("js_set_has", I32, &[I64, DOUBLE]);

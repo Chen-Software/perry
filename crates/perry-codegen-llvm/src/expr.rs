@@ -2248,10 +2248,24 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(ctx.block().call(DOUBLE, &fn_name, &arg_slices))
         }
 
-        // -------- fs.readFileBuffer(path) stub --------
-        // Returns 0.0 as a buffer placeholder. Real impl would call
-        // js_fs_read_file_binary.
-        Expr::FsReadFileBinary(_path) => Ok(double_literal(0.0)),
+        // -------- fs.readFileBuffer(path) / fs.readFileSync(path) -> Buffer --------
+        // Calls js_fs_read_file_binary(path: f64) -> i64 (raw *BufferHeader),
+        // then bitcasts the raw pointer directly to f64 WITHOUT NaN-boxing
+        // (matching the Cranelift backend). The runtime's
+        // `js_console_log_dynamic` → `format_jsvalue` path detects raw buffer
+        // pointers via the thread-local BUFFER_REGISTRY and formats them as
+        // `<Buffer xx xx ...>`. Buffer methods (`.length`, `.toString`, etc.)
+        // also flow through the raw-pointer fallback.
+        Expr::FsReadFileBinary(path) => {
+            let path_box = lower_expr(ctx, path)?;
+            let blk = ctx.block();
+            let buf_handle = blk.call(
+                I64,
+                "js_fs_read_file_binary",
+                &[(DOUBLE, &path_box)],
+            );
+            Ok(blk.bitcast_i64_to_double(&buf_handle))
+        }
 
         // -------- instanceof --------
         // Look up the target class's id and call js_instanceof. The

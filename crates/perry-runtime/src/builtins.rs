@@ -78,7 +78,19 @@ pub extern "C" fn js_console_log_dynamic(value: f64) {
     } else if jsval.is_int32() {
         println!("{}", jsval.as_int32());
     } else {
-        // Must be a regular number
+        // Must be a regular number — but first check for a raw (non-NaN-boxed)
+        // heap pointer. The LLVM / Cranelift backends return Buffer pointers as
+        // raw `i64` bitcast to `f64` (no POINTER_TAG), so `is_pointer()` is
+        // false yet the bit pattern is a valid buffer address. Detect by
+        // looking up the raw bits in the thread-local BUFFER_REGISTRY.
+        let raw_bits = value.to_bits();
+        if raw_bits > 0x1000
+            && (raw_bits >> 48) == 0
+            && crate::buffer::is_registered_buffer(raw_bits as usize)
+        {
+            println!("{}", format_jsvalue(value, 0));
+            return;
+        }
         let n = value;
         if n.is_nan() {
             println!("NaN");
@@ -303,6 +315,14 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
             let ptr: *const crate::array::ArrayHeader = jsval.as_pointer();
             if ptr.is_null() {
                 "null".to_string()
+            } else if crate::buffer::is_registered_buffer(ptr as usize) {
+                // Buffer/Uint8Array — Node prints as `<Buffer xx xx xx ...>`
+                // (lowercase hex bytes separated by single spaces). Buffer
+                // headers don't carry a GC header, so this check must happen
+                // BEFORE the GC_HEADER_SIZE pointer arithmetic below (which
+                // would read garbage one word before the BufferHeader).
+                let buf_ptr = ptr as *const crate::buffer::BufferHeader;
+                format_buffer_value(buf_ptr)
             } else {
                 // Use GC header to determine the actual type of the object.
                 // The GC header is located GC_HEADER_SIZE bytes before the user pointer.
@@ -394,7 +414,20 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
         } else if jsval.is_int32() {
             jsval.as_int32().to_string()
         } else {
-            // Regular number
+            // Regular number — but first check for raw (non-NaN-boxed) heap
+            // pointers. The Cranelift / LLVM backends sometimes return a raw
+            // i64 buffer pointer bitcast directly to f64 (no POINTER_TAG), so
+            // `jsval.is_pointer()` is false yet the bit pattern is a valid
+            // buffer address. Detect this case by looking up the raw bits
+            // in the thread-local BUFFER_REGISTRY.
+            let raw_bits = value.to_bits();
+            if raw_bits > 0x1000
+                && (raw_bits >> 48) == 0
+                && crate::buffer::is_registered_buffer(raw_bits as usize)
+            {
+                let buf_ptr = raw_bits as *const crate::buffer::BufferHeader;
+                return format_buffer_value(buf_ptr);
+            }
             let n = value;
             if n.is_nan() {
                 "NaN".to_string()
@@ -409,6 +442,32 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
             }
         }
     }
+}
+
+/// Format a Node.js Buffer as `<Buffer xx yy zz ...>` (lowercase hex bytes
+/// separated by single spaces). Mirrors Node's `util.inspect` output for
+/// Buffer / Uint8Array. Node truncates after 50 bytes with `... N more bytes`
+/// but we emit the whole buffer for now (tests use small buffers).
+unsafe fn format_buffer_value(buf_ptr: *const crate::buffer::BufferHeader) -> String {
+    if buf_ptr.is_null() {
+        return "<Buffer >".to_string();
+    }
+    let len = (*buf_ptr).length as usize;
+    let data = (buf_ptr as *const u8).add(std::mem::size_of::<crate::buffer::BufferHeader>());
+    let bytes = std::slice::from_raw_parts(data, len);
+    // Node caps at 50 bytes then shows "... N more bytes"
+    let display_len = len.min(50);
+    let mut out = String::with_capacity(9 + display_len * 3);
+    out.push_str("<Buffer");
+    for b in &bytes[..display_len] {
+        out.push(' ');
+        out.push_str(&format!("{:02x}", b));
+    }
+    if len > display_len {
+        out.push_str(&format!(" ... {} more bytes", len - display_len));
+    }
+    out.push('>');
+    out
 }
 
 /// Format an object as JSON-like string

@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.106
+**Current Version:** 0.4.107
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.107 (llvm-backend)
+- feat: `fs.readFileSync(path)` without encoding now returns a real `Buffer` on the LLVM backend — wired `Expr::FsReadFileBinary` to `js_fs_read_file_binary` (was stubbed to `0.0`), bitcasting the raw `*mut BufferHeader` to double so the runtime's raw-pointer fallback path sees it. Added runtime-side `format_buffer_value` helper in `builtins.rs` and raw-pointer Buffer detection in both `format_jsvalue` and `js_console_log_dynamic` via `BUFFER_REGISTRY`, so `console.log(buf)` now prints `<Buffer xx xx ...>` (Node-style, lowercase hex, space-separated, capped at 50 bytes). `test_cli_simulation` flipped DIFF → MATCH; sweep MATCH 84 → 86.
 
 ### v0.4.106 (llvm-backend)
 - fix: `"foo".split(/regex/)` segfault (LLVM backend) — the codegen always routes string.split through `js_string_split` regardless of delimiter type, and the runtime was interpreting the regex header as a `StringHeader`. Added `REGEX_POINTERS` thread-local in `regex.rs` that records every `RegExpHeader` allocation, plus an `is_regex_pointer()` check in `js_string_split` that delegates to `js_string_split_regex` for matched pointers. `test_edge_json_regex` flipped from LLVM_CRASH (SIGBUS) to DIFF; sweep CRASH count 7 → 6, MATCH 84 → 85.
