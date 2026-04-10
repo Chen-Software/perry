@@ -1287,6 +1287,18 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
                         let v = crate::error::js_error_get_cause(err_ptr);
                         return JSValue::from_bits(v.to_bits());
                     }
+                    b"errors" => {
+                        // AggregateError.errors — return the errors array
+                        // NaN-boxed with POINTER_TAG so callers can index
+                        // into it. (The LLVM backend also has a direct
+                        // `js_error_get_errors` fast path in expr.rs but
+                        // this covers dynamic dispatch on caught errors.)
+                        let errs = crate::error::js_error_get_errors(err_ptr);
+                        if errs.is_null() {
+                            return JSValue::undefined();
+                        }
+                        return JSValue::from_bits(crate::js_nanbox_pointer(errs as i64).to_bits());
+                    }
                     _ => return JSValue::undefined(),
                 }
             }

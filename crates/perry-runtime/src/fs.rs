@@ -388,3 +388,228 @@ pub extern "C" fn js_fs_rm_recursive(path_value: f64) -> i32 {
         }
     }
 }
+
+/// Helper: decode a NaN-boxed string path into a Rust &str slice.
+unsafe fn decode_path_value<'a>(path_value: f64) -> Option<&'a str> {
+    let path_ptr = extract_string_ptr(path_value);
+    if path_ptr.is_null() {
+        return None;
+    }
+    let len = (*path_ptr).length as usize;
+    let data_ptr = (path_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+    let path_bytes = std::slice::from_raw_parts(data_ptr, len);
+    std::str::from_utf8(path_bytes).ok()
+}
+
+// ---------- Stats object ----------
+//
+// `fs.statSync(path)` returns a Node-style Stats object supporting
+// `isFile()`, `isDirectory()`, `isSymbolicLink()` methods and a numeric
+// `size` property. We implement it as a plain ObjectHeader populated
+// with three closure fields (one per predicate) and a size field. The
+// closures capture a pre-computed boolean result so calling them just
+// returns the stored value via `js_closure_get_capture_f64`.
+
+extern "C" fn stats_closure_return_captured(closure: *const crate::closure::ClosureHeader) -> f64 {
+    // Slot 0 holds the pre-computed NaN-boxed boolean.
+    unsafe { crate::closure::js_closure_get_capture_f64(closure, 0) }
+}
+
+unsafe fn make_stats_predicate(value: bool) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+    let tag = if value { TAG_TRUE } else { TAG_FALSE };
+    let closure = crate::closure::js_closure_alloc(
+        stats_closure_return_captured as *const u8,
+        1,
+    );
+    crate::closure::js_closure_set_capture_f64(closure, 0, f64::from_bits(tag));
+    // NaN-box the closure pointer with POINTER_TAG so the dynamic
+    // dispatch path in `js_native_call_method` can unwrap it.
+    const POINTER_TAG: u64 = 0x7FFD_0000_0000_0000;
+    f64::from_bits(POINTER_TAG | (closure as u64 & 0x0000_FFFF_FFFF_FFFF))
+}
+
+unsafe fn build_stats_object(is_file: bool, is_dir: bool, is_symlink: bool, size: u64) -> f64 {
+    // 5 field slots: isFile, isDirectory, isSymbolicLink, size, mtimeMs.
+    let obj = crate::object::js_object_alloc(0, 5);
+
+    // Set fields via the by-name setter which builds up the key array.
+    let set = |name: &str, v: f64| {
+        let key = crate::string::js_string_from_bytes(name.as_ptr(), name.len() as u32);
+        crate::object::js_object_set_field_by_name(obj, key, v);
+    };
+    set("isFile", make_stats_predicate(is_file));
+    set("isDirectory", make_stats_predicate(is_dir));
+    set("isSymbolicLink", make_stats_predicate(is_symlink));
+    // size stored as a raw f64 number.
+    set("size", size as f64);
+    set("mtimeMs", 0.0_f64);
+
+    const POINTER_TAG: u64 = 0x7FFD_0000_0000_0000;
+    f64::from_bits(POINTER_TAG | (obj as u64 & 0x0000_FFFF_FFFF_FFFF))
+}
+
+/// `fs.statSync(path)` — returns a Stats-like object with `isFile()`,
+/// `isDirectory()`, `isSymbolicLink()` predicate methods and a `size`
+/// numeric field. On error, returns an object where all predicates are
+/// false and size is 0 (Node throws on ENOENT, but Perry's LLVM backend
+/// doesn't have a catch-unwind path for runtime panics — graceful
+/// degradation is safer here).
+#[no_mangle]
+pub extern "C" fn js_fs_stat_sync(path_value: f64) -> f64 {
+    unsafe {
+        let path_str = match decode_path_value(path_value) {
+            Some(s) => s,
+            None => return build_stats_object(false, false, false, 0),
+        };
+        match fs::metadata(path_str) {
+            Ok(meta) => {
+                let is_file = meta.is_file();
+                let is_dir = meta.is_dir();
+                let is_symlink = meta.file_type().is_symlink();
+                let size = meta.len();
+                build_stats_object(is_file, is_dir, is_symlink, size)
+            }
+            Err(_) => build_stats_object(false, false, false, 0),
+        }
+    }
+}
+
+/// `fs.renameSync(from, to)` — returns 1 on success, 0 on failure.
+#[no_mangle]
+pub extern "C" fn js_fs_rename_sync(from_value: f64, to_value: f64) -> i32 {
+    unsafe {
+        let from = match decode_path_value(from_value) {
+            Some(s) => s,
+            None => return 0,
+        };
+        let to = match decode_path_value(to_value) {
+            Some(s) => s,
+            None => return 0,
+        };
+        match fs::rename(from, to) {
+            Ok(_) => 1,
+            Err(_) => 0,
+        }
+    }
+}
+
+/// `fs.copyFileSync(from, to)` — returns 1 on success, 0 on failure.
+#[no_mangle]
+pub extern "C" fn js_fs_copy_file_sync(from_value: f64, to_value: f64) -> i32 {
+    unsafe {
+        let from = match decode_path_value(from_value) {
+            Some(s) => s,
+            None => return 0,
+        };
+        let to = match decode_path_value(to_value) {
+            Some(s) => s,
+            None => return 0,
+        };
+        match fs::copy(from, to) {
+            Ok(_) => 1,
+            Err(_) => 0,
+        }
+    }
+}
+
+/// `fs.accessSync(path)` — returns 1 if accessible, 0 otherwise.
+/// Unlike Node's `accessSync` which throws on failure, this returns a
+/// status code; the LLVM codegen wraps the result so `try/catch` works.
+#[no_mangle]
+pub extern "C" fn js_fs_access_sync(path_value: f64) -> i32 {
+    unsafe {
+        let path_str = match decode_path_value(path_value) {
+            Some(s) => s,
+            None => return 0,
+        };
+        if Path::new(path_str).exists() { 1 } else { 0 }
+    }
+}
+
+/// `fs.realpathSync(path)` — returns raw *mut StringHeader i64.
+/// Falls back to the input path on error (Node would throw).
+#[no_mangle]
+pub extern "C" fn js_fs_realpath_sync(path_value: f64) -> i64 {
+    unsafe {
+        let path_str = match decode_path_value(path_value) {
+            Some(s) => s,
+            None => return js_string_from_bytes(b"".as_ptr(), 0) as i64,
+        };
+        match fs::canonicalize(path_str) {
+            Ok(p) => {
+                let s = p.to_string_lossy();
+                let bytes = s.as_bytes();
+                js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32) as i64
+            }
+            Err(_) => {
+                let bytes = path_str.as_bytes();
+                js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32) as i64
+            }
+        }
+    }
+}
+
+/// `fs.mkdtempSync(prefix)` — creates a unique temp directory whose
+/// name starts with `prefix`. Returns raw *mut StringHeader i64 with
+/// the created path.
+#[no_mangle]
+pub extern "C" fn js_fs_mkdtemp_sync(prefix_value: f64) -> i64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    unsafe {
+        let prefix_str = match decode_path_value(prefix_value) {
+            Some(s) => s.to_string(),
+            None => return js_string_from_bytes(b"".as_ptr(), 0) as i64,
+        };
+        // Try a handful of candidate suffixes until one succeeds.
+        for _ in 0..16 {
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let candidate = format!("{}{:x}{:x}", prefix_str, ts, n);
+            match fs::create_dir(&candidate) {
+                Ok(_) => {
+                    let bytes = candidate.as_bytes();
+                    return js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32) as i64;
+                }
+                Err(_) => continue,
+            }
+        }
+        js_string_from_bytes(b"".as_ptr(), 0) as i64
+    }
+}
+
+/// `fs.rmdirSync(path)` — removes an empty directory. Returns i32 status.
+#[no_mangle]
+pub extern "C" fn js_fs_rmdir_sync(path_value: f64) -> i32 {
+    unsafe {
+        let path_str = match decode_path_value(path_value) {
+            Some(s) => s,
+            None => return 0,
+        };
+        match fs::remove_dir(path_str) {
+            Ok(_) => 1,
+            Err(_) => 0,
+        }
+    }
+}
+
+/// Stats predicate shortcuts — not currently called from codegen, but
+/// available so future fast paths can compute `stat.isFile()` without
+/// going through the closure dispatch chain.
+#[no_mangle]
+pub extern "C" fn js_fs_stats_is_file(_stats: f64) -> f64 {
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+    f64::from_bits(TAG_FALSE)
+}
+
+#[no_mangle]
+pub extern "C" fn js_fs_stats_is_directory(_stats: f64) -> f64 {
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+    f64::from_bits(TAG_FALSE)
+}

@@ -1114,6 +1114,45 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             ))
         }
 
+        // Phase H err: `agg.errors.length` — receiver is
+        // PropertyGet(.., "errors") which resolves to a NaN-boxed
+        // ArrayHeader pointer (via the dedicated "errors" arm below).
+        // Inline-read length at offset 0 just like any other array.
+        // Placed ahead of the generic length fast path so we don't
+        // need static type analysis to recognize the shape.
+        Expr::PropertyGet { object, property }
+            if property == "length"
+                && matches!(
+                    object.as_ref(),
+                    Expr::PropertyGet { property: p, .. } if p == "errors"
+                ) =>
+        {
+            let recv_box = lower_expr(ctx, object)?;
+            let blk = ctx.block();
+            let recv_bits = blk.bitcast_double_to_i64(&recv_box);
+            let recv_handle = blk.and(I64, &recv_bits, POINTER_MASK_I64);
+            let len_ptr = blk.inttoptr(I64, &recv_handle);
+            let len_i32 = blk.load(I32, &len_ptr);
+            Ok(blk.sitofp(I32, &len_i32, DOUBLE))
+        }
+
+        // Phase H err: `agg.errors` — AggregateError.errors field.
+        // Routes through js_error_get_errors which pulls the raw
+        // ArrayHeader pointer from the ErrorHeader struct. Returns a
+        // NaN-boxed pointer so downstream length / index operations
+        // see an array.
+        Expr::PropertyGet { object, property } if property == "errors" => {
+            let recv_box = lower_expr(ctx, object)?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let arr_handle = blk.call(
+                I64,
+                "js_error_get_errors",
+                &[(I64, &recv_handle)],
+            );
+            Ok(nanbox_pointer_inline(blk, &arr_handle))
+        }
+
         // `arr.length` / `str.length` — INLINE. Both ArrayHeader and
         // StringHeader start with `length: u32` (`crates/perry-runtime/src
         // /array.rs` and `string.rs`). Same pattern: unbox pointer, load
@@ -2959,7 +2998,11 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let result = blk.call(I64, "js_path_format", &[(DOUBLE, &obj_box)]);
             Ok(nanbox_string_inline(blk, &result))
         }
-        Expr::ProcessVersion => Ok(double_literal(0.0)),
+        Expr::ProcessVersion => {
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_process_version", &[]);
+            Ok(nanbox_string_inline(blk, &handle))
+        }
         Expr::ObjectHasOwn(obj, key) => {
             let obj_box = lower_expr(ctx, obj)?;
             let key_box = lower_expr(ctx, key)?;
@@ -2990,9 +3033,15 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(blk.bitcast_i64_to_double(&tagged))
         }
         Expr::FsMkdirSync(p) => {
-            // Stub: lower for side effects, return undefined.
-            let _ = lower_expr(ctx, p)?;
-            Ok(double_literal(0.0))
+            // Phase H fs: call js_fs_mkdir_sync. Node's fs.mkdirSync
+            // is void so we discard the i32 status.
+            let path_box = lower_expr(ctx, p)?;
+            let _ = ctx.block().call(
+                I32,
+                "js_fs_mkdir_sync",
+                &[(DOUBLE, &path_box)],
+            );
+            Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
         }
         Expr::IteratorToArray(o) => {
             // Walk the iterator protocol: call .next() in a loop, collect .value entries
@@ -3152,8 +3201,10 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(i32_bool_to_nanbox(blk, &i32_res))
         }
 
-        // -------- ProcessHrtimeBigint stub --------
-        Expr::ProcessHrtimeBigint => Ok(double_literal(0.0)),
+        // -------- process.hrtime.bigint() — returns already NaN-boxed BigInt --------
+        Expr::ProcessHrtimeBigint => {
+            Ok(ctx.block().call(DOUBLE, "js_process_hrtime_bigint", &[]))
+        }
 
         // -------- RegExpExecIndex — reads thread-local from the last exec() call --------
         Expr::RegExpExecIndex => {
@@ -3263,12 +3314,20 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(ctx.block().call(DOUBLE, "js_date_value_of", &[(DOUBLE, &v)]))
         }
 
-        // -------- ProcessOn (event handler registration) stub --------
-        Expr::ProcessOn { handler, .. } => {
-            // Lower the handler for side effects (it might be a closure
-            // we need to collect), discard the registration.
-            let _ = lower_expr(ctx, handler)?;
-            Ok(double_literal(0.0))
+        // -------- process.on(event, handler) — register a handler so its
+        // closure is rooted. We don't fire on real exit (matching Cranelift
+        // behavior) but the runtime records the handler pointer.
+        Expr::ProcessOn { event, handler } => {
+            let event_box = lower_expr(ctx, event)?;
+            let handler_box = lower_expr(ctx, handler)?;
+            let blk = ctx.block();
+            let event_handle = unbox_to_i64(blk, &event_box);
+            let handler_handle = unbox_to_i64(blk, &handler_box);
+            blk.call_void(
+                "js_process_on",
+                &[(I64, &event_handle), (I64, &handler_handle)],
+            );
+            Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
         }
 
         // -------- performance.now() — use date.now() as a stand-in --------
@@ -3381,8 +3440,11 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(nanbox_string_inline(blk, &s_handle))
         }
         Expr::ProcessChdir(p) => {
-            let _ = lower_expr(ctx, p)?;
-            Ok(double_literal(0.0))
+            let p_box = lower_expr(ctx, p)?;
+            let blk = ctx.block();
+            let p_handle = unbox_to_i64(blk, &p_box);
+            blk.call_void("js_process_chdir", &[(I64, &p_handle)]);
+            Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
         }
         Expr::ObjectGetPrototypeOf(o) => lower_expr(ctx, o),
         Expr::MathExpm1(o) => {
@@ -3535,8 +3597,14 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             );
             Ok(v)
         }
-        Expr::ProcessStdin | Expr::ProcessStdout | Expr::ProcessStderr => {
-            Ok(double_literal(0.0))
+        Expr::ProcessStdin => {
+            Ok(ctx.block().call(DOUBLE, "js_process_stdin", &[]))
+        }
+        Expr::ProcessStdout => {
+            Ok(ctx.block().call(DOUBLE, "js_process_stdout", &[]))
+        }
+        Expr::ProcessStderr => {
+            Ok(ctx.block().call(DOUBLE, "js_process_stderr", &[]))
         }
         Expr::MathAsinh(o) => {
             let v = lower_expr(ctx, o)?;
@@ -3561,11 +3629,14 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(ctx.block().call(DOUBLE, "js_date_set_utc_hours", &[(DOUBLE, &d), (DOUBLE, &v)]))
         }
         Expr::ProcessKill { pid, signal } => {
-            let _ = lower_expr(ctx, pid)?;
-            if let Some(s) = signal {
-                let _ = lower_expr(ctx, s)?;
-            }
-            Ok(double_literal(0.0))
+            let pid_d = lower_expr(ctx, pid)?;
+            let sig_d = match signal {
+                Some(s) => lower_expr(ctx, s)?,
+                None => double_literal(0.0),
+            };
+            let blk = ctx.block();
+            blk.call_void("js_process_kill", &[(DOUBLE, &pid_d), (DOUBLE, &sig_d)]);
+            Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
         }
         Expr::TextEncoderNew => {
             // Stateless UTF-8 encoder — return a non-null sentinel pointer.
@@ -3601,10 +3672,35 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let str_ptr = blk.call(I64, "js_text_decoder_decode_llvm", &[(DOUBLE, &v)]);
             Ok(nanbox_string_inline(blk, &str_ptr))
         }
-        Expr::OsArch | Expr::OsType | Expr::OsPlatform | Expr::OsRelease | Expr::OsHostname => {
-            Ok(double_literal(0.0))
+        Expr::OsArch => {
+            let blk = ctx.block();
+            let h = blk.call(I64, "js_os_arch", &[]);
+            Ok(nanbox_string_inline(blk, &h))
         }
-        Expr::ProcessMemoryUsage => Ok(double_literal(0.0)),
+        Expr::OsType => {
+            let blk = ctx.block();
+            let h = blk.call(I64, "js_os_type", &[]);
+            Ok(nanbox_string_inline(blk, &h))
+        }
+        Expr::OsPlatform => {
+            let blk = ctx.block();
+            let h = blk.call(I64, "js_os_platform", &[]);
+            Ok(nanbox_string_inline(blk, &h))
+        }
+        Expr::OsRelease => {
+            let blk = ctx.block();
+            let h = blk.call(I64, "js_os_release", &[]);
+            Ok(nanbox_string_inline(blk, &h))
+        }
+        Expr::OsHostname => {
+            let blk = ctx.block();
+            let h = blk.call(I64, "js_os_hostname", &[]);
+            Ok(nanbox_string_inline(blk, &h))
+        }
+        Expr::ProcessMemoryUsage => {
+            // Runtime returns an already NaN-boxed pointer (f64).
+            Ok(ctx.block().call(DOUBLE, "js_process_memory_usage", &[]))
+        }
         Expr::EncodeURI(o) => {
             let v = lower_expr(ctx, o)?;
             let blk = ctx.block();
@@ -3893,9 +3989,17 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(ctx.block().call(DOUBLE, "js_math_clz32", &[(DOUBLE, &v)]))
         }
         Expr::FsReadFileSync(p) => {
-            let _ = lower_expr(ctx, p)?;
-            // Return an empty-string-equivalent sentinel.
-            Ok(double_literal(0.0))
+            // Phase H fs: call js_fs_read_file_sync which returns a
+            // raw *mut StringHeader i64. NaN-box with STRING_TAG so
+            // downstream `.length` / `===` paths can use it as a string.
+            let path_box = lower_expr(ctx, p)?;
+            let blk = ctx.block();
+            let str_handle = blk.call(
+                I64,
+                "js_fs_read_file_sync",
+                &[(DOUBLE, &path_box)],
+            );
+            Ok(nanbox_string_inline(blk, &str_handle))
         }
         Expr::FinalizationRegistryNew(callback) => {
             // `new FinalizationRegistry(cb)` — allocates a wrapper object
@@ -3979,14 +4083,34 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let s_handle = unbox_to_i64(blk, &s_box);
             Ok(blk.call(DOUBLE, "js_date_parse", &[(I64, &s_handle)]))
         }
-        Expr::ProcessVersions => Ok(double_literal(0.0)),
-        Expr::ProcessUptime | Expr::ProcessCwd => Ok(double_literal(0.0)),
-        Expr::OsEOL => Ok(double_literal(0.0)),
+        Expr::ProcessVersions => {
+            // Runtime returns already NaN-boxed pointer.
+            Ok(ctx.block().call(DOUBLE, "js_process_versions", &[]))
+        }
+        Expr::ProcessUptime => {
+            Ok(ctx.block().call(DOUBLE, "js_process_uptime", &[]))
+        }
+        Expr::ProcessCwd => {
+            let blk = ctx.block();
+            let h = blk.call(I64, "js_process_cwd", &[]);
+            Ok(nanbox_string_inline(blk, &h))
+        }
+        Expr::OsEOL => {
+            let blk = ctx.block();
+            let h = blk.call(I64, "js_os_eol", &[]);
+            Ok(nanbox_string_inline(blk, &h))
+        }
         Expr::BufferFrom { data, .. } => lower_expr(ctx, data),
         Expr::BufferAlloc { .. } => Ok(double_literal(0.0)),
 
-        // -------- ProcessPid / ProcessPpid stubs --------
-        Expr::ProcessPid | Expr::ProcessPpid => Ok(double_literal(0.0)),
+        // -------- process.pid / process.ppid — raw f64 number --------
+        Expr::ProcessPid => Ok(ctx.block().call(DOUBLE, "js_process_pid", &[])),
+        Expr::ProcessPpid => Ok(ctx.block().call(DOUBLE, "js_process_ppid", &[])),
+        Expr::ProcessArgv => {
+            let blk = ctx.block();
+            let h = blk.call(I64, "js_process_argv", &[]);
+            Ok(nanbox_pointer_inline(blk, &h))
+        }
 
         // -------- structuredClone(v) — real deep copy --------
         Expr::StructuredClone(operand) => {
