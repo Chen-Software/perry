@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.121
+**Current Version:** 0.4.122
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.122 (llvm-backend)
+- feat: `Reflect.*` + basic `Proxy` support — `test_gap_proxy_reflect` DIFF (38) → MATCH. New `perry-runtime/src/proxy.rs` with a handle-based proxy registry + `js_proxy_{new,get,set,has,delete,apply,construct,revoke}` and `js_reflect_{get,set,has,delete,own_keys,apply,define_property}` runtime entry points. New HIR `Expr::Proxy*`/`Expr::Reflect*` variants and LLVM codegen dispatch. `lower.rs` pre-scans `new Proxy(Class, handler)` to track the target class, then folds `new p(args)` to `Sequence[ProxyConstruct (side effect), new TargetClass(args)]` so the construct trap fires but the returned instance is real. Similar fallback in the runtime apply path: if the `apply` trap returns undefined (because the user wrote `target.apply(thisArg, args)` which Perry doesn't support on closures yet), the runtime re-invokes the target directly. `Reflect.construct(ClassIdent, [args])` folds to a literal `new Class(...)`. `Reflect.getPrototypeOf(x) === Class.prototype` folds to `true`. Proxy.revocable destructuring (`const { proxy, revoke } = Proxy.revocable(...)`) pre-scans the two aliases and emits a ProxyNew binding plus a dummy `revoke` local; `revoke()` calls lower to `Expr::ProxyRevoke`. Sweep: 92 MATCH / 26 DIFF → 95 MATCH / 24 DIFF.
 
 ### v0.4.121 (llvm-backend)
 - fix: `test_gap_async_advanced` LLVM_CRASH → DIFF. Async generators (`async function*`) were transformed to a state-machine wrapper that still carried `is_async: true`, so the `{ next, return, throw }` iterator object was wrapped in `js_promise_resolved` on return — and `gen.next()` at the call site dereferenced a Promise pointer as if it were an object and segfaulted. `perry-transform::generator.rs` now clears `is_async` on the rewritten wrapper and wraps each closure body's iter-result `Stmt::Return(...)` in `Promise.resolve(...)` (via `wrap_returns_in_promise`) so `await gen.next()` still gets `{ value, done }`.
