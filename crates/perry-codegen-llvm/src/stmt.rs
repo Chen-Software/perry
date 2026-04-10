@@ -692,18 +692,49 @@ fn lower_switch(
 
         if let Some(test_expr) = case.test.as_ref() {
             let cv = lower_expr(ctx, test_expr)?;
-            // fcmp on NaN-tagged string/pointer values is always
-            // false (NaN comparisons are unordered). For switch on
-            // strings or any value that might be NaN-tagged, compare
-            // the i64 bit patterns instead. This works for numbers
-            // too — equal doubles have equal bits except for ±0
-            // which the JS spec treats as equal anyway and Number(0)
-            // === Number(-0) is true.
-            let blk = ctx.block();
-            let dv_bits = blk.bitcast_double_to_i64(&dv);
-            let cv_bits = blk.bitcast_double_to_i64(&cv);
-            let cmp = blk.icmp_eq(crate::types::I64, &dv_bits, &cv_bits);
-            blk.cond_br(&cmp, &body_label, &next_label);
+            // If either the discriminant or the case value is a static
+            // string expression (e.g. `switch (typeof x) { case "foo": }`),
+            // compare by string content via js_string_equals. Two allocations
+            // of the same text have different pointers, so icmp on bits
+            // would report them unequal. Dispatch through the unified
+            // string-pointer getter which returns null for non-strings —
+            // js_string_equals treats null as "not equal", matching the
+            // expected fall-through behavior.
+            let either_string = crate::type_analysis::is_string_expr(ctx, discriminant)
+                || crate::type_analysis::is_string_expr(ctx, test_expr);
+            if either_string {
+                let blk = ctx.block();
+                let l_handle = blk.call(
+                    crate::types::I64,
+                    "js_get_string_pointer_unified",
+                    &[(crate::types::DOUBLE, &dv)],
+                );
+                let r_handle = blk.call(
+                    crate::types::I64,
+                    "js_get_string_pointer_unified",
+                    &[(crate::types::DOUBLE, &cv)],
+                );
+                let i32_eq = blk.call(
+                    crate::types::I32,
+                    "js_string_equals",
+                    &[(crate::types::I64, &l_handle), (crate::types::I64, &r_handle)],
+                );
+                let cmp = blk.icmp_ne(crate::types::I32, &i32_eq, "0");
+                blk.cond_br(&cmp, &body_label, &next_label);
+            } else {
+                // fcmp on NaN-tagged string/pointer values is always
+                // false (NaN comparisons are unordered). For switch on
+                // strings or any value that might be NaN-tagged, compare
+                // the i64 bit patterns instead. This works for numbers
+                // too — equal doubles have equal bits except for ±0
+                // which the JS spec treats as equal anyway and Number(0)
+                // === Number(-0) is true.
+                let blk = ctx.block();
+                let dv_bits = blk.bitcast_double_to_i64(&dv);
+                let cv_bits = blk.bitcast_double_to_i64(&cv);
+                let cmp = blk.icmp_eq(crate::types::I64, &dv_bits, &cv_bits);
+                blk.cond_br(&cmp, &body_label, &next_label);
+            }
         } else {
             // Default case test block: unconditional jump to its body.
             ctx.block().br(&body_label);
