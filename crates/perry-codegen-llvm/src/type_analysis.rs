@@ -32,6 +32,13 @@ pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirT
         | Expr::ArrayFilter { .. }
         | Expr::ArrayFlat { .. }
         | Expr::ArrayFlatMap { .. }
+        | Expr::ArrayFrom(_)
+        | Expr::ArrayFromMapped { .. }
+        | Expr::ArraySort { .. }
+        | Expr::ArrayToReversed { .. }
+        | Expr::ArrayToSorted { .. }
+        | Expr::ArrayToSpliced { .. }
+        | Expr::ArrayWith { .. }
         | Expr::ObjectValues(_)
         | Expr::ObjectEntries(_)
         | Expr::ArrayEntries { .. }
@@ -39,6 +46,12 @@ pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirT
         | Expr::ArrayValues { .. }
         | Expr::StringMatch { .. }
         | Expr::StringMatchAll { .. } => Some(HirType::Array(Box::new(HirType::Any))),
+        // string.split(sep) → Array<string>
+        Expr::StringSplit { .. } => Some(HirType::Array(Box::new(HirType::String))),
+        // Set.values() / Set.keys() → iterable, but Array.from wraps it
+        // into an Array. Without an Array.from wrap, it's still iterable.
+        Expr::SetNewFromArray(_) => Some(HirType::Named("Set".into())),
+        Expr::MapNewFromArray(_) | Expr::MapNew => Some(HirType::Named("Map".into())),
         // Object.keys() always returns string handles.
         Expr::ObjectKeys(_) => Some(HirType::Array(Box::new(HirType::String))),
         Expr::String(_) | Expr::ArrayJoin { .. } | Expr::StringCoerce(_) => {

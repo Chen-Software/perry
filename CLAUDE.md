@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.110
+**Current Version:** 0.4.111
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,15 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.111 (llvm-backend)
+- fix: `{ ...src, k: v }` object spread now calls `js_object_copy_own_fields(dst, src)` (was silently ignored with `// Spreads are silently ignored`). Runtime was already implemented in `object.rs:860`.
+- fix: `js_array_concat` detects Sets (via `SET_REGISTRY`) and auto-converts before concatenation, so `[...new Set(...)]` spread-into-array gets the right elements instead of reading SetHeader memory as f64 array elements.
+- feat: wire remaining string method stubs — `Expr::StringAt` → `js_string_at` (negative index), `StringCodePointAt` → `js_string_code_point_at`, `StringFromCodePoint` → `js_string_from_code_point`, `StringFromCharCode` → `js_string_from_char_code`. Were stubs returning 0.0.
+- feat: `structuredClone(v)` wired to real `js_structured_clone` (was passthrough — mutations on "clone" affected original). Runtime handles deep copy for arrays, objects, nested structures via `builtins.rs:1979`.
+- feat: `Set.clear()` wired to `js_set_clear` (was stub; Map.clear was already wired).
+- feat: `refine_type_from_init` now marks `Array.from(...)`, `Array.from(..., mapFn)`, `arr.sort(...)`, `arr.toReversed/Sorted/Spliced/With(...)`, `str.split(...)` and Set/Map constructors as the correct Array/Named types, so `.length` and subsequent method calls hit the fast path. Fixes `Array.from(new Set(dupes)).length` returning undefined.
+- Sweep: 88 → 89 MATCH (test_edge_map_set flipped).
 
 ### v0.4.110 (llvm-backend)
 - feat: central merge of Agent A/B/C punch lists — wire ~18 LLVM `Expr::*` stubs to existing runtime functions. `Expr::PathFormat` → `js_path_format`; `PathNormalize` → `js_path_normalize`; `PathIsAbsolute` → `js_path_is_absolute` (bool NaN-box). `Expr::EncodeURI` / `DecodeURI` / `EncodeURIComponent` / `DecodeURIComponent` → `js_encode_uri*` / `js_decode_uri*` (runtime already in `builtins.rs`). `Expr::QueueMicrotask` / `ProcessNextTick` → `js_queue_microtask` (was dropping callback). `Expr::ObjectDefineProperty` / `GetOwnPropertyDescriptor` / `GetOwnPropertyNames` / `Create` / `Freeze` / `Seal` / `PreventExtensions` / `IsFrozen` / `IsSealed` / `IsExtensible` → real `js_object_*` runtime (was stubbed to return the operand). `Expr::AggregateErrorNew` → `js_aggregateerror_new` (was dropping errors array). `Expr::ErrorNewWithCause` → `js_error_new_with_cause` (was dropping cause). `Expr::JsonStringifyFull` → `js_json_stringify_full` with replacer/indent (was dropping both). `Expr::JsonParseReviver` / `JsonParseWithReviver` → `js_json_parse_with_reviver` (was dropping reviver). `Expr::InstanceOf` now maps built-in Error subclass names (`TypeError`, `RangeError`, `ReferenceError`, `SyntaxError`, `AggregateError`) to the reserved `CLASS_ID_*` constants in `error.rs`, so `e instanceof TypeError` resolves via the `GC_TYPE_ERROR` error-kind path in `js_instanceof`. `collectors.rs::collect_closures_in_expr` now walks `JsonParseReviver`/`JsonParseWithReviver` so closures inside revivers get emitted. `test_gap_json_advanced` flipped DIFF → MATCH (26 → 0 diff). `test_gap_object_methods` 72 → 12 diff, `test_gap_node_path` 26 → 12 diff, `test_gap_encoding_timers` 40 → 32 diff (remaining gaps need TextEncoder runtime + real prototype chain). Sweep 87 → 88 MATCH.

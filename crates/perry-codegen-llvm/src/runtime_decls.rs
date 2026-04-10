@@ -241,6 +241,7 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_array_includes_f64", I32, &[I64, DOUBLE]);
     module.declare_function("js_map_size", I32, &[I64]);
     module.declare_function("js_map_clear", VOID, &[I64]);
+    module.declare_function("js_set_clear", VOID, &[I64]);
     // Map iteration: entries/keys/values all take a map pointer and return an array pointer.
     module.declare_function("js_map_entries", I64, &[I64]);
     module.declare_function("js_map_keys", I64, &[I64]);
@@ -344,6 +345,15 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_object_freeze", DOUBLE, &[DOUBLE]);
     module.declare_function("js_object_seal", DOUBLE, &[DOUBLE]);
     module.declare_function("js_object_prevent_extensions", DOUBLE, &[DOUBLE]);
+    // Object spread: copy all own fields from src into dst.
+    module.declare_function("js_object_copy_own_fields", VOID, &[I64, DOUBLE]);
+    // String extras (already in string.rs; expr.rs was stubbing or missing dispatch).
+    module.declare_function("js_string_at", DOUBLE, &[I64, I32]);
+    module.declare_function("js_string_code_point_at", DOUBLE, &[I64, I32]);
+    module.declare_function("js_string_from_code_point", I64, &[I32]);
+    module.declare_function("js_string_from_char_code", I64, &[I32]);
+    // structuredClone(v) — real deep copy, was stubbed as passthrough.
+    module.declare_function("js_structured_clone", DOUBLE, &[DOUBLE]);
     module.declare_function("js_object_is_frozen", DOUBLE, &[DOUBLE]);
     module.declare_function("js_object_is_sealed", DOUBLE, &[DOUBLE]);
     module.declare_function("js_object_is_extensible", DOUBLE, &[DOUBLE]);

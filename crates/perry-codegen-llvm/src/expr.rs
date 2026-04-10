@@ -2142,6 +2142,13 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // props, ignoring spreads. Wrong for `...src` but unblocks
         // compilation.
         Expr::ObjectSpread { parts } => {
+            // `{ ...a, x: 1, ...b, y: 2 }` — allocate an empty object,
+            // then process `parts` in source order: static keys call
+            // `js_object_set_field_by_name`, spreads call the runtime
+            // `js_object_copy_own_fields(dst, src)` which walks the
+            // source's `keys_array` and copies each field via the same
+            // setter (so later parts override earlier ones, matching JS
+            // semantics).
             let static_count = parts
                 .iter()
                 .filter(|(k, _)| k.is_some())
@@ -2155,6 +2162,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             );
             for (key_opt, value_expr) in parts {
                 if let Some(key) = key_opt {
+                    // Static key:value pair.
                     let v = lower_expr(ctx, value_expr)?;
                     let key_idx = ctx.strings.intern(key);
                     let key_handle_global =
@@ -2167,8 +2175,15 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                         "js_object_set_field_by_name",
                         &[(I64, &obj_handle), (I64, &key_raw), (DOUBLE, &v)],
                     );
+                } else {
+                    // `...expr` spread — copy all own fields from the
+                    // source object into `obj_handle`.
+                    let src_box = lower_expr(ctx, value_expr)?;
+                    ctx.block().call_void(
+                        "js_object_copy_own_fields",
+                        &[(I64, &obj_handle), (DOUBLE, &src_box)],
+                    );
                 }
-                // Spreads are silently ignored.
             }
             Ok(nanbox_pointer_inline(ctx.block(), &obj_handle))
         }
@@ -3214,16 +3229,40 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // -------- RegExpExecGroups stub (returns null/0.0) --------
         Expr::RegExpExecGroups => Ok(double_literal(0.0)),
 
-        // -------- set.clear() stub --------
+        // -------- set.clear() --------
         Expr::SetClear(s) => {
-            let _ = lower_expr(ctx, s)?;
-            Ok(double_literal(0.0))
+            let s_box = lower_expr(ctx, s)?;
+            let blk = ctx.block();
+            let s_handle = unbox_to_i64(blk, &s_box);
+            blk.call_void("js_set_clear", &[(I64, &s_handle)]);
+            Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
         }
 
-        // -------- Long-tail one-test-each stubs --------
+        // -------- String.fromCodePoint(cp) — returns single-char string --------
         Expr::StringFromCodePoint(o) => {
-            let _ = lower_expr(ctx, o)?;
-            Ok(double_literal(0.0))
+            let v = lower_expr(ctx, o)?;
+            let blk = ctx.block();
+            let i32_v = blk.fptosi(DOUBLE, &v, I32);
+            let handle = blk.call(I64, "js_string_from_code_point", &[(I32, &i32_v)]);
+            Ok(nanbox_string_inline(blk, &handle))
+        }
+        // -------- str.at(i) — returns single-char string or undefined --------
+        Expr::StringAt { string, index } => {
+            let s_box = lower_expr(ctx, string)?;
+            let idx_d = lower_expr(ctx, index)?;
+            let blk = ctx.block();
+            let s_handle = unbox_to_i64(blk, &s_box);
+            let idx_i32 = blk.fptosi(DOUBLE, &idx_d, I32);
+            // Runtime returns NaN-boxed f64 directly (string or undefined).
+            Ok(blk.call(DOUBLE, "js_string_at", &[(I64, &s_handle), (I32, &idx_i32)]))
+        }
+        Expr::StringCodePointAt { string, index } => {
+            let s_box = lower_expr(ctx, string)?;
+            let idx_d = lower_expr(ctx, index)?;
+            let blk = ctx.block();
+            let s_handle = unbox_to_i64(blk, &s_box);
+            let idx_i32 = blk.fptosi(DOUBLE, &idx_d, I32);
+            Ok(blk.call(DOUBLE, "js_string_code_point_at", &[(I64, &s_handle), (I32, &idx_i32)]))
         }
         Expr::RegExpSource(o) | Expr::RegExpFlags(o) => {
             let _ = lower_expr(ctx, o)?;
@@ -3350,10 +3389,13 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             lower_expr(ctx, x)
         }
 
-        // -------- More long-tail stubs --------
+        // -------- String.fromCharCode(code) --------
         Expr::StringFromCharCode(o) => {
-            let _ = lower_expr(ctx, o)?;
-            Ok(double_literal(0.0))
+            let v = lower_expr(ctx, o)?;
+            let blk = ctx.block();
+            let i32_v = blk.fptosi(DOUBLE, &v, I32);
+            let handle = blk.call(I64, "js_string_from_char_code", &[(I32, &i32_v)]);
+            Ok(nanbox_string_inline(blk, &handle))
         }
         Expr::RegExpSetLastIndex { regex, value } => {
             let _ = lower_expr(ctx, value)?;
@@ -3664,8 +3706,11 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // -------- ProcessPid / ProcessPpid stubs --------
         Expr::ProcessPid | Expr::ProcessPpid => Ok(double_literal(0.0)),
 
-        // -------- StructuredClone stub (returns the source unchanged) --------
-        Expr::StructuredClone(operand) => lower_expr(ctx, operand),
+        // -------- structuredClone(v) — real deep copy --------
+        Expr::StructuredClone(operand) => {
+            let v = lower_expr(ctx, operand)?;
+            Ok(ctx.block().call(DOUBLE, "js_structured_clone", &[(DOUBLE, &v)]))
+        }
 
         // -------- WeakRefNew stub (returns the source as the ref) --------
         Expr::WeakRefNew(operand) => lower_expr(ctx, operand),

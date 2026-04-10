@@ -708,6 +708,14 @@ pub extern "C" fn js_array_push_jsvalue(arr: *mut ArrayHeader, value: u64) -> *m
 pub extern "C" fn js_array_concat(dest: *mut ArrayHeader, src: *const ArrayHeader) -> *mut ArrayHeader {
     let src = clean_arr_ptr(src);
     if src.is_null() { return dest; }
+    // Detect non-array sources: Sets register themselves in
+    // SET_REGISTRY; convert to array first so spread-into-array
+    // `[...new Set(...)]` reads the right elements instead of the
+    // SetHeader's raw memory.
+    if crate::set::is_registered_set(src as usize) {
+        let arr = unsafe { crate::set::js_set_to_array(src as *const crate::set::SetHeader) };
+        return js_array_concat(dest, arr);
+    }
     unsafe {
         let src_len = (*src).length;
         if src_len == 0 {
