@@ -172,6 +172,12 @@ pub struct CompilationContext {
     /// Whether any TS module calls global `fetch()` (which routes to
     /// reqwest in perry-stdlib's http-client feature).
     pub uses_fetch: bool,
+    /// Whether any TS module uses `crypto.randomBytes` / `randomUUID` /
+    /// `sha256` / `md5` as Perry builtins (without `import crypto`).
+    /// These lower to `Expr::CryptoRandomBytes`/`CryptoRandomUUID`/
+    /// `CryptoSha256`/`CryptoMd5` which dispatch to runtime symbols that
+    /// live behind the perry-stdlib `crypto` feature.
+    pub uses_crypto_builtins: bool,
     /// Whether `perry/thread` is imported. When true, the runtime must
     /// keep `panic = "unwind"` so that worker-thread panics translate to
     /// promise rejections via `catch_unwind` in `perry-runtime/src/thread.rs`
@@ -211,6 +217,7 @@ impl CompilationContext {
             geisterhand_port: 7676,
             native_module_imports: BTreeSet::new(),
             uses_fetch: false,
+            uses_crypto_builtins: false,
             needs_thread: false,
         }
     }
@@ -1037,7 +1044,11 @@ fn build_optimized_libs(
 ) -> OptimizedLibs {
     use super::stdlib_features::{compute_required_features, features_to_cargo_arg};
 
-    let features = compute_required_features(&ctx.native_module_imports, ctx.uses_fetch);
+    let features = compute_required_features(
+        &ctx.native_module_imports,
+        ctx.uses_fetch,
+        ctx.uses_crypto_builtins,
+    );
     let feature_arg = features_to_cargo_arg(&features);
 
     // panic = "abort" is safe whenever no `catch_unwind` callers are
@@ -2358,6 +2369,24 @@ fn collect_modules(
     if hir_module.uses_fetch {
         ctx.needs_stdlib = true;
         ctx.uses_fetch = true;
+    }
+
+    // Detect crypto.* builtin usage (randomBytes/randomUUID/sha256/md5 used
+    // without `import crypto`). The runtime symbols live behind the
+    // perry-stdlib `crypto` Cargo feature, so we need to flip that on for
+    // auto-optimize. Text-grep the serialized Debug form of the HIR — these
+    // variants are rare enough that the cost is negligible and avoids
+    // writing a new visitor.
+    {
+        let hir_debug: String = format!("{:?}{:?}", &hir_module.init, &hir_module.functions);
+        if hir_debug.contains("CryptoRandomBytes")
+            || hir_debug.contains("CryptoRandomUUID")
+            || hir_debug.contains("CryptoSha256")
+            || hir_debug.contains("CryptoMd5")
+        {
+            ctx.needs_stdlib = true;
+            ctx.uses_crypto_builtins = true;
+        }
     }
 
     // Detect ioredis usage (detected by class name, not import path)

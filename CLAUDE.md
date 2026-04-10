@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.118
+**Current Version:** 0.4.119
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,10 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.119 (llvm-backend)
+- fix: `Symbol()` / `Symbol.for()` / `Symbol.keyFor()` / `sym.description` / `sym.toString()` / `Object.getOwnPropertySymbols()` wired correctly in LLVM backend. The SYMBOL agent's commit (`2d6663e`) added HIR variants but the expr.rs dispatch was lost in a concurrent agent conflict — this commit re-applies the wire-up with the correct `f64` signatures (runtime functions in `symbol.rs` take and return NaN-boxed f64 directly). `test_gap_symbols` flips LLVM_CRASH → DIFF (28 lines output now, most match Node; remaining diffs from `s1 === s2` deduplication and symbol-keyed property access which need deeper HIR work).
+- feat: auto-optimize `crypto` feature detection — the CRASHFIX agent's `CryptoRandomBytes`/`RandomUUID`/`Sha256`/`Md5` wire-up hit a linker error on `test_crypto.ts` because the auto-optimize rebuild of perry-stdlib excluded the `crypto` Cargo feature (the test uses `crypto.randomBytes(16)` without `import crypto`). Added `uses_crypto_builtins` tracking in `compile.rs` that does a cheap `Debug` text scan of the HIR for `Expr::Crypto*` variants and forces the `crypto` feature on via `compute_required_features`.
 
 ### v0.4.118 (llvm-backend)
 - feat: LLVM backend wires `process.*` / `os.*` accessors to the real runtime. `ProcessVersion`/`ProcessCwd`/`ProcessPid`/`ProcessPpid`/`ProcessUptime`/`ProcessVersions`/`ProcessMemoryUsage`/`ProcessHrtimeBigint`/`ProcessChdir`/`ProcessKill`/`ProcessOn`/`ProcessStdin`/`ProcessStdout`/`ProcessStderr`/`ProcessArgv` and `OsArch`/`OsType`/`OsPlatform`/`OsRelease`/`OsHostname`/`OsEOL` previously returned `double_literal(0.0)` stubs. Runtime decls added, `type_analysis.rs` recognizes `ProcessVersion`/`ProcessCwd`/`OsArch`/`OsType`/`OsPlatform`/`OsRelease`/`OsHostname`/`OsEOL` as string expressions so `process.version.startsWith('v')` hits the string method fast path. `test_gap_node_process` diff drops 52 → 3 lines (remaining diffs are bigint comparison + Promise executor nextTick pattern, both out of scope).

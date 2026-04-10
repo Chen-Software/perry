@@ -3671,6 +3671,48 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             blk.call_void("js_process_kill", &[(DOUBLE, &pid_d), (DOUBLE, &sig_d)]);
             Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
         }
+        // -------- Symbol() / Symbol.for / ObjectGetOwnPropertySymbols --------
+        // Runtime functions in perry-runtime/src/symbol.rs take and return
+        // NaN-boxed f64 values directly, so no unbox/box dance needed.
+        Expr::SymbolNew(desc) => {
+            match desc {
+                Some(d) => {
+                    let d_box = lower_expr(ctx, d)?;
+                    let blk = ctx.block();
+                    Ok(blk.call(DOUBLE, "js_symbol_new", &[(DOUBLE, &d_box)]))
+                }
+                None => {
+                    let blk = ctx.block();
+                    Ok(blk.call(DOUBLE, "js_symbol_new_empty", &[]))
+                }
+            }
+        }
+        Expr::SymbolFor(key) => {
+            let k_box = lower_expr(ctx, key)?;
+            Ok(ctx.block().call(DOUBLE, "js_symbol_for", &[(DOUBLE, &k_box)]))
+        }
+        Expr::SymbolKeyFor(sym) => {
+            let s_box = lower_expr(ctx, sym)?;
+            Ok(ctx.block().call(DOUBLE, "js_symbol_key_for", &[(DOUBLE, &s_box)]))
+        }
+        Expr::SymbolDescription(sym) => {
+            let s_box = lower_expr(ctx, sym)?;
+            Ok(ctx.block().call(DOUBLE, "js_symbol_description", &[(DOUBLE, &s_box)]))
+        }
+        Expr::SymbolToString(sym) => {
+            // Returns i64 string pointer (not NaN-boxed).
+            let s_box = lower_expr(ctx, sym)?;
+            let blk = ctx.block();
+            let h = blk.call(I64, "js_symbol_to_string", &[(DOUBLE, &s_box)]);
+            Ok(nanbox_string_inline(blk, &h))
+        }
+        Expr::ObjectGetOwnPropertySymbols(obj) => {
+            let o_box = lower_expr(ctx, obj)?;
+            let blk = ctx.block();
+            let o_handle = unbox_to_i64(blk, &o_box);
+            let arr = blk.call(I64, "js_object_get_own_property_symbols", &[(I64, &o_handle)]);
+            Ok(nanbox_pointer_inline(blk, &arr))
+        }
         Expr::TextEncoderNew => {
             // Stateless UTF-8 encoder — return a non-null sentinel pointer.
             // NaN-box with POINTER_TAG so `typeof encoder === "object"` holds.
