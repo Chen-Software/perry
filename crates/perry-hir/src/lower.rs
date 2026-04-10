@@ -3675,10 +3675,23 @@ fn lower_stmt(
             };
 
             // Determine the array element type: String for strings, Tuple(K, V) for Maps, Any otherwise.
+            // For an identifier iterable like `for (const word of words)` where
+            // `words: string[]`, extract the element type from the local's
+            // declared Array<T> so the synthesized iteration variable gets
+            // the right type (was always Any, breaking `word.length` etc.).
             let elem_type = if is_string_iter {
                 Type::String
             } else if let (Some(ref k), Some(ref v)) = (&map_key_type, &map_val_type) {
                 Type::Tuple(vec![k.clone(), v.clone()])
+            } else if let ast::Expr::Ident(ident) = &*for_of_stmt.right {
+                let name = ident.sym.to_string();
+                match ctx.lookup_local_type(&name) {
+                    Some(Type::Array(elem)) => (**elem).clone(),
+                    Some(Type::Generic { base, type_args }) if base == "Array" && type_args.len() == 1 => {
+                        type_args[0].clone()
+                    }
+                    _ => Type::Any,
+                }
             } else {
                 Type::Any
             };

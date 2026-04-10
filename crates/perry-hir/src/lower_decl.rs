@@ -1953,12 +1953,35 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
 
             // For string iteration the __arr holder is typed as String (so codegen
             // uses string.length + js_string_char_at via the existing str[i] path).
+            // For an identifier iterable like `for (const word of words)` where
+            // `words: string[]`, extract the element type from the local's
+            // declared Array<T> so the loop variable gets the right type.
+            let inferred_elem_type: Option<Type> = if let ast::Expr::Ident(ident) = &*for_of_stmt.right {
+                let name = ident.sym.to_string();
+                match ctx.lookup_local_type(&name) {
+                    Some(Type::Array(elem)) => Some((**elem).clone()),
+                    Some(Type::Generic { base, type_args }) if base == "Array" && type_args.len() == 1 => {
+                        Some(type_args[0].clone())
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
             let holder_type = if is_string_iter {
                 Type::String
+            } else if let Some(ref elem) = inferred_elem_type {
+                Type::Array(Box::new(elem.clone()))
             } else {
                 Type::Array(Box::new(Type::Any))
             };
-            let item_hir_type = if is_string_iter { Type::String } else { Type::Any };
+            let item_hir_type = if is_string_iter {
+                Type::String
+            } else if let Some(elem) = inferred_elem_type {
+                elem
+            } else {
+                Type::Any
+            };
 
             let arr_id = ctx.fresh_local();
             let idx_id = ctx.fresh_local();

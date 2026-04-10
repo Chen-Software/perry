@@ -3485,7 +3485,12 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                     func.is_async,
                     func.is_exported
                 );
-
+                for p in &func.params {
+                    println!("      param {} (id={}): {:?}", p.name, p.id, p.ty);
+                }
+                for (i, stmt) in func.body.iter().enumerate() {
+                    println!("      [{}] {:?}", i, stmt);
+                }
             }
             println!("Init statements: {}", hir_module.init.len());
             for (i, stmt) in hir_module.init.iter().enumerate() {
