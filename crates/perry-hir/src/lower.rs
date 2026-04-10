@@ -5947,12 +5947,36 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             }
                                         }
                                         "entries" => {
+                                            let is_map = ctx.lookup_local_type(&arr_name)
+                                                .map(|ty| matches!(ty, Type::Generic { base, .. } if base == "Map"))
+                                                .unwrap_or(false);
+                                            if is_map {
+                                                return Ok(Expr::MapEntries(Box::new(Expr::LocalGet(array_id))));
+                                            }
                                             return Ok(Expr::ArrayEntries(Box::new(Expr::LocalGet(array_id))));
                                         }
                                         "keys" => {
+                                            let is_map = ctx.lookup_local_type(&arr_name)
+                                                .map(|ty| matches!(ty, Type::Generic { base, .. } if base == "Map"))
+                                                .unwrap_or(false);
+                                            if is_map {
+                                                return Ok(Expr::MapKeys(Box::new(Expr::LocalGet(array_id))));
+                                            }
                                             return Ok(Expr::ArrayKeys(Box::new(Expr::LocalGet(array_id))));
                                         }
                                         "values" => {
+                                            let is_map = ctx.lookup_local_type(&arr_name)
+                                                .map(|ty| matches!(ty, Type::Generic { base, .. } if base == "Map"))
+                                                .unwrap_or(false);
+                                            if is_map {
+                                                return Ok(Expr::MapValues(Box::new(Expr::LocalGet(array_id))));
+                                            }
+                                            let is_set = ctx.lookup_local_type(&arr_name)
+                                                .map(|ty| matches!(ty, Type::Generic { base, .. } if base == "Set"))
+                                                .unwrap_or(false);
+                                            if is_set {
+                                                return Ok(Expr::SetValues(Box::new(Expr::LocalGet(array_id))));
+                                            }
                                             return Ok(Expr::ArrayValues(Box::new(Expr::LocalGet(array_id))));
                                         }
                                         // Map methods (only apply to actual Map/Set types)
