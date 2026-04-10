@@ -203,6 +203,21 @@ pub(crate) fn compute_auto_captures(
 ///
 /// CRUCIALLY excludes Bool, String, Array, Object — those produce
 /// NaN-tagged doubles where `fcmp` is unsafe (NaN is unordered).
+/// Statically determine whether an expression is a BigInt value. Used by
+/// the Compare path to route `a > b` / `a >= b` / `a < b` / `a <= b` through
+/// `js_bigint_cmp` instead of the fcmp default (which sees NaN-tagged bits
+/// and always reports unordered).
+pub(crate) fn is_bigint_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
+    match e {
+        Expr::BigInt(_) => true,
+        Expr::LocalGet(id) => matches!(
+            ctx.local_types.get(id),
+            Some(HirType::BigInt)
+        ),
+        _ => false,
+    }
+}
+
 pub(crate) fn is_numeric_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
     match e {
         Expr::Integer(_) | Expr::Number(_) => true,

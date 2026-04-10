@@ -21,8 +21,8 @@ use crate::lower_string_method::{lower_string_coerce_concat, lower_string_concat
 use crate::nanbox::{double_literal, POINTER_MASK_I64, POINTER_TAG_I64, STRING_TAG_I64};
 use crate::strings::StringPool;
 use crate::type_analysis::{
-    compute_auto_captures, is_array_expr, is_bool_expr, is_map_expr, is_numeric_expr,
-    is_set_expr, is_string_expr, receiver_class_name,
+    compute_auto_captures, is_array_expr, is_bigint_expr, is_bool_expr, is_map_expr,
+    is_numeric_expr, is_set_expr, is_string_expr, receiver_class_name,
 };
 use crate::types::{DOUBLE, I1, I32, I64, PTR};
 
@@ -664,6 +664,38 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // round-trips through numeric contexts as 1.0 and "false" as 0.0,
         // which is what Perry's runtime expects from typed boolean returns.
         Expr::Compare { op, left, right } => {
+            // BigInt comparison fast path: NaN-tagged BIGINT_TAG values
+            // are unordered under fcmp (NaN), so `a > b` on two bigints
+            // always returns false. Route through js_bigint_cmp which
+            // returns -1/0/1 for the three bigint ordering outcomes.
+            if is_bigint_expr(ctx, left) || is_bigint_expr(ctx, right) {
+                let l = lower_expr(ctx, left)?;
+                let r = lower_expr(ctx, right)?;
+                let blk = ctx.block();
+                let l_handle = unbox_to_i64(blk, &l);
+                let r_handle = unbox_to_i64(blk, &r);
+                let cmp = blk.call(
+                    I32,
+                    "js_bigint_cmp",
+                    &[(I64, &l_handle), (I64, &r_handle)],
+                );
+                let bit = match op {
+                    CompareOp::Lt => blk.icmp_slt(I32, &cmp, "0"),
+                    CompareOp::Le => blk.icmp_sle(I32, &cmp, "0"),
+                    CompareOp::Gt => blk.icmp_sgt(I32, &cmp, "0"),
+                    CompareOp::Ge => blk.icmp_sge(I32, &cmp, "0"),
+                    CompareOp::Eq | CompareOp::LooseEq => blk.icmp_eq(I32, &cmp, "0"),
+                    CompareOp::Ne | CompareOp::LooseNe => blk.icmp_ne(I32, &cmp, "0"),
+                };
+                let tagged = blk.select(
+                    crate::types::I1,
+                    &bit,
+                    I64,
+                    crate::nanbox::TAG_TRUE_I64,
+                    crate::nanbox::TAG_FALSE_I64,
+                );
+                return Ok(blk.bitcast_i64_to_double(&tagged));
+            }
             // Boolean equality fast path: NaN-tagged TAG_TRUE/FALSE
             // bits don't compare correctly with fcmp. For
             // ===/!== where EITHER side is statically boolean, compare
