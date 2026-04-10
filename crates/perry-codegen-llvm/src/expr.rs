@@ -2939,8 +2939,11 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(double_literal(0.0))
         }
 
-        // -------- Math.fround stub (returns input unchanged) --------
-        Expr::MathFround(operand) => lower_expr(ctx, operand),
+        // -------- Math.fround --------
+        Expr::MathFround(operand) => {
+            let v = lower_expr(ctx, operand)?;
+            Ok(ctx.block().call(DOUBLE, "js_math_fround", &[(DOUBLE, &v)]))
+        }
 
         // -------- new Map([[k,v], ...]) — alloc empty map, ignore source --------
         Expr::MapNewFromArray(arr_expr) => {
@@ -2960,8 +2963,23 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let v = lower_expr(ctx, d)?;
             Ok(ctx.block().call(DOUBLE, "js_date_get_timezone_offset", &[(DOUBLE, &v)]))
         }
-        // -------- DateUtc stub --------
-        Expr::DateUtc(_) => Ok(double_literal(0.0)),
+        // -------- Date.UTC(year, month, day?, hour?, minute?, second?, ms?) --------
+        Expr::DateUtc(args) => {
+            // Lower up to 7 args; pad missing ones with 0.
+            let mut vals: Vec<String> = Vec::with_capacity(7);
+            for a in args.iter().take(7) {
+                vals.push(lower_expr(ctx, a)?);
+            }
+            while vals.len() < 7 {
+                vals.push(double_literal(0.0));
+            }
+            let blk = ctx.block();
+            let call_args: Vec<(crate::types::LlvmType, &str)> = vals
+                .iter()
+                .map(|v| (DOUBLE, v.as_str()))
+                .collect();
+            Ok(blk.call(DOUBLE, "js_date_utc", &call_args))
+        }
 
         // -------- Object.defineProperty stub --------
         Expr::ObjectDefineProperty(obj, key, value) => {
@@ -3058,15 +3076,10 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(double_literal(0.0))
         }
 
-        // -------- Math.cbrt — emulate via x^(1/3) using llvm.pow --------
+        // -------- Math.cbrt --------
         Expr::MathCbrt(operand) => {
             let v = lower_expr(ctx, operand)?;
-            // No llvm.cbrt intrinsic; use js_math_pow which we already
-            // declared. Could also use libc cbrt() but that adds a
-            // dependency on libm at link time. Using pow gives wrong
-            // results for negatives but matches the JS spec for x>=0.
-            let third = double_literal(1.0 / 3.0);
-            Ok(ctx.block().call(DOUBLE, "js_math_pow", &[(DOUBLE, &v), (DOUBLE, &third)]))
+            Ok(ctx.block().call(DOUBLE, "js_math_cbrt", &[(DOUBLE, &v)]))
         }
 
         // -------- Date.* getters: real runtime calls --------
@@ -3109,23 +3122,27 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(nanbox_pointer_inline(blk, &arr_handle))
         }
 
-        // -------- Math.hypot(...values) — sqrt of sum of squares --------
-        // For simplicity: emit a runtime call would need a helper. Stub
-        // by computing the first value.
+        // -------- Math.hypot(...values) --------
+        // Routes through `js_math_hypot(a, b)` which uses Rust's
+        // `f64::hypot` (numerically stable for very large / very small
+        // operands vs. the naive sqrt(a² + b²)). For 3+ args we chain:
+        // hypot(a, b, c) ≡ hypot(hypot(a, b), c).
         Expr::MathHypot(values) => {
             if values.is_empty() {
                 return Ok(double_literal(0.0));
             }
-            let mut acc = lower_expr(ctx, &values[0])?;
-            let blk = ctx.block();
-            acc = blk.fmul(&acc, &acc);
-            for v in &values[1..] {
-                let v_lowered = lower_expr(ctx, v)?;
-                let blk = ctx.block();
-                let sq = blk.fmul(&v_lowered, &v_lowered);
-                acc = blk.fadd(&acc, &sq);
+            if values.len() == 1 {
+                let v = lower_expr(ctx, &values[0])?;
+                // Math.hypot(x) = |x|
+                return Ok(ctx.block().call(DOUBLE, "llvm.fabs.f64", &[(DOUBLE, &v)]));
             }
-            Ok(ctx.block().call(DOUBLE, "llvm.sqrt.f64", &[(DOUBLE, &acc)]))
+            let mut acc = lower_expr(ctx, &values[0])?;
+            for v in &values[1..] {
+                let rhs = lower_expr(ctx, v)?;
+                let blk = ctx.block();
+                acc = blk.call(DOUBLE, "js_math_hypot", &[(DOUBLE, &acc), (DOUBLE, &rhs)]);
+            }
+            Ok(acc)
         }
 
         // -------- RegExpExecGroups stub (returns null/0.0) --------
@@ -3160,9 +3177,9 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(blk.fsub(&exp_v, "1.0"))
         }
         Expr::DateSetUtcFullYear { date, value } => {
-            let _ = lower_expr(ctx, date)?;
-            let _ = lower_expr(ctx, value)?;
-            Ok(double_literal(0.0))
+            let d = lower_expr(ctx, date)?;
+            let v = lower_expr(ctx, value)?;
+            Ok(ctx.block().call(DOUBLE, "js_date_set_utc_full_year", &[(DOUBLE, &d), (DOUBLE, &v)]))
         }
         Expr::DateGetDate(d) => {
             let v = lower_expr(ctx, d)?;
@@ -3243,16 +3260,25 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let v = lower_expr(ctx, o)?;
             Ok(ctx.block().call(DOUBLE, "llvm.cos.f64", &[(DOUBLE, &v)]))
         }
-        // tan/asin/acos/atan/sinh/cosh/tanh: stub returning input
-        // (no LLVM intrinsics, would need libm linkage). Wrong but
-        // doesn't crash.
+        // Hyperbolic + extra trig via runtime (uses Rust's f64 methods).
+        Expr::MathSinh(o) => {
+            let v = lower_expr(ctx, o)?;
+            Ok(ctx.block().call(DOUBLE, "js_math_sinh", &[(DOUBLE, &v)]))
+        }
+        Expr::MathCosh(o) => {
+            let v = lower_expr(ctx, o)?;
+            Ok(ctx.block().call(DOUBLE, "js_math_cosh", &[(DOUBLE, &v)]))
+        }
+        Expr::MathTanh(o) => {
+            let v = lower_expr(ctx, o)?;
+            Ok(ctx.block().call(DOUBLE, "js_math_tanh", &[(DOUBLE, &v)]))
+        }
+        // tan/asin/acos/atan: still stubs returning input (runtime has
+        // no wrappers yet, no LLVM intrinsics for these).
         Expr::MathTan(o)
         | Expr::MathAsin(o)
         | Expr::MathAcos(o)
-        | Expr::MathAtan(o)
-        | Expr::MathSinh(o)
-        | Expr::MathCosh(o)
-        | Expr::MathTanh(o) => lower_expr(ctx, o),
+        | Expr::MathAtan(o) => lower_expr(ctx, o),
         Expr::MathAtan2(y, x) => {
             let _ = lower_expr(ctx, y)?;
             lower_expr(ctx, x)
@@ -3270,12 +3296,27 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         Expr::ProcessStdin | Expr::ProcessStdout | Expr::ProcessStderr => {
             Ok(double_literal(0.0))
         }
-        Expr::MathAsinh(o) | Expr::MathAcosh(o) | Expr::MathAtanh(o) => lower_expr(ctx, o),
-        Expr::DateSetUtcDate { date, value }
-        | Expr::DateSetUtcHours { date, value } => {
-            let _ = lower_expr(ctx, date)?;
-            let _ = lower_expr(ctx, value)?;
-            Ok(double_literal(0.0))
+        Expr::MathAsinh(o) => {
+            let v = lower_expr(ctx, o)?;
+            Ok(ctx.block().call(DOUBLE, "js_math_asinh", &[(DOUBLE, &v)]))
+        }
+        Expr::MathAcosh(o) => {
+            let v = lower_expr(ctx, o)?;
+            Ok(ctx.block().call(DOUBLE, "js_math_acosh", &[(DOUBLE, &v)]))
+        }
+        Expr::MathAtanh(o) => {
+            let v = lower_expr(ctx, o)?;
+            Ok(ctx.block().call(DOUBLE, "js_math_atanh", &[(DOUBLE, &v)]))
+        }
+        Expr::DateSetUtcDate { date, value } => {
+            let d = lower_expr(ctx, date)?;
+            let v = lower_expr(ctx, value)?;
+            Ok(ctx.block().call(DOUBLE, "js_date_set_utc_date", &[(DOUBLE, &d), (DOUBLE, &v)]))
+        }
+        Expr::DateSetUtcHours { date, value } => {
+            let d = lower_expr(ctx, date)?;
+            let v = lower_expr(ctx, value)?;
+            Ok(ctx.block().call(DOUBLE, "js_date_set_utc_hours", &[(DOUBLE, &d), (DOUBLE, &v)]))
         }
         Expr::ProcessKill { pid, signal } => {
             let _ = lower_expr(ctx, pid)?;
@@ -3365,12 +3406,20 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let arr_handle = unbox_to_i64(blk, &arr_box);
             Ok(blk.call(DOUBLE, "js_array_at", &[(I64, &arr_handle), (DOUBLE, &idx_d)]))
         }
-        Expr::DateSetUtcMinutes { date, value }
-        | Expr::DateSetUtcSeconds { date, value }
-        | Expr::DateSetUtcMilliseconds { date, value } => {
-            let _ = lower_expr(ctx, date)?;
-            let _ = lower_expr(ctx, value)?;
-            Ok(double_literal(0.0))
+        Expr::DateSetUtcMinutes { date, value } => {
+            let d = lower_expr(ctx, date)?;
+            let v = lower_expr(ctx, value)?;
+            Ok(ctx.block().call(DOUBLE, "js_date_set_utc_minutes", &[(DOUBLE, &d), (DOUBLE, &v)]))
+        }
+        Expr::DateSetUtcSeconds { date, value } => {
+            let d = lower_expr(ctx, date)?;
+            let v = lower_expr(ctx, value)?;
+            Ok(ctx.block().call(DOUBLE, "js_date_set_utc_seconds", &[(DOUBLE, &d), (DOUBLE, &v)]))
+        }
+        Expr::DateSetUtcMilliseconds { date, value } => {
+            let d = lower_expr(ctx, date)?;
+            let v = lower_expr(ctx, value)?;
+            Ok(ctx.block().call(DOUBLE, "js_date_set_utc_milliseconds", &[(DOUBLE, &d), (DOUBLE, &v)]))
         }
         Expr::Yield { value, .. } => {
             // Generators not implemented; lower the yielded value for
@@ -3392,11 +3441,8 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(nanbox_pointer_inline(blk, &err_handle))
         }
         Expr::NumberIsSafeInteger(operand) => {
-            // Reuse js_number_is_integer; the safe-integer check
-            // additionally bounds the value to ±2^53-1 but we ignore
-            // that for simplicity.
             let v = lower_expr(ctx, operand)?;
-            Ok(ctx.block().call(DOUBLE, "js_number_is_integer", &[(DOUBLE, &v)]))
+            Ok(ctx.block().call(DOUBLE, "js_number_is_safe_integer", &[(DOUBLE, &v)]))
         }
         Expr::ObjectFreeze(o) | Expr::ObjectSeal(o) | Expr::ObjectPreventExtensions(o) => {
             // Real Object.freeze/seal sets a flag on GcHeader. Stub
@@ -3405,9 +3451,9 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             lower_expr(ctx, o)
         }
         Expr::DateSetUtcMonth { date, value } => {
-            let _ = lower_expr(ctx, date)?;
-            let _ = lower_expr(ctx, value)?;
-            Ok(double_literal(0.0))
+            let d = lower_expr(ctx, date)?;
+            let v = lower_expr(ctx, value)?;
+            Ok(ctx.block().call(DOUBLE, "js_date_set_utc_month", &[(DOUBLE, &d), (DOUBLE, &v)]))
         }
         Expr::ArrayIsArray(o) => {
             // Compile-time check: emit TAG_TRUE if the operand is
@@ -3445,8 +3491,8 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         Expr::PathResolve(p) | Expr::PathNormalize(p) => lower_expr(ctx, p),
         Expr::ObjectCreate(p) => lower_expr(ctx, p),
         Expr::MathClz32(o) => {
-            let _ = lower_expr(ctx, o)?;
-            Ok(double_literal(0.0))
+            let v = lower_expr(ctx, o)?;
+            Ok(ctx.block().call(DOUBLE, "js_math_clz32", &[(DOUBLE, &v)]))
         }
         Expr::FsReadFileSync(p) => {
             let _ = lower_expr(ctx, p)?;
@@ -3483,8 +3529,18 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let result = blk.call(I64, "js_getenv", &[(I64, &key_handle)]);
             Ok(nanbox_string_inline(blk, &result))
         }
-        Expr::DateToISOString(_d) => Ok(double_literal(0.0)),
-        Expr::DateParse(_s) => Ok(double_literal(0.0)),
+        Expr::DateToISOString(d) => {
+            let v = lower_expr(ctx, d)?;
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_date_to_iso_string", &[(DOUBLE, &v)]);
+            Ok(nanbox_string_inline(blk, &handle))
+        }
+        Expr::DateParse(s) => {
+            let s_box = lower_expr(ctx, s)?;
+            let blk = ctx.block();
+            let s_handle = unbox_to_i64(blk, &s_box);
+            Ok(blk.call(DOUBLE, "js_date_parse", &[(I64, &s_handle)]))
+        }
         Expr::ProcessVersions => Ok(double_literal(0.0)),
         Expr::ProcessUptime | Expr::ProcessCwd => Ok(double_literal(0.0)),
         Expr::OsEOL => Ok(double_literal(0.0)),

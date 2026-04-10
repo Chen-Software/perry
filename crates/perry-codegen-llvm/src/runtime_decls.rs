@@ -302,6 +302,28 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_date_new", DOUBLE, &[]);
     module.declare_function("js_number_is_integer", DOUBLE, &[DOUBLE]);
     module.declare_function("js_number_is_nan", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_number_is_safe_integer", DOUBLE, &[DOUBLE]);
+    // Date parsing / UTC constructors / UTC setters.
+    module.declare_function("js_date_parse", DOUBLE, &[I64]);
+    module.declare_function("js_date_utc", DOUBLE, &[DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE]);
+    module.declare_function("js_date_set_utc_full_year", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_date_set_utc_month", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_date_set_utc_date", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_date_set_utc_hours", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_date_set_utc_minutes", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_date_set_utc_seconds", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_date_set_utc_milliseconds", DOUBLE, &[DOUBLE, DOUBLE]);
+    // Math extras (stubs in expr.rs had fallen through to no-op/passthrough).
+    module.declare_function("js_math_clz32", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_math_cbrt", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_math_fround", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_math_sinh", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_math_cosh", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_math_tanh", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_math_asinh", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_math_acosh", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_math_atanh", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_math_hypot", DOUBLE, &[DOUBLE, DOUBLE]);
     module.declare_function("js_object_is", DOUBLE, &[DOUBLE, DOUBLE]);
     module.declare_function("js_array_find", DOUBLE, &[I64, I64]);
     module.declare_function("js_array_findIndex", I32, &[I64, I64]);

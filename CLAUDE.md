@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.107
+**Current Version:** 0.4.108
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.108 (llvm-backend)
+- feat: wire up LLVM backend stubs to existing runtime functions — `Expr::DateToISOString` → `js_date_to_iso_string`, `Expr::DateParse` → `js_date_parse`, `Expr::DateUtc` → `js_date_utc` (7-arg pad), all 7 `DateSetUtc*` setters → `js_date_set_utc_*`, `MathCbrt`/`Fround`/`Clz32`/`Sinh`/`Cosh`/`Tanh`/`Asinh`/`Acosh`/`Atanh` → `js_math_*`, `NumberIsSafeInteger` → `js_number_is_safe_integer`, `MathHypot` chained via new runtime `js_math_hypot(a, b)` in `math.rs`. All called functions already existed in the runtime — pure wiring. `test_gap_number_math` flipped DIFF → MATCH; `test_gap_date_methods` diff drops 30 → 12. Sweep MATCH 86 → 87.
 
 ### v0.4.107 (llvm-backend)
 - feat: `fs.readFileSync(path)` without encoding now returns a real `Buffer` on the LLVM backend — wired `Expr::FsReadFileBinary` to `js_fs_read_file_binary` (was stubbed to `0.0`), bitcasting the raw `*mut BufferHeader` to double so the runtime's raw-pointer fallback path sees it. Added runtime-side `format_buffer_value` helper in `builtins.rs` and raw-pointer Buffer detection in both `format_jsvalue` and `js_console_log_dynamic` via `BUFFER_REGISTRY`, so `console.log(buf)` now prints `<Buffer xx xx ...>` (Node-style, lowercase hex, space-separated, capped at 50 bytes). `test_cli_simulation` flipped DIFF → MATCH; sweep MATCH 84 → 86.
