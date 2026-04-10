@@ -461,7 +461,19 @@ pub(crate) fn receiver_class_name(ctx: &FnCtx<'_>, e: &Expr) -> Option<String> {
 ///   (e.g. `arr.map(...)` — but those use the special Expr::ArrayMap
 ///   variant which is already handled)
 pub(crate) fn is_array_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
-    matches!(static_type_of(ctx, e), Some(HirType::Array(_)) | Some(HirType::Tuple(_)))
+    match static_type_of(ctx, e) {
+        Some(HirType::Array(_)) | Some(HirType::Tuple(_)) => true,
+        // `T | null`, `T | undefined`, `T[] | null` — when an `if (x)`
+        // guard narrows away the null/undefined, the truthy branch
+        // still has the same union type in the HIR, so recognize
+        // unions whose non-nullish variant is an array. Without this
+        // `maybeArr.length` falls through to object-field access and
+        // prints `undefined`.
+        Some(HirType::Union(variants)) => variants.iter().any(|v| {
+            matches!(v, HirType::Array(_) | HirType::Tuple(_))
+        }),
+        _ => false,
+    }
 }
 
 /// Best-effort static type lookup for an expression. Returns the HIR
@@ -525,6 +537,20 @@ pub(crate) fn static_type_of(ctx: &FnCtx<'_>, e: &Expr) -> Option<HirType> {
         | Expr::ObjectEntries(_) => {
             Some(HirType::Array(Box::new(HirType::Any)))
         }
+        // `arr[i]` where `arr: Array<T>` has static type `T`. This lets
+        // nested access like `grid[i][j]` and `grid[i].length` reach
+        // the array fast paths (via is_array_expr) when `grid` is
+        // statically known to be `Array<Array<T>>` / `Array<Tuple<...>>`.
+        Expr::IndexGet { object, .. } => match static_type_of(ctx, object)? {
+            HirType::Array(inner) => Some(*inner),
+            HirType::Tuple(elems) if !elems.is_empty() => {
+                // Heterogeneous tuple — safest bet is the first
+                // element type, which is still better than Any for
+                // common homogeneous tuples.
+                Some(elems[0].clone())
+            }
+            _ => None,
+        },
         _ => None,
     }
 }

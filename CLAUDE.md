@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.102
+**Current Version:** 0.4.105
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,12 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.104 (llvm-backend)
+- fix: 2D indexing `grid[i][j]` and `grid[i].length` when `grid: Array<Array<T>>`. `static_type_of` in `type_analysis.rs` now walks `Expr::IndexGet` to return the element type of a statically-known array receiver, so `grid[i]` is recognized as an array and its `.length` hits the inline fast path (`load i32 from ptr+0`) instead of falling through to `js_object_get_field_by_name_f64` which returned undefined. `is_array_expr` also now recognizes unions whose non-nullish variant is an array (e.g. `number[] | null` after `if (x)` narrowing), fixing `maybeArr.length` in test_edge_arrays. test_edge_arrays flipped DIFF → MATCH (sweep 84 → 85).
+
+### v0.4.103 (llvm-backend)
+- fix: Date local-time getters (`getFullYear`/`getMonth`/`getDate`/`getHours`/`getMinutes`/`getSeconds`) now return LOCAL time via `libc::localtime_r` — previously returned UTC and mismatched Node for any non-UTC locale. `getTimezoneOffset` returns the real system offset. `toDateString`/`toTimeString`/`toLocaleString*` also switch to local time. `test_date` diff drops from 12 to 6 lines (remaining diffs are `toISOString` stub + `Date.now()` timing flake, both blocked on expr.rs).
 
 ### v0.4.102 (llvm-backend)
 - fix: **try/catch state preservation across setjmp**. At -O2 on aarch64, LLVM's mem2reg promoted allocas to SSA registers inside functions containing `try {}` — so mutations performed in the try body (like `log = log + "try,"`) were invisible in the catch block after longjmp returned. `returns_twice` on the setjmp call alone was not sufficient. Fix: mark the enclosing function with `noinline optnone` (`#1`) in the LLVM IR so the optimizer leaves allocas on the stack across setjmp. New `has_try` bit on `LlFunction` set by `lower_try`; module emits `attributes #1 = { noinline optnone }`.
