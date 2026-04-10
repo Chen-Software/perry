@@ -1843,14 +1843,21 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // we'd link in; sentinel keeps the compile-pass count up.
         Expr::MathRandom => Ok(ctx.block().call(DOUBLE, "js_math_random", &[])),
 
-        // `JSON.stringify(value)` (3-arg form with indent ignored for now).
-        Expr::JsonStringifyFull(value, _replacer, _indent) => {
+        // `JSON.stringify(value, replacer, indent)` — full form via
+        // runtime `js_json_stringify_full` which handles array/function
+        // replacers, indent spaces, circular detection (throws
+        // TypeError), and `toJSON`.
+        Expr::JsonStringifyFull(value, replacer, indent) => {
             let v = lower_expr(ctx, value)?;
+            let r = lower_expr(ctx, replacer)?;
+            let i = lower_expr(ctx, indent)?;
             let blk = ctx.block();
-            // type_hint=0 means "use the value's NaN tag to dispatch".
-            let zero = "0".to_string();
-            let handle = blk.call(I64, "js_json_stringify", &[(DOUBLE, &v), (I32, &zero)]);
-            Ok(nanbox_string_inline(blk, &handle))
+            let result_i64 = blk.call(
+                I64,
+                "js_json_stringify_full",
+                &[(DOUBLE, &v), (DOUBLE, &r), (DOUBLE, &i)],
+            );
+            Ok(blk.bitcast_i64_to_double(&result_i64))
         }
 
         // `new Map()` — alloc with default capacity 8 (the runtime grows
@@ -2274,7 +2281,19 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // conversion needed.
         Expr::InstanceOf { expr: e, ty } => {
             let v = lower_expr(ctx, e)?;
-            let cid = ctx.class_ids.get(ty).copied().unwrap_or(0);
+            // Built-in Error subclasses have reserved CLASS_ID_* constants
+            // in the runtime (see crates/perry-runtime/src/error.rs). Map
+            // them by name here so `e instanceof TypeError` works even
+            // though there's no user class definition.
+            let cid = match ty.as_str() {
+                "Error" => 0xFFFF0001u32,
+                "TypeError" => 0xFFFF0010u32,
+                "RangeError" => 0xFFFF0011u32,
+                "ReferenceError" => 0xFFFF0012u32,
+                "SyntaxError" => 0xFFFF0013u32,
+                "AggregateError" => 0xFFFF0014u32,
+                _ => ctx.class_ids.get(ty).copied().unwrap_or(0),
+            };
             let cid_str = cid.to_string();
             Ok(ctx.block().call(
                 DOUBLE,
@@ -2434,8 +2453,11 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // closure expression that needs to register slots) and
         // return undefined.
         Expr::QueueMicrotask(cb) | Expr::ProcessNextTick(cb) => {
-            let _ = lower_expr(ctx, cb)?;
-            Ok(double_literal(0.0))
+            let cb_box = lower_expr(ctx, cb)?;
+            let blk = ctx.block();
+            let cb_handle = unbox_to_i64(blk, &cb_box);
+            blk.call_void("js_queue_microtask", &[(I64, &cb_handle)]);
+            Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
         }
 
         // -------- RegExpTest --------
@@ -2680,11 +2702,30 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let result_i64 = blk.call(I64, "js_json_parse", &[(I64, &s_handle)]);
             Ok(blk.bitcast_i64_to_double(&result_i64))
         }
-        Expr::JsonParseReviver { text, .. } | Expr::JsonParseWithReviver(text, _) => {
+        Expr::JsonParseReviver { text, reviver } => {
             let s_box = lower_expr(ctx, text)?;
+            let r_box = lower_expr(ctx, reviver)?;
             let blk = ctx.block();
             let s_handle = unbox_to_i64(blk, &s_box);
-            let result_i64 = blk.call(I64, "js_json_parse", &[(I64, &s_handle)]);
+            let r_handle = unbox_to_i64(blk, &r_box);
+            let result_i64 = blk.call(
+                I64,
+                "js_json_parse_with_reviver",
+                &[(I64, &s_handle), (I64, &r_handle)],
+            );
+            Ok(blk.bitcast_i64_to_double(&result_i64))
+        }
+        Expr::JsonParseWithReviver(text, reviver) => {
+            let s_box = lower_expr(ctx, text)?;
+            let r_box = lower_expr(ctx, reviver)?;
+            let blk = ctx.block();
+            let s_handle = unbox_to_i64(blk, &s_box);
+            let r_handle = unbox_to_i64(blk, &r_box);
+            let result_i64 = blk.call(
+                I64,
+                "js_json_parse_with_reviver",
+                &[(I64, &s_handle), (I64, &r_handle)],
+            );
             Ok(blk.bitcast_i64_to_double(&result_i64))
         }
 
@@ -2781,10 +2822,19 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(nanbox_pointer_inline(blk, &result))
         }
 
-        // -------- Object.isFrozen / isSealed / isExtensible stubs (return false) --------
-        Expr::ObjectIsFrozen(o) | Expr::ObjectIsSealed(o) | Expr::ObjectIsExtensible(o) => {
-            let _ = lower_expr(ctx, o)?;
-            Ok(double_literal(0.0))
+        // -------- Object.isFrozen / isSealed / isExtensible --------
+        // Runtime returns f64 already NaN-boxed as TAG_TRUE/TAG_FALSE.
+        Expr::ObjectIsFrozen(o) => {
+            let v = lower_expr(ctx, o)?;
+            Ok(ctx.block().call(DOUBLE, "js_object_is_frozen", &[(DOUBLE, &v)]))
+        }
+        Expr::ObjectIsSealed(o) => {
+            let v = lower_expr(ctx, o)?;
+            Ok(ctx.block().call(DOUBLE, "js_object_is_sealed", &[(DOUBLE, &v)]))
+        }
+        Expr::ObjectIsExtensible(o) => {
+            let v = lower_expr(ctx, o)?;
+            Ok(ctx.block().call(DOUBLE, "js_object_is_extensible", &[(DOUBLE, &v)]))
         }
 
         // -------- FuncRef as expression value (function reference) --------
@@ -2824,7 +2874,12 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let result = blk.call(I64, "js_path_extname", &[(I64, &p_handle)]);
             Ok(nanbox_string_inline(blk, &result))
         }
-        Expr::PathFormat(o) => lower_expr(ctx, o),
+        Expr::PathFormat(o) => {
+            let obj_box = lower_expr(ctx, o)?;
+            let blk = ctx.block();
+            let result = blk.call(I64, "js_path_format", &[(DOUBLE, &obj_box)]);
+            Ok(nanbox_string_inline(blk, &result))
+        }
         Expr::ProcessVersion => Ok(double_literal(0.0)),
         Expr::ObjectHasOwn(obj, key) => {
             let obj_box = lower_expr(ctx, obj)?;
@@ -2981,18 +3036,24 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(blk.call(DOUBLE, "js_date_utc", &call_args))
         }
 
-        // -------- Object.defineProperty stub --------
+        // -------- Object.defineProperty --------
         Expr::ObjectDefineProperty(obj, key, value) => {
-            // Lower for side effects (the value may contain closures), return obj.
-            let _ = lower_expr(ctx, key)?;
-            let _ = lower_expr(ctx, value)?;
-            lower_expr(ctx, obj)
+            let o = lower_expr(ctx, obj)?;
+            let k = lower_expr(ctx, key)?;
+            let v = lower_expr(ctx, value)?;
+            let blk = ctx.block();
+            blk.call(DOUBLE, "js_object_define_property",
+                &[(DOUBLE, &o), (DOUBLE, &k), (DOUBLE, &v)]);
+            Ok(o)
         }
 
-        // -------- path.isAbsolute(p) -> boolean stub --------
+        // -------- path.isAbsolute(p) -> boolean --------
         Expr::PathIsAbsolute(p) => {
-            let _ = lower_expr(ctx, p)?;
-            Ok(double_literal(0.0))
+            let p_box = lower_expr(ctx, p)?;
+            let blk = ctx.block();
+            let p_handle = unbox_to_i64(blk, &p_box);
+            let i32_res = blk.call(I32, "js_path_is_absolute", &[(I64, &p_handle)]);
+            Ok(i32_bool_to_nanbox(blk, &i32_res))
         }
 
         // -------- ProcessHrtimeBigint stub --------
@@ -3069,11 +3130,15 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(double_literal(0.0))
         }
 
-        // -------- ObjectGetOwnPropertyDescriptor stub --------
+        // -------- Object.getOwnPropertyDescriptor(obj, key) --------
         Expr::ObjectGetOwnPropertyDescriptor(obj, key) => {
-            let _ = lower_expr(ctx, obj)?;
-            let _ = lower_expr(ctx, key)?;
-            Ok(double_literal(0.0))
+            let o = lower_expr(ctx, obj)?;
+            let k = lower_expr(ctx, key)?;
+            Ok(ctx.block().call(
+                DOUBLE,
+                "js_object_get_own_property_descriptor",
+                &[(DOUBLE, &o), (DOUBLE, &k)],
+            ))
         }
 
         // -------- Math.cbrt --------
@@ -3113,13 +3178,14 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(ctx.block().call(DOUBLE, "js_date_now", &[]))
         }
 
-        // -------- Object.getOwnPropertyNames stub (returns Object.keys) --------
+        // -------- Object.getOwnPropertyNames(obj) --------
+        // Returns ALL own keys (including non-enumerable ones from
+        // defineProperty), unlike Object.keys which skips them.
         Expr::ObjectGetOwnPropertyNames(obj) => {
             let obj_box = lower_expr(ctx, obj)?;
             let blk = ctx.block();
-            let obj_handle = unbox_to_i64(blk, &obj_box);
-            let arr_handle = blk.call(I64, "js_object_keys", &[(I64, &obj_handle)]);
-            Ok(nanbox_pointer_inline(blk, &arr_handle))
+            let arr_box = blk.call(DOUBLE, "js_object_get_own_property_names", &[(DOUBLE, &obj_box)]);
+            Ok(arr_box)
         }
 
         // -------- Math.hypot(...values) --------
@@ -3331,10 +3397,30 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(double_literal(0.0))
         }
         Expr::ProcessMemoryUsage => Ok(double_literal(0.0)),
-        Expr::EncodeURI(o)
-        | Expr::DecodeURI(o)
-        | Expr::EncodeURIComponent(o)
-        | Expr::DecodeURIComponent(o) => lower_expr(ctx, o),
+        Expr::EncodeURI(o) => {
+            let v = lower_expr(ctx, o)?;
+            let blk = ctx.block();
+            let h = blk.call(I64, "js_encode_uri", &[(DOUBLE, &v)]);
+            Ok(nanbox_string_inline(blk, &h))
+        }
+        Expr::DecodeURI(o) => {
+            let v = lower_expr(ctx, o)?;
+            let blk = ctx.block();
+            let h = blk.call(I64, "js_decode_uri", &[(DOUBLE, &v)]);
+            Ok(nanbox_string_inline(blk, &h))
+        }
+        Expr::EncodeURIComponent(o) => {
+            let v = lower_expr(ctx, o)?;
+            let blk = ctx.block();
+            let h = blk.call(I64, "js_encode_uri_component", &[(DOUBLE, &v)]);
+            Ok(nanbox_string_inline(blk, &h))
+        }
+        Expr::DecodeURIComponent(o) => {
+            let v = lower_expr(ctx, o)?;
+            let blk = ctx.block();
+            let h = blk.call(I64, "js_decode_uri_component", &[(DOUBLE, &v)]);
+            Ok(nanbox_string_inline(blk, &h))
+        }
         Expr::DateToDateString(o) => {
             let v = lower_expr(ctx, o)?;
             let blk = ctx.block();
@@ -3444,11 +3530,17 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let v = lower_expr(ctx, operand)?;
             Ok(ctx.block().call(DOUBLE, "js_number_is_safe_integer", &[(DOUBLE, &v)]))
         }
-        Expr::ObjectFreeze(o) | Expr::ObjectSeal(o) | Expr::ObjectPreventExtensions(o) => {
-            // Real Object.freeze/seal sets a flag on GcHeader. Stub
-            // by passing through (the runtime does nothing extra
-            // for unflagged objects, which is fine for the tests).
-            lower_expr(ctx, o)
+        Expr::ObjectFreeze(o) => {
+            let v = lower_expr(ctx, o)?;
+            Ok(ctx.block().call(DOUBLE, "js_object_freeze", &[(DOUBLE, &v)]))
+        }
+        Expr::ObjectSeal(o) => {
+            let v = lower_expr(ctx, o)?;
+            Ok(ctx.block().call(DOUBLE, "js_object_seal", &[(DOUBLE, &v)]))
+        }
+        Expr::ObjectPreventExtensions(o) => {
+            let v = lower_expr(ctx, o)?;
+            Ok(ctx.block().call(DOUBLE, "js_object_prevent_extensions", &[(DOUBLE, &v)]))
         }
         Expr::DateSetUtcMonth { date, value } => {
             let d = lower_expr(ctx, date)?;
@@ -3467,14 +3559,20 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             }
         }
 
-        // -------- AggregateError stub --------
+        // -------- new AggregateError(errors, message) --------
+        // Calls real runtime `js_aggregateerror_new(errors_handle, msg_handle)`
+        // which stores both the errors array and message in ErrorHeader.
         Expr::AggregateErrorNew { errors, message } => {
-            let _ = lower_expr(ctx, errors)?;
+            let errors_box = lower_expr(ctx, errors)?;
             let m = lower_expr(ctx, message)?;
             let blk = ctx.block();
+            let errors_handle = unbox_to_i64(blk, &errors_box);
             let msg_handle = unbox_to_i64(blk, &m);
-            let err_handle =
-                blk.call(I64, "js_error_new_with_message", &[(I64, &msg_handle)]);
+            let err_handle = blk.call(
+                I64,
+                "js_aggregateerror_new",
+                &[(I64, &errors_handle), (I64, &msg_handle)],
+            );
             Ok(nanbox_pointer_inline(blk, &err_handle))
         }
 
@@ -3488,8 +3586,18 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         Expr::StaticPluginResolve(_) => Ok(double_literal(0.0)),
 
         // -------- More cheap stubs --------
-        Expr::PathResolve(p) | Expr::PathNormalize(p) => lower_expr(ctx, p),
-        Expr::ObjectCreate(p) => lower_expr(ctx, p),
+        Expr::PathNormalize(p) => {
+            let p_box = lower_expr(ctx, p)?;
+            let blk = ctx.block();
+            let p_handle = unbox_to_i64(blk, &p_box);
+            let result = blk.call(I64, "js_path_normalize", &[(I64, &p_handle)]);
+            Ok(nanbox_string_inline(blk, &result))
+        }
+        Expr::PathResolve(p) => lower_expr(ctx, p),
+        Expr::ObjectCreate(p) => {
+            let v = lower_expr(ctx, p)?;
+            Ok(ctx.block().call(DOUBLE, "js_object_create", &[(DOUBLE, &v)]))
+        }
         Expr::MathClz32(o) => {
             let v = lower_expr(ctx, o)?;
             Ok(ctx.block().call(DOUBLE, "js_math_clz32", &[(DOUBLE, &v)]))
@@ -3502,12 +3610,18 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         Expr::FinalizationRegistryNew(_) => Ok(double_literal(0.0)),
         Expr::FinalizationRegistryRegister { .. } => Ok(double_literal(0.0)),
         Expr::FinalizationRegistryUnregister { .. } => Ok(double_literal(0.0)),
-        Expr::ErrorNewWithCause { message, .. } => {
-            // Drop the cause; emit a regular Error with the message.
+        Expr::ErrorNewWithCause { message, cause } => {
+            // new Error(msg, { cause }). Runtime stores the cause
+            // on the ErrorHeader so `e.cause` returns it.
             let msg = lower_expr(ctx, message)?;
+            let c = lower_expr(ctx, cause)?;
             let blk = ctx.block();
             let msg_handle = unbox_to_i64(blk, &msg);
-            let err_handle = blk.call(I64, "js_error_new_with_message", &[(I64, &msg_handle)]);
+            let err_handle = blk.call(
+                I64,
+                "js_error_new_with_cause",
+                &[(I64, &msg_handle), (DOUBLE, &c)],
+            );
             Ok(nanbox_pointer_inline(blk, &err_handle))
         }
         Expr::EnvGet(name) => {

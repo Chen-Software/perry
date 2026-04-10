@@ -325,6 +325,34 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_math_atanh", DOUBLE, &[DOUBLE]);
     module.declare_function("js_math_hypot", DOUBLE, &[DOUBLE, DOUBLE]);
     module.declare_function("js_object_is", DOUBLE, &[DOUBLE, DOUBLE]);
+    // Path + URI (wired in expr.rs; runtime already implemented).
+    module.declare_function("js_path_normalize", I64, &[I64]);
+    module.declare_function("js_path_format", I64, &[DOUBLE]);
+    module.declare_function("js_path_is_absolute", I32, &[I64]);
+    module.declare_function("js_encode_uri", I64, &[DOUBLE]);
+    module.declare_function("js_decode_uri", I64, &[DOUBLE]);
+    module.declare_function("js_encode_uri_component", I64, &[DOUBLE]);
+    module.declare_function("js_decode_uri_component", I64, &[DOUBLE]);
+    // Microtask queue (queueMicrotask / process.nextTick).
+    module.declare_function("js_queue_microtask", VOID, &[I64]);
+    // Object introspection / mutation (Agent A's accessor-descriptor work).
+    module.declare_function("js_object_has_own", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_object_define_property", DOUBLE, &[DOUBLE, DOUBLE, DOUBLE]);
+    module.declare_function("js_object_get_own_property_descriptor", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_object_get_own_property_names", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_object_create", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_object_freeze", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_object_seal", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_object_prevent_extensions", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_object_is_frozen", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_object_is_sealed", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_object_is_extensible", DOUBLE, &[DOUBLE]);
+    // Error subclasses (Agent B's runtime work).
+    module.declare_function("js_aggregateerror_new", I64, &[I64, I64]);
+    module.declare_function("js_error_new_with_cause", I64, &[I64, DOUBLE]);
+    // JSON full-featured stringify/parse (replacer + indent + reviver).
+    module.declare_function("js_json_stringify_full", I64, &[DOUBLE, DOUBLE, DOUBLE]);
+    module.declare_function("js_json_parse_with_reviver", I64, &[I64, I64]);
     module.declare_function("js_array_find", DOUBLE, &[I64, I64]);
     module.declare_function("js_array_findIndex", I32, &[I64, I64]);
     module.declare_function("js_array_find_last", DOUBLE, &[I64, I64]);

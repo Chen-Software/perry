@@ -391,6 +391,14 @@ fn collect_closures_in_expr(
             walk(replacer, seen, out);
             walk(indent, seen, out);
         }
+        Expr::JsonParseReviver { text, reviver } => {
+            walk(text, seen, out);
+            walk(reviver, seen, out);
+        }
+        Expr::JsonParseWithReviver(text, reviver) => {
+            walk(text, seen, out);
+            walk(reviver, seen, out);
+        }
         Expr::NativeMethodCall { object, args, .. } => {
             if let Some(o) = object {
                 walk(o, seen, out);
