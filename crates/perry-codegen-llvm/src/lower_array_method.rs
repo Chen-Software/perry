@@ -2,13 +2,16 @@
 //!
 //! Contains `lower_array_method` which dispatches `.pop()`, `.join()`,
 //! `.some()`, `.every()`, `.toString()`, `.concat()`, `.sort()`,
-//! `.reverse()`, `.flat()`, `.flatMap()`.
+//! `.reverse()`, `.flat()`, `.flatMap()`, plus safety-net handlers for
+//! methods that normally arrive as HIR variants but may reach here as
+//! generic MethodCall when the HIR lowering doesn't recognize the pattern.
 
 use anyhow::{bail, Result};
 use perry_hir::Expr;
 
 use crate::expr::{lower_expr, nanbox_pointer_inline, nanbox_string_inline, unbox_to_i64, FnCtx};
-use crate::types::{DOUBLE, I64};
+use crate::nanbox::double_literal;
+use crate::types::{DOUBLE, I32, I64};
 
 /// Lower `arr.method(args…)` for an array-typed receiver. Currently
 /// supported: `pop`, `join`. `push` is handled separately by the HIR
@@ -137,10 +140,237 @@ pub(crate) fn lower_array_method(
             );
             Ok(nanbox_pointer_inline(blk, &result))
         }
+        // -------- Safety-net handlers for methods that normally arrive --------
+        // as HIR variants but may reach here as generic MethodCall when
+        // the HIR lowering doesn't recognize the pattern.
+        "find" => {
+            if args.len() != 1 {
+                bail!("perry-codegen-llvm: Array.find expects 1 arg, got {}", args.len());
+            }
+            let cb_box = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let cb_handle = unbox_to_i64(blk, &cb_box);
+            Ok(blk.call(DOUBLE, "js_array_find", &[(I64, &recv_handle), (I64, &cb_handle)]))
+        }
+        "findIndex" => {
+            if args.len() != 1 {
+                bail!("perry-codegen-llvm: Array.findIndex expects 1 arg, got {}", args.len());
+            }
+            let cb_box = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let cb_handle = unbox_to_i64(blk, &cb_box);
+            let i32_v = blk.call(I32, "js_array_findIndex", &[(I64, &recv_handle), (I64, &cb_handle)]);
+            Ok(blk.sitofp(I32, &i32_v, DOUBLE))
+        }
+        "findLast" => {
+            if args.len() != 1 {
+                bail!("perry-codegen-llvm: Array.findLast expects 1 arg, got {}", args.len());
+            }
+            let cb_box = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let cb_handle = unbox_to_i64(blk, &cb_box);
+            Ok(blk.call(DOUBLE, "js_array_find_last", &[(I64, &recv_handle), (I64, &cb_handle)]))
+        }
+        "findLastIndex" => {
+            if args.len() != 1 {
+                bail!("perry-codegen-llvm: Array.findLastIndex expects 1 arg, got {}", args.len());
+            }
+            let cb_box = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let cb_handle = unbox_to_i64(blk, &cb_box);
+            let i32_v = blk.call(I32, "js_array_find_last_index", &[(I64, &recv_handle), (I64, &cb_handle)]);
+            Ok(blk.sitofp(I32, &i32_v, DOUBLE))
+        }
+        "reduce" => {
+            if args.is_empty() || args.len() > 2 {
+                bail!("perry-codegen-llvm: Array.reduce expects 1-2 args, got {}", args.len());
+            }
+            let cb_box = lower_expr(ctx, &args[0])?;
+            let (has_initial, initial_box) = if args.len() == 2 {
+                let init = lower_expr(ctx, &args[1])?;
+                (1i32, init)
+            } else {
+                (0i32, "0.0".to_string())
+            };
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let cb_handle = unbox_to_i64(blk, &cb_box);
+            let has_init_str = format!("{}", has_initial);
+            Ok(blk.call(
+                DOUBLE,
+                "js_array_reduce",
+                &[(I64, &recv_handle), (I64, &cb_handle), (I32, &has_init_str), (DOUBLE, &initial_box)],
+            ))
+        }
+        "reduceRight" => {
+            if args.is_empty() || args.len() > 2 {
+                bail!("perry-codegen-llvm: Array.reduceRight expects 1-2 args, got {}", args.len());
+            }
+            let cb_box = lower_expr(ctx, &args[0])?;
+            let (has_initial, initial_box) = if args.len() == 2 {
+                let init = lower_expr(ctx, &args[1])?;
+                (1i32, init)
+            } else {
+                (0i32, "0.0".to_string())
+            };
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let cb_handle = unbox_to_i64(blk, &cb_box);
+            let has_init_str = format!("{}", has_initial);
+            Ok(blk.call(
+                DOUBLE,
+                "js_array_reduce_right",
+                &[(I64, &recv_handle), (I64, &cb_handle), (I32, &has_init_str), (DOUBLE, &initial_box)],
+            ))
+        }
+        "map" => {
+            if args.len() != 1 {
+                bail!("perry-codegen-llvm: Array.map expects 1 arg, got {}", args.len());
+            }
+            let cb_box = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let cb_handle = unbox_to_i64(blk, &cb_box);
+            let result = blk.call(I64, "js_array_map", &[(I64, &recv_handle), (I64, &cb_handle)]);
+            Ok(nanbox_pointer_inline(blk, &result))
+        }
+        "filter" => {
+            if args.len() != 1 {
+                bail!("perry-codegen-llvm: Array.filter expects 1 arg, got {}", args.len());
+            }
+            let cb_box = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let cb_handle = unbox_to_i64(blk, &cb_box);
+            let result = blk.call(I64, "js_array_filter", &[(I64, &recv_handle), (I64, &cb_handle)]);
+            Ok(nanbox_pointer_inline(blk, &result))
+        }
+        "forEach" => {
+            if args.len() != 1 {
+                bail!("perry-codegen-llvm: Array.forEach expects 1 arg, got {}", args.len());
+            }
+            let cb_box = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let cb_handle = unbox_to_i64(blk, &cb_box);
+            blk.call_void("js_array_forEach", &[(I64, &recv_handle), (I64, &cb_handle)]);
+            // forEach returns undefined
+            Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
+        }
+        "includes" => {
+            if args.len() != 1 {
+                bail!("perry-codegen-llvm: Array.includes expects 1 arg, got {}", args.len());
+            }
+            let val_box = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let i32_v = blk.call(I32, "js_array_includes_f64", &[(I64, &recv_handle), (DOUBLE, &val_box)]);
+            // Convert i32 boolean to NaN-boxed true/false
+            let bit = blk.icmp_ne(I32, &i32_v, "0");
+            let tagged = blk.select(
+                "i1", &bit, I64,
+                crate::nanbox::TAG_TRUE_I64,
+                crate::nanbox::TAG_FALSE_I64,
+            );
+            Ok(blk.bitcast_i64_to_double(&tagged))
+        }
+        "indexOf" => {
+            if args.len() != 1 {
+                bail!("perry-codegen-llvm: Array.indexOf expects 1 arg, got {}", args.len());
+            }
+            let val_box = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let i32_v = blk.call(I32, "js_array_indexOf_f64", &[(I64, &recv_handle), (DOUBLE, &val_box)]);
+            Ok(blk.sitofp(I32, &i32_v, DOUBLE))
+        }
+        "at" => {
+            if args.len() != 1 {
+                bail!("perry-codegen-llvm: Array.at expects 1 arg, got {}", args.len());
+            }
+            let idx_box = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            Ok(blk.call(DOUBLE, "js_array_at", &[(I64, &recv_handle), (DOUBLE, &idx_box)]))
+        }
+        "slice" => {
+            if args.is_empty() || args.len() > 2 {
+                bail!("perry-codegen-llvm: Array.slice expects 1-2 args, got {}", args.len());
+            }
+            let start_box = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let start_i32 = blk.fptosi(DOUBLE, &start_box, I32);
+            let end_i32 = if args.len() == 2 {
+                let end_box = lower_expr(ctx, &args[1])?;
+                let blk = ctx.block();
+                blk.fptosi(DOUBLE, &end_box, I32)
+            } else {
+                "2147483647".to_string()
+            };
+            let blk = ctx.block();
+            let result = blk.call(
+                I64,
+                "js_array_slice",
+                &[(I64, &recv_handle), (I32, &start_i32), (I32, &end_i32)],
+            );
+            Ok(nanbox_pointer_inline(blk, &result))
+        }
+        "shift" => {
+            if !args.is_empty() {
+                bail!("perry-codegen-llvm: Array.shift takes no args, got {}", args.len());
+            }
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            Ok(blk.call(DOUBLE, "js_array_shift_f64", &[(I64, &recv_handle)]))
+        }
+        "fill" => {
+            if args.len() != 1 {
+                bail!("perry-codegen-llvm: Array.fill expects 1 arg, got {}", args.len());
+            }
+            let val_box = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let result = blk.call(I64, "js_array_fill", &[(I64, &recv_handle), (DOUBLE, &val_box)]);
+            Ok(nanbox_pointer_inline(blk, &result))
+        }
+        "unshift" => {
+            if args.len() != 1 {
+                bail!("perry-codegen-llvm: Array.unshift expects 1 arg, got {}", args.len());
+            }
+            let val_box = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let result = blk.call(I64, "js_array_unshift_f64", &[(I64, &recv_handle), (DOUBLE, &val_box)]);
+            Ok(nanbox_pointer_inline(blk, &result))
+        }
+        "entries" => {
+            for a in args { let _ = lower_expr(ctx, a)?; }
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let result = blk.call(I64, "js_array_entries", &[(I64, &recv_handle)]);
+            Ok(nanbox_pointer_inline(blk, &result))
+        }
+        "keys" => {
+            for a in args { let _ = lower_expr(ctx, a)?; }
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let result = blk.call(I64, "js_array_keys", &[(I64, &recv_handle)]);
+            Ok(nanbox_pointer_inline(blk, &result))
+        }
+        "values" => {
+            for a in args { let _ = lower_expr(ctx, a)?; }
+            let blk = ctx.block();
+            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let result = blk.call(I64, "js_array_values", &[(I64, &recv_handle)]);
+            Ok(nanbox_pointer_inline(blk, &result))
+        }
         // Best-effort fallback: lower args for side effects, return
-        // the receiver. Many array methods are property-access shapes
-        // we don't yet implement (forEach, find, map without callback,
-        // etc.) and the test only checks compile success.
+        // the receiver.
         _ => {
             for a in args {
                 let _ = lower_expr(ctx, a)?;
