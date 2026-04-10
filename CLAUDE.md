@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.117
+**Current Version:** 0.4.118
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.118 (llvm-backend)
+- feat: LLVM backend wires `process.*` / `os.*` accessors to the real runtime. `ProcessVersion`/`ProcessCwd`/`ProcessPid`/`ProcessPpid`/`ProcessUptime`/`ProcessVersions`/`ProcessMemoryUsage`/`ProcessHrtimeBigint`/`ProcessChdir`/`ProcessKill`/`ProcessOn`/`ProcessStdin`/`ProcessStdout`/`ProcessStderr`/`ProcessArgv` and `OsArch`/`OsType`/`OsPlatform`/`OsRelease`/`OsHostname`/`OsEOL` previously returned `double_literal(0.0)` stubs. Runtime decls added, `type_analysis.rs` recognizes `ProcessVersion`/`ProcessCwd`/`OsArch`/`OsType`/`OsPlatform`/`OsRelease`/`OsHostname`/`OsEOL` as string expressions so `process.version.startsWith('v')` hits the string method fast path. `test_gap_node_process` diff drops 52 → 3 lines (remaining diffs are bigint comparison + Promise executor nextTick pattern, both out of scope).
 
 ### v0.4.117 (llvm-backend)
 - fix: `format_jsvalue`/`format_jsvalue_for_json` now cap nesting at Node's default `util.inspect` depth (2). Nested arrays collapse to `[Array]` and nested objects to `[Object]` past that level, so `console.log({ a: { b: { c: { d: 1 } } } })` prints `{ a: { b: { c: [Object] } } }` instead of the full tree.

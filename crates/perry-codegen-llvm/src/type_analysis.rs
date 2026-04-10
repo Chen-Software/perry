@@ -61,7 +61,19 @@ pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirT
         | Expr::StringFromCharCode(_)
         | Expr::StringAt { .. }
         | Expr::RegExpSource(_)
-        | Expr::RegExpFlags(_) => Some(HirType::String),
+        | Expr::RegExpFlags(_)
+        // process/os string accessors — lower to runtime calls that
+        // return NaN-boxed strings in expr.rs. Refining the local type
+        // to String lets `const v = process.version; v.startsWith('v')`
+        // hit the string method fast path.
+        | Expr::ProcessVersion
+        | Expr::ProcessCwd
+        | Expr::OsArch
+        | Expr::OsType
+        | Expr::OsPlatform
+        | Expr::OsRelease
+        | Expr::OsHostname
+        | Expr::OsEOL => Some(HirType::String),
         // `let l = new ClassName<...>()` — refine to Named(ClassName)
         // so subsequent `l.method()` dispatch goes through the class
         // method registry instead of the universal fallback. This is
@@ -297,6 +309,18 @@ pub(crate) fn is_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
         | Expr::StringAt { .. }
         | Expr::RegExpSource(_)
         | Expr::RegExpFlags(_) => true,
+        // process.* / os.* string-returning accessors. These lower to runtime
+        // calls that return raw StringHeader* pointers, NaN-boxed with STRING_TAG
+        // in expr.rs. Without this, `process.version.startsWith('v')` falls
+        // through to the generic native method dispatch and returns undefined.
+        Expr::ProcessVersion
+        | Expr::ProcessCwd
+        | Expr::OsArch
+        | Expr::OsType
+        | Expr::OsPlatform
+        | Expr::OsRelease
+        | Expr::OsHostname
+        | Expr::OsEOL => true,
         // `obj.toString()` always returns a string. Same for the
         // string-returning method family (trim, trimStart, trimEnd,
         // toLowerCase, toUpperCase, slice, substring, charAt, repeat,
