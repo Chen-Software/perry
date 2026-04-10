@@ -2512,10 +2512,8 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
 
         // -------- arr.splice(start, deleteCount?, ...items) --------
         // Real call to js_array_splice. The runtime returns the
-        // (possibly realloc'd) modified array via the function
-        // return, and the deleted elements via an out-parameter.
-        // For the no-insert form `arr.splice(start, count)` we
-        // pass a null items pointer and 0 count.
+        // deleted elements; the modified array is written to an
+        // out-parameter pointer.
         Expr::ArraySplice { array_id, start, delete_count, items } => {
             let arr_box = lower_expr(ctx, &Expr::LocalGet(*array_id))?;
             let start_d = lower_expr(ctx, start)?;
@@ -2524,23 +2522,41 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             } else {
                 "0.0".to_string()
             };
-            // Materialize items (if any) into a heap f64 array. We
-            // skip the proper data layout and just pass null for the
-            // common no-insert form. Insert-items is a follow-up.
+
+            // Evaluate splice-insert items and collect their f64 values.
+            let mut item_vals: Vec<String> = Vec::new();
             for it in items {
-                let _ = lower_expr(ctx, it)?;
+                item_vals.push(lower_expr(ctx, it)?);
             }
+
             let blk = ctx.block();
             let out_slot = blk.alloca(I64);
             blk.store(I64, "0", &out_slot);
             let arr_handle = unbox_to_i64(blk, &arr_box);
             let start_i32 = blk.fptosi(DOUBLE, &start_d, I32);
             let count_i32 = blk.fptosi(DOUBLE, &count_d, I32);
-            let null_ptr = "null".to_string();
-            let zero_count = "0".to_string();
+
+            let (items_ptr, items_count_str) = if item_vals.is_empty() {
+                ("null".to_string(), "0".to_string())
+            } else {
+                // Allocate a stack buffer of [N x double] for the
+                // items, store each value, and pass the base pointer.
+                let n = item_vals.len();
+                let items_count_str = format!("{}", n);
+                let buf_reg = blk.next_reg();
+                blk.emit_raw(format!(
+                    "{} = alloca [{} x double]",
+                    buf_reg, n
+                ));
+                for (i, val) in item_vals.iter().enumerate() {
+                    let slot = blk.gep(DOUBLE, &buf_reg, &[(I64, &format!("{}", i))]);
+                    blk.store(DOUBLE, val, &slot);
+                }
+                (buf_reg, items_count_str)
+            };
+
             // Note: js_array_splice's return value is the DELETED
             // array; the modified-in-place arr is written to *out_arr.
-            // (Reversed from what you'd guess from the signature.)
             let deleted_handle = blk.call(
                 I64,
                 "js_array_splice",
@@ -2548,8 +2564,8 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     (I64, &arr_handle),
                     (I32, &start_i32),
                     (I32, &count_i32),
-                    (PTR, &null_ptr),
-                    (I32, &zero_count),
+                    (PTR, &items_ptr),
+                    (I32, &items_count_str),
                     (PTR, &out_slot),
                 ],
             );
@@ -3380,14 +3396,14 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(double_literal(0.0))
         }
         Expr::ArrayIsArray(o) => {
-            // Compile-time check: emit 1.0 if the operand is statically
-            // an array, else 0.0. Wrong but doesn't crash.
+            // Compile-time check: emit TAG_TRUE if the operand is
+            // statically an array, else TAG_FALSE. NaN-boxed booleans
+            // so console.log prints "true"/"false".
+            let _ = lower_expr(ctx, o)?;
             if is_array_expr(ctx, o) {
-                let _ = lower_expr(ctx, o)?;
-                Ok(double_literal(1.0))
+                Ok(double_literal(f64::from_bits(crate::nanbox::TAG_TRUE)))
             } else {
-                let _ = lower_expr(ctx, o)?;
-                Ok(double_literal(0.0))
+                Ok(double_literal(f64::from_bits(crate::nanbox::TAG_FALSE)))
             }
         }
 

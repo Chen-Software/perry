@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.100
+**Current Version:** 0.4.101
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,11 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.101 (llvm-backend)
+- fix: `js_array_clone` runtime declaration was missing from `runtime_decls.rs` — Array.from and all chained array ops that touch it failed with `use of undefined value '@js_array_clone'`. 4 tests flipped from COMPILE_FAIL to DIFF (test_edge_arrays, test_edge_iteration, test_edge_map_set, test_gap_class_advanced).
+- feat: `arr.splice(start, del, ...items)` insert form now materializes items into a stack `[N x double]` buffer and passes the base pointer to `js_array_splice` (was null pointer, so inserted elements were dropped).
+- fix: `Array.isArray()` returns NaN-boxed `true`/`false` literals (`TAG_TRUE`/`TAG_FALSE`) instead of raw `1.0`/`0.0`, so `console.log(Array.isArray(x))` prints `true`/`false`.
 
 ### v0.4.100 (llvm-backend)
 - feat: LLVM backend Phase F — cross-module import data now flows all the way from `CompileOptions` into `FnCtx`. Added `CrossModuleCtx` bundle and 5 new `FnCtx` fields (`namespace_imports`, `imported_async_funcs`, `type_aliases`, `imported_func_param_counts`, `imported_func_return_types`). `compile_module` now merges imported enums into `enum_table`, builds owned stub `Class` objects for imported classes and inserts them into `class_table`/`class_ids`/`method_names`, and pre-declares imported class methods + constructors as extern LLVM functions so the linker can resolve cross-module method calls. Threaded `&cross_module` through all 6 FnCtx construction sites. Multi-module tests (main/reexport/export_all) still pass; downstream consumers (lower_call, type_analysis) can now read the cross-module data in later phases.
