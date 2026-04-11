@@ -4397,6 +4397,38 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 let resolved_triple = target
                     .as_deref()
                     .and_then(perry_codegen_llvm::resolve_target_triple);
+                // ── Feature plumbing ──
+                // Mirror every setter the Cranelift dispatch site calls
+                // below (lines ~4435-4471) so the LLVM backend honors
+                // the same project configuration. Without this, the
+                // auto-optimize feature detection + linker flag
+                // construction can't see which modules the program
+                // actually uses and strips too much from libperry_stdlib.a.
+                let bundled_ext_vec: Vec<(String, String)> = if is_entry {
+                    bundled_extensions
+                        .iter()
+                        .map(|(ext_path, _plugin_id)| {
+                            let ext_prefix = compute_module_prefix(
+                                &ext_path.to_string_lossy(),
+                                &ctx.project_root,
+                            );
+                            (ext_path.to_string_lossy().to_string(), ext_prefix)
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let native_module_init_names_vec: Vec<String> = if is_entry {
+                    non_entry_module_names.clone()
+                } else {
+                    Vec::new()
+                };
+                let js_module_specifiers_vec: Vec<String> = if needs_js_runtime {
+                    js_module_specifiers.clone()
+                } else {
+                    Vec::new()
+                };
+
                 let opts = perry_codegen_llvm::CompileOptions {
                     target: resolved_triple,
                     is_entry_module: is_entry,
@@ -4410,6 +4442,20 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                     type_aliases: type_alias_map,
                     imported_func_param_counts: imported_param_counts,
                     imported_func_return_types: imported_return_types,
+
+                    // Feature plumbing
+                    output_type: args.output_type.clone(),
+                    needs_stdlib: ctx.needs_stdlib,
+                    needs_ui: ctx.needs_ui,
+                    needs_geisterhand: ctx.needs_geisterhand,
+                    geisterhand_port: ctx.geisterhand_port,
+                    needs_js_runtime,
+                    enabled_features: compiled_features.clone(),
+                    native_module_init_names: native_module_init_names_vec,
+                    js_module_specifiers: js_module_specifiers_vec,
+                    bundled_extensions: bundled_ext_vec,
+                    native_library_functions: ffi_functions.clone(),
+                    i18n_table: i18n_snapshot.clone(),
                 };
                 let object_code = perry_codegen_llvm::compile_module(hir_module, opts)
                     .map_err(|e| format!(

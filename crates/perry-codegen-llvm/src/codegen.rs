@@ -99,6 +99,59 @@ pub struct CompileOptions {
     pub imported_func_param_counts: std::collections::HashMap<String, usize>,
     /// Imported function return types, keyed by local function name.
     pub imported_func_return_types: std::collections::HashMap<String, perry_types::Type>,
+
+    // ── Feature plumbing (mirrors Cranelift setter chain) ──
+    //
+    // These fields control which runtime libraries and FFI surfaces are
+    // compiled into the resulting binary. Before this, the LLVM dispatch
+    // site silently skipped the Cranelift setter calls — so the auto-
+    // optimize feature detection didn't fire and real-world programs
+    // with UI/HTTP/DB/native-library deps couldn't link. The fields below
+    // propagate the CLI's feature detection into the LLVM codegen so
+    // both backends honor the same project configuration.
+    //
+    // NOTE: most of these are informational for the CLI driver's auto-
+    // optimize rebuild + linker step — `compile_module` itself only
+    // consults `output_type` (to decide between `main` and a dylib init)
+    // and `i18n_table` (to materialize the table as rodata). The rest
+    // are round-tripped through the CompileOptions so the CLI can hand
+    // them to `build_optimized_libs` / linker flag construction without
+    // threading separate parameters.
+
+    /// Output type. "executable" emits a `main`, "dylib" emits a shared
+    /// library plugin with no entrypoint.
+    pub output_type: String,
+    /// Whether the project needs `libperry_stdlib.a` linked in.
+    pub needs_stdlib: bool,
+    /// Whether the project needs `libperry_ui_*.a` linked in.
+    pub needs_ui: bool,
+    /// Whether the project needs the Geisterhand inspector linked in.
+    pub needs_geisterhand: bool,
+    /// Port the Geisterhand inspector listens on when `needs_geisterhand`.
+    pub geisterhand_port: u16,
+    /// Whether the project needs the QuickJS fallback runtime linked in.
+    pub needs_js_runtime: bool,
+    /// Cargo feature names enabled for this build, computed by the CLI's
+    /// `compute_required_features`. Used by the auto-optimize path to
+    /// decide which optional runtime helpers to compile into
+    /// `libperry_stdlib.a`.
+    pub enabled_features: Vec<String>,
+    /// For the entry module: names of every non-entry native module
+    /// that needs its `<prefix>__init` called before the entry's own
+    /// init. Already covered by `non_entry_module_prefixes` for the
+    /// init sequence, but tracked separately for auto-optimize's
+    /// feature scan.
+    pub native_module_init_names: Vec<String>,
+    /// JavaScript-only modules routed through QuickJS (full specifiers).
+    pub js_module_specifiers: Vec<String>,
+    /// Bundled TypeScript extensions — `(absolute_path, module_prefix)`.
+    pub bundled_extensions: Vec<(String, String)>,
+    /// Native library FFI from `package.json` — `(library_name,
+    /// function_names, header_path)` tuples.
+    pub native_library_functions: Vec<(String, Vec<String>, String)>,
+    /// i18n translation table snapshot — `(translations, key_count,
+    /// locale_count, locale_codes)`.
+    pub i18n_table: Option<(Vec<String>, usize, usize, Vec<String>)>,
 }
 
 /// A class imported from another native module.
