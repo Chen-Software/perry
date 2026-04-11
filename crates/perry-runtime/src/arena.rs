@@ -381,6 +381,23 @@ pub fn arena_total_bytes() -> usize {
     })
 }
 
+/// Get bytes currently in use (sum of `block.offset` across blocks).
+/// Used by adaptive GC to measure how much actual data the program is
+/// holding live, separately from how much arena space we've reserved.
+/// After a GC sweep that resets empty blocks, in-use bytes drop
+/// dramatically while reserved bytes stay constant.
+pub fn arena_in_use_bytes() -> usize {
+    sync_inline_arena_state();
+    ARENA.with(|arena| {
+        let arena = unsafe { &*arena.get() };
+        let mut used: usize = 0;
+        for block in &arena.blocks {
+            used += block.offset;
+        }
+        used
+    })
+}
+
 /// Walk all GcHeader objects in arena blocks linearly.
 /// Calls `callback` for each GcHeader pointer found.
 /// Objects are discovered by their `size` field (hop from one to the next).
