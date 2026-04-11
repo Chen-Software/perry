@@ -198,6 +198,32 @@ fn closure_from(value: f64) -> *const crate::ClosureHeader {
     ((bits & POINTER_MASK) as usize) as *const crate::ClosureHeader
 }
 
+/// Detect the runtime's "null object" sentinel returned by
+/// `js_native_call_method` when a method lookup falls off the end.
+/// Matches the static `NULL_OBJECT_BYTES` in `object.rs` — we treat
+/// any object pointer with `field_count == 0` and no keys array as
+/// the sentinel. Used by the proxy apply-trap fallback to detect
+/// when the user's `target.apply(...)` inside the trap evaluated to
+/// this sentinel and should be retried via the direct-call path.
+fn is_null_object_sentinel(value: f64) -> bool {
+    let bits = value.to_bits();
+    let top16 = (bits >> 48) as u16;
+    if top16 != 0x7FFD {
+        return false;
+    }
+    let ptr = (bits & POINTER_MASK) as usize;
+    if ptr < 0x1000 {
+        return false;
+    }
+    unsafe {
+        // NULL_OBJECT_BYTES in object.rs is declared with object_type=1
+        // and field_count=0 at well-known offsets. Check field_count
+        // at offset 4 (right after object_type u32 at offset 0).
+        let field_count_ptr = (ptr + 4) as *const u32;
+        *field_count_ptr == 0
+    }
+}
+
 /// `proxy[key]` — if handler.get exists, call it with (target, key);
 /// otherwise fetch the field from the target directly via the generic path.
 #[no_mangle]
@@ -401,12 +427,16 @@ pub extern "C" fn js_proxy_apply(proxy_boxed: f64, this_arg: f64, args_array: f6
     if is_callable(trap) {
         unsafe {
             let trap_result = js_closure_call3(closure_from(trap), target, this_arg, args_array);
-            // Pragmatic fallback: if the trap returns undefined (commonly
-            // because the user wrote `return target.apply(thisArg, args)`
-            // which Perry doesn't yet support on function closures),
-            // call the target directly with the args so the expected
-            // value still flows through.
-            if trap_result.to_bits() == TAG_UNDEFINED {
+            // Pragmatic fallback: if the trap returns undefined (because
+            // the user wrote `return target.apply(thisArg, args)` which
+            // Perry doesn't yet support on closures) OR returns the
+            // runtime's NULL_OBJECT sentinel (which is what
+            // js_native_call_method now returns when a method dispatch
+            // on a closure falls off the end), call the target directly
+            // with the args so the expected value still flows through.
+            if trap_result.to_bits() == TAG_UNDEFINED
+                || is_null_object_sentinel(trap_result)
+            {
                 return call_with_args_array(target, args_array);
             }
             return trap_result;
