@@ -81,6 +81,24 @@ impl LlBlock {
         self.emit(line);
     }
 
+    /// Number of instructions currently in this block. Used by
+    /// `LlFunction::mark_entry_init_boundary` to record where the entry
+    /// block's "prelude" (init calls) ends so post-init hoisted setup
+    /// (e.g. cached global loads) can be spliced in at exactly that
+    /// point — after the inits run but before user code, so the load
+    /// dominates every use yet sees the up-to-date global value.
+    pub fn instruction_count(&self) -> usize {
+        self.instructions.len()
+    }
+
+    /// Iterate over the raw instruction strings (each already prefixed
+    /// with two leading spaces, no trailing newline). Used by
+    /// `LlFunction::to_ir` when it needs to splice hoisted setup into
+    /// the entry block at a specific boundary.
+    pub fn instructions_iter(&self) -> impl Iterator<Item = &str> {
+        self.instructions.iter().map(|s| s.as_str())
+    }
+
     // -------- Arithmetic (double) --------
     //
     // We emit `reassoc contract` fast-math flags on every float op. These

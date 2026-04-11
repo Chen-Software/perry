@@ -1053,7 +1053,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     // `__perry_init_strings_<prefix>` function that runs once at startup.
     // The function name is scoped by module prefix so multiple modules
     // can each have their own string-pool init without colliding.
-    emit_string_pool(&mut llmod, &strings, &module_prefix, &class_keys_init_data, &class_ids);
+    emit_string_pool(&mut llmod, &strings, &module_prefix, &class_keys_init_data, &class_ids, &class_table);
 
     let ll_text = llmod.to_ir();
     log::debug!(
@@ -1616,6 +1616,14 @@ fn compile_module_entry(
                 blk.call_void(&format!("{}__init", prefix), &[]);
             }
         }
+        // Mark the boundary between init prelude and user code so
+        // hoisted post-init setup (cached `@perry_class_keys_*` loads
+        // for the inline allocator) is spliced AFTER the init calls.
+        // Without this, the load reads the global before
+        // `__perry_init_strings_*` populates it — `keys_array` is null
+        // on every freshly allocated object and field-by-name lookup
+        // returns undefined.
+        main.mark_entry_init_boundary();
 
         let main_boxed_vars = module_boxed_vars.clone();
         let main_integer_locals = crate::collectors::collect_integer_locals(&hir.init);
@@ -1702,6 +1710,10 @@ fn compile_module_entry(
             // executes, every module's strings are alive.
             blk.call_void(&strings_init_name, &[]);
         }
+        // Same boundary as the entry-module main: hoisted post-init
+        // setup must run AFTER the strings init populates module
+        // globals like `@perry_class_keys_*`.
+        init_fn.mark_entry_init_boundary();
 
         let init_boxed_vars = module_boxed_vars.clone();
         let init_integer_locals = crate::collectors::collect_integer_locals(&hir.init);
@@ -1777,6 +1789,7 @@ fn emit_string_pool(
     module_prefix: &str,
     class_keys_init_data: &[(String, String, u32)],
     class_ids: &HashMap<String, u32>,
+    classes: &HashMap<String, &perry_hir::Class>,
 ) {
     for entry in strings.iter() {
         // .rodata bytes — `[N+1 x i8]` because we include the null terminator.
@@ -1869,6 +1882,34 @@ fn emit_string_pool(
             &[(I32, &cid_str), (I32, &fc_str), (PTR, &packed_ref), (I32, &len_str)],
         );
         blk.store(I64, &arr, &format!("@{}", global_name));
+    }
+
+    // Register the parent-class chain for every class with a parent.
+    // The runtime allocators do this on every alloc; the inline
+    // bump allocator skips it. Without this one-time call, the
+    // CLASS_REGISTRY misses the `child → parent` edge and walks of
+    // the inheritance chain (e.g. `instanceof Shape` on a `Square`
+    // where `Square extends Rectangle extends Shape`) terminate
+    // prematurely. We emit one call per inheriting class, sorted by
+    // class id for deterministic ordering.
+    let mut parent_pairs: Vec<(u32, u32)> = Vec::new();
+    for (name, &cid) in class_ids.iter() {
+        if let Some(class) = classes.get(name) {
+            if let Some(parent_name) = &class.extends_name {
+                if let Some(&parent_cid) = class_ids.get(parent_name) {
+                    if parent_cid != 0 {
+                        parent_pairs.push((cid, parent_cid));
+                    }
+                }
+            }
+        }
+    }
+    parent_pairs.sort_unstable();
+    for (cid, parent_cid) in parent_pairs {
+        blk.call_void(
+            "js_register_class_parent",
+            &[(I32, &cid.to_string()), (I32, &parent_cid.to_string())],
+        );
     }
 
     blk.ret_void();

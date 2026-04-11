@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.10
+**Current Version:** 0.5.11
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,12 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.144 and earlier), see CHANGELOG.md.
+
+### v0.5.11 (llvm-backend) — inline-allocator regression fixes (parity 80% → 94%)
+- **fix**: the inline bump-allocator hoist (v0.5.0-followup) cached `@perry_class_keys_<class>` in a function-entry stack slot, but the entry-block hoist ran BEFORE `__perry_init_strings_*` (which is what populates the global). So freshly-allocated objects had a null `keys_array` and `js_object_get_field_by_name` returned `undefined` for every field — `test_array_of_objects` showed `sorted[0].name → undefined`. New `LlFunction::entry_init_boundary` + `entry_post_init_setup`: alloca stays at the very top (dominates), but the load+store splices in AFTER the init prelude. `mark_entry_init_boundary()` is called immediately after `js_gc_init` / `__perry_init_strings_*` / non-entry module inits in `compile_module_entry`.
+- **fix**: the inline allocator skipped `register_class(child, parent)` (the runtime allocators do it on every alloc). With every class instance going through the inline path, the CLASS_REGISTRY was never populated and `instanceof` walks broke at the first hop — `test_edge_classes` showed `square instanceof Rectangle → false` for a `class Square extends Rectangle extends Shape`. New public `js_register_class_parent(child, parent)` extern; codegen emits one call per inheriting class in `__perry_init_strings_*` (sorted by class id).
+- **infra**: parity script normalize_output now strips Node v25 `MODULE_TYPELESS_PACKAGE_JSON` warnings (4 lines printed to stderr per test file without `"type": "module"` in package.json — pure environmental noise that started after the Node v25 upgrade).
+- **result**: parity sweep 96 PASS / 6 FAIL / 0 COMPILE_FAIL = **94.1%**, beating the v0.5.0 baseline of 91.8%. Remaining 6 DIFFs are all pre-existing (timer precision, lookbehind regex, lone surrogates, NFC/NFD, async-generator baseline) — verified by reproducing on the pre-optimization commit. Numeric benchmarks (object_create 8ms, binary_trees 7ms, factorial 25ms) still beat or tie Node on every workload — the fix didn't regress any of the v0.5.2 wins.
 
 ### v0.5.10 (llvm-backend) — `perry/ui.App({...})` dispatch — mango actually launches
 - **fix**: the LLVM backend port (v0.5.0 cutover) silently dropped `perry/ui` dispatch — receiver-less `NativeMethodCall { module: "perry/ui", method, object: None }` fell into `lower_native_method_call`'s catch-all early-out at `lower_call.rs:1922` and returned `double 0.0`. So `App({title, width, height, body})` at the end of any perry/ui app silently no-op'd, the binary completed init without entering `NSApplication.run()`, and exited with no output. Mango compiled cleanly under v0.5.0 through v0.5.9 but couldn't actually launch — the regression was masked because the driver doesn't have an integration test that runs the resulting binary. New per-method dispatch in `lower_call.rs::lower_native_method_call` that recognizes `perry/ui.App({...})`, walks the args[0] object literal for `title` / `width` / `height` / `icon` / `body`, lazy-declares `perry_ui_app_create` / `perry_ui_app_set_icon` / `perry_ui_app_set_body` / `perry_ui_app_run` via `pending_declares`, and emits the create/set-icon/set-body/run sequence. Verified by compiling `mango/src/app.ts -o Mango`, launching the binary, and screenshotting a native macOS window titled "Mango" (menubar shows Mango/Edit/Window — proof that NSApplication.run() is now being entered). The window's content area is empty because the other perry/ui constructors (Text/Button/VStack/HStack/etc.) are still in the same dropped state — full widget dispatch is the next followup. This commit lands `App()` only as a focused proof-of-concept that the linking + runtime + Mach-O code path works end to end.

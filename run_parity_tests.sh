@@ -112,6 +112,15 @@ normalize_output() {
     echo "$decoded" | \
         # Normalize line endings
         tr -d '\r' | \
+        # Strip Node v22+ MODULE_TYPELESS_PACKAGE_JSON warnings (4 lines
+        # printed to stderr when running .ts files without "type":
+        # "module" in package.json — pure environmental noise that
+        # appeared after the Node v25 upgrade and has nothing to do
+        # with Perry's output).
+        sed -E '/^\(node:[0-9]+\) \[MODULE_TYPELESS_PACKAGE_JSON\]/d' | \
+        sed -E '/^Reparsing as ES module because module syntax was detected/d' | \
+        sed -E '/^To eliminate this warning, add "type": "module"/d' | \
+        sed -E '/^\(Use `node --trace-warnings/d' | \
         # Trim trailing whitespace on each line
         sed 's/[[:space:]]*$//' | \
         # Normalize boolean output: true->1, false->0 (whole line only)

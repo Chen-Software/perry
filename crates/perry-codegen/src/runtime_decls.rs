@@ -400,6 +400,11 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_bigint_cmp", I32, &[I64, I64]);
     module.declare_function("js_instanceof", DOUBLE, &[DOUBLE, I32]);
     module.declare_function("js_register_class_extends_error", VOID, &[I32]);
+    // Inline-allocator class registration: emitted once per class
+    // with a parent in the entry-block init prelude. The runtime
+    // allocators register on every alloc; the inline allocator skips
+    // the alloc-site call and relies on this one-time registration.
+    module.declare_function("js_register_class_parent", VOID, &[I32, I32]);
     module.declare_function("js_typeerror_new", I64, &[I64]);
     module.declare_function("js_rangeerror_new", I64, &[I64]);
     module.declare_function("js_syntaxerror_new", I64, &[I64]);

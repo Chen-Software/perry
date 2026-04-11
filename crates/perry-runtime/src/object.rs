@@ -650,6 +650,29 @@ fn register_class(class_id: u32, parent_class_id: u32) {
     registry.as_mut().unwrap().insert(class_id, parent_class_id);
 }
 
+/// Public registration entry point used by codegen module init.
+///
+/// The inline bump allocator (codegen-side `new ClassName()` lowering)
+/// writes `parent_class_id` directly into the ObjectHeader and skips
+/// the per-alloc `register_class` call that the runtime allocators
+/// (`js_object_alloc_with_parent`, `js_object_alloc_class_inline_keys`,
+/// etc.) make on every allocation. That breaks multi-level
+/// `instanceof` chains: `class Square extends Rectangle extends Shape`
+/// — `square instanceof Shape` walks the registry chain
+/// `Square → Rectangle → Shape`, but if we never registered the
+/// `Square → Rectangle` edge the walk stops immediately and returns
+/// false.
+///
+/// Codegen now emits one call to this function per inheriting class
+/// in the entry-block init prelude (after `__perry_init_strings_*`),
+/// so the registry chain is fully populated before any user code runs.
+#[no_mangle]
+pub extern "C" fn js_register_class_parent(class_id: u32, parent_class_id: u32) {
+    if parent_class_id != 0 {
+        register_class(class_id, parent_class_id);
+    }
+}
+
 /// Look up parent class ID from the registry
 fn get_parent_class_id(class_id: u32) -> Option<u32> {
     let registry = CLASS_REGISTRY.read().unwrap();
