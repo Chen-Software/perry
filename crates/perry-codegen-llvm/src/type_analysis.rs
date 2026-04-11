@@ -103,6 +103,15 @@ pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirT
         | Expr::JsonStringify(_)
         | Expr::JsonStringifyPretty { .. }
         | Expr::JsonStringifyFull(..) => Some(HirType::String),
+        // `atob(b64)` / `btoa(s)` return raw binary strings. Without
+        // this refinement, `const dec = atob(...)` is typed as Any, so
+        // chained `dec.charCodeAt(i)` routes through the universal
+        // method dispatcher (which doesn't know how to handle string
+        // pointers — `js_native_call_method` returns a NULL_OBJECT
+        // sentinel that prints as `[object Object]`). With the local
+        // refined to String, charCodeAt hits the inline string fast
+        // path that calls `js_string_char_code_at`.
+        Expr::Atob(_) | Expr::Btoa(_) => Some(HirType::String),
         // `process.hrtime.bigint()` returns a BigInt value. Refining the
         // local type lets `hr2 >= hr1` route through the BigInt compare
         // fast path (`js_bigint_cmp`) instead of fcmp-on-NaN.
@@ -610,6 +619,8 @@ pub(crate) fn is_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
         // Recognized so chained `.length`/`.includes`/`===` on the
         // resulting hex string hit the string fast paths.
         Expr::Call { callee, .. } if is_crypto_digest_chain(callee) => true,
+        // atob/btoa always return strings.
+        Expr::Atob(_) | Expr::Btoa(_) => true,
         _ => false,
     }
 }
