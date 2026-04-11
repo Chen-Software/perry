@@ -366,6 +366,21 @@ pub(crate) fn is_numeric_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
             }
             false
         }
+        // `arr[i]` where `arr` is statically `number[]` / `Int32[]`.
+        // Without this, `sum + arr[i]` in a hot loop wraps the element
+        // load in `js_number_coerce` which blocks LLVM's vectorizer
+        // and adds a function call per iteration.
+        Expr::IndexGet { object, .. } => {
+            let Expr::LocalGet(arr_id) = object.as_ref() else {
+                return false;
+            };
+            match ctx.local_types.get(arr_id) {
+                Some(HirType::Array(elem)) => {
+                    matches!(**elem, HirType::Number | HirType::Int32)
+                }
+                _ => false,
+            }
+        }
         _ => false,
     }
 }
