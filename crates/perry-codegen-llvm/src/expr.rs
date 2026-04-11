@@ -1155,31 +1155,52 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     &[(I64, &obj_handle), (I64, &key_handle)],
                 ));
             }
-            // Last-resort fallback with runtime tag check on the index.
-            // If the index has STRING_TAG (0x7FFF) in top 16 bits,
-            // use object field access. Otherwise, inline array path.
+            // Last-resort fallback with runtime tag checks on the index.
+            // First runtime-check whether the index is a Symbol; if so,
+            // dispatch to the symbol-property side table — mirrors the
+            // IndexSet branch. Otherwise fall through to string/numeric.
             let obj_box = lower_expr(ctx, object)?;
             let idx_box = lower_expr(ctx, index)?;
             let blk = ctx.block();
             let obj_handle = unbox_to_i64(blk, &obj_box);
+            let is_sym_i32 = blk.call(I32, "js_is_symbol", &[(DOUBLE, &idx_box)]);
+            let is_sym_bit = blk.icmp_ne(I32, &is_sym_i32, "0");
+            let sym_idx = ctx.new_block("iget.sym");
+            let nonsym_idx = ctx.new_block("iget.nonsym");
+            let str_idx = ctx.new_block("iget.str");
+            let num_idx = ctx.new_block("iget.num");
+            let merge_idx = ctx.new_block("iget.merge");
+            let sym_lbl = ctx.block_label(sym_idx);
+            let nonsym_lbl = ctx.block_label(nonsym_idx);
+            let str_lbl = ctx.block_label(str_idx);
+            let num_lbl = ctx.block_label(num_idx);
+            let merge_lbl = ctx.block_label(merge_idx);
+            ctx.block().cond_br(&is_sym_bit, &sym_lbl, &nonsym_lbl);
+            // Symbol key → side-table get.
+            ctx.current_block = sym_idx;
+            let v_sym = ctx.block().call(
+                DOUBLE,
+                "js_object_get_symbol_property",
+                &[(DOUBLE, &obj_box), (DOUBLE, &idx_box)],
+            );
+            let sym_end_lbl = ctx.block().label.clone();
+            ctx.block().br(&merge_lbl);
+            // Not a symbol → recompute idx_bits in this block.
+            ctx.current_block = nonsym_idx;
+            let blk = ctx.block();
             let idx_bits = blk.bitcast_double_to_i64(&idx_box);
             let top16 = blk.lshr(I64, &idx_bits, "48");
-            // STRING_TAG = 0x7FFF AND lower 48 bits >= 0x1000 (valid ptr)
             let is_str_tag = blk.icmp_eq(I64, &top16, "32767");
             let lower48 = blk.and(I64, &idx_bits, POINTER_MASK_I64);
             let is_valid_ptr = blk.icmp_ugt(I64, &lower48, "4095");
             let is_str = blk.and(crate::types::I1, &is_str_tag, &is_valid_ptr);
-            let str_idx = ctx.new_block("iget.str");
-            let num_idx = ctx.new_block("iget.num");
-            let merge_idx = ctx.new_block("iget.merge");
-            let str_lbl = ctx.block_label(str_idx);
-            let num_lbl = ctx.block_label(num_idx);
-            let merge_lbl = ctx.block_label(merge_idx);
             ctx.block().cond_br(&is_str, &str_lbl, &num_lbl);
             // String key → object field access.
             ctx.current_block = str_idx;
-            let key_handle = ctx.block().and(I64, &idx_bits, POINTER_MASK_I64);
-            let v_str = ctx.block().call(
+            let blk = ctx.block();
+            let idx_bits2 = blk.bitcast_double_to_i64(&idx_box);
+            let key_handle = blk.and(I64, &idx_bits2, POINTER_MASK_I64);
+            let v_str = blk.call(
                 DOUBLE,
                 "js_object_get_field_by_name_f64",
                 &[(I64, &obj_handle), (I64, &key_handle)],
@@ -1201,7 +1222,11 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             ctx.current_block = merge_idx;
             Ok(ctx.block().phi(
                 DOUBLE,
-                &[(&v_str, &str_end_lbl), (&v_num, &num_end_lbl)],
+                &[
+                    (&v_sym, &sym_end_lbl),
+                    (&v_str, &str_end_lbl),
+                    (&v_num, &num_end_lbl),
+                ],
             ))
         }
 

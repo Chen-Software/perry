@@ -20,7 +20,7 @@
 //! functions in this module.
 
 use crate::string::{js_string_from_bytes, StringHeader};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 // NaN-boxing tags (must match value.rs)
@@ -31,7 +31,7 @@ const POINTER_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
 
 /// Magic number distinguishing SymbolHeader from other GC_TYPE_STRING objects.
 /// Placed at offset 0 so `js_is_symbol` can cheaply detect symbols.
-const SYMBOL_MAGIC: u32 = 0x5359_4D42; // "SYMB"
+pub const SYMBOL_MAGIC: u32 = 0x5359_4D42; // "SYMB"
 
 /// Symbol object header. Allocated via `gc_malloc` (or malloc for registered
 /// symbols that need to outlive GC cycles).
@@ -53,6 +53,31 @@ pub struct SymbolHeader {
 // The symbol pointers stored here are leaked (never freed) so that
 // `Symbol.for("x") === Symbol.for("x")` always returns the same pointer.
 static SYMBOL_REGISTRY: Mutex<Option<HashMap<String, usize>>> = Mutex::new(None);
+
+// Side-table tracking ALL allocated symbol pointers (both gc_malloc'd from
+// `Symbol(desc)` and Box::leak'd from `Symbol.for(key)`). Used by
+// `is_registered_symbol` so the runtime's property/method dispatch can
+// detect symbol pointers safely without reading the (possibly nonexistent)
+// GcHeader byte.
+static SYMBOL_POINTERS: Mutex<Option<HashSet<usize>>> = Mutex::new(None);
+
+fn register_symbol_pointer(ptr: usize) {
+    let mut guard = SYMBOL_POINTERS.lock().unwrap();
+    if guard.is_none() {
+        *guard = Some(HashSet::new());
+    }
+    guard.as_mut().unwrap().insert(ptr);
+}
+
+/// O(1) check whether a raw pointer (already untagged) is a known Symbol.
+/// Safe to call on any pointer-shaped value — no dereference is performed.
+pub fn is_registered_symbol(ptr: usize) -> bool {
+    if ptr < 0x10000 {
+        return false;
+    }
+    let guard = SYMBOL_POINTERS.lock().unwrap();
+    guard.as_ref().map_or(false, |s| s.contains(&ptr))
+}
 
 // Side-table for symbol-keyed properties on objects. The object pointer is
 // the key (as usize); the value is a list of (symbol_ptr, value_bits) pairs.
@@ -105,6 +130,7 @@ unsafe fn alloc_symbol(description: *mut StringHeader, registered: bool) -> *mut
     (*ptr).registered = if registered { 1 } else { 0 };
     (*ptr).description = description;
     (*ptr).id = next_id();
+    register_symbol_pointer(ptr as usize);
     ptr
 }
 
@@ -116,7 +142,11 @@ pub unsafe extern "C" fn js_is_symbol(value: f64) -> i32 {
     if tag != POINTER_TAG {
         return 0;
     }
-    let ptr = (bits & POINTER_MASK) as *const SymbolHeader;
+    let ptr_usize = (bits & POINTER_MASK) as usize;
+    if is_registered_symbol(ptr_usize) {
+        return 1;
+    }
+    let ptr = ptr_usize as *const SymbolHeader;
     if ptr.is_null() || (ptr as usize) < 0x1000 {
         return 0;
     }
@@ -194,6 +224,7 @@ pub unsafe extern "C" fn js_symbol_for(key_f64: f64) -> f64 {
     });
     let sym_ptr = Box::into_raw(boxed);
     registry.insert(key, sym_ptr as usize);
+    register_symbol_pointer(sym_ptr as usize);
     f64::from_bits(POINTER_TAG | (sym_ptr as u64 & POINTER_MASK))
 }
 

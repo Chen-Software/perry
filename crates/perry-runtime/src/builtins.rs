@@ -316,6 +316,18 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
             let ptr: *const crate::array::ArrayHeader = jsval.as_pointer();
             if ptr.is_null() {
                 "null".to_string()
+            } else if crate::symbol::is_registered_symbol(ptr as usize) {
+                // Symbols print as "Symbol(description)" inside util.inspect.
+                let s = crate::symbol::js_symbol_to_string(value);
+                let s_ptr = s as *const StringHeader;
+                if s_ptr.is_null() {
+                    "Symbol()".to_string()
+                } else {
+                    let len = (*s_ptr).length as usize;
+                    let data = (s_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+                    let bytes = std::slice::from_raw_parts(data, len);
+                    std::str::from_utf8(bytes).unwrap_or("Symbol()").to_string()
+                }
             } else if crate::buffer::is_registered_buffer(ptr as usize) {
                 // Buffer/Uint8Array — Node prints as `<Buffer xx xx xx ...>`
                 // (lowercase hex bytes separated by single spaces). Buffer
@@ -904,6 +916,7 @@ pub extern "C" fn js_value_typeof(value: f64) -> *mut StringHeader {
         static TYPEOF_STRING:    Cell<*mut StringHeader> = const { Cell::new(std::ptr::null_mut()) };
         static TYPEOF_FUNCTION:  Cell<*mut StringHeader> = const { Cell::new(std::ptr::null_mut()) };
         static TYPEOF_BIGINT:    Cell<*mut StringHeader> = const { Cell::new(std::ptr::null_mut()) };
+        static TYPEOF_SYMBOL:    Cell<*mut StringHeader> = const { Cell::new(std::ptr::null_mut()) };
     }
 
     /// Get or initialize a cached typeof string.
@@ -938,15 +951,21 @@ pub extern "C" fn js_value_typeof(value: f64) -> *mut StringHeader {
         // JS handle from V8 runtime - always an object
         get_cached(&TYPEOF_OBJECT, "object")
     } else if jsval.is_pointer() {
-        // Object/array/closure pointer - check if it's a closure
+        // Object/array/closure/symbol pointer - check via the side-table first.
         let ptr = jsval.as_pointer::<u8>();
         if !ptr.is_null() && (ptr as usize) > 0x10000 {
-            // ClosureHeader has type_tag at offset 12 (after func_ptr:8 + capture_count:4)
-            let type_tag = unsafe { *(ptr.add(12) as *const u32) };
-            if type_tag == crate::closure::CLOSURE_MAGIC {
-                get_cached(&TYPEOF_FUNCTION, "function")
+            // Symbols: registered in SYMBOL_POINTERS (handles both gc_malloc'd
+            // and Box-leaked symbols, which have no GcHeader).
+            if crate::symbol::is_registered_symbol(ptr as usize) {
+                get_cached(&TYPEOF_SYMBOL, "symbol")
             } else {
-                get_cached(&TYPEOF_OBJECT, "object")
+                // ClosureHeader has type_tag at offset 12 (after func_ptr:8 + capture_count:4)
+                let type_tag = unsafe { *(ptr.add(12) as *const u32) };
+                if type_tag == crate::closure::CLOSURE_MAGIC {
+                    get_cached(&TYPEOF_FUNCTION, "function")
+                } else {
+                    get_cached(&TYPEOF_OBJECT, "object")
+                }
             }
         } else {
             get_cached(&TYPEOF_OBJECT, "object")

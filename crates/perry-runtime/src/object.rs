@@ -1290,6 +1290,25 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
             }
             return JSValue::undefined();
         }
+        // Symbols: registered in SYMBOL_POINTERS by symbol.rs. Symbols
+        // allocated via Symbol.for(...) are Box-leaked (no GcHeader), so
+        // reading the byte before would be UB. Detect via the side table.
+        if crate::symbol::is_registered_symbol(obj as usize) {
+            if !key.is_null() {
+                let key_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+                let key_len = (*key).length as usize;
+                let key_bytes = std::slice::from_raw_parts(key_ptr, key_len);
+                let sym_f64 = f64::from_bits(
+                    0x7FFD_0000_0000_0000u64 | (obj as u64 & 0x0000_FFFF_FFFF_FFFF),
+                );
+                if key_bytes == b"description" {
+                    return JSValue::from_bits(
+                        crate::symbol::js_symbol_description(sym_f64).to_bits(),
+                    );
+                }
+            }
+            return JSValue::undefined();
+        }
         // Validate this is an ObjectHeader, not some other heap type.
         // Check GcHeader first (reliable for heap objects), then fallback to ObjectHeader.object_type
         // for static/const objects that don't have GcHeaders.
@@ -2179,6 +2198,27 @@ pub unsafe extern "C" fn js_native_call_method(
     }
 
     let jsval = JSValue::from_bits(object.to_bits());
+
+    // Symbols: Symbol.for() pointers are Box-leaked (no GcHeader), so the
+    // ObjectHeader path below would dereference garbage. Detect symbols
+    // up front via the side-table.
+    if jsval.is_pointer() {
+        let raw_ptr = (object.to_bits() & 0x0000_FFFF_FFFF_FFFF) as usize;
+        if crate::symbol::is_registered_symbol(raw_ptr) {
+            let sym_f64 = object;
+            return match method_name {
+                "toString" => {
+                    let s = crate::symbol::js_symbol_to_string(sym_f64);
+                    f64::from_bits(JSValue::string_ptr(s as *mut crate::StringHeader).bits())
+                }
+                "valueOf" => sym_f64,
+                "description" => {
+                    f64::from_bits(crate::symbol::js_symbol_description(sym_f64).to_bits())
+                }
+                _ => f64::from_bits(crate::value::TAG_UNDEFINED),
+            };
+        }
+    }
 
     // Handle BigInt method calls (NaN-boxed with BIGINT_TAG 0x7FFA)
     if jsval.is_bigint() {

@@ -852,6 +852,13 @@ pub extern "C" fn js_jsvalue_to_string(value: f64) -> *mut crate::string::String
         // objects fall back to "[object Object]".
         let ptr: *const u8 = jsval.as_pointer();
         if !ptr.is_null() && (ptr as usize) >= 0x10000 {
+            // Symbols: detect via the side-table before any GC header read.
+            if crate::symbol::is_registered_symbol(ptr as usize) {
+                return unsafe {
+                    crate::symbol::js_symbol_to_string(value)
+                        as *mut crate::string::StringHeader
+                };
+            }
             // Buffers: BufferHeader has no GC header, so we must detect via
             // BUFFER_REGISTRY before computing gc_header (which would read
             // garbage one word before the buffer). `Buffer.toString()` with
