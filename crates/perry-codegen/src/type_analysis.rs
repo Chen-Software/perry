@@ -143,7 +143,24 @@ pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirT
         // method registry instead of the universal fallback. This is
         // the difference between `l.size()` returning the real size
         // and returning undefined for generic class instances.
-        Expr::New { class_name, .. } => Some(HirType::Named(class_name.clone())),
+        Expr::New { class_name, .. } => {
+            // Resolve through `local_class_aliases` so `let b: any = new Y()`
+            // (where `let Y = SomeClass` aliased Y → SomeClass) refines `b`
+            // to `Named("SomeClass")` instead of `Named("Y")`. Without this,
+            // the PropertyGet fast path looks up "Y" in `ctx.classes`, finds
+            // nothing, and falls back to the slow path —
+            // `js_object_get_field_by_name_f64`. The slow path is broken
+            // for fast-path-allocated objects, so the read returns undefined
+            // even though the field is correctly initialized in memory.
+            // Resolving the alias here keeps `b` on the fast field-access
+            // path that matches how `lower_new` actually built the object.
+            let resolved = ctx
+                .local_class_aliases
+                .get(class_name.as_str())
+                .cloned()
+                .unwrap_or_else(|| class_name.clone());
+            Some(HirType::Named(resolved))
+        }
         // Buffer / Uint8Array constructors all produce a Buffer instance.
         // Refining the local lets `buf[i]`/`buf.length` use the byte-indexed
         // fast path (`js_buffer_get`/`js_buffer_length`) and `buf.method(...)`

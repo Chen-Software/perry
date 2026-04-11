@@ -49,15 +49,44 @@ pub(crate) fn nanbox_pointer_inline(blk: &mut LlBlock, ptr_i64: &str) -> String 
 ///     or `window.Date`. The `globalThis.X` form is what the parser
 ///     emits for `new globalThis.WebSocket(url)` (mango uses this for
 ///     the websocket helper in `_wsOpen`).
-fn try_static_class_name(callee: &Expr) -> Option<&str> {
+///   - `Expr::PropertyGet { object: LocalGet(ns_id), property }` where
+///     `ns_id` is a namespace import local (`import * as ns from 'm';
+///     new ns.Foo()`). The local id is mapped to its name via
+///     `ctx.local_id_to_name`, then checked against
+///     `ctx.namespace_imports`. The property name is returned as the
+///     class name; the rest of the lower_new path resolves it via the
+///     usual `ctx.classes` lookup, which contains imported classes
+///     under their original (un-namespaced) names.
+fn try_static_class_name<'a>(callee: &'a Expr, ctx: &FnCtx<'_>) -> Option<&'a str> {
     match callee {
         Expr::ClassRef(name) => Some(name.as_str()),
         Expr::PropertyGet { object, property } => {
             if matches!(object.as_ref(), Expr::GlobalGet(_)) {
-                Some(property.as_str())
-            } else {
-                None
+                return Some(property.as_str());
             }
+            // Namespace import via local: `import * as ns from 'm'; new ns.Foo()`.
+            // The local binding shows up as `LocalGet(id)` here; we map id →
+            // name via `local_id_to_name`, then check `namespace_imports`.
+            if let Expr::LocalGet(id) = object.as_ref() {
+                if let Some(name) = ctx.local_id_to_name.get(id) {
+                    if ctx.namespace_imports.contains(name) {
+                        return Some(property.as_str());
+                    }
+                }
+            }
+            // Namespace import via ExternFuncRef: the HIR's
+            // `ast::Expr::Ident` lowering at `crates/perry-hir/src/lower.rs`
+            // lifts a namespace identifier to `Expr::ExternFuncRef { name: "ns" }`
+            // when the name resolves to a `import * as ns from 'm'` binding
+            // (rather than a local let). The property access then becomes
+            // `PropertyGet { object: ExternFuncRef("ns"), property: "Foo" }`.
+            // Check `namespace_imports` directly with the ExternFuncRef name.
+            if let Expr::ExternFuncRef { name, .. } = object.as_ref() {
+                if ctx.namespace_imports.contains(name) {
+                    return Some(property.as_str());
+                }
+            }
+            None
         }
         _ => None,
     }
@@ -2078,7 +2107,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         //      the v0.5.8 changelog.
         Expr::NewDynamic { callee, args } => {
             // Case 1 + 2: callee is statically a class.
-            if let Some(name) = try_static_class_name(callee.as_ref()) {
+            if let Some(name) = try_static_class_name(callee.as_ref(), ctx) {
                 return lower_new(ctx, name, args);
             }
 

@@ -1397,12 +1397,17 @@ pub(crate) fn lower_new(
     // resolve the class name to its underlying real class here and
     // shadow the parameter so the rest of the function uses the
     // resolved name (alloc, ctor lookup, field offsets, etc).
+    // Shadow `class_name` with the alias-resolved version. The
+    // `resolved_owned` binding outlives the shadowed `&str` because it's
+    // declared in the same scope. After this point everything in
+    // `lower_new` (alloc, ctor lookup, field offsets, this_stack push)
+    // sees the resolved class name and the rest of the function is
+    // identical to the direct `new SomeClass()` path.
     let resolved_owned: String;
     let class_name: &str = if !ctx.classes.contains_key(class_name) {
         if let Some(resolved) = ctx.local_class_aliases.get(class_name).cloned() {
             if resolved != class_name {
                 resolved_owned = resolved;
-                eprintln!("[DBG] resolved alias to {}", resolved_owned);
                 &resolved_owned
             } else {
                 class_name
@@ -1413,7 +1418,6 @@ pub(crate) fn lower_new(
     } else {
         class_name
     };
-    eprintln!("[DBG] lower_new BODY for class={} (class_keys_globals?={})", class_name, ctx.class_keys_globals.contains_key(class_name));
 
     let class = match ctx.classes.get(class_name).copied() {
         Some(c) => c,
@@ -1567,14 +1571,17 @@ pub(crate) fn lower_new(
         let blk = ctx.block();
         let state_ptr = blk.load(PTR, &arena_state_slot);
 
-        // offset = state.offset (at byte offset 8 in InlineArenaState)
+        // offset = state.offset (at byte offset 8 in InlineArenaState).
+        // The offset is invariant 8-aligned: arena blocks start at offset 0
+        // (8-aligned), every allocation is a multiple of 8 (`total_size`
+        // includes the 8-byte GcHeader and `MIN_FIELD_SLOTS=8` slots ×
+        // 8 bytes), and `js_inline_arena_slow_alloc` only ever swings the
+        // state to `block.offset` which is also always 8-aligned. So we
+        // skip the `(offset + 7) & -8` align-up step entirely — saves
+        // 2 instructions per iter on the hot path.
         let offset_field_ptr = blk.gep(I8, &state_ptr, &[(I64, "8")]);
         let offset_val = blk.load(I64, &offset_field_ptr);
-
-        // Align up to 8 bytes (no-op when offset is already 8-aligned,
-        // but emitting it lets the unaligned-init case work).
-        let off_plus_7 = blk.add(I64, &offset_val, "7");
-        let aligned_off = blk.and(I64, &off_plus_7, "-8");
+        let aligned_off = offset_val.clone();
 
         // new_offset = aligned + total_size
         let new_offset = blk.add(I64, &aligned_off, &total_size_str);
@@ -1720,7 +1727,6 @@ pub(crate) fn lower_new(
     ctx.this_stack.push(this_slot);
     ctx.class_stack.push(class_name.to_string());
 
-    eprintln!("[DBG]   lower_new {}: this_stack.len()={} class_stack.len()={}", class_name, ctx.this_stack.len(), ctx.class_stack.len());
     // Apply field initializers FIRST — TypeScript / ES2022 semantics:
     // class field initializers run at the start of the constructor body
     // (after super() for derived classes, before any user ctor code).

@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.8
+**Current Version:** 0.5.9
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.144 and earlier), see CHANGELOG.md.
+
+### v0.5.9 (llvm-backend) — `let C = SomeClass; new C()` correctness + alias type refinement
+- **fix**: `let C = SomeClass; new C()` now actually creates an instance of `SomeClass` instead of returning the empty-object placeholder. New `local_class_aliases: HashMap<String, String>` and `local_id_to_name: HashMap<u32, String>` fields on `FnCtx`, populated by `Stmt::Let` when the init is `Expr::ClassRef(name)` (direct alias) or `Expr::LocalGet(other_id)` where `other_id`'s name is itself an alias (chain — `let A = X; let B = A; new B()`). `lower_new` shadows its `class_name` parameter with the resolved name early so the rest of the function (alloc + ctor inline + field offsets) uses the real class. Critically, `refine_type_from_init` for `Expr::New` *also* resolves through `local_class_aliases`, so `let b: any = new C()` refines `b`'s static type to `Named("SomeClass")` not `Named("C")` — without this, the PropertyGet fast path would look up "C" in `ctx.classes`, find nothing, fall through to `js_object_get_field_by_name_f64`, and return undefined for fields that were correctly initialized in memory by the inline allocator. Verified with three test shapes: direct alias (`const C = Foo; const a = new C()`), 3-step chain (`const A = Bar; const B = A; const b = new B()`), and in-function (`function f() { const D = Foo; return new D() }`). Mango compiles cleanly.
 
 ### v0.5.8 (llvm-backend) — `Expr::NewDynamic` static reroute + conditional callee branching
 - **fix**: workspace `Cargo.toml` was missing `[profile.release.package]` `strip = false` overrides for `perry-ui-ios`, `perry-ui-tvos`, `perry-ui-android`, `perry-ui-watchos`. Same staticlib+`#[no_mangle] extern "C"` FFI contract as `perry-ui-macos` (which already had the override + the explicit "UI crates must NOT strip — they export `#[no_mangle] extern "C"` symbols" comment), so a release build of those four would have silently stripped their `perry_ui_*` symbols and broken linking user binaries on `--target ios-simulator`/`ios`/`tvos-simulator`/`tvos`/android. Hadn't bitten yet because all four are in `members` but not `default-members` — a plain `cargo build --release` skips them. Added the four missing profile blocks (`strip = false`, `codegen-units = 16`) alongside the existing macOS/gtk4/windows/geisterhand ones. No code changes, no version bump.
