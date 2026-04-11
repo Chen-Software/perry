@@ -1636,6 +1636,37 @@ fn init_static_fields(
             }
         }
     }
+    // Well-known symbol class hooks: HIR lifts `static [Symbol.hasInstance]`
+    // and `get [Symbol.toStringTag]` to top-level functions with the
+    // prefixes `__perry_wk_hasinstance_<class>` / `__perry_wk_tostringtag_<class>`.
+    // Scan `hir.functions`, compute the LLVM symbol via `scoped_fn_name`,
+    // and emit `js_register_class_<hook>(class_id, ptrtoint(@func, i64))`
+    // at module init so the runtime's `js_instanceof` / `js_object_to_string`
+    // can dispatch through them.
+    let module_prefix = ctx.strings.module_prefix().to_string();
+    for f in &hir.functions {
+        let (registrar, class_name): (&str, &str) =
+            if let Some(rest) = f.name.strip_prefix("__perry_wk_hasinstance_") {
+                ("js_register_class_has_instance", rest)
+            } else if let Some(rest) = f.name.strip_prefix("__perry_wk_tostringtag_") {
+                ("js_register_class_to_string_tag", rest)
+            } else {
+                continue;
+            };
+        let Some(&cid) = ctx.class_ids.get(class_name) else { continue };
+        let cid_str = cid.to_string();
+        let llvm_sym = format!("perry_fn_{}__{}", module_prefix, sanitize(&f.name));
+        let func_ref = format!("@{}", llvm_sym);
+        let blk = ctx.block();
+        let func_ptr_i64 = blk.ptrtoint(&func_ref, I64);
+        blk.call_void(
+            registrar,
+            &[
+                (crate::types::I32, &cid_str),
+                (I64, &func_ptr_i64),
+            ],
+        );
+    }
     for c in &hir.classes {
         for sf in &c.static_fields {
             let key = (c.name.clone(), sf.name.clone());

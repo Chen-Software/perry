@@ -246,6 +246,101 @@ static CLASS_REGISTRY: RwLock<Option<HashMap<u32, u32>>> = RwLock::new(None);
 /// Global registry of class IDs that extend the built-in Error class
 static EXTENDS_ERROR_REGISTRY: RwLock<Option<std::collections::HashSet<u32>>> = RwLock::new(None);
 
+/// Per-class `Symbol.hasInstance` static hook. Maps class_id → raw function
+/// pointer with signature `extern "C" fn(value: f64) -> f64` (NaN-boxed
+/// TAG_TRUE / TAG_FALSE result). Populated at module init from
+/// `__perry_wk_hasinstance_<class>` top-level functions lifted by the HIR
+/// class lowering.
+static CLASS_HAS_INSTANCE_REGISTRY: RwLock<Option<HashMap<u32, usize>>> = RwLock::new(None);
+
+/// Per-class `Symbol.toStringTag` getter hook. Maps class_id → raw function
+/// pointer with signature `extern "C" fn(this: f64) -> f64` returning a
+/// NaN-boxed STRING_TAG value with the user's tag text. Populated at module
+/// init from `__perry_wk_tostringtag_<class>` top-level functions lifted by
+/// the HIR class lowering. Consulted by `js_object_to_string` so
+/// `Object.prototype.toString.call(x)` returns `[object <tag>]`.
+static CLASS_TO_STRING_TAG_REGISTRY: RwLock<Option<HashMap<u32, usize>>> = RwLock::new(None);
+
+/// Register a class-level `Symbol.hasInstance` hook.
+#[no_mangle]
+pub unsafe extern "C" fn js_register_class_has_instance(class_id: u32, func_ptr: i64) {
+    let mut registry = CLASS_HAS_INSTANCE_REGISTRY.write().unwrap();
+    if registry.is_none() {
+        *registry = Some(HashMap::new());
+    }
+    registry
+        .as_mut()
+        .unwrap()
+        .insert(class_id, func_ptr as usize);
+}
+
+/// Register a class-level `Symbol.toStringTag` getter hook.
+#[no_mangle]
+pub unsafe extern "C" fn js_register_class_to_string_tag(class_id: u32, func_ptr: i64) {
+    let mut registry = CLASS_TO_STRING_TAG_REGISTRY.write().unwrap();
+    if registry.is_none() {
+        *registry = Some(HashMap::new());
+    }
+    registry
+        .as_mut()
+        .unwrap()
+        .insert(class_id, func_ptr as usize);
+}
+
+fn lookup_has_instance_hook(class_id: u32) -> Option<usize> {
+    let reg = CLASS_HAS_INSTANCE_REGISTRY.read().unwrap();
+    reg.as_ref().and_then(|m| m.get(&class_id).copied())
+}
+
+fn lookup_to_string_tag_hook(class_id: u32) -> Option<usize> {
+    let reg = CLASS_TO_STRING_TAG_REGISTRY.read().unwrap();
+    reg.as_ref().and_then(|m| m.get(&class_id).copied())
+}
+
+/// `Object.prototype.toString.call(x)` — returns `[object <tag>]` where
+/// `<tag>` is read from the value's class-level `Symbol.toStringTag` getter
+/// if registered, otherwise `Object` (matching Node for plain objects).
+#[no_mangle]
+pub unsafe extern "C" fn js_object_to_string(value: f64) -> f64 {
+    const POINTER_TAG: u64 = 0x7FFD_0000_0000_0000;
+    const POINTER_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
+    const STRING_TAG: u64 = 0x7FFF_0000_0000_0000;
+    let bits = value.to_bits();
+    let mut tag_str: Option<String> = None;
+    if (bits & 0xFFFF_0000_0000_0000) == POINTER_TAG {
+        let obj_ptr = (bits & POINTER_MASK) as *const ObjectHeader;
+        if !obj_ptr.is_null() && (obj_ptr as usize) >= 0x1000 {
+            let class_id = (*obj_ptr).class_id;
+            if let Some(func_ptr) = lookup_to_string_tag_hook(class_id) {
+                let getter: extern "C" fn(f64) -> f64 =
+                    std::mem::transmute(func_ptr as *const u8);
+                let result_f64 = getter(value);
+                let rbits = result_f64.to_bits();
+                if (rbits & 0xFFFF_0000_0000_0000) == STRING_TAG {
+                    let str_ptr =
+                        (rbits & POINTER_MASK) as *const crate::string::StringHeader;
+                    if !str_ptr.is_null() {
+                        let len = (*str_ptr).length as usize;
+                        let data = (str_ptr as *const u8)
+                            .add(std::mem::size_of::<crate::string::StringHeader>());
+                        let bytes = std::slice::from_raw_parts(data, len);
+                        if let Ok(s) = std::str::from_utf8(bytes) {
+                            tag_str = Some(s.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let formatted = match tag_str {
+        Some(tag) => format!("[object {}]", tag),
+        None => "[object Object]".to_string(),
+    };
+    let bytes = formatted.as_bytes();
+    let str_ptr = crate::string::js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32);
+    f64::from_bits(STRING_TAG | (str_ptr as u64 & POINTER_MASK))
+}
+
 /// Mark a user-defined class as extending the built-in Error class.
 #[no_mangle]
 pub extern "C" fn js_register_class_extends_error(class_id: u32) {
@@ -2005,6 +2100,33 @@ pub extern "C" fn js_instanceof(value: f64, class_id: u32) -> f64 {
     const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
     let true_val = f64::from_bits(TAG_TRUE);
     let false_val = f64::from_bits(TAG_FALSE);
+
+    // User-defined `Symbol.hasInstance` takes precedence over the built-in
+    // prototype-chain walk. The HIR lifts `static [Symbol.hasInstance](v)`
+    // to a top-level function `__perry_wk_hasinstance_<class>` and the
+    // LLVM backend registers a pointer to it against the class's id at
+    // module init. If a hook is present, call it with the candidate value
+    // and return the boolean-shaped result directly.
+    if let Some(func_ptr) = lookup_has_instance_hook(class_id) {
+        let hook: extern "C" fn(f64) -> f64 =
+            unsafe { std::mem::transmute(func_ptr as *const u8) };
+        let result = hook(value);
+        // Normalize: any truthy NaN-boxed bool stays as the TAG_TRUE/FALSE
+        // sentinel. User-written `return typeof v === "number" && ...`
+        // already returns a NaN-boxed bool, so this is usually a no-op.
+        let rbits = result.to_bits();
+        if rbits == TAG_TRUE || rbits == TAG_FALSE {
+            return result;
+        }
+        // Fallback: treat as truthy → TRUE, zero/undefined → FALSE.
+        if result.is_nan() && rbits & 0xFFFF_0000_0000_0000 == 0x7FFC_0000_0000_0000 {
+            return false_val;
+        }
+        if result == 0.0 || result.is_nan() {
+            return false_val;
+        }
+        return true_val;
+    }
 
     let bits = value.to_bits();
     let jsval = crate::JSValue::from_bits(bits);

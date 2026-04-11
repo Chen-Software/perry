@@ -4589,6 +4589,52 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                 }
             }
 
+            // --- Object.prototype.toString.call(x) → js_object_to_string(x) ---
+            // AST shape is a four-level member expression:
+            //   call.call(x)
+            //   ^^^^^^^^^^ outer member: (Object.prototype.toString).call
+            // The runtime helper consults the class's `Symbol.toStringTag`
+            // getter (registered at module init via `__perry_wk_tostringtag_*`)
+            // and returns `[object <tag>]` or the default `[object Object]`.
+            if !has_spread && args.len() == 1 {
+                if let ast::Callee::Expr(callee_expr) = &call.callee {
+                    if let ast::Expr::Member(outer) = callee_expr.as_ref() {
+                        if let (ast::MemberProp::Ident(outer_prop), ast::Expr::Member(mid)) =
+                            (&outer.prop, outer.obj.as_ref())
+                        {
+                            if outer_prop.sym.as_ref() == "call" {
+                                if let (ast::MemberProp::Ident(mid_prop), ast::Expr::Member(inner)) =
+                                    (&mid.prop, mid.obj.as_ref())
+                                {
+                                    if mid_prop.sym.as_ref() == "toString" {
+                                        if let (
+                                            ast::MemberProp::Ident(inner_prop),
+                                            ast::Expr::Ident(inner_obj),
+                                        ) = (&inner.prop, inner.obj.as_ref())
+                                        {
+                                            if inner_obj.sym.as_ref() == "Object"
+                                                && inner_prop.sym.as_ref() == "prototype"
+                                            {
+                                                let arg = args.into_iter().next().unwrap();
+                                                return Ok(Expr::Call {
+                                                    callee: Box::new(Expr::ExternFuncRef {
+                                                        name: "js_object_to_string".to_string(),
+                                                        param_types: Vec::new(),
+                                                        return_type: Type::Any,
+                                                    }),
+                                                    args: vec![arg],
+                                                    type_args: Vec::new(),
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // If spread is present, create CallSpread instead of Call
             let spread_args: Option<Vec<CallArg>> = if has_spread {
                 Some(call.args.iter().zip(args.iter())
@@ -6291,6 +6337,18 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                 // are NOT arrays — they are plain objects with closure-valued
                                 // properties and must NOT enter the array fast path.
                                 let is_object_type = matches!(type_info, Some(Type::Object(_)));
+                                // `Uint8Array`/`Buffer` instances must NOT enter the generic
+                                // array fast path. They have a distinct runtime representation
+                                // (raw `BufferHeader`, no f64 elements) and a different method
+                                // family (`readUInt8`, `swap16`, byte-level `indexOf` matching
+                                // string/buffer needles, etc.). The runtime's
+                                // `dispatch_buffer_method` handles all of these via the
+                                // universal `js_native_call_method` fallback path.
+                                let is_buffer_type = matches!(
+                                    type_info,
+                                    Some(Type::Named(n))
+                                        if n == "Uint8Array" || n == "Buffer" || n == "Uint8ClampedArray"
+                                );
                                 let is_ambiguous_method = matches!(method_name,
                                     "indexOf" | "includes" | "slice"
                                 );
@@ -6300,6 +6358,8 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                     false  // user class — must dispatch to class method, skip array fast-path
                                 } else if is_object_type {
                                     false  // object type literal — dispatch via method call, not array ops
+                                } else if is_buffer_type {
+                                    false  // Buffer/Uint8Array — runtime dispatch handles byte-level methods
                                 } else if is_known_not_string {
                                     true   // definitely not a string, enter array block
                                 } else if is_ambiguous_method {

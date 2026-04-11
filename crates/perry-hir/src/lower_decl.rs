@@ -28,6 +28,29 @@ pub(crate) fn is_symbol_iterator_key(expr: &ast::Expr) -> bool {
     false
 }
 
+/// Detect the computed key `[Symbol.<well-known>]` in a class method (static
+/// method, getter, regular method). Returns the short well-known name
+/// ("toPrimitive", "hasInstance", "toStringTag", "iterator", "asyncIterator")
+/// if the expression matches `Symbol.X` for a supported well-known.
+pub(crate) fn symbol_well_known_key(expr: &ast::Expr) -> Option<&'static str> {
+    if let ast::Expr::Member(member) = expr {
+        if let (ast::Expr::Ident(obj), ast::MemberProp::Ident(prop)) = (member.obj.as_ref(), &member.prop) {
+            if obj.sym.as_ref() != "Symbol" {
+                return None;
+            }
+            return match prop.sym.as_ref() {
+                "toPrimitive" => Some("toPrimitive"),
+                "hasInstance" => Some("hasInstance"),
+                "toStringTag" => Some("toStringTag"),
+                "iterator" => Some("iterator"),
+                "asyncIterator" => Some("asyncIterator"),
+                _ => None,
+            };
+        }
+    }
+    None
+}
+
 /// Pre-scan a function body to detect references to the `arguments` identifier.
 /// Stops descent at nested function declarations and arrow functions, since
 /// those have their own `arguments` binding (or, for arrows, inherit the
@@ -432,14 +455,76 @@ pub(crate) fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::Clas
                     continue;
                 }
                 // Get the property name for getters/setters. Computed
-                // keys are only accepted for `[Symbol.iterator]`, which
-                // we register under the sentinel name `@@iterator`.
+                // keys are accepted for `[Symbol.iterator]` (registered
+                // under `@@iterator`), and for `[Symbol.hasInstance]` /
+                // `[Symbol.toStringTag]` (lifted to top-level functions
+                // with a `__perry_wk_<hook>_<class>` prefix so the LLVM
+                // backend's `init_static_fields` picks them up and
+                // registers them with the runtime).
                 let prop_name = match &method.key {
                     ast::PropName::Ident(ident) => ident.sym.to_string(),
                     ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
                     ast::PropName::Computed(computed) => {
                         if is_symbol_iterator_key(&computed.expr) {
                             "@@iterator".to_string()
+                        } else if let Some(wk) = symbol_well_known_key(&computed.expr) {
+                            // hasInstance (static method): lift the method
+                            // body to a top-level function named
+                            // `__perry_wk_hasinstance_<class>`. Signature:
+                            // `(value: f64) -> f64` — no `this`.
+                            if wk == "hasInstance"
+                                && method.is_static
+                                && matches!(method.kind, ast::MethodKind::Method)
+                            {
+                                let mut func = lower_class_method(ctx, method)?;
+                                func.name = format!("__perry_wk_hasinstance_{}", name);
+                                ctx.pending_functions.push(func);
+                                continue;
+                            }
+                            // toStringTag (instance getter): lift the
+                            // getter body to a top-level function named
+                            // `__perry_wk_tostringtag_<class>`. Signature:
+                            // `(this: f64) -> f64` — getter takes `this`
+                            // as an explicit first parameter and returns
+                            // a string.
+                            if wk == "toStringTag"
+                                && !method.is_static
+                                && matches!(method.kind, ast::MethodKind::Getter)
+                            {
+                                let getter = lower_getter_method(ctx, method)?;
+                                // Inject a `this` parameter at position 0 and rewrite
+                                // any `Expr::This` in the body to `LocalGet(this_id)`.
+                                let this_id = ctx.fresh_local();
+                                let mut new_params = Vec::with_capacity(getter.params.len() + 1);
+                                new_params.push(Param {
+                                    id: this_id,
+                                    name: "this".to_string(),
+                                    ty: Type::Named(name.clone()),
+                                    default: None,
+                                    is_rest: false,
+                                });
+                                new_params.extend(getter.params.into_iter());
+                                let mut body = getter.body;
+                                crate::analysis::replace_this_in_stmts(&mut body, this_id);
+                                let top_fn = Function {
+                                    id: ctx.fresh_func(),
+                                    name: format!("__perry_wk_tostringtag_{}", name),
+                                    type_params: Vec::new(),
+                                    params: new_params,
+                                    return_type: Type::Any,
+                                    body,
+                                    is_async: false,
+                                    is_generator: false,
+                                    is_exported: false,
+                                    captures: Vec::new(),
+                                    decorators: Vec::new(),
+                                };
+                                ctx.pending_functions.push(top_fn);
+                                continue;
+                            }
+                            // Other well-known (toPrimitive, asyncIterator)
+                            // on a class: not yet implemented, skip.
+                            continue;
                         } else {
                             continue;
                         }
@@ -1261,6 +1346,17 @@ pub(crate) fn lower_class_method(ctx: &mut LoweringContext, method: &ast::ClassM
         ast::PropName::Computed(computed) if is_symbol_iterator_key(&computed.expr) => {
             "@@iterator".to_string()
         }
+        ast::PropName::Computed(computed) => {
+            // Well-known symbols (hasInstance, toStringTag, toPrimitive,
+            // asyncIterator) get a synthetic `@@<short>` name. The caller
+            // is responsible for renaming / lifting the returned Function
+            // as needed — see the well-known handling in lower_class_decl.
+            if let Some(wk) = symbol_well_known_key(&computed.expr) {
+                format!("@@{}", wk)
+            } else {
+                return Err(anyhow!("Unsupported method key"));
+            }
+        }
         _ => return Err(anyhow!("Unsupported method key")),
     };
 
@@ -1338,6 +1434,16 @@ pub(crate) fn lower_getter_method(ctx: &mut LoweringContext, method: &ast::Class
     let name = match &method.key {
         ast::PropName::Ident(ident) => format!("get_{}", ident.sym),
         ast::PropName::Str(s) => format!("get_{}", s.value.as_str().unwrap_or("")),
+        ast::PropName::Computed(computed) => {
+            // Well-known symbol getters (e.g., `get [Symbol.toStringTag]()`)
+            // get a synthetic `get_@@<short>` name. The caller is
+            // responsible for lifting / renaming as needed.
+            if let Some(wk) = symbol_well_known_key(&computed.expr) {
+                format!("get_@@{}", wk)
+            } else {
+                return Err(anyhow!("Unsupported getter key"));
+            }
+        }
         _ => return Err(anyhow!("Unsupported getter key")),
     };
 

@@ -1434,10 +1434,23 @@ pub fn declare_stdlib_ffi(module: &mut LlModule) {
     //     `[Symbol.toPrimitive]` method when the value is an object. Called
     //     indirectly from within the runtime; declared here so HIR
     //     `Call(ExternFuncRef("js_to_primitive"), ...)` can also call it.
+    //   - `js_register_class_has_instance` / `js_register_class_to_string_tag`:
+    //     called from `init_static_fields` for each class whose HIR lowering
+    //     lifted a `static [Symbol.hasInstance]()` method or a
+    //     `get [Symbol.toStringTag]()` getter to a top-level function with
+    //     a `__perry_wk_<hook>_<class>` prefix. The runtime stores the
+    //     function pointer against the class_id and consults it from
+    //     `js_instanceof` / `js_object_to_string`.
+    //   - `js_object_to_string`: implements `Object.prototype.toString.call(x)`
+    //     by reading the class's registered `Symbol.toStringTag` getter.
+    //     Called directly from HIR via `Call(ExternFuncRef, [obj])`.
     module.declare_function(
         "js_object_set_symbol_method",
         DOUBLE,
         &[DOUBLE, DOUBLE, DOUBLE],
     );
     module.declare_function("js_to_primitive", DOUBLE, &[DOUBLE, I32]);
+    module.declare_function("js_register_class_has_instance", VOID, &[I32, I64]);
+    module.declare_function("js_register_class_to_string_tag", VOID, &[I32, I64]);
+    module.declare_function("js_object_to_string", DOUBLE, &[DOUBLE]);
 }
