@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.138
+**Current Version:** 0.4.139
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,11 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.139 (llvm-backend)
+- feat: `fs.createWriteStream` / `fs.createReadStream` now return real stream objects (were stubs returning undefined). New `STREAM_REGISTRY` in `crates/perry-runtime/src/fs.rs` tracks per-stream state (path, in-memory buffer, finished flag, error). The returned `ObjectHeader` exposes fields `write`/`end`/`on`/`once`/`close`/`destroy` (write) or `on`/`once`/`pipe`/`close`/`destroy` (read), each a NaN-boxed closure capturing the stream id in slot 0. The extern "C" helpers (`write_stream_write_impl`, `write_stream_end*_impl`, `write_stream_on_impl`, `read_stream_on_impl`) are dispatched via the existing `js_native_call_method` → object field scan → `js_native_call_value` path, so `ws.write(chunk); ws.end(); ws.on('finish', r)` and `rs.on('data', cb); rs.on('end', cb)` flow through unchanged. Write path buffers chunks and flushes via `std::fs::write` at `end()`; read path pre-reads the file at creation so the data callback can fire synchronously. The common `end(); on('finish', r)` pattern fires `r` inline because state is already `finished`; conversely registration-before-end stashes the callback on the state for later firing.
+- fix: `collect_boxed_vars` in `crates/perry-codegen-llvm/src/boxed_vars.rs` now recurses into nested `Expr::Closure` bodies so mutable captures inside Promise executors / setTimeout callbacks / any inline closure scope get boxed. Previously the top-level walker stopped at closure boundaries, so `let data = ''` declared inside a `new Promise((r) => { ... })` body was never considered for boxing — inner closures captured by-value snapshots and outer mutations were lost. Fix splits the analysis into `collect_boxed_vars_scope` (single scope) + `collect_nested_closure_boxed_vars_in_stmts`/`_in_expr` (recursive walker that runs the scope analysis on every inner closure body). Unblocks the read-stream `data += chunk` pattern in `test_gap_node_fs` and independently improves `test_gap_async_advanced` by 7 diff markers (30 → 23).
+- `test_gap_node_fs` DIFF 23 → 6 (remaining 6 markers are pre-existing `String.includes`/`Array.includes` → `[object Object]` bugs on `fs.readdirSync` / `fs.mkdtempSync` results, unrelated to streams).
 
 ### v0.4.138 (llvm-backend)
 - feat: `test_gap_class_advanced` DIFF (8) → MATCH. Three coordinated fixes:

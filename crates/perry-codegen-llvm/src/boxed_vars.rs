@@ -31,6 +31,19 @@ use crate::collectors::{collect_let_ids, collect_ref_ids_in_stmts};
 pub(crate) fn collect_boxed_vars(
     stmts: &[perry_hir::Stmt],
 ) -> HashSet<u32> {
+    let mut boxed = collect_boxed_vars_scope(stmts);
+    // Recurse into nested closures: each inner closure is its own
+    // scope and needs independent boxing analysis. Without this,
+    // mutable captures inside Promise executors, setTimeout callbacks,
+    // etc. never get boxed and the outer mutation is lost.
+    collect_nested_closure_boxed_vars_in_stmts(stmts, &mut boxed);
+    boxed
+}
+
+/// Boxing analysis for a single lexical scope (does NOT recurse into
+/// inner closures — that's done by the caller via
+/// `collect_nested_closure_boxed_vars_in_stmts`).
+fn collect_boxed_vars_scope(stmts: &[perry_hir::Stmt]) -> HashSet<u32> {
     // Step 1: set of ids declared in this scope (Let).
     let mut declared: HashSet<u32> = HashSet::new();
     collect_let_ids(stmts, &mut declared);
@@ -93,6 +106,191 @@ pub(crate) fn collect_boxed_vars(
         }
     }
     boxed
+}
+
+/// Walk the given statements looking for `Expr::Closure` nodes, and
+/// for each one recursively run the boxing analysis on its body.
+/// Unions the resulting ids into `out`.
+///
+/// This lets us detect mutable-capture patterns like:
+///
+/// ```ignore
+/// await new Promise((resolve) => {
+///     let data = "";                // inner closure's scope
+///     rs.on("data", (chunk) => { data += chunk; });
+///     rs.on("end", () => resolve(data));
+/// });
+/// ```
+///
+/// Without this recursion, `data` is invisible to the top-level
+/// `collect_let_ids` walker (which stops at closure boundaries), so
+/// the inner closures end up capturing by-value snapshots and the
+/// mutation is lost.
+fn collect_nested_closure_boxed_vars_in_stmts(
+    stmts: &[perry_hir::Stmt],
+    out: &mut HashSet<u32>,
+) {
+    use perry_hir::Stmt;
+    for s in stmts {
+        collect_nested_closure_boxed_vars_in_stmt(s, out);
+    }
+}
+
+fn collect_nested_closure_boxed_vars_in_stmt(
+    stmt: &perry_hir::Stmt,
+    out: &mut HashSet<u32>,
+) {
+    use perry_hir::Stmt;
+    match stmt {
+        Stmt::Expr(e) | Stmt::Throw(e) => {
+            collect_nested_closure_boxed_vars_in_expr(e, out);
+        }
+        Stmt::Return(opt) => {
+            if let Some(e) = opt {
+                collect_nested_closure_boxed_vars_in_expr(e, out);
+            }
+        }
+        Stmt::Let { init, .. } => {
+            if let Some(e) = init {
+                collect_nested_closure_boxed_vars_in_expr(e, out);
+            }
+        }
+        Stmt::If { condition, then_branch, else_branch } => {
+            collect_nested_closure_boxed_vars_in_expr(condition, out);
+            collect_nested_closure_boxed_vars_in_stmts(then_branch, out);
+            if let Some(eb) = else_branch {
+                collect_nested_closure_boxed_vars_in_stmts(eb, out);
+            }
+        }
+        Stmt::For { init, condition, update, body } => {
+            if let Some(i) = init {
+                collect_nested_closure_boxed_vars_in_stmt(i, out);
+            }
+            if let Some(c) = condition {
+                collect_nested_closure_boxed_vars_in_expr(c, out);
+            }
+            if let Some(u) = update {
+                collect_nested_closure_boxed_vars_in_expr(u, out);
+            }
+            collect_nested_closure_boxed_vars_in_stmts(body, out);
+        }
+        Stmt::While { condition, body } | Stmt::DoWhile { body, condition } => {
+            collect_nested_closure_boxed_vars_in_expr(condition, out);
+            collect_nested_closure_boxed_vars_in_stmts(body, out);
+        }
+        Stmt::Try { body, catch, finally } => {
+            collect_nested_closure_boxed_vars_in_stmts(body, out);
+            if let Some(c) = catch {
+                collect_nested_closure_boxed_vars_in_stmts(&c.body, out);
+            }
+            if let Some(f) = finally {
+                collect_nested_closure_boxed_vars_in_stmts(f, out);
+            }
+        }
+        Stmt::Switch { discriminant, cases } => {
+            collect_nested_closure_boxed_vars_in_expr(discriminant, out);
+            for case in cases {
+                if let Some(t) = &case.test {
+                    collect_nested_closure_boxed_vars_in_expr(t, out);
+                }
+                collect_nested_closure_boxed_vars_in_stmts(&case.body, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_nested_closure_boxed_vars_in_expr(
+    expr: &perry_hir::Expr,
+    out: &mut HashSet<u32>,
+) {
+    use perry_hir::Expr;
+    match expr {
+        Expr::Closure { body, .. } => {
+            // Each closure is its own lexical scope — run the scope
+            // analysis on the body, then recurse into any closures
+            // that appear inside it.
+            let inner = collect_boxed_vars_scope(body);
+            out.extend(inner);
+            collect_nested_closure_boxed_vars_in_stmts(body, out);
+        }
+        Expr::Binary { left, right, .. }
+        | Expr::Logical { left, right, .. }
+        | Expr::Compare { left, right, .. } => {
+            collect_nested_closure_boxed_vars_in_expr(left, out);
+            collect_nested_closure_boxed_vars_in_expr(right, out);
+        }
+        Expr::Unary { operand, .. } => {
+            collect_nested_closure_boxed_vars_in_expr(operand, out);
+        }
+        Expr::Call { callee, args, .. } => {
+            collect_nested_closure_boxed_vars_in_expr(callee, out);
+            for a in args {
+                collect_nested_closure_boxed_vars_in_expr(a, out);
+            }
+        }
+        Expr::New { args, .. } => {
+            for a in args {
+                collect_nested_closure_boxed_vars_in_expr(a, out);
+            }
+        }
+        Expr::Array(items) => {
+            for i in items {
+                collect_nested_closure_boxed_vars_in_expr(i, out);
+            }
+        }
+        Expr::Object(props) => {
+            for (_, v) in props {
+                collect_nested_closure_boxed_vars_in_expr(v, out);
+            }
+        }
+        Expr::LocalSet(_, v) => {
+            collect_nested_closure_boxed_vars_in_expr(v, out);
+        }
+        Expr::Conditional { condition, then_expr, else_expr } => {
+            collect_nested_closure_boxed_vars_in_expr(condition, out);
+            collect_nested_closure_boxed_vars_in_expr(then_expr, out);
+            collect_nested_closure_boxed_vars_in_expr(else_expr, out);
+        }
+        Expr::IndexGet { object, index } => {
+            collect_nested_closure_boxed_vars_in_expr(object, out);
+            collect_nested_closure_boxed_vars_in_expr(index, out);
+        }
+        Expr::IndexSet { object, index, value } => {
+            collect_nested_closure_boxed_vars_in_expr(object, out);
+            collect_nested_closure_boxed_vars_in_expr(index, out);
+            collect_nested_closure_boxed_vars_in_expr(value, out);
+        }
+        Expr::PropertyGet { object, .. } => {
+            collect_nested_closure_boxed_vars_in_expr(object, out);
+        }
+        Expr::PropertySet { object, value, .. } => {
+            collect_nested_closure_boxed_vars_in_expr(object, out);
+            collect_nested_closure_boxed_vars_in_expr(value, out);
+        }
+        Expr::Await(inner) => {
+            collect_nested_closure_boxed_vars_in_expr(inner, out);
+        }
+        Expr::ArrayPush { value, .. } => {
+            collect_nested_closure_boxed_vars_in_expr(value, out);
+        }
+        Expr::ArrayForEach { array, callback }
+        | Expr::ArrayMap { array, callback }
+        | Expr::ArrayFilter { array, callback }
+        | Expr::ArrayFlatMap { array, callback } => {
+            collect_nested_closure_boxed_vars_in_expr(array, out);
+            collect_nested_closure_boxed_vars_in_expr(callback, out);
+        }
+        Expr::ArrayReduce { array, callback, initial }
+        | Expr::ArrayReduceRight { array, callback, initial } => {
+            collect_nested_closure_boxed_vars_in_expr(array, out);
+            collect_nested_closure_boxed_vars_in_expr(callback, out);
+            if let Some(init) = initial {
+                collect_nested_closure_boxed_vars_in_expr(init, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Collect LocalIds declared inside the init slot of any `for` loop
