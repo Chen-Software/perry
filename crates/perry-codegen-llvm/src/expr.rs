@@ -4519,16 +4519,18 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(nanbox_string_inline(blk, &h))
         }
         Expr::BufferFrom { data, encoding } => {
-            // Phase H buffer: call js_buffer_from_string(str_handle_i64, enc_i32)
-            // which returns a raw *mut BufferHeader (i64). NaN-box the result
-            // with POINTER_TAG so the chained `.toString()` / `.length` paths
-            // (which dispatch via `is_registered_buffer` after stripping the
-            // tag) recognize the receiver as a buffer.
+            // `Buffer.from(value, encoding?)` accepts strings, arrays of
+            // numbers, or other buffers. Route through `js_buffer_from_value`
+            // which dispatches on the input type at runtime — strings via
+            // `js_buffer_from_string`, arrays via `js_buffer_from_array`,
+            // existing buffers via copy. The result is a raw `*mut
+            // BufferHeader` registered in BUFFER_REGISTRY; NaN-box with
+            // POINTER_TAG so chained `.toString(enc)` / `.length` /
+            // method dispatch see the same registered pointer.
             //
-            // The encoding argument in JS/TS is a STRING ('utf8'/'hex'/'base64'),
-            // never a number. Compile-time fold string literals; for non-literal
-            // encoding values (e.g. `Buffer.from(b64, enc)` where `enc: string`)
-            // call the runtime helper `js_encoding_tag_from_value`.
+            // The encoding argument is a JS string ('utf8'/'hex'/'base64').
+            // Compile-time fold string literals; for non-literal encoding
+            // values call the runtime helper `js_encoding_tag_from_value`.
             let data_box = lower_expr(ctx, data)?;
             let enc_tag_i32 = if let Some(enc_expr) = encoding {
                 if let Expr::String(s) = enc_expr.as_ref() {
@@ -4552,18 +4554,13 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 "0".to_string()
             };
             let blk = ctx.block();
-            // Extract the raw string pointer from the (NaN-boxed) data value.
-            // `js_get_string_pointer_unified` handles both STRING_TAG-boxed
-            // strings and bare pointers, returning a clean i64.
-            let str_handle = blk.call(
-                I64,
-                "js_get_string_pointer_unified",
-                &[(DOUBLE, &data_box)],
-            );
+            // Pass the NaN-boxed value as i64 — `js_buffer_from_value`
+            // sniffs string vs array vs buffer at runtime by inspecting tags.
+            let value_i64 = blk.bitcast_double_to_i64(&data_box);
             let buf_handle = blk.call(
                 I64,
-                "js_buffer_from_string",
-                &[(I64, &str_handle), (I32, &enc_tag_i32)],
+                "js_buffer_from_value",
+                &[(I64, &value_i64), (I32, &enc_tag_i32)],
             );
             Ok(nanbox_pointer_inline(blk, &buf_handle))
         }

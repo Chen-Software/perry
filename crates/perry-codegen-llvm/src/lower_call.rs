@@ -1171,8 +1171,19 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
         // `JSON.parse`) — those are handled by the spread/closure paths above
         // or have dedicated lowerings. Skip when the receiver is a known class
         // instance — those have static method dispatch handled earlier.
+        //
+        // Exception: `Uint8Array`/`Buffer` typed receivers must NOT be skipped.
+        // They aren't real classes (no vtable) — the runtime's
+        // `js_native_call_method` detects them via `is_registered_buffer` and
+        // routes through `dispatch_buffer_method` which handles the full
+        // Node-style numeric read/write/swap/indexOf method family.
+        let class_name_opt = receiver_class_name(ctx, object);
+        let is_buffer_class = matches!(
+            class_name_opt.as_deref(),
+            Some("Uint8Array") | Some("Buffer") | Some("Uint8ClampedArray")
+        );
         let skip_native = matches!(object.as_ref(), Expr::GlobalGet(_))
-            || receiver_class_name(ctx, object).is_some();
+            || (class_name_opt.is_some() && !is_buffer_class);
         if !skip_native {
             let recv_box = lower_expr(ctx, object)?;
             let mut lowered_args: Vec<String> = Vec::with_capacity(args.len());

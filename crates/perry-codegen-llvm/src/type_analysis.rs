@@ -115,6 +115,17 @@ pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirT
         // the difference between `l.size()` returning the real size
         // and returning undefined for generic class instances.
         Expr::New { class_name, .. } => Some(HirType::Named(class_name.clone())),
+        // Buffer / Uint8Array constructors all produce a Buffer instance.
+        // Refining the local lets `buf[i]`/`buf.length` use the byte-indexed
+        // fast path (`js_buffer_get`/`js_buffer_length`) and `buf.method(...)`
+        // route through the runtime buffer dispatch — without this they
+        // fall through to the dynamic-array codegen which reads f64 elements
+        // from the underlying storage as if they were JS values.
+        Expr::BufferFrom { .. }
+        | Expr::BufferAlloc { .. }
+        | Expr::BufferAllocUnsafe(_)
+        | Expr::BufferConcat(_)
+        | Expr::CryptoRandomBytes(_) => Some(HirType::Named("Uint8Array".into())),
         // Compare results are now NaN-boxed booleans (TAG_TRUE/FALSE).
         // Type-refining the local as Boolean lets is_numeric_expr
         // skip the fast path (which would emit fcmp/sitofp on a NaN
@@ -195,10 +206,34 @@ pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirT
                     }
                 }
             }
+            // `crypto.createHash(alg).update(data).digest(enc)` chain.
+            // The expr.rs handler collapses this into a runtime call that
+            // returns a NaN-boxed string. Refine the local to String so
+            // `hmac === hmac2` routes through `js_string_equals` instead of
+            // bit-comparing two distinct allocations.
+            if is_crypto_digest_chain(callee) {
+                return Some(HirType::String);
+            }
             None
         }
         _ => None,
     }
+}
+
+/// Detects the `crypto.createHash(alg).update(data).digest(enc)` /
+/// `crypto.createHmac(alg, key).update(data).digest(enc)` chain shape.
+/// Walks the nested PropertyGet→Call structure looking for the
+/// `NativeModuleRef("crypto")` root.
+fn is_crypto_digest_chain(callee: &Expr) -> bool {
+    let Expr::PropertyGet { property: p1, object: o1 } = callee else { return false };
+    if p1 != "digest" { return false; }
+    let Expr::Call { callee: c2, .. } = o1.as_ref() else { return false };
+    let Expr::PropertyGet { property: p2, object: o2 } = c2.as_ref() else { return false };
+    if p2 != "update" { return false; }
+    let Expr::Call { callee: c3, .. } = o2.as_ref() else { return false };
+    let Expr::PropertyGet { property: p3, object: o3 } = c3.as_ref() else { return false };
+    if p3 != "createHash" && p3 != "createHmac" { return false; }
+    matches!(o3.as_ref(), Expr::NativeModuleRef(n) if n == "crypto")
 }
 
 /// Compute the effective list of capture LocalIds for a closure. Starts
@@ -571,6 +606,10 @@ pub(crate) fn is_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
                 .map(|f| matches!(f.ty, HirType::String))
                 .unwrap_or(false)
         }
+        // `crypto.createHash(alg).update(data).digest(enc)` chain.
+        // Recognized so chained `.length`/`.includes`/`===` on the
+        // resulting hex string hit the string fast paths.
+        Expr::Call { callee, .. } if is_crypto_digest_chain(callee) => true,
         _ => false,
     }
 }
