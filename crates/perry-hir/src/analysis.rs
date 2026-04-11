@@ -639,6 +639,11 @@ pub fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>, visited: &m
             collect_local_refs_expr(index, refs, visited);
             collect_local_refs_expr(value, refs, visited);
         }
+        Expr::TypedArrayNew { arg, .. } => {
+            if let Some(a) = arg {
+                collect_local_refs_expr(a, refs, visited);
+            }
+        }
         // Dynamic env access
         Expr::EnvGetDynamic(key) => {
             collect_local_refs_expr(key, refs, visited);
@@ -1484,6 +1489,11 @@ pub(crate) fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<Local
             collect_assigned_locals_expr(array, assigned);
             collect_assigned_locals_expr(index, assigned);
             collect_assigned_locals_expr(value, assigned);
+        }
+        Expr::TypedArrayNew { arg, .. } => {
+            if let Some(a) = arg {
+                collect_assigned_locals_expr(a, assigned);
+            }
         }
         // Dynamic env access
         Expr::EnvGetDynamic(key) => {

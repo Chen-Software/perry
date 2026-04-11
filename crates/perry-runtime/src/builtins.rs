@@ -85,9 +85,9 @@ pub extern "C" fn js_console_log_dynamic(value: f64) {
         // false yet the bit pattern is a valid buffer address. Detect by
         // looking up the raw bits in the thread-local BUFFER_REGISTRY.
         let raw_bits = value.to_bits();
-        if raw_bits > 0x1000
-            && (raw_bits >> 48) == 0
-            && crate::buffer::is_registered_buffer(raw_bits as usize)
+        if raw_bits > 0x1000 && (raw_bits >> 48) == 0
+            && (crate::typedarray::lookup_typed_array_kind(raw_bits as usize).is_some()
+                || crate::buffer::is_registered_buffer(raw_bits as usize))
         {
             println!("{}{}", p, format_jsvalue(value, 0));
             return;
@@ -328,6 +328,10 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
                     let bytes = std::slice::from_raw_parts(data, len);
                     std::str::from_utf8(bytes).unwrap_or("Symbol()").to_string()
                 }
+            } else if crate::typedarray::lookup_typed_array_kind(ptr as usize).is_some() {
+                // Typed array — Int32Array(N) [ a, b, c ] etc.
+                let ta = ptr as *const crate::typedarray::TypedArrayHeader;
+                crate::typedarray::format_typed_array(ta)
             } else if crate::buffer::is_registered_buffer(ptr as usize) {
                 // Buffer/Uint8Array — Node prints as `<Buffer xx xx xx ...>`
                 // (lowercase hex bytes separated by single spaces). Buffer
@@ -443,12 +447,15 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
             // buffer address. Detect this case by looking up the raw bits
             // in the thread-local BUFFER_REGISTRY.
             let raw_bits = value.to_bits();
-            if raw_bits > 0x1000
-                && (raw_bits >> 48) == 0
-                && crate::buffer::is_registered_buffer(raw_bits as usize)
-            {
-                let buf_ptr = raw_bits as *const crate::buffer::BufferHeader;
-                return format_buffer_value(buf_ptr);
+            if raw_bits > 0x1000 && (raw_bits >> 48) == 0 {
+                if crate::typedarray::lookup_typed_array_kind(raw_bits as usize).is_some() {
+                    let ta = raw_bits as *const crate::typedarray::TypedArrayHeader;
+                    return crate::typedarray::format_typed_array(ta);
+                }
+                if crate::buffer::is_registered_buffer(raw_bits as usize) {
+                    let buf_ptr = raw_bits as *const crate::buffer::BufferHeader;
+                    return format_buffer_value(buf_ptr);
+                }
             }
             let n = value;
             if n.is_nan() {
@@ -477,6 +484,22 @@ unsafe fn format_buffer_value(buf_ptr: *const crate::buffer::BufferHeader) -> St
     let len = (*buf_ptr).length as usize;
     let data = (buf_ptr as *const u8).add(std::mem::size_of::<crate::buffer::BufferHeader>());
     let bytes = std::slice::from_raw_parts(data, len);
+
+    // If this buffer was created via `new Uint8Array(...)`, format it Node-style
+    // as `Uint8Array(N) [ a, b, c ]` rather than `<Buffer aa bb cc>`.
+    if crate::buffer::is_uint8array_buffer(buf_ptr as usize) {
+        if len == 0 {
+            return "Uint8Array(0) []".to_string();
+        }
+        let mut out = format!("Uint8Array({}) [", len);
+        for (i, b) in bytes.iter().enumerate() {
+            if i == 0 { out.push(' '); } else { out.push_str(", "); }
+            out.push_str(&format!("{}", *b));
+        }
+        out.push_str(" ]");
+        return out;
+    }
+
     // Node caps at 50 bytes then shows "... N more bytes"
     let display_len = len.min(50);
     let mut out = String::with_capacity(9 + display_len * 3);

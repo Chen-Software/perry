@@ -3293,23 +3293,44 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // `TextDecoder.decode(new Uint8Array([...]))` works and
         // `encoder.encode(...)` result can be used interchangeably.
         Expr::Uint8ArrayNew(arg) => {
-            let arr_box = match arg {
-                Some(e) => lower_expr(ctx, e)?,
+            // `new Uint8Array(arg)` has three forms:
+            //   - `new Uint8Array()` → empty buffer (length 0)
+            //   - `new Uint8Array(N)` where N is a number → zero-filled buffer of length N
+            //   - `new Uint8Array([1, 2, 3])` → buffer initialized from array
+            // The codegen detects the literal-number case at compile time and routes
+            // it to `js_buffer_alloc` so we don't read garbage from a number-as-array.
+            // Other shapes flow through `js_uint8array_from_array` which reads
+            // from the array storage region.
+            match arg.as_deref() {
                 None => {
-                    // `new Uint8Array()` — allocate an empty array.
-                    let zero = "0".to_string();
-                    let h = ctx.block().call(I64, "js_array_alloc", &[(I32, &zero)]);
-                    nanbox_pointer_inline(ctx.block(), &h)
+                    let blk = ctx.block();
+                    let h = blk.call(I64, "js_buffer_alloc", &[(I32, "0"), (I32, "0")]);
+                    Ok(nanbox_pointer_inline(blk, &h))
                 }
-            };
-            let blk = ctx.block();
-            let arr_handle = unbox_to_i64(blk, &arr_box);
-            let buf_handle = blk.call(
-                I64,
-                "js_buffer_from_array",
-                &[(I64, &arr_handle)],
-            );
-            Ok(nanbox_pointer_inline(blk, &buf_handle))
+                Some(Expr::Integer(n)) => {
+                    let size_str = (*n as i32).to_string();
+                    let blk = ctx.block();
+                    let h = blk.call(I64, "js_buffer_alloc", &[(I32, &size_str), (I32, "0")]);
+                    Ok(nanbox_pointer_inline(blk, &h))
+                }
+                Some(Expr::Number(n)) if n.fract() == 0.0 && *n >= 0.0 && *n < (i32::MAX as f64) => {
+                    let size_str = (*n as i32).to_string();
+                    let blk = ctx.block();
+                    let h = blk.call(I64, "js_buffer_alloc", &[(I32, &size_str), (I32, "0")]);
+                    Ok(nanbox_pointer_inline(blk, &h))
+                }
+                Some(e) => {
+                    let arr_box = lower_expr(ctx, e)?;
+                    let blk = ctx.block();
+                    let arr_handle = unbox_to_i64(blk, &arr_box);
+                    let buf_handle = blk.call(
+                        I64,
+                        "js_uint8array_from_array",
+                        &[(I64, &arr_handle)],
+                    );
+                    Ok(nanbox_pointer_inline(blk, &buf_handle))
+                }
+            }
         }
         Expr::Uint8ArrayLength(arr) => {
             let v = lower_expr(ctx, arr)?;
@@ -3328,6 +3349,41 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(blk.sitofp(I32, &val_i32, DOUBLE))
         }
         Expr::Uint8ArraySet { value, .. } => lower_expr(ctx, value),
+
+        // `new Int32Array([1,2,3])` etc. — generic typed array constructor.
+        // Routes through `js_typed_array_new_from_array(kind, arr_handle)` for
+        // the array-from form, or `js_typed_array_new_empty(kind, length)`
+        // for the no-arg / numeric-length form. Result is a raw pointer
+        // bitcast to f64 (no NaN-box tag) — the runtime formatter and
+        // `js_array_*` dispatch helpers detect it via TYPED_ARRAY_REGISTRY.
+        Expr::TypedArrayNew { kind, arg } => {
+            let kind_str = (*kind as i32).to_string();
+            match arg {
+                None => {
+                    let zero = "0".to_string();
+                    let p = ctx.block().call(
+                        I64,
+                        "js_typed_array_new_empty",
+                        &[(I32, &kind_str), (I32, &zero)],
+                    );
+                    Ok(ctx.block().bitcast_i64_to_double(&p))
+                }
+                Some(arg_expr) => {
+                    // We always treat the single argument as an array literal
+                    // / array-typed expression — the test cases pass an inline
+                    // array literal `[1, 2, 3]`.
+                    let arr_box = lower_expr(ctx, arg_expr)?;
+                    let blk = ctx.block();
+                    let arr_handle = unbox_to_i64(blk, &arr_box);
+                    let p = blk.call(
+                        I64,
+                        "js_typed_array_new_from_array",
+                        &[(I32, &kind_str), (I64, &arr_handle)],
+                    );
+                    Ok(blk.bitcast_i64_to_double(&p))
+                }
+            }
+        }
 
         // -------- arr.unshift(value) --------
         Expr::ArrayUnshift { array_id, value } => {

@@ -5,6 +5,31 @@
 
 use perry_types::{FuncId, GlobalId, LocalId, Type, TypeParam};
 
+/// TypedArray element-kind tags. Must match `crates/perry-runtime/src/typedarray.rs`.
+pub const TYPED_ARRAY_KIND_INT8: u8 = 0;
+pub const TYPED_ARRAY_KIND_UINT8: u8 = 1;
+pub const TYPED_ARRAY_KIND_INT16: u8 = 2;
+pub const TYPED_ARRAY_KIND_UINT16: u8 = 3;
+pub const TYPED_ARRAY_KIND_INT32: u8 = 4;
+pub const TYPED_ARRAY_KIND_UINT32: u8 = 5;
+pub const TYPED_ARRAY_KIND_FLOAT32: u8 = 6;
+pub const TYPED_ARRAY_KIND_FLOAT64: u8 = 7;
+
+/// Map a class name (e.g. "Int32Array") to its `TYPED_ARRAY_KIND_*` tag.
+pub fn typed_array_kind_for_name(name: &str) -> Option<u8> {
+    match name {
+        "Int8Array" => Some(TYPED_ARRAY_KIND_INT8),
+        "Uint8Array" | "Uint8ClampedArray" => Some(TYPED_ARRAY_KIND_UINT8),
+        "Int16Array" => Some(TYPED_ARRAY_KIND_INT16),
+        "Uint16Array" => Some(TYPED_ARRAY_KIND_UINT16),
+        "Int32Array" => Some(TYPED_ARRAY_KIND_INT32),
+        "Uint32Array" => Some(TYPED_ARRAY_KIND_UINT32),
+        "Float32Array" => Some(TYPED_ARRAY_KIND_FLOAT32),
+        "Float64Array" => Some(TYPED_ARRAY_KIND_FLOAT64),
+        _ => None,
+    }
+}
+
 /// Known native module names that map to stdlib implementations.
 /// These are npm packages that have native Rust replacements.
 pub const NATIVE_MODULES: &[&str] = &[
@@ -1242,6 +1267,11 @@ pub enum Expr {
         index: Box<Expr>,
         value: Box<Expr>,
     },
+
+    /// Generic typed array constructor: `new Int32Array([1, 2, 3])` etc.
+    /// `kind` is one of the `TYPED_ARRAY_KIND_*` constants.
+    /// `arg` is `None` for `new Int32Array()`, `Some(expr)` for `(length)` or `(arrayLike)`.
+    TypedArrayNew { kind: u8, arg: Option<Box<Expr>> },
 
     // Child Process operations
     ChildProcessExecSync {               // execSync(cmd, opts?) -> Buffer | string

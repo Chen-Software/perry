@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.143
+**Current Version:** 0.4.144
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,14 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.145 (llvm-backend)
+- feat: real **TypedArray** support (Int8/Int16/Int32, Uint16/Uint32, Float32/Float64) — `test_gap_array_methods` DIFF (35) → DIFF (7, only `Object.groupBy` + `Array.fromAsync` remaining, both out of scope). New `crates/perry-runtime/src/typedarray.rs` defines `TypedArrayHeader { length, capacity, kind, elem_size }` with thread-local `TYPED_ARRAY_REGISTRY` for instanceof / formatter detection. New HIR variant `Expr::TypedArrayNew { kind, arg }` lowers `new Int32Array([1,2,3])` etc. through LLVM `js_typed_array_new_from_array(kind, arr_handle)`. Generic array runtime helpers (`js_array_get_f64`, `js_array_at`, `js_array_to_reversed`, `js_array_to_sorted_default/with_comparator`, `js_array_with`, `js_array_find_last`, `js_array_find_last_index`) all detect typed-array pointers via `lookup_typed_array_kind` and dispatch to per-kind helpers — so `i32.toSorted()`, `i32.with(1, 99)`, `i32[0]`, `i32.findLast(...)` all return another typed array (not a plain Array), preserving the `Int32Array(N) [ ... ]` Node-style format on round-trip. New `js_uint8array_from_array` wrapper around `js_buffer_from_array` flags Uint8Array buffers in the new `UINT8ARRAY_FROM_CTOR` registry so they format as `Uint8Array(N) [ a, b, c ]` instead of `<Buffer aa bb cc>`. Reserved class IDs `0xFFFF0030..0xFFFF0037` plumbed through `js_instanceof` for `instanceof Int32Array` etc. `Uint8Array.at(i)` no longer returns f64 garbage — `js_array_at` routes through the buffer registry for negative-index handling.
+- Regression sweep clean: test_edge_arrays, test_gap_encoding_timers, test_complex_runtime_probes, test_edge_buffer_from_encoding, test_gap_class_advanced, test_gap_proxy_reflect, test_gap_object_methods, test_gap_node_fs all stay at 0 markers; test_gap_symbols stays at 10 (the v0.4.143 baseline).
+
+### v0.4.144 (llvm-backend)
+- feat: `test_gap_async_advanced` CRASH (segv + garbage `0.0000…6365987373` from for-await-of) → DIFF (18 markers, all async-generator tests now pass byte-for-byte). The async-iterator scaffolding from v0.4.121's `wrap_returns_in_promise` rewrite was incomplete: function-body for-of had no iterator-protocol path at all, so `for [await] (const x of asyncGen())` inside `async function` bodies fell through to the array-index desugar in `lower_decl.rs::lower_body_stmt` and segfaulted dereferencing the iterator object as if it were an array. Fix: ported the iterator-protocol branch from `lower::lower_stmt` into `lower_body_stmt` (mirrors the `let __iter = gen(); let __result = __iter.next(); while (!__result.done) { ... }` desugar), gated by the existing `generator_func_names` set. The new branch also threads `needs_await = for_of_stmt.is_await || callee_is_async_gen` through and wraps each `__iter.next()` in `Expr::Await(...)` when set, so the busy-wait await loop unwraps the `Promise<{value, done}>` returned by async-generator state machines into a real iter-result before reading `.value`/`.done`. The new `LoweringContext::async_generator_func_names` HashSet (populated in `lower_fn_decl` whenever `is_generator && is_async`) lets both for-of paths detect bare `for (const x of g())` against an async generator without requiring user `await`. testForAwaitOf / testAsyncGenerator / testAsyncCounterGen all pass byte-for-byte. Remaining 18 diff markers are unrelated Promise/syntax features (`Promise.any`/`.withResolvers`/`AggregateError`/`await using`/microtask ordering) on other tracks.
+- Regression sweep clean: test_gap_generators / test_edge_promises / test_async / test_async2-5 / test_gap_node_fs / test_gap_class_advanced / test_gap_object_methods / test_gap_fetch_response / test_gap_symbols all stay at their prior marker counts.
 
 ### v0.4.143 (llvm-backend)
 - feat: `test_gap_symbols` DIFF (18) → DIFF (10). Two coordinated fixes for computed-symbol-key object literals like `const o = { [symA]: 1, regular: 2 }`:

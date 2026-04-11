@@ -2076,6 +2076,31 @@ pub extern "C" fn js_instanceof(value: f64, class_id: u32) -> f64 {
         return false_val;
     }
 
+    // Typed arrays — Int8Array..Float64Array reserved IDs (0xFFFF0030..37).
+    // The pointer can arrive as either a NaN-boxed POINTER_TAG value or a
+    // raw bitcast f64, so handle both forms.
+    if (0xFFFF0030..=0xFFFF0037).contains(&class_id) {
+        let addr = if jsval.is_pointer() {
+            (bits & 0x0000_FFFF_FFFF_FFFF) as usize
+        } else {
+            let top16 = (bits >> 48) as u16;
+            if top16 == 0 && bits >= 0x1000 {
+                bits as usize
+            } else {
+                0
+            }
+        };
+        if addr != 0 {
+            if let Some(actual_kind) = crate::typedarray::lookup_typed_array_kind(addr) {
+                let want_id = crate::typedarray::class_id_for_kind(actual_kind);
+                if want_id == class_id {
+                    return true_val;
+                }
+            }
+        }
+        return false_val;
+    }
+
     // Only objects (pointers) can be instances of classes
     if !jsval.is_pointer() {
         return false_val;
@@ -2303,6 +2328,15 @@ pub unsafe extern "C" fn js_native_call_method(
             return f64::from_bits(crate::value::TAG_UNDEFINED);
         }
 
+        // Buffer / Uint8Array dispatch — buffers are allocated raw without
+        // a GcHeader, so the GC type check below would read random bytes
+        // before the buffer storage and may accidentally match GC_TYPE_OBJECT.
+        // Detect buffers via the BUFFER_REGISTRY first and route through the
+        // dedicated dispatcher.
+        if crate::buffer::is_registered_buffer(raw_ptr) {
+            return dispatch_buffer_method(raw_ptr, method_name, args_ptr, args_len);
+        }
+
         // Check if this is a native module namespace object (e.g., fs, os, path)
         let obj = jsval.as_pointer::<ObjectHeader>();
         // Validate GcHeader to confirm this is actually an object before reading class_id
@@ -2431,6 +2465,14 @@ pub unsafe extern "C" fn js_native_call_method(
                     "size" => crate::set::js_set_size(set) as f64,
                     _ => f64::from_bits(crate::value::TAG_UNDEFINED),
                 };
+            }
+            // Buffer / Uint8Array dispatch — allocated raw, not behind a
+            // GcHeader, so it can't be discovered through the ObjectHeader
+            // path below. Tracked in BUFFER_REGISTRY. Routes Node-style
+            // numeric read/write/search/swap method family through
+            // `crate::buffer` helpers.
+            if crate::buffer::is_registered_buffer(check_ptr) {
+                return dispatch_buffer_method(check_ptr, method_name, args_ptr, args_len);
             }
         }
     }
@@ -2670,6 +2712,172 @@ pub unsafe extern "C" fn js_native_call_method(
     // causing a SIGSEGV. A null object with field_count=0 is safe to dereference.
     let null_obj_ptr = &NULL_OBJECT_BYTES as *const NullObjectBytes as *mut u8;
     f64::from_bits(JSValue::pointer(null_obj_ptr).bits())
+}
+
+/// Dispatch a Buffer / Uint8Array instance method call. Receiver address
+/// is the raw heap pointer (already stripped of NaN-box tags). Routes
+/// the Node-style numeric read/write/search/swap method family through
+/// `crate::buffer` helpers; unknown methods return undefined.
+pub unsafe fn dispatch_buffer_method(
+    addr: usize,
+    method_name: &str,
+    args_ptr: *const f64,
+    args_len: usize,
+) -> f64 {
+    let buf_f64 = f64::from_bits(JSValue::pointer(addr as *mut u8).bits());
+    let buf_ptr = addr as *mut crate::buffer::BufferHeader;
+    let args = if !args_ptr.is_null() && args_len > 0 {
+        std::slice::from_raw_parts(args_ptr, args_len)
+    } else {
+        &[]
+    };
+    let arg_i32 = |i: usize| -> i32 {
+        if i < args.len() { args[i] as i32 } else { 0 }
+    };
+    let arg_or_zero = |i: usize| -> f64 {
+        if i < args.len() { args[i] } else { 0.0 }
+    };
+    let i32_bool = |b: i32| f64::from_bits(JSValue::bool(b != 0).bits());
+    let i32_num = |n: i32| n as f64;
+
+    match method_name {
+        "length" => crate::buffer::js_buffer_length(buf_ptr) as f64,
+        "toString" => {
+            let enc = if !args.is_empty() {
+                crate::buffer::js_encoding_tag_from_value(args[0])
+            } else { 0 };
+            let str_ptr = crate::buffer::js_buffer_to_string(buf_ptr, enc);
+            f64::from_bits(JSValue::string_ptr(str_ptr).bits())
+        }
+        "slice" | "subarray" => {
+            let len = (*buf_ptr).length as i32;
+            let start = arg_i32(0);
+            let end = if args.len() >= 2 { arg_i32(1) } else { len };
+            let result = crate::buffer::js_buffer_slice(buf_ptr, start, end);
+            f64::from_bits(JSValue::pointer(result as *mut u8).bits())
+        }
+        "fill" => {
+            let result = crate::buffer::js_buffer_fill(buf_ptr, arg_i32(0));
+            f64::from_bits(JSValue::pointer(result as *mut u8).bits())
+        }
+        "equals" => {
+            if args.is_empty() { return i32_bool(0); }
+            let other_bits = args[0].to_bits();
+            let other_addr = if (other_bits >> 48) >= 0x7FF8 {
+                other_bits & 0x0000_FFFF_FFFF_FFFF
+            } else { other_bits };
+            let other = other_addr as *const crate::buffer::BufferHeader;
+            i32_bool(crate::buffer::js_buffer_equals(buf_ptr, other))
+        }
+        "compare" => {
+            if args.is_empty() { return 0.0; }
+            let other_bits = args[0].to_bits();
+            let other_addr = if (other_bits >> 48) >= 0x7FF8 {
+                other_bits & 0x0000_FFFF_FFFF_FFFF
+            } else { other_bits };
+            let other = other_addr as *const crate::buffer::BufferHeader;
+            i32_num(crate::buffer::js_buffer_compare(buf_ptr, other))
+        }
+        "indexOf" => i32_num(crate::buffer::js_buffer_index_of(buf_f64, arg_or_zero(0), arg_i32(1))),
+        "lastIndexOf" => i32_num(crate::buffer::js_buffer_index_of(buf_f64, arg_or_zero(0), arg_i32(1))),
+        "includes" => i32_bool(crate::buffer::js_buffer_includes(buf_f64, arg_or_zero(0), arg_i32(1))),
+        "swap16" => { crate::buffer::js_buffer_swap16(buf_f64); buf_f64 }
+        "swap32" => { crate::buffer::js_buffer_swap32(buf_f64); buf_f64 }
+        "swap64" => { crate::buffer::js_buffer_swap64(buf_f64); buf_f64 }
+        // Synthetic method emitted by lower.rs for `crypto.getRandomValues(buf)`.
+        "$$cryptoFillRandom" => crate::buffer::js_buffer_fill_random(buf_f64),
+        "readUInt8" | "readUint8" => crate::buffer::js_buffer_read_uint8(buf_f64, arg_i32(0)),
+        "readInt8" => crate::buffer::js_buffer_read_int8(buf_f64, arg_i32(0)),
+        "readUInt16BE" | "readUint16BE" => crate::buffer::js_buffer_read_uint16_be(buf_f64, arg_i32(0)),
+        "readUInt16LE" | "readUint16LE" => crate::buffer::js_buffer_read_uint16_le(buf_f64, arg_i32(0)),
+        "readInt16BE" => crate::buffer::js_buffer_read_int16_be(buf_f64, arg_i32(0)),
+        "readInt16LE" => crate::buffer::js_buffer_read_int16_le(buf_f64, arg_i32(0)),
+        "readUInt32BE" | "readUint32BE" => crate::buffer::js_buffer_read_uint32_be(buf_f64, arg_i32(0)),
+        "readUInt32LE" | "readUint32LE" => crate::buffer::js_buffer_read_uint32_le(buf_f64, arg_i32(0)),
+        "readInt32BE" => crate::buffer::js_buffer_read_int32_be(buf_f64, arg_i32(0)),
+        "readInt32LE" => crate::buffer::js_buffer_read_int32_le(buf_f64, arg_i32(0)),
+        "readFloatBE" => crate::buffer::js_buffer_read_float_be(buf_f64, arg_i32(0)),
+        "readFloatLE" => crate::buffer::js_buffer_read_float_le(buf_f64, arg_i32(0)),
+        "readDoubleBE" => crate::buffer::js_buffer_read_double_be(buf_f64, arg_i32(0)),
+        "readDoubleLE" => crate::buffer::js_buffer_read_double_le(buf_f64, arg_i32(0)),
+        "readBigInt64BE" => crate::buffer::js_buffer_read_bigint64_be(buf_f64, arg_i32(0)),
+        "readBigInt64LE" => crate::buffer::js_buffer_read_bigint64_le(buf_f64, arg_i32(0)),
+        "readBigUInt64BE" | "readBigUint64BE" => crate::buffer::js_buffer_read_biguint64_be(buf_f64, arg_i32(0)),
+        "readBigUInt64LE" | "readBigUint64LE" => crate::buffer::js_buffer_read_biguint64_le(buf_f64, arg_i32(0)),
+        "writeUInt8" | "writeUint8" => {
+            crate::buffer::js_buffer_write_uint8(buf_f64, arg_or_zero(0), arg_i32(1));
+            (arg_i32(1) + 1) as f64
+        }
+        "writeInt8" => {
+            crate::buffer::js_buffer_write_int8(buf_f64, arg_or_zero(0), arg_i32(1));
+            (arg_i32(1) + 1) as f64
+        }
+        "writeUInt16BE" | "writeUint16BE" => {
+            crate::buffer::js_buffer_write_uint16_be(buf_f64, arg_or_zero(0), arg_i32(1));
+            (arg_i32(1) + 2) as f64
+        }
+        "writeUInt16LE" | "writeUint16LE" => {
+            crate::buffer::js_buffer_write_uint16_le(buf_f64, arg_or_zero(0), arg_i32(1));
+            (arg_i32(1) + 2) as f64
+        }
+        "writeInt16BE" => {
+            crate::buffer::js_buffer_write_int16_be(buf_f64, arg_or_zero(0), arg_i32(1));
+            (arg_i32(1) + 2) as f64
+        }
+        "writeInt16LE" => {
+            crate::buffer::js_buffer_write_int16_le(buf_f64, arg_or_zero(0), arg_i32(1));
+            (arg_i32(1) + 2) as f64
+        }
+        "writeUInt32BE" | "writeUint32BE" => {
+            crate::buffer::js_buffer_write_uint32_be(buf_f64, arg_or_zero(0), arg_i32(1));
+            (arg_i32(1) + 4) as f64
+        }
+        "writeUInt32LE" | "writeUint32LE" => {
+            crate::buffer::js_buffer_write_uint32_le(buf_f64, arg_or_zero(0), arg_i32(1));
+            (arg_i32(1) + 4) as f64
+        }
+        "writeInt32BE" => {
+            crate::buffer::js_buffer_write_int32_be(buf_f64, arg_or_zero(0), arg_i32(1));
+            (arg_i32(1) + 4) as f64
+        }
+        "writeInt32LE" => {
+            crate::buffer::js_buffer_write_int32_le(buf_f64, arg_or_zero(0), arg_i32(1));
+            (arg_i32(1) + 4) as f64
+        }
+        "writeFloatBE" => {
+            crate::buffer::js_buffer_write_float_be(buf_f64, arg_or_zero(0), arg_i32(1));
+            (arg_i32(1) + 4) as f64
+        }
+        "writeFloatLE" => {
+            crate::buffer::js_buffer_write_float_le(buf_f64, arg_or_zero(0), arg_i32(1));
+            (arg_i32(1) + 4) as f64
+        }
+        "writeDoubleBE" => {
+            crate::buffer::js_buffer_write_double_be(buf_f64, arg_or_zero(0), arg_i32(1));
+            (arg_i32(1) + 8) as f64
+        }
+        "writeDoubleLE" => {
+            crate::buffer::js_buffer_write_double_le(buf_f64, arg_or_zero(0), arg_i32(1));
+            (arg_i32(1) + 8) as f64
+        }
+        "writeBigInt64BE" => {
+            crate::buffer::js_buffer_write_bigint64_be(buf_f64, arg_or_zero(0), arg_i32(1));
+            (arg_i32(1) + 8) as f64
+        }
+        "writeBigInt64LE" => {
+            crate::buffer::js_buffer_write_bigint64_le(buf_f64, arg_or_zero(0), arg_i32(1));
+            (arg_i32(1) + 8) as f64
+        }
+        "writeBigUInt64BE" | "writeBigUint64BE" => {
+            crate::buffer::js_buffer_write_biguint64_be(buf_f64, arg_or_zero(0), arg_i32(1));
+            (arg_i32(1) + 8) as f64
+        }
+        "writeBigUInt64LE" | "writeBigUint64LE" => {
+            crate::buffer::js_buffer_write_biguint64_le(buf_f64, arg_or_zero(0), arg_i32(1));
+            (arg_i32(1) + 8) as f64
+        }
+        _ => f64::from_bits(crate::value::TAG_UNDEFINED),
+    }
 }
 
 /// Dispatch a method call on a native module namespace object.

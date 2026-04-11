@@ -236,7 +236,21 @@ pub extern "C" fn js_buffer_from_array(arr_ptr: *const ArrayHeader) -> *mut Buff
 
         for i in 0..len {
             let val = *arr_data.add(i);
-            *buf_data.add(i) = (val as u32 & 0xFF) as u8;
+            // Array elements may be NaN-boxed INT32, raw f64 numbers, or
+            // NaN-boxed pointers/strings (rare for byte literals). Decode
+            // numeric kinds; non-numeric values become 0.
+            let bits = val.to_bits();
+            let top16 = bits >> 48;
+            let byte = if top16 == 0x7FFE {
+                // INT32_TAG: lower 32 bits are an i32
+                ((bits as u32) & 0xFF) as u8
+            } else if top16 < 0x7FF8 || (top16 == 0x7FF8 && bits == 0x7FF8_0000_0000_0000) {
+                // Raw double — convert via i64 to handle negatives correctly
+                ((val as i64) & 0xFF) as u8
+            } else {
+                0
+            };
+            *buf_data.add(i) = byte;
         }
 
         buf
@@ -822,6 +836,22 @@ pub extern "C" fn js_buffer_index_of(buf_ptr: f64, needle: f64, start: i32) -> i
 #[no_mangle]
 pub extern "C" fn js_buffer_includes(buf_ptr: f64, needle: f64, start: i32) -> i32 {
     if js_buffer_index_of(buf_ptr, needle, start) >= 0 { 1 } else { 0 }
+}
+
+/// `crypto.getRandomValues(buf)` — fill an existing buffer with random
+/// bytes in-place. Returns the same buffer pointer.
+#[no_mangle]
+pub extern "C" fn js_buffer_fill_random(buf_ptr: f64) -> f64 {
+    use rand::RngCore;
+    let buf = unbox_buffer_ptr(buf_ptr.to_bits()) as *mut BufferHeader;
+    if buf.is_null() { return buf_ptr; }
+    unsafe {
+        let len = (*buf).length as usize;
+        let data = buffer_data_mut(buf);
+        let mut bytes = std::slice::from_raw_parts_mut(data, len);
+        rand::thread_rng().fill_bytes(&mut bytes);
+    }
+    buf_ptr
 }
 
 /// `buf.swap16()` — pairs of bytes are swapped in-place.

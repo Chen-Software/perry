@@ -287,6 +287,9 @@ fn collect_closures_in_expr(
             }
         }
         Expr::ArrayFrom(o) | Expr::Uint8ArrayFrom(o) => walk(o, seen, out),
+        Expr::TypedArrayNew { arg, .. } => {
+            if let Some(a) = arg { walk(a, seen, out); }
+        }
         Expr::ArrayFromMapped { iterable, map_fn } => {
             walk(iterable, seen, out);
             walk(map_fn, seen, out);
@@ -965,6 +968,9 @@ fn collect_ref_ids_in_expr(e: &perry_hir::Expr, out: &mut HashSet<u32>) {
             walk(array, out);
             walk(index, out);
             walk(value, out);
+        }
+        Expr::TypedArrayNew { arg, .. } => {
+            if let Some(a) = arg { walk(a, out); }
         }
         Expr::ArrayFromMapped { iterable, map_fn } => {
             walk(iterable, out);

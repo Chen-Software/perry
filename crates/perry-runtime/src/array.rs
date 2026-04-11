@@ -157,6 +157,13 @@ pub extern "C" fn js_array_get_f64_unchecked(arr: *const ArrayHeader, index: u32
 pub extern "C" fn js_array_get_f64(arr: *const ArrayHeader, index: u32) -> f64 {
     let arr = clean_arr_ptr(arr);
     if arr.is_null() { return f64::NAN; }
+    // Check if this is actually a TypedArray — dispatch through typed array helper
+    if crate::typedarray::lookup_typed_array_kind(arr as usize).is_some() {
+        return crate::typedarray::js_typed_array_get(
+            arr as *const crate::typedarray::TypedArrayHeader,
+            index as i32,
+        );
+    }
     // Check if this is actually a buffer (Uint8Array) — read individual bytes
     if crate::buffer::is_registered_buffer(arr as usize) {
         let byte_val = crate::buffer::js_buffer_get(arr as *const crate::buffer::BufferHeader, index as i32);
@@ -1270,6 +1277,12 @@ pub extern "C" fn js_array_findIndex(arr: *const ArrayHeader, callback: *const C
 pub extern "C" fn js_array_find_last(arr: *const ArrayHeader, callback: *const ClosureHeader) -> f64 {
     let arr = clean_arr_ptr(arr);
     if arr.is_null() { return f64::from_bits(crate::value::TAG_UNDEFINED); }
+    if crate::typedarray::lookup_typed_array_kind(arr as usize).is_some() {
+        return crate::typedarray::js_typed_array_find_last(
+            arr as *const crate::typedarray::TypedArrayHeader,
+            callback,
+        );
+    }
     unsafe {
         let length = (*arr).length as usize;
         let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
@@ -1289,6 +1302,13 @@ pub extern "C" fn js_array_find_last(arr: *const ArrayHeader, callback: *const C
 pub extern "C" fn js_array_find_last_index(arr: *const ArrayHeader, callback: *const ClosureHeader) -> i32 {
     let arr = clean_arr_ptr(arr);
     if arr.is_null() { return -1; }
+    if crate::typedarray::lookup_typed_array_kind(arr as usize).is_some() {
+        let r = crate::typedarray::js_typed_array_find_last_index(
+            arr as *const crate::typedarray::TypedArrayHeader,
+            callback,
+        );
+        return r as i32;
+    }
     unsafe {
         let length = (*arr).length as usize;
         let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
@@ -1308,6 +1328,29 @@ pub extern "C" fn js_array_find_last_index(arr: *const ArrayHeader, callback: *c
 pub extern "C" fn js_array_at(arr: *const ArrayHeader, index: f64) -> f64 {
     let arr = clean_arr_ptr(arr);
     if arr.is_null() { return f64::from_bits(crate::value::TAG_UNDEFINED); }
+    // If this pointer is actually a typed-array, dispatch there. Typed arrays
+    // and Uint8Array/Buffer have different layouts than ArrayHeader, and the
+    // codegen happily routes their `.at(i)` through this generic helper.
+    let addr = arr as usize;
+    if crate::typedarray::lookup_typed_array_kind(addr).is_some() {
+        return crate::typedarray::js_typed_array_at(
+            addr as *const crate::typedarray::TypedArrayHeader,
+            index,
+        );
+    }
+    if crate::buffer::is_registered_buffer(addr) {
+        let buf = addr as *const crate::buffer::BufferHeader;
+        unsafe {
+            let length = (*buf).length as i64;
+            let mut idx = index as i64;
+            if idx < 0 { idx += length; }
+            if idx < 0 || idx >= length {
+                return f64::from_bits(crate::value::TAG_UNDEFINED);
+            }
+            let data = (buf as *const u8).add(std::mem::size_of::<crate::buffer::BufferHeader>());
+            return *data.add(idx as usize) as f64;
+        }
+    }
     unsafe {
         let length = (*arr).length as i64;
         let mut idx = index as i64;
@@ -1635,6 +1678,11 @@ pub extern "C" fn js_array_reduce_right(
 pub extern "C" fn js_array_to_reversed(arr: *const ArrayHeader) -> *mut ArrayHeader {
     let arr = clean_arr_ptr(arr);
     if arr.is_null() { return js_array_alloc(0); }
+    if crate::typedarray::lookup_typed_array_kind(arr as usize).is_some() {
+        return crate::typedarray::js_typed_array_to_reversed(
+            arr as *const crate::typedarray::TypedArrayHeader,
+        ) as *mut ArrayHeader;
+    }
     unsafe {
         let len = (*arr).length as usize;
         let new_arr = js_array_alloc(len as u32);
@@ -1652,6 +1700,11 @@ pub extern "C" fn js_array_to_reversed(arr: *const ArrayHeader) -> *mut ArrayHea
 #[no_mangle]
 pub extern "C" fn js_array_to_sorted_default(arr: *const ArrayHeader) -> *mut ArrayHeader {
     let arr = clean_arr_ptr(arr);
+    if !arr.is_null() && crate::typedarray::lookup_typed_array_kind(arr as usize).is_some() {
+        return crate::typedarray::js_typed_array_to_sorted_default(
+            arr as *const crate::typedarray::TypedArrayHeader,
+        ) as *mut ArrayHeader;
+    }
     if arr.is_null() { return js_array_alloc(0); }
     unsafe {
         let len = (*arr).length as usize;
@@ -1671,6 +1724,12 @@ pub extern "C" fn js_array_to_sorted_default(arr: *const ArrayHeader) -> *mut Ar
 #[no_mangle]
 pub extern "C" fn js_array_to_sorted_with_comparator(arr: *const ArrayHeader, comparator: *const ClosureHeader) -> *mut ArrayHeader {
     let arr = clean_arr_ptr(arr);
+    if !arr.is_null() && crate::typedarray::lookup_typed_array_kind(arr as usize).is_some() {
+        return crate::typedarray::js_typed_array_to_sorted_with_comparator(
+            arr as *const crate::typedarray::TypedArrayHeader,
+            comparator,
+        ) as *mut ArrayHeader;
+    }
     if arr.is_null() { return js_array_alloc(0); }
     unsafe {
         let len = (*arr).length as usize;
@@ -1740,6 +1799,13 @@ pub extern "C" fn js_array_to_spliced(
 pub extern "C" fn js_array_with(arr: *const ArrayHeader, index: f64, value: f64) -> *mut ArrayHeader {
     let arr = clean_arr_ptr(arr);
     if arr.is_null() { return js_array_alloc(0); }
+    if crate::typedarray::lookup_typed_array_kind(arr as usize).is_some() {
+        return crate::typedarray::js_typed_array_with(
+            arr as *const crate::typedarray::TypedArrayHeader,
+            index,
+            value,
+        ) as *mut ArrayHeader;
+    }
     unsafe {
         let len = (*arr).length as isize;
         let mut idx = index as isize;

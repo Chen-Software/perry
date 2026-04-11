@@ -4755,6 +4755,23 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             let data = args.get(0).cloned().unwrap_or(Expr::String("".to_string()));
                                             return Ok(Expr::BufferByteLength(Box::new(data)));
                                         }
+                                        // `Buffer.compare(a, b)` → `a.compare(b)` instance call
+                                        // (handled by runtime buffer dispatch).
+                                        "compare" => {
+                                            if args.len() >= 2 {
+                                                let mut iter = args.into_iter();
+                                                let a = iter.next().unwrap();
+                                                let b = iter.next().unwrap();
+                                                return Ok(Expr::Call {
+                                                    callee: Box::new(Expr::PropertyGet {
+                                                        object: Box::new(a),
+                                                        property: "compare".to_string(),
+                                                    }),
+                                                    args: vec![b],
+                                                    type_args: vec![],
+                                                });
+                                            }
+                                        }
                                         _ => {} // Fall through to generic handling
                                     }
                                 }
@@ -5671,6 +5688,25 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                 return Ok(Expr::CryptoMd5(Box::new(args.into_iter().next().unwrap())));
                                             }
                                         }
+                                        // `crypto.getRandomValues(buf)` fills the buffer
+                                        // in-place with random bytes and returns it.
+                                        // Lower as a synthetic instance method call so
+                                        // the runtime buffer dispatcher (added in
+                                        // perry-runtime/src/object.rs) handles it via
+                                        // `js_buffer_fill_random`.
+                                        "getRandomValues" => {
+                                            if args.len() >= 1 {
+                                                let buf_arg = args.into_iter().next().unwrap();
+                                                return Ok(Expr::Call {
+                                                    callee: Box::new(Expr::PropertyGet {
+                                                        object: Box::new(buf_arg),
+                                                        property: "$$cryptoFillRandom".to_string(),
+                                                    }),
+                                                    args: vec![],
+                                                    type_args: vec![],
+                                                });
+                                            }
+                                        }
                                         _ => {} // Fall through to generic handling
                                     }
                                 }
@@ -5769,6 +5805,26 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                         "byteLength" => {
                                             if args.len() >= 1 {
                                                 return Ok(Expr::BufferByteLength(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        // `Buffer.compare(a, b)` returns -1/0/1. The runtime
+                                        // dispatch already handles `a.compare(b)` as an
+                                        // instance method routing through `js_buffer_compare`.
+                                        // Synthesize that form so we don't need a dedicated
+                                        // HIR variant or runtime entry point.
+                                        "compare" => {
+                                            if args.len() >= 2 {
+                                                let mut iter = args.into_iter();
+                                                let a = iter.next().unwrap();
+                                                let b = iter.next().unwrap();
+                                                return Ok(Expr::Call {
+                                                    callee: Box::new(Expr::PropertyGet {
+                                                        object: Box::new(a),
+                                                        property: "compare".to_string(),
+                                                    }),
+                                                    args: vec![b],
+                                                    type_args: vec![],
+                                                });
                                             }
                                         }
                                         _ => {} // Fall through to generic handling
@@ -8278,6 +8334,33 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                             "stdout" => return Ok(Expr::ProcessStdout),
                             "stderr" => return Ok(Expr::ProcessStderr),
                             _ => {}
+                        }
+                    }
+                }
+            }
+
+            // Check if this is Symbol.<well-known> — Symbol.toPrimitive,
+            // Symbol.hasInstance, Symbol.toStringTag, Symbol.iterator,
+            // Symbol.asyncIterator. Lowered to `SymbolFor(String("@@__perry_wk_<name>"))`
+            // which the runtime's `js_symbol_for` sniffs via prefix and
+            // resolves from the well-known cache (not the registry). This
+            // gives each well-known symbol a stable pointer without needing
+            // a new HIR variant.
+            if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
+                if obj_ident.sym.as_ref() == "Symbol" {
+                    if let ast::MemberProp::Ident(prop_ident) = &member.prop {
+                        let prop_name = prop_ident.sym.as_ref();
+                        if matches!(
+                            prop_name,
+                            "toPrimitive"
+                                | "hasInstance"
+                                | "toStringTag"
+                                | "iterator"
+                                | "asyncIterator"
+                        ) {
+                            return Ok(Expr::SymbolFor(Box::new(Expr::String(
+                                format!("@@__perry_wk_{}", prop_name),
+                            ))));
                         }
                     }
                 }
