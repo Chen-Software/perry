@@ -2090,7 +2090,11 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 let saved_local_types = ctx.local_types.clone();
 
                 for (param, arg_val) in parent_ctor.params.iter().zip(lowered_args.iter()) {
-                    let slot = ctx.block().alloca(DOUBLE);
+                    // Parent ctor params become ctx.locals for the
+                    // inlined body; a closure inside the parent ctor
+                    // may capture them, so hoist to the entry block
+                    // for dominance safety.
+                    let slot = ctx.func.alloca_entry(DOUBLE);
                     ctx.block().store(DOUBLE, arg_val, &slot);
                     ctx.locals.insert(param.id, slot);
                     ctx.local_types.insert(param.id, param.ty.clone());
@@ -3144,6 +3148,8 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             }
 
             let blk = ctx.block();
+            // Scratch out-parameter slot — used only in this block to
+            // receive the modified-array handle from js_array_splice.
             let out_slot = blk.alloca(I64);
             blk.store(I64, "0", &out_slot);
             let arr_handle = unbox_to_i64(blk, &arr_box);
@@ -3930,8 +3936,11 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let cond_lbl = ctx.block_label(cond_idx);
             let body_lbl = ctx.block_label(body_idx);
             let exit_lbl = ctx.block_label(exit_idx);
-            // i alloca
-            let i_slot = ctx.block().alloca(I32);
+            // i alloca — hoisted to the entry block so the loop body
+            // (which lives in its own basic blocks) is dominated by
+            // the slot definition even if this forEach is itself
+            // lowered from inside a nested if-arm.
+            let i_slot = ctx.func.alloca_entry(I32);
             ctx.block().store(I32, "0", &i_slot);
             ctx.block().br(&cond_lbl);
             // cond: i < len
@@ -5000,8 +5009,10 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             // The result is materialized via an `alloca` slot so the
             // merge block can reload a single SSA value without
             // having to thread explicit phi nodes through every
-            // intermediate block.
-            let result_slot = ctx.block().alloca(DOUBLE);
+            // intermediate block. Hoisted to the entry block so the
+            // slot dominates the merge block even when this Await is
+            // itself nested inside an if-arm.
+            let result_slot = ctx.func.alloca_entry(DOUBLE);
             // Pre-seed with the boxed operand so the non-promise
             // branch just needs to jump to merge.
             ctx.block().store(DOUBLE, &promise_box, &result_slot);

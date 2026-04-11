@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.4
+**Current Version:** 0.5.5
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.144 and earlier), see CHANGELOG.md.
+
+### v0.5.5 (llvm-backend) — `alloca_entry` sweep
+- **fix**: 7 cross-block alloca sites in `expr.rs` / `lower_call.rs` / `stmt.rs` migrated to `LlFunction.alloca_entry()` to close the latent SSA dominance hazards flagged in v0.5.2's followup list. Migrated: catch-clause exception binding (capturable by nested closures in the catch body), `super()`-inlined parent ctor params (capturable by closures inside the parent ctor body), `forEach` loop counter (spans cond/body/exit successor blocks), `Await` result slot (spans check/wait/settled/done/merge blocks; can be lowered inside a nested if-arm), `NewClass` `this_slot` (pushed on `this_stack` for the entire inlined ctor body with nested closures capturing `this`), and the inlined-ctor param slots in two places. Left alone with comment: `js_array_splice out_slot` (single-block scratch, dominance-safe by construction). Mango compiles + links cleanly. Original sweep done as a worktree-isolated subagent task because main was being concurrently edited; cherry-picked back here.
 
 ### v0.5.4 (llvm-backend) — `Expr::ExternFuncRef`-as-value via static `ClosureHeader` thunks
 - **fix**: imported functions can now be passed as callbacks, stored in variables, and called indirectly. Previously `Expr::ExternFuncRef` lowered as a value returned a `TAG_TRUE` sentinel that worked for `if (importedFn)` truthiness checks but crashed at runtime the moment anything tried to dispatch through `js_closure_callN`. The fix mirrors the existing `__perry_wrap_<name>` machinery for local funcs (`crates/perry-codegen/src/codegen.rs:870-904`): for every entry in `opts.import_function_prefixes`, `compile_module` now emits a thin `__perry_wrap_extern_<src>__<name>` wrapper (`internal` linkage so per-module copies don't collide at link time) plus a static `ClosureHeader` constant `__perry_extern_closure_<src>__<name>` whose `func_ptr` points at the wrapper and `type_tag = CLOSURE_MAGIC`. The expr.rs lowering returns `ptrtoint @<global> to i64` NaN-boxed as POINTER. New `LlModule.add_internal_constant()` helper. Verified end-to-end with a TS test that uses `arr.map(double)`, `if (double)`, `f === g`, and `fn(3, 4)` indirect call — all four cases produce correct output (was `[undef, undef, ...]` and `undefined` before). Mango unaffected (entry path uses truthiness only).

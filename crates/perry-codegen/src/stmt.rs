@@ -416,7 +416,11 @@ fn lower_try(
         ctx.block().call_void("js_clear_exception", &[]);
         // Bind the catch param (if any) to the exception value.
         if let Some((id, _name)) = &clause.param {
-            let slot = ctx.block().alloca(DOUBLE);
+            // Slot lives in the entry block — a closure inside the
+            // catch body may capture the exception binding and get
+            // called from a sibling branch that the catch block
+            // doesn't dominate.
+            let slot = ctx.func.alloca_entry(DOUBLE);
             ctx.locals.insert(*id, slot.clone());
             ctx.block().store(DOUBLE, &exc, &slot);
         }

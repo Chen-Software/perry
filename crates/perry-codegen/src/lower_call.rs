@@ -1519,8 +1519,12 @@ pub(crate) fn lower_new(
     };
     let obj_box = nanbox_pointer_inline(ctx.block(), &obj_handle);
 
-    // Allocate a `this` slot and store the new object there.
-    let this_slot = ctx.block().alloca(DOUBLE);
+    // Allocate a `this` slot and store the new object there. The
+    // slot lives on this_stack for the duration of the inlined ctor
+    // body (which may span many basic blocks and contain nested
+    // closures that capture `this`), so hoist to the entry block for
+    // dominance safety.
+    let this_slot = ctx.func.alloca_entry(DOUBLE);
     ctx.block().store(DOUBLE, &obj_box, &this_slot);
     ctx.this_stack.push(this_slot);
     ctx.class_stack.push(class_name.to_string());
@@ -1542,7 +1546,10 @@ pub(crate) fn lower_new(
         let saved_local_types = ctx.local_types.clone();
 
         for (param, arg_val) in ctor.params.iter().zip(lowered_args.iter()) {
-            let slot = ctx.block().alloca(DOUBLE);
+            // Ctor params become ctx.locals for the inlined body;
+            // closures inside the ctor may capture them, so hoist
+            // to the entry block.
+            let slot = ctx.func.alloca_entry(DOUBLE);
             ctx.block().store(DOUBLE, arg_val, &slot);
             ctx.locals.insert(param.id, slot);
             ctx.local_types.insert(param.id, param.ty.clone());
@@ -1571,7 +1578,10 @@ pub(crate) fn lower_new(
                     // than the parent expects, extra params get
                     // undefined.
                     for (i, param) in parent_ctor.params.iter().enumerate() {
-                        let slot = ctx.block().alloca(DOUBLE);
+                        // Parent-ctor params become ctx.locals for the
+                        // inlined body; capturable by nested closures,
+                        // so hoist to the entry block.
+                        let slot = ctx.func.alloca_entry(DOUBLE);
                         if i < lowered_args.len() {
                             ctx.block().store(DOUBLE, &lowered_args[i], &slot);
                         } else {

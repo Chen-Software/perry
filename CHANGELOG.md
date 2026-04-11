@@ -2,6 +2,46 @@
 
 Detailed changelog for Perry. See CLAUDE.md for concise summaries.
 
+## v0.5.5 (llvm-backend) — `alloca_entry` sweep
+
+The third followup from the v0.5.1 mango compile sweep. Closes the latent SSA dominance hazards from "Other alloca call sites in expr.rs / lower_call.rs / stmt.rs:419 (for-of counters, intermediate result slots, MathMin/Max temp arrays) were NOT migrated" — the v0.5.2 followup item.
+
+### What changed
+
+`LlFunction::alloca_entry()` was added in commit `fb11e20` (v0.5.2) to hoist `Stmt::Let` slots into the function entry block. v0.5.2 only migrated the two `Stmt::Let` paths (boxed and non-boxed). This sweep walks every other `.alloca(` call site in the LLVM backend, classifies it, and migrates the cross-block ones.
+
+Migrated to `alloca_entry` (case c — definitely or potentially capturable):
+
+| File:line | What it allocates | Reason |
+|---|---|---|
+| `stmt.rs:419` | Catch-clause exception binding | Goes into `ctx.locals`, capturable by nested closures inside the catch body. |
+| `expr.rs:2093` | `super()` inlines parent ctor params | Parent ctor params become `ctx.locals` and may be captured by closures inside the parent ctor body. |
+| `expr.rs:3934` | `forEach` loop counter `i_slot` | Defined in current block but used across cond/body/exit successor blocks. Not in `ctx.locals`, but migrated defensively. |
+| `expr.rs:5004` | `Await` `result_slot` | Spans check/wait/settled/done/merge blocks, and `Await` can be lowered inside a nested if-arm. |
+| `lower_call.rs:1523` | `NewClass` `this_slot` | Pushed on `this_stack` for the entire inlined ctor body with nested closures capturing `this`. |
+| `lower_call.rs:1545` | Inlined-ctor params | Inserted into `ctx.locals`, capturable. |
+| `lower_call.rs:1574` | Parent-ctor fallback inline path | Same semantics as 1545. |
+
+Left alone with explanatory comment (case b — single-block scratch, dominance-safe by construction):
+- `expr.rs:3147` `js_array_splice out_slot` — alloca + store + call + reload all in the same block.
+
+Construction-time entry-block param init paths in `codegen.rs` (case a — already in entry, untouched):
+- 6 sites in `compile_function`/`compile_method`/`compile_closure`/`compile_static_method` that allocate param slots on `lf.block_mut(0).unwrap()` directly before any `FnCtx` exists. These already live in the entry block by construction.
+
+### Out-of-scope sites noted but not in sweep
+
+Three `emit_raw("... = alloca [N x double]")` sites at `expr.rs:3162`, `expr.rs:4564`, `lower_call.rs:1302` are variadic call-arg buffers, single-block, and use `emit_raw` rather than `.alloca(`, so they fall outside the literal `.alloca(` sweep. All are case (b) in practice.
+
+### Verified
+
+- `cargo build --release -p perry-codegen` clean
+- `cargo build --release` clean (full workspace)
+- `mango/src/app.ts` compiles + links: `Wrote executable: /tmp/Mango-after-pick`. No `error compiling`, no `invalid LLVM IR`, no `does not dominate`.
+
+### Process note
+
+This sweep was originally executed by a worktree-isolated `general-purpose` Opus subagent (`/Users/amlug/projects/perry/perry/.claude/worktrees/agent-a02f7a85`, branch `worktree-agent-a02f7a85`) because the main branch was being concurrently edited by 7+ other Claude sessions and naive edits to `expr.rs` were colliding. The agent's commit `1c4debc` was cherry-picked back into main as `e6f3a25` after my v0.5.4 ExternFuncRef wrapper commit landed.
+
 ## v0.5.4 (llvm-backend) — `Expr::ExternFuncRef`-as-value via static `ClosureHeader` thunks
 
 The second followup from the v0.5.1 mango compile sweep. Fixes the limitation flagged in the v0.5.1 changelog: "calling an extern fn via a stored value is NOT supported and will misbehave at runtime." After this commit, imported functions are first-class values — you can pass them as callbacks, store them in variables, compare them for reference equality, and call them indirectly through `js_closure_callN`, just like locally-defined functions.
