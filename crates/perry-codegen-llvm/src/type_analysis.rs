@@ -223,6 +223,25 @@ pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirT
             if is_crypto_digest_chain(callee) {
                 return Some(HirType::String);
             }
+            // String prototype methods that return strings — when called
+            // on a known-string receiver, the result is also a string.
+            // Without this refinement, `const fixed = s.toWellFormed()`
+            // gets typed as Any and chained `fixed.isWellFormed()` routes
+            // through dynamic dispatch (which prints `[object Object]`).
+            // Mirrors the `is_string_expr` logic just below.
+            if let Expr::PropertyGet { property, object } = callee.as_ref() {
+                let returns_string = matches!(
+                    property.as_str(),
+                    "toString" | "toLowerCase" | "toUpperCase" | "trim"
+                        | "trimStart" | "trimEnd" | "slice" | "substring"
+                        | "substr" | "charAt" | "repeat" | "replace"
+                        | "replaceAll" | "padStart" | "padEnd" | "concat"
+                        | "normalize" | "at" | "toWellFormed"
+                );
+                if returns_string && is_string_expr(ctx, object) {
+                    return Some(HirType::String);
+                }
+            }
             None
         }
         _ => None,

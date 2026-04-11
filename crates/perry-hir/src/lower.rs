@@ -822,6 +822,26 @@ pub(crate) fn is_known_array_static_method(name: &str) -> bool {
     matches!(name, "isArray" | "from" | "of" | "fromAsync")
 }
 
+/// Names of `String.prototype.<name>` instance methods that Perry's
+/// runtime implements (or short-circuits) — used by the `typeof
+/// "".methodName` AST fold so feature-detection checks like
+/// `if (typeof "".isWellFormed === "function")` see the methods that
+/// the runtime would actually dispatch successfully.
+pub(crate) fn is_known_string_prototype_method(name: &str) -> bool {
+    matches!(
+        name,
+        // ES2015+ classics
+        "charAt" | "charCodeAt" | "codePointAt" | "concat" | "endsWith"
+        | "includes" | "indexOf" | "lastIndexOf" | "match" | "matchAll"
+        | "normalize" | "padEnd" | "padStart" | "repeat" | "replace"
+        | "replaceAll" | "search" | "slice" | "split" | "startsWith"
+        | "substring" | "toLowerCase" | "toUpperCase" | "toLocaleLowerCase"
+        | "toLocaleUpperCase" | "trim" | "trimEnd" | "trimStart" | "at"
+        // ES2024
+        | "isWellFormed" | "toWellFormed"
+    )
+}
+
 /// `let/const x = new FinalizationRegistry(...)` bindings into the lowering
 /// context. This is used by `obj.method()` lowering to recognise these instances
 /// without requiring type inference (Perry's existing var-decl type inference
@@ -4623,6 +4643,21 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                             {
                                 return Ok(Expr::String("function".to_string()));
                             }
+                        }
+                    }
+                    // `typeof "".methodName === "function"` — feature
+                    // detection idiom. Generic PropertyGet on a string
+                    // literal returns undefined in Perry today, so the
+                    // typeof would be "undefined" and the test branch
+                    // gets skipped. Fold to "function" when the property
+                    // name is a known String.prototype method that the
+                    // runtime actually dispatches.
+                    if let (ast::Expr::Lit(ast::Lit::Str(_)), ast::MemberProp::Ident(prop_ident)) =
+                        (member.obj.as_ref(), &member.prop)
+                    {
+                        let prop_name = prop_ident.sym.as_ref();
+                        if is_known_string_prototype_method(prop_name) {
+                            return Ok(Expr::String("function".to_string()));
                         }
                     }
                 }
