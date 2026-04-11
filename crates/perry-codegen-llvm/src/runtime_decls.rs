@@ -571,6 +571,15 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_buffer_from_array", I64, &[I64]);
     module.declare_function("js_buffer_length", I32, &[I64]);
     module.declare_function("js_buffer_get", I32, &[I64, I32]);
+    // console.time/count runtime functions.
+    module.declare_function("js_console_time", VOID, &[I64]);
+    module.declare_function("js_console_time_end", VOID, &[I64]);
+    module.declare_function("js_console_time_log", VOID, &[I64]);
+    module.declare_function("js_console_count", VOID, &[I64]);
+    module.declare_function("js_console_count_reset", VOID, &[I64]);
+    module.declare_function("js_console_group_begin", VOID, &[]);
+    module.declare_function("js_console_group_end", VOID, &[]);
+    module.declare_function("js_console_clear", VOID, &[]);
     module.declare_function("js_promise_resolve", VOID, &[I64, DOUBLE]);
     module.declare_function("js_promise_reject", VOID, &[I64, DOUBLE]);
     module.declare_function("js_promise_resolved", I64, &[DOUBLE]);

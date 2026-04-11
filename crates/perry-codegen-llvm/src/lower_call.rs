@@ -932,17 +932,80 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
             // dispatch (separate stderr for warn/error, dir's depth
             // option, table's tabular layout) lives in a future
             // phase that ports the Cranelift dispatch table.
+            // Zero-arg console.* calls (groupEnd, clear, etc.) — just
+            // dispatch to the runtime helper and return undefined.
+            // Don't print 0.0 as that shows up as literal "0" lines.
             if args.is_empty() {
-                ctx.block().call_void(
-                    "js_console_log_dynamic",
-                    &[(DOUBLE, &"0.0".to_string())],
-                );
-                return Ok("0.0".to_string());
+                match property.as_str() {
+                    "groupEnd" => {
+                        ctx.block().call_void("js_console_group_end", &[]);
+                    }
+                    "clear" => {
+                        ctx.block().call_void("js_console_clear", &[]);
+                    }
+                    _ => {
+                        // Other zero-arg calls like console.log() print nothing.
+                    }
+                }
+                return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
+            }
+            // console.group / groupCollapsed with a label — push
+            // indent level and print the label.
+            if matches!(property.as_str(), "group" | "groupCollapsed") {
+                for a in args {
+                    let v = lower_expr(ctx, a)?;
+                    ctx.block()
+                        .call_void("js_console_log_dynamic", &[(DOUBLE, &v)]);
+                }
+                ctx.block().call_void("js_console_group_begin", &[]);
+                return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
             }
             // console.table(data) — dedicated table renderer.
             if property == "table" && args.len() == 1 {
                 let v = lower_expr(ctx, &args[0])?;
                 ctx.block().call_void("js_console_table", &[(DOUBLE, &v)]);
+                return Ok("0.0".to_string());
+            }
+            // console.time(label) / timeEnd(label) / timeLog(label) —
+            // dedicated timer functions that track per-label Instants
+            // in a thread-local HashMap. Without this dispatch the
+            // label got routed through js_console_log_dynamic and just
+            // printed the string, losing the elapsed-time output.
+            if matches!(property.as_str(), "time" | "timeEnd" | "timeLog" | "count" | "countReset")
+                && args.len() == 1
+            {
+                let v = lower_expr(ctx, &args[0])?;
+                let blk = ctx.block();
+                let handle = blk.call(I64, "js_get_string_pointer_unified", &[(DOUBLE, &v)]);
+                let runtime_fn = match property.as_str() {
+                    "time" => "js_console_time",
+                    "timeEnd" => "js_console_time_end",
+                    "timeLog" => "js_console_time_log",
+                    "count" => "js_console_count",
+                    "countReset" => "js_console_count_reset",
+                    _ => unreachable!(),
+                };
+                blk.call_void(runtime_fn, &[(I64, &handle)]);
+                return Ok("0.0".to_string());
+            }
+            // Zero-arg time* / count* use the default label "default".
+            if matches!(property.as_str(), "time" | "timeEnd" | "timeLog" | "count" | "countReset")
+                && args.is_empty()
+            {
+                let sp_idx = ctx.strings.intern("default");
+                let sp_global = format!("@{}", ctx.strings.entry(sp_idx).handle_global);
+                let blk = ctx.block();
+                let sp_box = blk.load(DOUBLE, &sp_global);
+                let handle = blk.call(I64, "js_get_string_pointer_unified", &[(DOUBLE, &sp_box)]);
+                let runtime_fn = match property.as_str() {
+                    "time" => "js_console_time",
+                    "timeEnd" => "js_console_time_end",
+                    "timeLog" => "js_console_time_log",
+                    "count" => "js_console_count",
+                    "countReset" => "js_console_count_reset",
+                    _ => unreachable!(),
+                };
+                blk.call_void(runtime_fn, &[(I64, &handle)]);
                 return Ok("0.0".to_string());
             }
             // Single-arg fast path: just print directly.

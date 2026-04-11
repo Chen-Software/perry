@@ -48,35 +48,36 @@ pub extern "C" fn js_console_log(value: JSValue) {
 #[no_mangle]
 pub extern "C" fn js_console_log_dynamic(value: f64) {
     let jsval = JSValue::from_bits(value.to_bits());
+    let p = console_group_prefix();
 
     if jsval.is_undefined() {
-        println!("undefined");
+        println!("{}undefined", p);
     } else if jsval.is_null() {
-        println!("null");
+        println!("{}null", p);
     } else if jsval.is_bool() {
-        println!("{}", jsval.as_bool());
+        println!("{}{}", p, jsval.as_bool());
     } else if jsval.is_string() {
         // String pointer (uses STRING_TAG 0x7FFF)
         let ptr = jsval.as_string_ptr();
         if ptr.is_null() {
-            println!("null");
+            println!("{}null", p);
         } else {
             unsafe {
                 let len = (*ptr).length as usize;
                 let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                 let bytes = std::slice::from_raw_parts(data, len);
                 if let Ok(s) = std::str::from_utf8(bytes) {
-                    println!("{}", s);
+                    println!("{}{}", p, s);
                 } else {
-                    println!("[invalid utf8]");
+                    println!("{}[invalid utf8]", p);
                 }
             }
         }
     } else if jsval.is_pointer() {
         // Object/array pointer - format as JSON
-        println!("{}", format_jsvalue(value, 0));
+        println!("{}{}", p, format_jsvalue(value, 0));
     } else if jsval.is_int32() {
-        println!("{}", jsval.as_int32());
+        println!("{}{}", p, jsval.as_int32());
     } else {
         // Must be a regular number — but first check for a raw (non-NaN-boxed)
         // heap pointer. The LLVM / Cranelift backends return Buffer pointers as
@@ -88,20 +89,20 @@ pub extern "C" fn js_console_log_dynamic(value: f64) {
             && (raw_bits >> 48) == 0
             && crate::buffer::is_registered_buffer(raw_bits as usize)
         {
-            println!("{}", format_jsvalue(value, 0));
+            println!("{}{}", p, format_jsvalue(value, 0));
             return;
         }
         let n = value;
         if n.is_nan() {
-            println!("NaN");
+            println!("{}NaN", p);
         } else if n.is_infinite() {
-            if n > 0.0 { println!("Infinity"); } else { println!("-Infinity"); }
+            if n > 0.0 { println!("{}Infinity", p); } else { println!("{}-Infinity", p); }
         } else if is_negative_zero(n) {
-            println!("-0");
+            println!("{}-0", p);
         } else if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
-            println!("{}", n as i64);
+            println!("{}{}", p, n as i64);
         } else {
-            println!("{}", n);
+            println!("{}{}", p, n);
         }
     }
 }
@@ -1470,15 +1471,41 @@ pub extern "C" fn js_console_count_reset(label_ptr: *const StringHeader) {
 //
 // Just print the label like console.log; we don't track indent yet.
 
+// Thread-local indent level for console.group. Each call to
+// console.group() increments, each groupEnd() decrements. The
+// common console.log path prefixes output with `"  ".repeat(level)`
+// when level > 0 to match Node's visual indentation.
+thread_local! {
+    pub(crate) static CONSOLE_GROUP_INDENT: std::cell::Cell<usize> = std::cell::Cell::new(0);
+}
+
+/// Return the current indent prefix (two spaces per level).
+pub(crate) fn console_group_prefix() -> String {
+    CONSOLE_GROUP_INDENT.with(|l| "  ".repeat(l.get()))
+}
+
 #[no_mangle]
 pub extern "C" fn js_console_group(label_ptr: *const StringHeader) {
     let label = unsafe { label_from_str_ptr(label_ptr) };
-    println!("{}", label);
+    println!("{}{}", console_group_prefix(), label);
+    CONSOLE_GROUP_INDENT.with(|l| l.set(l.get() + 1));
+}
+
+/// Called after the label is printed via the common console.log
+/// path; just bumps the indent level.
+#[no_mangle]
+pub extern "C" fn js_console_group_begin() {
+    CONSOLE_GROUP_INDENT.with(|l| l.set(l.get() + 1));
 }
 
 #[no_mangle]
 pub extern "C" fn js_console_group_end() {
-    // No-op until we add indent tracking.
+    CONSOLE_GROUP_INDENT.with(|l| {
+        let cur = l.get();
+        if cur > 0 {
+            l.set(cur - 1);
+        }
+    });
 }
 
 // === console.assert ===
