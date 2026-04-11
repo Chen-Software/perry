@@ -150,8 +150,12 @@ pub struct CompileOptions {
     /// function_names, header_path)` tuples.
     pub native_library_functions: Vec<(String, Vec<String>, String)>,
     /// i18n translation table snapshot — `(translations, key_count,
-    /// locale_count, locale_codes)`.
-    pub i18n_table: Option<(Vec<String>, usize, usize, Vec<String>)>,
+    /// locale_count, locale_codes, default_locale_idx)`. The
+    /// `default_locale_idx` is the row index used at compile time to
+    /// resolve `Expr::I18nString` to the right translation — without
+    /// it, the lowering would have to either pick locale 0 blindly or
+    /// fall back to the verbatim key.
+    pub i18n_table: Option<(Vec<String>, usize, usize, Vec<String>, usize)>,
 }
 
 /// A class imported from another native module.
@@ -193,6 +197,12 @@ pub(crate) struct CrossModuleCtx {
     /// allocator. See `js_object_alloc_class_inline_keys` in
     /// `perry-runtime/src/object.rs`.
     pub class_keys_globals: std::collections::HashMap<String, String>,
+    /// Compile-time i18n table for resolving `Expr::I18nString` against
+    /// the project's default locale. `None` when i18n is not configured.
+    /// Built from `opts.i18n_table` once at the top of `compile_module`
+    /// and threaded through every `FnCtx` instantiation as a shared
+    /// borrow via `cross_module.i18n`.
+    pub i18n: Option<crate::expr::I18nLowerCtx>,
 }
 
 /// Compile a Perry HIR module to an object file via LLVM IR.
@@ -433,6 +443,20 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         imported_func_param_counts: opts.imported_func_param_counts,
         imported_func_return_types: opts.imported_func_return_types,
         class_keys_globals: class_keys_globals_map,
+        // Per-module i18n lowering context. Built from `opts.i18n_table`
+        // when i18n is configured; `None` otherwise. The
+        // `Expr::I18nString` lowering pulls the right translation row at
+        // compile time using `default_locale_idx` and emits the resolved
+        // string (with runtime interpolation for `{name}` placeholders).
+        i18n: opts.i18n_table.as_ref().map(
+            |(translations, key_count, _locale_count, _locale_codes, default_locale_idx)| {
+                crate::expr::I18nLowerCtx {
+                    translations: translations.clone(),
+                    key_count: *key_count,
+                    default_locale_idx: *default_locale_idx,
+                }
+            },
+        ),
     };
 
     // Module-level globals registry. Pre-walk:
@@ -1148,6 +1172,8 @@ fn compile_function(
         imported_func_return_types: &cross_module.imported_func_return_types,
         pending_declares: Vec::new(),
         integer_locals: &integer_locals,
+        arena_state_slot: None,
+        i18n: &cross_module.i18n,
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of '{}'", f.name))?;
@@ -1374,6 +1400,8 @@ fn compile_closure(
         imported_func_return_types: &cross_module.imported_func_return_types,
         pending_declares: Vec::new(),
         integer_locals: &integer_locals,
+        arena_state_slot: None,
+        i18n: &cross_module.i18n,
     };
 
     stmt::lower_stmts(&mut ctx, body)
@@ -1494,6 +1522,8 @@ fn compile_method(
         imported_func_return_types: &cross_module.imported_func_return_types,
         pending_declares: Vec::new(),
         integer_locals: &integer_locals,
+        arena_state_slot: None,
+        i18n: &cross_module.i18n,
     };
 
     stmt::lower_stmts(&mut ctx, &method.body)
@@ -1609,6 +1639,8 @@ fn compile_module_entry(
             imported_func_return_types: &cross_module.imported_func_return_types,
             pending_declares: Vec::new(),
             integer_locals: &main_integer_locals,
+            arena_state_slot: None,
+            i18n: &cross_module.i18n,
         };
         // Initialize static class fields with their declared init
         // expressions. Runs once at the top of main, before user code.
@@ -1688,6 +1720,8 @@ fn compile_module_entry(
             imported_func_return_types: &cross_module.imported_func_return_types,
             pending_declares: Vec::new(),
             integer_locals: &init_integer_locals,
+            arena_state_slot: None,
+            i18n: &cross_module.i18n,
         };
         init_static_fields(&mut ctx, hir)?;
         stmt::lower_stmts(&mut ctx, &hir.init)
@@ -1913,6 +1947,8 @@ fn compile_static_method(
         imported_func_return_types: &cross_module.imported_func_return_types,
         pending_declares: Vec::new(),
         integer_locals: &integer_locals,
+        arena_state_slot: None,
+        i18n: &cross_module.i18n,
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of static '{}::{}'", class_name, f.name))?;

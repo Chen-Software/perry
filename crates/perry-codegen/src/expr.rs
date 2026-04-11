@@ -246,6 +246,42 @@ pub(crate) struct FnCtx<'a> {
     /// LLVM's SCEV hoists the conversions. Turned factorial
     /// (`sum += i % 1000` in a 100M loop) from 1550ms → ~150ms on ARM.
     pub integer_locals: &'a std::collections::HashSet<u32>,
+
+    /// Cached pointer to this function's `InlineArenaState` slot —
+    /// allocated lazily on the first `new ClassName()` site that uses
+    /// the inline bump-allocator path. The slot lives in the function
+    /// entry block (via `LlFunction::entry_init_call_ptr`) and holds
+    /// the result of a one-time `js_inline_arena_state()` call. Each
+    /// subsequent `new` in the function loads from this slot instead
+    /// of paying a TLS access per allocation.
+    ///
+    /// `None` until the first `new` lowers; thereafter `Some(slot_name)`
+    /// (e.g. `"%r3"`).
+    pub arena_state_slot: Option<String>,
+
+    /// Compile-time i18n resolution context. When `Some`, the
+    /// `Expr::I18nString` lowering looks up the translation for the
+    /// default locale at compile time and emits the resolved string
+    /// (with runtime interpolation for `{name}` placeholders). When
+    /// `None`, the lowering falls back to the verbatim key string.
+    ///
+    /// The data is owned by `compile_module` (built once from
+    /// `opts.i18n_table`) and threaded through every `FnCtx`
+    /// instantiation as a shared borrow.
+    pub i18n: &'a Option<I18nLowerCtx>,
+}
+
+/// Per-module i18n table snapshot used by the LLVM codegen to resolve
+/// `Expr::I18nString` against the default locale at compile time.
+///
+/// `translations` is a flat 2D array `[locale_idx * key_count + string_idx]`
+/// matching `perry_transform::i18n::I18nStringTable::translations`. The
+/// codegen uses `default_locale_idx` to pick a row.
+#[derive(Debug, Clone)]
+pub struct I18nLowerCtx {
+    pub translations: Vec<String>,
+    pub key_count: usize,
+    pub default_locale_idx: usize,
 }
 
 impl<'a> FnCtx<'a> {
@@ -5950,21 +5986,201 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(double_literal(f64::from_bits(crate::nanbox::TAG_TRUE)))
         }
 
-        // -------- I18nString — locale-keyed string literal --------
-        // Pragmatic: i18n resolution requires either a runtime key
-        // lookup (with locale + plural categorization) or a compile-time
-        // pre-resolution against the active locale. Until that's wired
-        // up properly, fall back to the verbatim key string so the
-        // binary builds and the user sees the source text. Walks any
-        // interpolation params for side effects (closure collection,
-        // string interning).
-        Expr::I18nString { key, params, .. } => {
-            for (_, v) in params {
-                let _ = lower_expr(ctx, v)?;
+        // -------- I18nString — compile-time resolution + runtime interpolation --------
+        // Two cases:
+        //
+        //  (a) `ctx.i18n` is `None` — the project doesn't configure i18n,
+        //      or this build doesn't have a snapshot threaded through.
+        //      Fall back to emitting the verbatim key string. Lower
+        //      params for side effects (closure collection, string
+        //      literal interning) so they don't get dropped.
+        //
+        //  (b) `ctx.i18n` is `Some(I18nLowerCtx { translations,
+        //      key_count, default_locale_idx })` — pull the right cell
+        //      from the flat 2D table at compile time using the entry's
+        //      `string_idx`, then:
+        //
+        //      - If the resolved string has no `{name}` placeholders,
+        //        intern it as a string literal and load the handle.
+        //      - Otherwise, parse the placeholders, lower each param's
+        //        value, `js_string_coerce` to a handle, and chain
+        //        `js_string_concat` calls to build the final string at
+        //        runtime. Fragments are interned via the StringPool so
+        //        identical templates share storage.
+        //
+        // Plurals: `plural_forms` and `plural_param` are deliberately
+        // ignored in this first cut. The lowering uses the canonical
+        // `string_idx` (which is what the singular/non-plural form
+        // points at). CLDR plural rule selection at runtime is a
+        // followup; in the meantime plural-tagged keys still produce a
+        // working translation, just not the count-aware variant.
+        Expr::I18nString { key, string_idx, params, .. } => {
+            let resolved: Option<String> = ctx.i18n.as_ref().and_then(|t| {
+                let idx = t.default_locale_idx * t.key_count + (*string_idx as usize);
+                t.translations.get(idx).cloned()
+            });
+            // An empty translation cell means the locale file is missing
+            // this key — fall back to the source key so the user at
+            // least sees the English text instead of `""`.
+            let template: String = match resolved {
+                Some(s) if !s.is_empty() => s,
+                _ => key.clone(),
+            };
+            // Build a `(fragment, Option<param_name>)` plan from the
+            // template. Each `{name}` placeholder splits a fragment;
+            // text between/around placeholders is a literal piece. We
+            // tolerate `{{` / `}}` as literal braces (matches common
+            // i18n conventions and avoids quirks if a translation
+            // contains a literal `{`).
+            //
+            // The plan is a list of (literal_text, optional_param_name)
+            // pairs where the param name (if any) follows the literal.
+            // The trailing literal has no param.
+            #[derive(Debug)]
+            enum Part {
+                Lit(String),
+                Param(String),
             }
-            let key_idx = ctx.strings.intern(key);
-            let handle_global = format!("@{}", ctx.strings.entry(key_idx).handle_global);
-            Ok(ctx.block().load(DOUBLE, &handle_global))
+            let mut plan: Vec<Part> = Vec::new();
+            {
+                let bytes = template.as_bytes();
+                let mut i = 0usize;
+                let mut buf = String::new();
+                while i < bytes.len() {
+                    let b = bytes[i];
+                    if b == b'{' {
+                        if i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+                            buf.push('{');
+                            i += 2;
+                            continue;
+                        }
+                        // Find the matching `}`.
+                        let end = bytes[i + 1..].iter().position(|&c| c == b'}').map(|p| i + 1 + p);
+                        match end {
+                            Some(close) => {
+                                if !buf.is_empty() {
+                                    plan.push(Part::Lit(std::mem::take(&mut buf)));
+                                }
+                                let name = std::str::from_utf8(&bytes[i + 1..close])
+                                    .unwrap_or("")
+                                    .trim()
+                                    .to_string();
+                                plan.push(Part::Param(name));
+                                i = close + 1;
+                            }
+                            None => {
+                                // Unterminated `{` — treat as literal.
+                                buf.push(b as char);
+                                i += 1;
+                            }
+                        }
+                    } else if b == b'}' && i + 1 < bytes.len() && bytes[i + 1] == b'}' {
+                        buf.push('}');
+                        i += 2;
+                    } else {
+                        // Push the byte as-is. UTF-8 multi-byte chars
+                        // pass through cleanly because we never split
+                        // inside one (we only act on `{` and `}` which
+                        // are ASCII).
+                        buf.push(b as char);
+                        i += 1;
+                    }
+                }
+                if !buf.is_empty() {
+                    plan.push(Part::Lit(buf));
+                }
+            }
+
+            // Fast path: no `{name}` placeholders → just emit the
+            // literal. Still lower the params for side effects in case
+            // the template parser misses something exotic, but the
+            // result is a single static string handle.
+            let has_placeholders = plan.iter().any(|p| matches!(p, Part::Param(_)));
+            if !has_placeholders {
+                for (_, v) in params {
+                    let _ = lower_expr(ctx, v)?;
+                }
+                let key_idx = ctx.strings.intern(&template);
+                let handle_global =
+                    format!("@{}", ctx.strings.entry(key_idx).handle_global);
+                return Ok(ctx.block().load(DOUBLE, &handle_global));
+            }
+
+            // Build a name → lowered value map for params we'll
+            // reference. We lower each param exactly once so closures
+            // and side effects in arg expressions fire in source order
+            // — even if a placeholder appears multiple times in the
+            // template (we'll reuse the cached value in that case).
+            //
+            // Params declared in the HIR but not referenced in the
+            // resolved template still get lowered for side effects.
+            let mut lowered_params: std::collections::HashMap<String, String> =
+                std::collections::HashMap::with_capacity(params.len());
+            for (name, v) in params {
+                let v_box = lower_expr(ctx, v)?;
+                lowered_params.insert(name.clone(), v_box);
+            }
+
+            // Walk the plan and emit a chain of string concats. We
+            // accumulate the result in `acc_handle` (i64 string
+            // handle, NOT a NaN-boxed double — saves the
+            // bitcast/mask cycle on every concat).
+            //
+            // For each Part:
+            //   - Lit(s): intern via StringPool, load the handle, mask.
+            //   - Param(name): look up the lowered value, coerce via
+            //     `js_string_coerce` (which already returns a handle).
+            // Then concat with `js_string_concat(left_handle, right_handle)`.
+            //
+            // For the very first part, just initialize acc_handle from
+            // it (no concat needed).
+            let mut acc_handle: Option<String> = None;
+            for part in &plan {
+                let part_handle: String = match part {
+                    Part::Lit(s) => {
+                        let key_idx = ctx.strings.intern(s);
+                        let handle_global =
+                            format!("@{}", ctx.strings.entry(key_idx).handle_global);
+                        let blk = ctx.block();
+                        let lit_box = blk.load(DOUBLE, &handle_global);
+                        unbox_to_i64(blk, &lit_box)
+                    }
+                    Part::Param(name) => {
+                        // If the placeholder names a param we don't
+                        // know about, fall back to the literal `{name}`
+                        // text so the user can see the bug.
+                        let v_box = match lowered_params.get(name) {
+                            Some(v) => v.clone(),
+                            None => {
+                                let placeholder = format!("{{{}}}", name);
+                                let key_idx = ctx.strings.intern(&placeholder);
+                                let handle_global = format!(
+                                    "@{}",
+                                    ctx.strings.entry(key_idx).handle_global
+                                );
+                                ctx.block().load(DOUBLE, &handle_global)
+                            }
+                        };
+                        let blk = ctx.block();
+                        blk.call(I64, "js_string_coerce", &[(DOUBLE, &v_box)])
+                    }
+                };
+                acc_handle = Some(match acc_handle {
+                    None => part_handle,
+                    Some(prev) => {
+                        let blk = ctx.block();
+                        blk.call(
+                            I64,
+                            "js_string_concat",
+                            &[(I64, &prev), (I64, &part_handle)],
+                        )
+                    }
+                });
+            }
+            // `plan` had at least one placeholder so it can't be empty;
+            // `acc_handle` is therefore Some. Box the final handle.
+            let final_handle = acc_handle.expect("template plan was non-empty");
+            Ok(nanbox_string_inline(ctx.block(), &final_handle))
         }
 
         // -------- Unsupported (clear error) --------

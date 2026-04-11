@@ -4190,10 +4190,21 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
     // Compile native modules in parallel using rayon
     use rayon::prelude::*;
 
-    // Snapshot i18n data from main thread so rayon workers can access it
-    let i18n_snapshot: Option<(Vec<String>, usize, usize, Vec<String>)> = i18n_table.as_ref().map(|table| {
-        (table.translations.clone(), table.keys.len(), table.locale_count, table.locale_codes.clone())
-    });
+    // Snapshot i18n data from main thread so rayon workers can access it.
+    // The `default_locale_idx` is required by the LLVM backend to resolve
+    // `Expr::I18nString` against the right translation row at compile time
+    // — without it the lowering would either fall back to the verbatim key
+    // or guess locale 0.
+    let i18n_snapshot: Option<(Vec<String>, usize, usize, Vec<String>, usize)> =
+        i18n_table.as_ref().map(|table| {
+            (
+                table.translations.clone(),
+                table.keys.len(),
+                table.locale_count,
+                table.locale_codes.clone(),
+                table.default_locale_idx,
+            )
+        });
 
     // Phase J: detect bitcode-link mode. The actual .bc paths aren't known
     // yet (build_optimized_libs runs after compilation), but we decide the

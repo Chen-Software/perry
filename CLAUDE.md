@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.6
+**Current Version:** 0.5.7
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.144 and earlier), see CHANGELOG.md.
+
+### v0.5.7 (llvm-backend) — `Expr::I18nString` compile-time resolution + runtime interpolation
+- **fix**: localized strings now resolve to the right translation at compile time. Previously the `Expr::I18nString` lowering returned the verbatim KEY string regardless of the project's `default_locale`, so any user calling `t("Hello")` from `perry/i18n` got `"Hello"` instead of `"Hallo"` even with `default_locale = "de"`. New `expr::I18nLowerCtx` (threaded through `CrossModuleCtx`) carries the i18n table from `opts.i18n_table` and the default locale index. The lowering pulls `translations[default_locale_idx * key_count + string_idx]` at compile time, parses `{name}` placeholders, lowers each interpolation param's value, and emits a `js_string_concat` chain that interleaves interned literal fragments with `js_string_coerce`'d param values. Empty / missing translation cells fall back to the source key. Plurals (`plural_forms`/`plural_param`) are still ignored — uses the canonical `string_idx` form, leaving CLDR plural rule selection as a followup. Also fixed: `lower_call.rs::lower_native_method_call` was discarding `NativeMethodCall { module: "perry/i18n", method: "t", object: None, args: [I18nString] }` and returning `double 0.0` because the receiver-less early-out path didn't know about `t()`. Now special-cases the `t()` unwrap and lowers the inner I18nString directly. Added `default_locale_idx` to `CompileOptions::i18n_table` (5-tuple). Verified end-to-end with a 2-locale test: en/de translations resolve correctly when `default_locale` is switched, and missing/empty cells fall back to the source key. Mango still compiles cleanly (89 localizable strings across 13 locales).
 
 ### v0.5.6 (llvm-backend) — perry-stdlib auto-optimize `hex` crate fix
 - **fix**: `crates/perry-stdlib/src/sqlite.rs:54` was using `hex::encode(b)` to format SQLite `Blob` columns as hex strings, but the `hex` crate dep in `perry-stdlib`'s `Cargo.toml` is gated behind the `crypto` Cargo feature. Auto-optimize rebuilds that enabled only `database-sqlite` (e.g. mango: `better-sqlite3` + `mongodb` + fetch, no crypto) failed with `error[E0433]: failed to resolve: use of unresolved module or unlinked crate hex` and fell back to the prebuilt full stdlib, leaving every user binary 100KB+ larger than necessary. Replaced with a hand-rolled nibble loop (`const HEX: &[u8; 16] = b"0123456789abcdef"; for &byte in b { out.push(HEX[(byte >> 4) as usize]); out.push(HEX[(byte & 0x0f) as usize]); }`) so sqlite no longer depends on hex. Surgical fix — no Cargo.toml or auto-optimize logic changes. Mango now goes through the auto-optimize rebuild path: prebuilt-fallback 5.18 MB → optimized 5.01 MB (~168 KB / 3.4% savings, mostly from features the user doesn't import being stripped). Original fix done as a worktree-isolated subagent task; the agent's commit was based on a stale `llvm-backend` HEAD so the sqlite.rs change was applied manually here on top of v0.5.5.

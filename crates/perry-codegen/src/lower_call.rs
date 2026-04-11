@@ -11,7 +11,7 @@ use crate::lower_array_method::lower_array_method;
 use crate::lower_string_method::lower_string_method;
 use crate::nanbox::{double_literal, POINTER_MASK_I64};
 use crate::type_analysis::{is_array_expr, is_map_expr, is_promise_expr, is_set_expr, is_string_expr, receiver_class_name};
-use crate::types::{DOUBLE, I32, I64, PTR};
+use crate::types::{DOUBLE, I32, I64, I8, PTR};
 
 /// Lower a `Call` expression. Two shapes are supported:
 /// 1. `FuncRef(id)(args...)` — direct call to a user function by HIR id.
@@ -1455,24 +1455,177 @@ pub(crate) fn lower_new(
     let n_str = field_count.to_string();
 
     // Fast path: if the class has a per-class keys global (built once
-    // at module init via `js_build_class_keys_array`), load the
-    // pointer and call the inline-keys allocator. This bypasses the
-    // SHAPE_CACHE lookup AND the runtime `js_object_alloc_class_with_keys`
-    // function entirely on the hot allocation path. The global is
-    // pre-populated in `__perry_init_strings_<modprefix>`.
+    // at module init via `js_build_class_keys_array`), emit INLINE
+    // bump-allocator IR — no function call into the runtime at all on
+    // the hot path. The runtime exposes a `InlineArenaState` struct
+    // (data ptr at offset 0, current bump offset at offset 8, current
+    // block size at offset 16) via `js_inline_arena_state()`. We call
+    // that ONCE per JS function entry (cached in `arena_state_slot`)
+    // and then emit a 5-instruction bump check + GcHeader/ObjectHeader
+    // store sequence at every `new ClassName()` site. The slow path
+    // (block overflow) calls `js_inline_arena_slow_alloc` which syncs
+    // the inline state back to the underlying arena, allocates a new
+    // block, and updates the inline state.
+    //
+    // Cycles per inlined alloc on the M-series fast path:
+    //    load offset       (1)
+    //    add+and align     (2)
+    //    add new_offset    (1)
+    //    load size + cmp   (2)
+    //    cond br           (predicted, 0)
+    //    store offset      (1)
+    //    load data + gep   (2)
+    //    write GcHeader    (1)  — packed i64 store
+    //    write ObjectHeader×2 (2) — packed i64 stores
+    //    write keys_ptr    (1)
+    //  total: ~13 cycles vs ~140 cycles for the function-call path.
+    //
+    // Layout assumption: GcHeader is 8 bytes
+    //    {obj_type:u8, gc_flags:u8, _reserved:u16, size:u32}
+    // and ObjectHeader is 24 bytes
+    //    {object_type:u32, class_id:u32, parent_class_id:u32,
+    //     field_count:u32, keys_array:*ptr}
+    // followed by `max(field_count, 8)` 8-byte field slots. The user
+    // pointer the rest of the codegen sees is `raw + 8` (i.e. the
+    // ObjectHeader address) — same as what
+    // `js_object_alloc_class_inline_keys` returns.
+    //
+    // Layout constants are duplicated here from the runtime; if
+    // `GcHeader` or `ObjectHeader` ever change in
+    // `crates/perry-runtime/src/{gc,object}.rs`, update both sides.
     let obj_handle = if let Some(keys_global_name) = ctx.class_keys_globals.get(class_name).cloned() {
+        // Compile-time layout constants.
+        const GC_HEADER_SIZE: u64 = 8;
+        const OBJECT_HEADER_SIZE: u64 = 24;
+        const FIELD_SLOT_SIZE: u64 = 8;
+        const MIN_FIELD_SLOTS: u64 = 8;
+        const GC_TYPE_OBJECT: u64 = 2;
+        const GC_FLAG_ARENA: u64 = 0x02;
+        const OBJECT_TYPE_REGULAR: u64 = 1;
+
+        let alloc_field_count = std::cmp::max(field_count as u64, MIN_FIELD_SLOTS);
+        let payload_size = OBJECT_HEADER_SIZE + alloc_field_count * FIELD_SLOT_SIZE;
+        let total_size = GC_HEADER_SIZE + payload_size; // e.g. 96 for any class with ≤8 fields
+        let total_size_str = total_size.to_string();
+
+        // Lazy: allocate the per-function arena-state slot on the
+        // first `new` we see. The slot init (`call @js_inline_arena_state`
+        // + store) lives in the entry block via `entry_init_call_ptr`,
+        // so it dominates every reachable use.
+        let arena_state_slot = if let Some(slot) = ctx.arena_state_slot.clone() {
+            slot
+        } else {
+            let slot = ctx.func.entry_init_call_ptr("js_inline_arena_state");
+            ctx.arena_state_slot = Some(slot.clone());
+            slot
+        };
+
+        // Load the per-class keys global up front (its address is
+        // module-static, so it stays cheap to reload per call).
         let keys_global_ref = format!("@{}", keys_global_name);
         let keys_ptr = ctx.block().load(I64, &keys_global_ref);
-        ctx.block().call(
-            I64,
-            "js_object_alloc_class_inline_keys",
+
+        // Inline bump-allocator IR.
+        let blk = ctx.block();
+        let state_ptr = blk.load(PTR, &arena_state_slot);
+
+        // offset = state.offset (at byte offset 8 in InlineArenaState)
+        let offset_field_ptr = blk.gep(I8, &state_ptr, &[(I64, "8")]);
+        let offset_val = blk.load(I64, &offset_field_ptr);
+
+        // Align up to 8 bytes (no-op when offset is already 8-aligned,
+        // but emitting it lets the unaligned-init case work).
+        let off_plus_7 = blk.add(I64, &offset_val, "7");
+        let aligned_off = blk.and(I64, &off_plus_7, "-8");
+
+        // new_offset = aligned + total_size
+        let new_offset = blk.add(I64, &aligned_off, &total_size_str);
+
+        // size = state.size (at byte offset 16)
+        let size_field_ptr = blk.gep(I8, &state_ptr, &[(I64, "16")]);
+        let size_val = blk.load(I64, &size_field_ptr);
+
+        // fits = new_offset <= size
+        let fits = blk.icmp_ule(I64, &new_offset, &size_val);
+
+        // Set up fast/slow/merge basic blocks.
+        let fast_idx = ctx.new_block("alloc.fast");
+        let slow_idx = ctx.new_block("alloc.slow");
+        let merge_idx = ctx.new_block("alloc.merge");
+        let fast_label = ctx.block_label(fast_idx);
+        let slow_label = ctx.block_label(slow_idx);
+        let merge_label = ctx.block_label(merge_idx);
+
+        ctx.block().cond_br(&fits, &fast_label, &slow_label);
+
+        // ---- Fast path: bump and return data + aligned ----
+        ctx.current_block = fast_idx;
+        let blk = ctx.block();
+        blk.store(I64, &new_offset, &offset_field_ptr);
+        // data ptr is at byte offset 0 in InlineArenaState
+        let data_ptr = blk.load(PTR, &state_ptr);
+        let raw_fast = blk.gep(I8, &data_ptr, &[(I64, &aligned_off)]);
+        let fast_pred_label = blk.label.clone();
+        blk.br(&merge_label);
+
+        // ---- Slow path: call into the runtime ----
+        ctx.current_block = slow_idx;
+        let raw_slow = ctx.block().call(
+            PTR,
+            "js_inline_arena_slow_alloc",
             &[
-                (I32, &cid_str),
-                (I32, &parent_cid_str),
-                (I32, &n_str),
-                (I64, &keys_ptr),
+                (PTR, &state_ptr),
+                (I64, &total_size_str),
+                (I64, "8"),
             ],
-        )
+        );
+        let slow_pred_label = ctx.block().label.clone();
+        ctx.block().br(&merge_label);
+
+        // ---- Merge: phi the raw pointer, write headers, NaN-box ----
+        ctx.current_block = merge_idx;
+        let blk = ctx.block();
+        let raw = blk.phi(
+            PTR,
+            &[
+                (&raw_fast, &fast_pred_label),
+                (&raw_slow, &slow_pred_label),
+            ],
+        );
+
+        // Write GcHeader (8 bytes) as a single i64 store. Field
+        // packing (little-endian):
+        //   bits  0..7   = obj_type (u8)
+        //   bits  8..15  = gc_flags (u8)
+        //   bits 16..31  = _reserved (u16)
+        //   bits 32..63  = size (u32)
+        let gc_packed: u64 = GC_TYPE_OBJECT
+            | (GC_FLAG_ARENA << 8)
+            | ((total_size as u64) << 32);
+        blk.store(I64, &gc_packed.to_string(), &raw);
+
+        // Write ObjectHeader at raw + 8.
+        // First 8 bytes: object_type (u32, low) | class_id (u32, high)
+        let oh_addr_1 = blk.gep(I8, &raw, &[(I64, "8")]);
+        let oh_word_1: u64 = OBJECT_TYPE_REGULAR | ((cid as u64) << 32);
+        blk.store(I64, &oh_word_1.to_string(), &oh_addr_1);
+
+        // Second 8 bytes: parent_class_id (u32, low) | field_count (u32, high)
+        let oh_addr_2 = blk.gep(I8, &raw, &[(I64, "16")]);
+        let oh_word_2: u64 = (parent_cid as u64) | ((field_count as u64) << 32);
+        blk.store(I64, &oh_word_2.to_string(), &oh_addr_2);
+
+        // Third 8 bytes: keys_array pointer. The keys_ptr we loaded
+        // above is an i64 (carries the ArrayHeader address); store as
+        // i64 since the underlying memory is 8 bytes either way.
+        let oh_addr_3 = blk.gep(I8, &raw, &[(I64, "24")]);
+        blk.store(I64, &keys_ptr, &oh_addr_3);
+
+        // User pointer = raw + 8 (the ObjectHeader address — what the
+        // function-call path returned). Convert to i64 to match what
+        // the existing nanbox_pointer_inline expects.
+        let user_ptr = blk.gep(I8, &raw, &[(I64, "8")]);
+        blk.ptrtoint(&user_ptr, I64)
     } else {
         // Fallback: build the packed-keys string at this site and
         // call the slower SHAPE_CACHE-aware allocator. Used when the
@@ -1700,6 +1853,22 @@ pub(crate) fn lower_native_method_call(
     // `Response.json(v)` (object.is_none()) finds its runtime function.
     if let Some(val) = lower_fetch_native_method(ctx, module, method, object, args)? {
         return Ok(val);
+    }
+
+    // `perry/i18n.t(key, params?)` is the i18n entry point. The
+    // perry-transform i18n pass already replaced the first arg with
+    // an `Expr::I18nString { key, string_idx, params, ... }` containing
+    // all the metadata the codegen needs to resolve the translation
+    // at compile time. The wrapping `t()` call is therefore identity:
+    // we just lower `args[0]` (the I18nString) and return its value.
+    // Without this case, the receiver-less early-out below would
+    // discard the I18nString and return `double 0.0`, which prints
+    // as `0` instead of the translated text — the symptom that broke
+    // the v0.5.7 i18n test before this fix landed.
+    if module == "perry/i18n" && method == "t" && object.is_none() {
+        if let Some(first) = args.first() {
+            return lower_expr(ctx, first);
+        }
     }
 
     // Receiver-less native method calls (e.g. plugin::setConfig(...)

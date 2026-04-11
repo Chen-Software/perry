@@ -2,6 +2,111 @@
 
 Detailed changelog for Perry. See CLAUDE.md for concise summaries.
 
+## v0.5.7 (llvm-backend) — `Expr::I18nString` compile-time resolution + runtime interpolation
+
+The fifth followup from the v0.5.1 mango compile sweep. Closes the followup item "I18nString currently returns the verbatim key string; need to wire up the locale-table lookup that the rest of the codebase already has plumbing for."
+
+### What was broken
+
+Previously `Expr::I18nString` lowered to:
+
+```rust
+let key_idx = ctx.strings.intern(key);
+let handle_global = format!("@{}", ctx.strings.entry(key_idx).handle_global);
+ctx.block().load(DOUBLE, &handle_global)
+```
+
+The "key" field is the source-language form (e.g. `"Hello"` in English), so the lowering effectively pinned every i18n string to its source text regardless of the project's `default_locale`. The `i18n_table` was already being built and threaded through `CompileOptions::i18n_table` — the lowering just wasn't consulting it.
+
+A second, much subtler bug compounded the first. The i18n transform replaces `t("key")` (which lowers to `Expr::NativeMethodCall { module: "perry/i18n", method: "t", object: None, args: [Expr::String("key")] }`) with `Expr::NativeMethodCall { ..., args: [Expr::I18nString { ... }] }` — keeping the wrapping NativeMethodCall but replacing the inner string. The codegen's `lower_native_method_call` has a receiver-less early-out at line 1858 that lowers args for side effects and returns `double 0.0`. So `t("Hello")` was producing the literal value 0 (printable as `"0"` via console.log), regardless of what the i18n transform did to the inner expression. This was caught only because I wrote a runtime test — without it the v0.5.1 i18n lowering's "verbatim key" claim was actually unreachable for any code that used `t()`.
+
+### What changed
+
+**1. New `expr::I18nLowerCtx` struct** in `crates/perry-codegen/src/expr.rs`:
+
+```rust
+pub struct I18nLowerCtx {
+    pub translations: Vec<String>,   // flat 2D: [locale_idx * key_count + string_idx]
+    pub key_count: usize,
+    pub default_locale_idx: usize,
+}
+```
+
+Threaded onto `CrossModuleCtx` so all six `FnCtx` construction sites pick it up automatically. `compile_module` builds it once at the top from `opts.i18n_table` and stores it on `cross_module.i18n`; FnCtx exposes it as `ctx.i18n: &Option<I18nLowerCtx>`.
+
+**2. `CompileOptions::i18n_table` extended** from a 4-tuple to a 5-tuple to carry `default_locale_idx`:
+
+```rust
+pub i18n_table: Option<(Vec<String>, usize, usize, Vec<String>, usize)>,
+//                      translations key_count locale_count locale_codes default_locale_idx
+```
+
+The driver's `i18n_snapshot` builder in `crates/perry/src/commands/compile.rs` updated to populate the new field from `table.default_locale_idx`.
+
+**3. `Expr::I18nString` lowering rewrite** in `crates/perry-codegen/src/expr.rs`:
+
+- If `ctx.i18n` is `None` → keep the old behavior (intern the key, return its handle).
+- Otherwise look up `translations[default_locale_idx * key_count + string_idx]`. Empty cells fall back to the source key.
+- Parse the resolved template for `{name}` placeholders. Tolerates `{{` / `}}` as literal braces. Builds a `Vec<Part>` where `Part::Lit(String)` is a static fragment and `Part::Param(String)` is a placeholder name.
+- **Fast path:** no placeholders → intern the resolved string and return its handle (one load).
+- **Interpolation path:** lower each param's value once (so closures and side effects fire in source order, even if a placeholder appears multiple times in the template). Walk the plan, building an i64-handle accumulator: `Lit` parts load + unbox the interned global; `Param` parts call `js_string_coerce(value)`. Each step after the first chains a `js_string_concat(prev_handle, part_handle)`. The final accumulator is NaN-boxed via `nanbox_string_inline`.
+- Unknown placeholder names (template references `{foo}` but the call doesn't provide a `foo` param) fall back to the literal `{foo}` text — visible in the output so the user can spot the typo.
+
+**4. `lower_native_method_call` `perry/i18n.t` unwrap** in `crates/perry-codegen/src/lower_call.rs`:
+
+```rust
+if module == "perry/i18n" && method == "t" && object.is_none() {
+    if let Some(first) = args.first() {
+        return lower_expr(ctx, first);
+    }
+}
+```
+
+Placed before the receiver-less early-out so `t("...")` calls actually reach the I18nString lowering instead of returning `double 0.0`.
+
+### Verified end-to-end
+
+`/tmp/perry_i18n_test/` with `perry.toml`:
+
+```toml
+[i18n]
+locales = ["en", "de"]
+default_locale = "en"
+```
+
+`locales/en.json`:
+```json
+{ "Hello": "Hello", "Hello, {name}!": "Hello, {name}!", "Click me": "Click me" }
+```
+
+`locales/de.json`:
+```json
+{ "Hello": "Hallo", "Click me": "" }   ← Hello,{name}! missing entirely; Click me empty
+```
+
+`app.ts`:
+```ts
+import { t } from 'perry/i18n';
+const name = "Alice";
+console.log(t("Hello"));
+console.log(t("Hello, {name}!", { name: name }));
+console.log(t("Click me"));
+```
+
+| `default_locale` | Output |
+|---|---|
+| `en` | `Hello` / `Hello, Alice!` / `Click me` |
+| `de` | `Hallo` / `Hello, Alice!` (missing → en source key fallback, with interpolation) / `Click me` (empty → fallback) |
+
+Mango compiles cleanly: 89 localizable strings across 13 locales (en, de, ja, zh-Hans, es-MX, fr, pt, ko, it, tr, th, id, vi), default `en`. The `Wrote executable: /tmp/Mango-i18n2` line lands without any `error compiling` or `module(s) failed` messages.
+
+### Followups (still out of scope)
+
+- **CLDR plural rules.** `plural_forms` and `plural_param` on the HIR variant are deliberately ignored. The lowering uses the canonical `string_idx` form, which is correct for non-plural strings and the "other" form for plural keys. Real fix needs a runtime helper that takes a count and a CLDR locale tag, returns the plural category (zero/one/two/few/many/other), and indexes into the form table.
+- **Runtime locale switching.** Currently the locale is baked in at compile time (whichever `default_locale` was active). For dynamic apps that let the user change language at runtime, the lowering would have to read a `g_active_locale_idx` global at every `Expr::I18nString` site instead of folding `default_locale_idx` at compile time. The `dynamic` flag in `I18nConfig` already exists but isn't consulted by the codegen — that's the trigger for switching to the runtime path.
+- **Stricter placeholder parser.** The current `{name}` parser is byte-level and only handles ASCII names. A real parser would handle nested braces, escape sequences other than `{{`/`}}`, and validate that placeholder names match the params at compile time (warning on mismatched ones rather than emitting a `{foo}` literal).
+- **Parameter type coercion.** `js_string_coerce` handles numbers, booleans, null/undefined, and objects (via `[object Object]`), but doesn't apply locale-aware number formatting (`1234.5` → `1,234.5` in en, `1.234,5` in de). Real i18n would route through `Intl.NumberFormat` or similar.
+
 ## v0.5.6 (llvm-backend) — perry-stdlib auto-optimize `hex` crate fix
 
 The fourth followup from the v0.5.1 mango compile sweep. Closes the last item in the v0.5.1 followup list: "auto-optimize perry-stdlib rebuild fails with `error[E0433]: failed to resolve: use of unresolved module or unlinked crate 'hex'`. Falls back to prebuilt — optimized rebuild path is broken."
