@@ -269,6 +269,18 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_box_set", VOID, &[I64, DOUBLE]);
     module.declare_function("js_object_get_class_id", I32, &[I64]);
     module.declare_function("js_object_alloc_with_parent", I64, &[I32, I32, I32]);
+    // Class instance allocator that pre-populates the keys_array with
+    // the class's field names. Required so the LLVM PropertyGet/Set
+    // fast path's slot indices match the runtime's by-name dispatch
+    // (which walks keys_array). Without this, classes that mix
+    // fast-path field access with runtime-helper field access (e.g.
+    // PropertySet via fast path + PropertyUpdate via runtime) end up
+    // reading/writing different slots for the same field name.
+    module.declare_function(
+        "js_object_alloc_class_with_keys",
+        I64,
+        &[I32, I32, I32, PTR, I32],
+    );
     module.declare_function("js_object_delete_field", I32, &[I64, I64]);
     // js_eq takes JSValue (#[repr(transparent)] u64) for both
     // params + return — i64 in the ABI, not double.

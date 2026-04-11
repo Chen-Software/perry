@@ -712,6 +712,77 @@ pub(crate) fn is_promise_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
     }
 }
 
+/// Look up a field's global index in the object's slot layout, walking
+/// the inheritance chain. Returns `Some(index)` only if the field is a
+/// plain instance field (no getter/setter shadowing) and the entire
+/// parent chain is resolvable from `ctx.classes`.
+///
+/// Layout convention: parent class fields come first (in declaration
+/// order), then the child's own fields. So `Child` with parent `Base`
+/// and `Base.fields = [a, b]`, `Child.fields = [c]` produces slot order
+/// `[a, b, c]` — `Base.b` is index 1, `Child.c` is index 2.
+///
+/// This mirrors how `js_object_alloc_with_parent` lays out the inline
+/// field array (parent first, then child) and how the constructor
+/// codegen at `lower_call.rs::compile_new` walks parent constructors
+/// before the child's own initializers.
+///
+/// Returns `None` when:
+/// - The class has a getter or setter for this property (the dispatch
+///   path needs to call the synthesized accessor instead).
+/// - The field name doesn't exist anywhere in the chain.
+/// - A parent class isn't in `ctx.classes` (imported class with no HIR).
+pub(crate) fn class_field_global_index(
+    ctx: &FnCtx<'_>,
+    class_name: &str,
+    property: &str,
+) -> Option<u32> {
+    // Walk parent chain to find the field. Parent fields come first in
+    // the slot layout, so we sum parent counts as we descend.
+    fn walk(
+        ctx: &FnCtx<'_>,
+        class_name: &str,
+        property: &str,
+        offset: u32,
+    ) -> Option<u32> {
+        let class = ctx.classes.get(class_name)?;
+        // Bail if a getter/setter shadows the field — those need real
+        // method dispatch, not a direct memory access.
+        if class.getters.iter().any(|(n, _)| n == property)
+            || class.setters.iter().any(|(n, _)| n == property)
+        {
+            return None;
+        }
+        // Compute the byte-offset contribution from this class's parent.
+        let parent_count = if let Some(parent_name) = class.extends_name.as_deref() {
+            let mut p_count = 0u32;
+            let mut p = Some(parent_name.to_string());
+            while let Some(name) = p {
+                if let Some(parent) = ctx.classes.get(&name) {
+                    p_count += parent.fields.len() as u32;
+                    p = parent.extends_name.clone();
+                } else {
+                    return None; // unresolvable parent — no inline path
+                }
+            }
+            p_count
+        } else {
+            0
+        };
+        // Look for the field on this class first (the most-derived
+        // declaration shadows parents in TypeScript).
+        if let Some(idx) = class.fields.iter().position(|f| f.name == property) {
+            return Some(offset + parent_count + idx as u32);
+        }
+        // Otherwise walk into the parent chain looking for the field.
+        if let Some(parent_name) = class.extends_name.as_deref() {
+            return walk(ctx, parent_name, property, offset);
+        }
+        None
+    }
+    walk(ctx, class_name, property, 0)
+}
+
 /// If the expression is a known instance of a Named class type, return
 /// the class name. Used by the class method dispatch in lower_call to
 /// pick the right `perry_method_<class>_<name>` function.

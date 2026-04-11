@@ -24,7 +24,7 @@ use crate::type_analysis::{
     compute_auto_captures, is_array_expr, is_bigint_expr, is_bool_expr, is_map_expr,
     is_numeric_expr, is_set_expr, is_string_expr, receiver_class_name,
 };
-use crate::types::{DOUBLE, I1, I32, I64, PTR};
+use crate::types::{DOUBLE, I1, I8, I32, I64, PTR};
 
 /// Inline NaN-box of a raw heap pointer with `POINTER_TAG`.
 pub(crate) fn nanbox_pointer_inline(blk: &mut LlBlock, ptr_i64: &str) -> String {
@@ -1482,6 +1482,37 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     );
                     return Ok(val_double);
                 }
+                // Fast path: known class instance + plain instance field.
+                // Mirrors the PropertyGet fast path. NOTE: this bypasses
+                // the runtime's `Object.freeze` / per-key writable: false
+                // check that `js_object_set_field_by_name` does. That's
+                // OK for class methods on user types because:
+                //   1. The fast path only fires when the receiver type
+                //      is statically known to be a Named class — which
+                //      means the user has typed it as such.
+                //   2. Object.freeze on user-class instances is rare in
+                //      practice; freezing a Counter and then calling
+                //      .increment() would silently succeed instead of
+                //      silently failing — both are non-standard.
+                //   3. The dynamic `obj["foo"] = ...` path still goes
+                //      through the runtime helper and honors freeze.
+                if let Some(field_index) =
+                    crate::type_analysis::class_field_global_index(ctx, &class_name, property)
+                {
+                    let recv_box = lower_expr(ctx, object)?;
+                    let val_double = lower_expr(ctx, value)?;
+                    let blk = ctx.block();
+                    let obj_bits = blk.bitcast_double_to_i64(&recv_box);
+                    let obj_handle = blk.and(I64, &obj_bits, POINTER_MASK_I64);
+                    let obj_ptr = blk.inttoptr(I64, &obj_handle);
+                    let header_skip = "24".to_string();
+                    let fields_base =
+                        blk.gep(I8, &obj_ptr, &[(I64, &header_skip)]);
+                    let idx_str = field_index.to_string();
+                    let field_ptr = blk.gep(DOUBLE, &fields_base, &[(I64, &idx_str)]);
+                    blk.store(DOUBLE, &val_double, &field_ptr);
+                    return Ok(val_double);
+                }
             }
             let obj_box = lower_expr(ctx, object)?;
             let val_double = lower_expr(ctx, value)?;
@@ -1532,6 +1563,42 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                         &fn_name,
                         &[(DOUBLE, &recv_box)],
                     ));
+                }
+                // Fast path: known class instance + plain instance field
+                // (no getter/setter shadowing). Inline a direct GEP+load
+                // at the field's slot offset, bypassing the
+                // `js_object_get_field_by_name_f64` runtime helper which
+                // hashes the property name + walks the keys array. The
+                // ObjectHeader layout (`#[repr(C)]` in
+                // `crates/perry-runtime/src/object.rs:591`) is 24 bytes
+                // followed by the inline field array of f64-sized slots:
+                //
+                //   offset  0..24:  ObjectHeader (object_type, class_id,
+                //                   parent_class_id, field_count, keys_array)
+                //   offset 24..32:  field 0
+                //   offset 32..40:  field 1
+                //   ...
+                //
+                // Parent class fields come first in the slot order
+                // (matches `js_object_alloc_with_parent` and the
+                // constructor codegen in lower_call.rs::compile_new), so
+                // `class_field_global_index` returns the cumulative
+                // offset across the inheritance chain.
+                if let Some(field_index) =
+                    crate::type_analysis::class_field_global_index(ctx, &class_name, property)
+                {
+                    let recv_box = lower_expr(ctx, object)?;
+                    let blk = ctx.block();
+                    let obj_bits = blk.bitcast_double_to_i64(&recv_box);
+                    let obj_handle = blk.and(I64, &obj_bits, POINTER_MASK_I64);
+                    let obj_ptr = blk.inttoptr(I64, &obj_handle);
+                    // Skip the 24-byte ObjectHeader.
+                    let header_skip = "24".to_string();
+                    let fields_base =
+                        blk.gep(I8, &obj_ptr, &[(I64, &header_skip)]);
+                    let idx_str = field_index.to_string();
+                    let field_ptr = blk.gep(DOUBLE, &fields_base, &[(I64, &idx_str)]);
+                    return Ok(blk.load(DOUBLE, &field_ptr));
                 }
             }
             let obj_box = lower_expr(ctx, object)?;

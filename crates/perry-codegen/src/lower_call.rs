@@ -1421,6 +1421,19 @@ pub(crate) fn lower_new(
     // Allocate the object with the per-class id and (if applicable)
     // parent class id, so the runtime registers the inheritance
     // chain for instanceof / virtual dispatch lookups.
+    //
+    // Use `js_object_alloc_class_with_keys`, which pre-populates the
+    // `keys_array` with the class's field names in declaration order
+    // (parent fields first, walking from the deepest ancestor down,
+    // then own fields). This is REQUIRED so the LLVM PropertyGet/Set
+    // fast path's slot indices match the runtime's by-name dispatch
+    // (which walks `keys_array`). Mixing the two access patterns on
+    // the same object — e.g. constructor writes via the fast path,
+    // PropertyUpdate reads via the runtime helper — only produces
+    // consistent results when both agree on the slot mapping.
+    //
+    // The packed-keys constant is interned via the StringPool. Two
+    // classes with the same field-name set + order share one constant.
     let cid = ctx.class_ids.get(class_name).copied().unwrap_or(0);
     let parent_cid = class
         .extends_name
@@ -1430,16 +1443,49 @@ pub(crate) fn lower_new(
     let cid_str = cid.to_string();
     let parent_cid_str = parent_cid.to_string();
     let n_str = field_count.to_string();
-    let obj_handle = if parent_cid != 0 {
-        ctx.block().call(
-            I64,
-            "js_object_alloc_with_parent",
-            &[(I32, &cid_str), (I32, &parent_cid_str), (I32, &n_str)],
-        )
-    } else {
-        ctx.block()
-            .call(I64, "js_object_alloc", &[(I32, &cid_str), (I32, &n_str)])
-    };
+
+    // Build the packed-keys string. Format: each field name followed
+    // by `\0`. Parent classes contribute their fields first (deepest
+    // ancestor → root → own), matching the slot order assumed by the
+    // PropertyGet/Set fast path in `class_field_global_index`.
+    let mut packed_keys = String::new();
+    let mut parent_chain: Vec<&perry_hir::Class> = Vec::new();
+    let mut p = class.extends_name.as_deref();
+    while let Some(parent_name) = p {
+        if let Some(pc) = ctx.classes.get(parent_name).copied() {
+            parent_chain.push(pc);
+            p = pc.extends_name.as_deref();
+        } else {
+            break;
+        }
+    }
+    // Walk from deepest ancestor to direct parent.
+    for pc in parent_chain.iter().rev() {
+        for f in &pc.fields {
+            packed_keys.push_str(&f.name);
+            packed_keys.push('\0');
+        }
+    }
+    for f in &class.fields {
+        packed_keys.push_str(&f.name);
+        packed_keys.push('\0');
+    }
+    let keys_idx = ctx.strings.intern(&packed_keys);
+    let keys_entry = ctx.strings.entry(keys_idx);
+    let keys_global = format!("@{}", keys_entry.bytes_global);
+    let keys_len_str = keys_entry.byte_len.to_string();
+
+    let obj_handle = ctx.block().call(
+        I64,
+        "js_object_alloc_class_with_keys",
+        &[
+            (I32, &cid_str),
+            (I32, &parent_cid_str),
+            (I32, &n_str),
+            (PTR, &keys_global),
+            (I32, &keys_len_str),
+        ],
+    );
     let obj_box = nanbox_pointer_inline(ctx.block(), &obj_handle);
 
     // Allocate a `this` slot and store the new object there.
