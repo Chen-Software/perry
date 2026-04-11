@@ -268,7 +268,12 @@ pub(crate) fn lower_array_method(
             let val_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
             let recv_handle = unbox_to_i64(blk, &recv_box);
-            let i32_v = blk.call(I32, "js_array_includes_f64", &[(I64, &recv_handle), (DOUBLE, &val_box)]);
+            // Use `js_array_includes_jsvalue` for deep equality so
+            // string values stored in arrays (from e.g. `Object.keys()`
+            // or `Object.getOwnPropertyNames()`) match by content, not
+            // pointer identity. The `*_f64` variant compares raw bits
+            // which fails for strings allocated at different sites.
+            let i32_v = blk.call(I32, "js_array_includes_jsvalue", &[(I64, &recv_handle), (DOUBLE, &val_box)]);
             // Convert i32 boolean to NaN-boxed true/false
             let bit = blk.icmp_ne(I32, &i32_v, "0");
             let tagged = blk.select(

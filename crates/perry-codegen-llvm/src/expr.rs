@@ -2781,9 +2781,13 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let v = lower_expr(ctx, value)?;
             let blk = ctx.block();
             let arr_handle = unbox_to_i64(blk, &arr_box);
+            // Use `js_array_includes_jsvalue` which does deep-value
+            // equality (string content, not pointer identity). The
+            // `*_f64` variant compares raw f64 bits which fails for
+            // strings created at different sites.
             let i32_v = blk.call(
                 I32,
-                "js_array_includes_f64",
+                "js_array_includes_jsvalue",
                 &[(I64, &arr_handle), (DOUBLE, &v)],
             );
             // Convert i32 boolean to NaN-tagged TAG_TRUE/FALSE so

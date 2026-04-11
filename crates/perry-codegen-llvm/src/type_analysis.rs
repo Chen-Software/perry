@@ -61,6 +61,8 @@ pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirT
         Expr::MapNewFromArray(_) | Expr::MapNew => Some(HirType::Named("Map".into())),
         // Object.keys() always returns string handles.
         Expr::ObjectKeys(_) => Some(HirType::Array(Box::new(HirType::String))),
+        Expr::ObjectGetOwnPropertyNames(_) => Some(HirType::Array(Box::new(HirType::String))),
+        Expr::ObjectGetOwnPropertySymbols(_) => Some(HirType::Array(Box::new(HirType::Any))),
         Expr::String(_)
         | Expr::ArrayJoin { .. }
         | Expr::StringCoerce(_)
