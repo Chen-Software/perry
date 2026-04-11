@@ -2952,6 +2952,21 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(ctx.block().call(DOUBLE, "js_object_from_entries", &[(DOUBLE, &v)]))
         }
 
+        // -------- Object.groupBy(items, keyFn) --------
+        // Routes through `js_object_group_by(items_value, callback_ptr)`.
+        // The callback is a closure pointer (i64).
+        Expr::ObjectGroupBy { items, key_fn } => {
+            let items_v = lower_expr(ctx, items)?;
+            let cb_v = lower_expr(ctx, key_fn)?;
+            let blk = ctx.block();
+            let cb_handle = unbox_to_i64(blk, &cb_v);
+            Ok(blk.call(
+                DOUBLE,
+                "js_object_group_by",
+                &[(DOUBLE, &items_v), (I64, &cb_handle)],
+            ))
+        }
+
         // -------- string.match(regex) --------
         Expr::StringMatch { string, regex } => {
             let s_box = lower_expr(ctx, string)?;

@@ -731,6 +731,26 @@ pub fn lower_module(ast_module: &ast::Module, name: &str, source_file_path: &str
     lower_module_with_class_id(ast_module, name, source_file_path, 1).map(|(module, _)| module)
 }
 
+/// Names of well-known `Object.<name>` static methods. Used by the typeof
+/// fast path so `typeof Object.groupBy === "function"` evaluates to true
+/// at compile time.
+pub(crate) fn is_known_object_static_method(name: &str) -> bool {
+    matches!(
+        name,
+        "keys" | "values" | "entries" | "fromEntries" | "assign" | "is"
+        | "hasOwn" | "freeze" | "seal" | "preventExtensions" | "create"
+        | "isFrozen" | "isSealed" | "isExtensible" | "getPrototypeOf"
+        | "setPrototypeOf" | "defineProperty" | "defineProperties"
+        | "getOwnPropertyDescriptor" | "getOwnPropertyDescriptors"
+        | "getOwnPropertyNames" | "getOwnPropertySymbols" | "groupBy"
+    )
+}
+
+/// Names of well-known `Array.<name>` static methods.
+pub(crate) fn is_known_array_static_method(name: &str) -> bool {
+    matches!(name, "isArray" | "from" | "of" | "fromAsync")
+}
+
 /// `let/const x = new FinalizationRegistry(...)` bindings into the lowering
 /// context. This is used by `obj.method()` lowering to recognise these instances
 /// without requiring type inference (Perry's existing var-decl type inference
@@ -4515,6 +4535,27 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
             }
         }
         ast::Expr::Unary(unary) => {
+            // AST-level typeof fold for `typeof Object.<known>` /
+            // `typeof Array.<known>`. Lowering the operand would yield a
+            // generic property-get on the global Object/Array (which
+            // currently returns 0/undefined and makes `=== "function"`
+            // checks fail). The static methods are real functions in
+            // Node, so fold to the literal "function" string here.
+            if matches!(unary.op, ast::UnaryOp::TypeOf) {
+                if let ast::Expr::Member(member) = unary.arg.as_ref() {
+                    if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
+                        if let ast::MemberProp::Ident(prop_ident) = &member.prop {
+                            let obj_name = obj_ident.sym.as_ref();
+                            let prop_name = prop_ident.sym.as_ref();
+                            if (obj_name == "Object" && is_known_object_static_method(prop_name))
+                                || (obj_name == "Array" && is_known_array_static_method(prop_name))
+                            {
+                                return Ok(Expr::String("function".to_string()));
+                            }
+                        }
+                    }
+                }
+            }
             let operand = Box::new(lower_expr(ctx, &unary.arg)?);
             match unary.op {
                 ast::UnaryOp::Minus => {
@@ -4885,6 +4926,19 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                         "fromEntries" => {
                                             let entries = args.into_iter().next().unwrap_or(Expr::Undefined);
                                             return Ok(Expr::ObjectFromEntries(Box::new(entries)));
+                                        }
+                                        "groupBy" => {
+                                            // Object.groupBy(items, keyFn) — Node 22+ static method
+                                            if args.len() >= 2 {
+                                                let mut iter = args.into_iter();
+                                                let items = iter.next().unwrap();
+                                                let key_fn = iter.next().unwrap();
+                                                let key_fn = ctx.maybe_wrap_builtin_callback(key_fn, &call.args[1]);
+                                                return Ok(Expr::ObjectGroupBy {
+                                                    items: Box::new(items),
+                                                    key_fn: Box::new(key_fn),
+                                                });
+                                            }
                                         }
                                         "is" => {
                                             let mut iter = args.into_iter();

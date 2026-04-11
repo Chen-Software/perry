@@ -306,6 +306,10 @@ fn collect_closures_in_expr(
             walk(b, seen, out);
         }
         Expr::ObjectValues(o) | Expr::ObjectEntries(o) => walk(o, seen, out),
+        Expr::ObjectGroupBy { items, key_fn } => {
+            walk(items, seen, out);
+            walk(key_fn, seen, out);
+        }
         Expr::RegExpTest { regex, string } | Expr::RegExpExec { regex, string } => {
             walk(regex, seen, out);
             walk(string, seen, out);
@@ -971,6 +975,10 @@ fn collect_ref_ids_in_expr(e: &perry_hir::Expr, out: &mut HashSet<u32>) {
         }
         Expr::TypedArrayNew { arg, .. } => {
             if let Some(a) = arg { walk(a, out); }
+        }
+        Expr::ObjectGroupBy { items, key_fn } => {
+            walk(items, out);
+            walk(key_fn, out);
         }
         Expr::ArrayFromMapped { iterable, map_fn } => {
             walk(iterable, out);

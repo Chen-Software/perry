@@ -1453,4 +1453,18 @@ pub fn declare_stdlib_ffi(module: &mut LlModule) {
     module.declare_function("js_register_class_has_instance", VOID, &[I32, I64]);
     module.declare_function("js_register_class_to_string_tag", VOID, &[I32, I64]);
     module.declare_function("js_object_to_string", DOUBLE, &[DOUBLE]);
+
+    // ---- Object.groupBy (Node 22+) ----
+    // Triggered by HIR variant `Expr::ObjectGroupBy { items, key_fn }`
+    // (perry-hir/src/lower.rs catches the AST `Object.groupBy(items, fn)`
+    // call site). The runtime implementation walks `items`, invokes
+    // `key_fn(item, index)` per element, and materializes a result
+    // object grouping items by their string key. See
+    // `crates/perry-runtime/src/object.rs::js_object_group_by`.
+    //
+    // NOTE: `Array.fromAsync` is partially started — `lower.rs::is_known
+    // _array_static_method` lists "fromAsync" so `typeof Array.fromAsync`
+    // folds to "function", but no HIR variant or runtime decl exists yet.
+    // It needs its own commit.
+    module.declare_function("js_object_group_by", DOUBLE, &[DOUBLE, I64]);
 }

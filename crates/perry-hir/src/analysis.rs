@@ -524,6 +524,10 @@ pub fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>, visited: &m
         Expr::ObjectKeys(obj) | Expr::ObjectValues(obj) | Expr::ObjectEntries(obj) => {
             collect_local_refs_expr(obj, refs, visited);
         }
+        Expr::ObjectGroupBy { items, key_fn } => {
+            collect_local_refs_expr(items, refs, visited);
+            collect_local_refs_expr(key_fn, refs, visited);
+        }
         Expr::ArrayIsArray(value) | Expr::ArrayFrom(value) => {
             collect_local_refs_expr(value, refs, visited);
         }
@@ -1374,6 +1378,10 @@ pub(crate) fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<Local
         Expr::RegExp { .. } => {}
         Expr::ObjectKeys(obj) | Expr::ObjectValues(obj) | Expr::ObjectEntries(obj) => {
             collect_assigned_locals_expr(obj, assigned);
+        }
+        Expr::ObjectGroupBy { items, key_fn } => {
+            collect_assigned_locals_expr(items, assigned);
+            collect_assigned_locals_expr(key_fn, assigned);
         }
         Expr::ArrayIsArray(value) | Expr::ArrayFrom(value) => {
             collect_assigned_locals_expr(value, assigned);

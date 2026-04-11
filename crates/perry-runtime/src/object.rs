@@ -2903,6 +2903,16 @@ pub unsafe fn dispatch_buffer_method(
         "indexOf" => i32_num(crate::buffer::js_buffer_index_of(buf_f64, arg_or_zero(0), arg_i32(1))),
         "lastIndexOf" => i32_num(crate::buffer::js_buffer_index_of(buf_f64, arg_or_zero(0), arg_i32(1))),
         "includes" => i32_bool(crate::buffer::js_buffer_includes(buf_f64, arg_or_zero(0), arg_i32(1))),
+        // `buf.at(i)` — supports negative indices like Array.prototype.at.
+        "at" => {
+            let len = (*buf_ptr).length as i32;
+            let mut idx = arg_i32(0);
+            if idx < 0 { idx += len; }
+            if idx < 0 || idx >= len {
+                return f64::from_bits(crate::value::TAG_UNDEFINED);
+            }
+            crate::buffer::js_buffer_get(buf_ptr, idx) as f64
+        }
         "swap16" => { crate::buffer::js_buffer_swap16(buf_f64); buf_f64 }
         "swap32" => { crate::buffer::js_buffer_swap32(buf_f64); buf_f64 }
         "swap64" => { crate::buffer::js_buffer_swap64(buf_f64); buf_f64 }
@@ -3559,6 +3569,97 @@ pub extern "C" fn js_object_from_entries(entries_value: f64) -> f64 {
         // Return as NaN-boxed pointer
         let bits = (obj as u64) | 0x7FFD_0000_0000_0000;
         f64::from_bits(bits)
+    }
+}
+
+/// `Object.groupBy(items, callback)` — Node 22+ static method.
+/// Walks `items` (an array), calls `callback(item, index)` to compute a
+/// string key per item, and returns a new object whose keys are the
+/// distinct callback results and whose values are arrays of the items
+/// that produced each key.
+///
+/// `items_value` is the NaN-boxed array pointer; `callback` is the
+/// closure to invoke per element. Returns the result object as a
+/// NaN-boxed POINTER_TAG f64 so codegen can pass it through the normal
+/// f64 plumbing.
+#[no_mangle]
+pub extern "C" fn js_object_group_by(
+    items_value: f64,
+    callback: *const crate::closure::ClosureHeader,
+) -> f64 {
+    // Strip NaN-box and validate the array pointer.
+    let bits = items_value.to_bits();
+    let raw = if (bits >> 48) == 0x7FFD {
+        (bits & 0x0000_FFFF_FFFF_FFFF) as *const ArrayHeader
+    } else if bits != 0 && bits <= 0x0000_FFFF_FFFF_FFFF {
+        bits as *const ArrayHeader
+    } else {
+        return f64::from_bits(crate::value::TAG_UNDEFINED);
+    };
+    if raw.is_null() {
+        return f64::from_bits(crate::value::TAG_UNDEFINED);
+    }
+
+    unsafe {
+        let length = (*raw).length as usize;
+        let elements = (raw as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
+
+        // Build a side table: key (UTF-8 String) -> Vec<f64> of group elements.
+        // We materialize the result object only at the end so we don't have to
+        // worry about per-push reallocation invalidating an array stored
+        // inside the object's field slot.
+        use std::collections::BTreeMap;
+        let mut groups: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        // Preserve insertion order for the keys array (Node iterates the
+        // result object in insertion order, not sorted order).
+        let mut order: Vec<String> = Vec::new();
+
+        for i in 0..length {
+            let item = *elements.add(i);
+            let key_val = crate::closure::js_closure_call2(callback, item, i as f64);
+            // Coerce the key to a UTF-8 String.
+            let key_ptr = crate::builtins::js_string_coerce(key_val);
+            let key_string = if key_ptr.is_null() {
+                "undefined".to_string()
+            } else {
+                let len = (*key_ptr).length as usize;
+                let data = (key_ptr as *const u8).add(std::mem::size_of::<crate::string::StringHeader>());
+                let bytes = std::slice::from_raw_parts(data, len);
+                std::str::from_utf8(bytes).unwrap_or("").to_string()
+            };
+
+            if !groups.contains_key(&key_string) {
+                order.push(key_string.clone());
+            }
+            groups.entry(key_string).or_insert_with(Vec::new).push(item);
+        }
+
+        // Materialize the result object. Allocate with the right field count
+        // up front so the keys_array is sized correctly.
+        let obj = js_object_alloc(0, order.len() as u32);
+        if obj.is_null() {
+            return f64::from_bits(crate::value::TAG_UNDEFINED);
+        }
+        for key in &order {
+            // Build the JS string for the key.
+            let key_str_ptr = crate::string::js_string_from_bytes(
+                key.as_ptr(),
+                key.len() as u32,
+            );
+            // Build the per-group Array<f64> from the materialized Vec.
+            let items_for_key = groups.get(key).unwrap();
+            let arr = crate::array::js_array_alloc(items_for_key.len() as u32);
+            (*arr).length = items_for_key.len() as u32;
+            let arr_data = (arr as *mut u8).add(std::mem::size_of::<ArrayHeader>()) as *mut f64;
+            for (i, v) in items_for_key.iter().enumerate() {
+                std::ptr::write(arr_data.add(i), *v);
+            }
+            // NaN-box the array pointer with POINTER_TAG before storing.
+            let arr_boxed = f64::from_bits((arr as u64) | 0x7FFD_0000_0000_0000);
+            js_object_set_field_by_name(obj, key_str_ptr, arr_boxed);
+        }
+        // Return the result object NaN-boxed.
+        f64::from_bits((obj as u64) | 0x7FFD_0000_0000_0000)
     }
 }
 

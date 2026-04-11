@@ -1602,6 +1602,10 @@ pub enum Expr {
     /// Object.entries(obj) -> [string, any][]
     /// Returns an array of the object's own enumerable [key, value] pairs
     ObjectEntries(Box<Expr>),
+    /// Object.groupBy(items, keyFn) -> { [key]: items[] }
+    /// Walks `items` and groups each element by the string key returned
+    /// from `keyFn(item, index)`. Lowered through `js_object_group_by`.
+    ObjectGroupBy { items: Box<Expr>, key_fn: Box<Expr> },
     /// Object rest destructuring: copies all properties except the excluded keys
     /// Used for `const { a, b, ...rest } = obj` → rest = ObjectRest(obj, ["a", "b"])
     ObjectRest { object: Box<Expr>, exclude_keys: Vec<String> },
