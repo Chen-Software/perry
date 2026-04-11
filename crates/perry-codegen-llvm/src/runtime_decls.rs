@@ -445,6 +445,23 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_text_decoder_decode_llvm", I64, &[DOUBLE]);
     // Microtask queue (queueMicrotask / process.nextTick).
     module.declare_function("js_queue_microtask", VOID, &[I64]);
+    // Uint8Array constructor wrapper that flags the resulting buffer so the
+    // formatter prints `Uint8Array(N) [ ... ]` instead of `<Buffer ...>`.
+    module.declare_function("js_uint8array_from_array", I64, &[I64]);
+    // Generic typed array runtime (Int8/16/32, Uint16/32, Float32/64).
+    // Uint8Array piggybacks on the BufferHeader path.
+    module.declare_function("js_typed_array_new_empty", I64, &[I32, I32]);
+    module.declare_function("js_typed_array_new_from_array", I64, &[I32, I64]);
+    module.declare_function("js_typed_array_length", I32, &[I64]);
+    module.declare_function("js_typed_array_get", DOUBLE, &[I64, I32]);
+    module.declare_function("js_typed_array_at", DOUBLE, &[I64, DOUBLE]);
+    module.declare_function("js_typed_array_set", VOID, &[I64, I32, DOUBLE]);
+    module.declare_function("js_typed_array_to_reversed", I64, &[I64]);
+    module.declare_function("js_typed_array_to_sorted_default", I64, &[I64]);
+    module.declare_function("js_typed_array_to_sorted_with_comparator", I64, &[I64, I64]);
+    module.declare_function("js_typed_array_with", I64, &[I64, DOUBLE, DOUBLE]);
+    module.declare_function("js_typed_array_find_last", DOUBLE, &[I64, I64]);
+    module.declare_function("js_typed_array_find_last_index", DOUBLE, &[I64, I64]);
     // Object introspection / mutation (Agent A's accessor-descriptor work).
     module.declare_function("js_object_has_own", DOUBLE, &[DOUBLE, DOUBLE]);
     module.declare_function("js_object_define_property", DOUBLE, &[DOUBLE, DOUBLE, DOUBLE]);
@@ -767,4 +784,642 @@ pub fn declare_phase_b_objects(module: &mut LlModule) {
     module.declare_function("js_reflect_own_keys", DOUBLE, &[DOUBLE]);
     module.declare_function("js_reflect_apply", DOUBLE, &[DOUBLE, DOUBLE, DOUBLE]);
     module.declare_function("js_reflect_define_property", DOUBLE, &[DOUBLE, DOUBLE, DOUBLE]);
+
+    declare_stdlib_ffi(module);
+}
+
+/// Stdlib / FFI runtime functions — ported from the Cranelift backend's
+/// `crates/perry-codegen/src/runtime_decls.rs`. Without these declarations,
+/// user code that touches any of the third-party stdlib modules (http, mysql2,
+/// pg, redis, mongodb, bcrypt, jsonwebtoken, axios, sharp, cron, WebSocket,
+/// zlib, etc.) emits `use of undefined value '@js_*'` at clang -c time
+/// because the IR references the name without a preceding `declare`.
+///
+/// Signatures cross-checked against `crates/perry-runtime/src/` and
+/// `crates/perry-stdlib/src/`. A handful of Cranelift-only stubs
+/// (`js_json_parse_reviver`, `js_json_stringify_pretty`) were skipped because
+/// no Rust definition exists.
+pub fn declare_stdlib_ffi(module: &mut LlModule) {
+    // ========== HTTP server ==========
+    module.declare_function("js_http_client_request_end", I64, &[I64, DOUBLE]);
+    module.declare_function("js_http_client_request_write", I64, &[I64, DOUBLE]);
+    module.declare_function("js_http_get", I64, &[DOUBLE, I64]);
+    module.declare_function("js_http_on", I64, &[I64, I64, I64]);
+    module.declare_function("js_http_request", I64, &[DOUBLE, I64]);
+    module.declare_function("js_http_request_body", I64, &[I64]);
+    module.declare_function("js_http_request_body_length", DOUBLE, &[I64]);
+    module.declare_function("js_http_request_content_type", I64, &[I64]);
+    module.declare_function("js_http_request_has_header", DOUBLE, &[I64, I64]);
+    module.declare_function("js_http_request_header", I64, &[I64, I64]);
+    module.declare_function("js_http_request_headers_all", I64, &[I64]);
+    module.declare_function("js_http_request_id", DOUBLE, &[I64]);
+    module.declare_function("js_http_request_is_method", DOUBLE, &[I64, I64]);
+    module.declare_function("js_http_request_method", I64, &[I64]);
+    module.declare_function("js_http_request_path", I64, &[I64]);
+    module.declare_function("js_http_request_query", I64, &[I64]);
+    module.declare_function("js_http_request_query_all", I64, &[I64]);
+    module.declare_function("js_http_request_query_param", I64, &[I64, I64]);
+    module.declare_function("js_http_respond_error", DOUBLE, &[I64, DOUBLE, I64]);
+    module.declare_function("js_http_respond_html", DOUBLE, &[I64, DOUBLE, I64]);
+    module.declare_function("js_http_respond_json", DOUBLE, &[I64, DOUBLE, I64]);
+    module.declare_function("js_http_respond_not_found", DOUBLE, &[I64]);
+    module.declare_function("js_http_respond_redirect", DOUBLE, &[I64, I64, DOUBLE]);
+    module.declare_function("js_http_respond_status_text", I64, &[DOUBLE]);
+    module.declare_function("js_http_respond_text", DOUBLE, &[I64, DOUBLE, I64]);
+    module.declare_function("js_http_respond_with_headers", DOUBLE, &[I64, DOUBLE, I64, I64]);
+    module.declare_function("js_http_response_headers", DOUBLE, &[I64]);
+    module.declare_function("js_http_server_accept_v2", I64, &[I64]);
+    module.declare_function("js_http_server_close", DOUBLE, &[I64]);
+    module.declare_function("js_http_server_create", I64, &[DOUBLE]);
+    module.declare_function("js_http_set_header", I64, &[I64, I64, I64]);
+    module.declare_function("js_http_set_timeout", I64, &[I64, DOUBLE]);
+    module.declare_function("js_http_status_code", DOUBLE, &[I64]);
+    module.declare_function("js_http_status_message", I64, &[I64]);
+
+    // ========== HTTPS ==========
+    module.declare_function("js_https_get", I64, &[DOUBLE, I64]);
+    module.declare_function("js_https_request", I64, &[DOUBLE, I64]);
+
+    // ========== PostgreSQL (pg) ==========
+    module.declare_function("js_pg_client_end", I64, &[I64]);
+    module.declare_function("js_pg_client_query", I64, &[I64, I64]);
+    module.declare_function("js_pg_client_query_params", I64, &[I64, I64, I64]);
+    module.declare_function("js_pg_connect", I64, &[I64]);
+    module.declare_function("js_pg_create_pool", I64, &[I64]);
+    module.declare_function("js_pg_pool_end", I64, &[I64]);
+    module.declare_function("js_pg_pool_query", I64, &[I64, I64]);
+
+    // ========== Redis / ioredis ==========
+    module.declare_function("js_ioredis_connect", I64, &[I64]);
+    module.declare_function("js_ioredis_decr", I64, &[I64, I64]);
+    module.declare_function("js_ioredis_del", I64, &[I64, I64]);
+    module.declare_function("js_ioredis_disconnect", VOID, &[I64]);
+    module.declare_function("js_ioredis_exists", I64, &[I64, I64]);
+    module.declare_function("js_ioredis_expire", I64, &[I64, I64, DOUBLE]);
+    module.declare_function("js_ioredis_get", I64, &[I64, I64]);
+    module.declare_function("js_ioredis_hdel", I64, &[I64, I64, I64]);
+    module.declare_function("js_ioredis_hget", I64, &[I64, I64, I64]);
+    module.declare_function("js_ioredis_hgetall", I64, &[I64, I64]);
+    module.declare_function("js_ioredis_hlen", I64, &[I64, I64]);
+    module.declare_function("js_ioredis_hset", I64, &[I64, I64, I64, I64]);
+    module.declare_function("js_ioredis_incr", I64, &[I64, I64]);
+    module.declare_function("js_ioredis_new", I64, &[I64]);
+    module.declare_function("js_ioredis_ping", I64, &[I64]);
+    module.declare_function("js_ioredis_quit", I64, &[I64]);
+    module.declare_function("js_ioredis_set", I64, &[I64, I64, I64]);
+    module.declare_function("js_ioredis_setex", I64, &[I64, I64, DOUBLE, I64]);
+
+    // ========== MongoDB ==========
+    module.declare_function("js_mongodb_client_close", I64, &[I64]);
+    module.declare_function("js_mongodb_client_db", I64, &[I64, I64]);
+    module.declare_function("js_mongodb_client_list_databases", I64, &[I64]);
+    module.declare_function("js_mongodb_collection_count", I64, &[I64, I64]);
+    module.declare_function("js_mongodb_collection_delete_many", I64, &[I64, I64]);
+    module.declare_function("js_mongodb_collection_delete_one", I64, &[I64, I64]);
+    module.declare_function("js_mongodb_collection_find", I64, &[I64, I64]);
+    module.declare_function("js_mongodb_collection_find_one", I64, &[I64, I64]);
+    module.declare_function("js_mongodb_collection_insert_many", I64, &[I64, I64]);
+    module.declare_function("js_mongodb_collection_insert_one", I64, &[I64, I64]);
+    module.declare_function("js_mongodb_collection_update_many", I64, &[I64, I64, I64]);
+    module.declare_function("js_mongodb_collection_update_one", I64, &[I64, I64, I64]);
+    module.declare_function("js_mongodb_connect", I64, &[I64]);
+    module.declare_function("js_mongodb_db_collection", I64, &[I64, I64]);
+    module.declare_function("js_mongodb_db_list_collections", I64, &[I64]);
+
+    // ========== bcrypt / argon2 ==========
+    module.declare_function("js_argon2_hash", I64, &[I64]);
+    module.declare_function("js_argon2_hash_options", I64, &[I64, I64]);
+    module.declare_function("js_argon2_verify", I64, &[I64, I64]);
+    module.declare_function("js_bcrypt_compare", I64, &[I64, I64]);
+    module.declare_function("js_bcrypt_compare_sync", DOUBLE, &[I64, I64]);
+    module.declare_function("js_bcrypt_gen_salt", I64, &[DOUBLE]);
+    module.declare_function("js_bcrypt_hash", I64, &[I64, DOUBLE]);
+    module.declare_function("js_bcrypt_hash_sync", I64, &[I64, DOUBLE]);
+
+    // ========== jsonwebtoken / JWT ==========
+    module.declare_function("js_jwt_decode", I64, &[I64]);
+    module.declare_function("js_jwt_sign", I64, &[I64, I64, DOUBLE, I64]);
+    module.declare_function("js_jwt_sign_es256", I64, &[I64, I64, DOUBLE, I64]);
+    module.declare_function("js_jwt_sign_rs256", I64, &[I64, I64, DOUBLE, I64]);
+    module.declare_function("js_jwt_verify", I64, &[I64, I64]);
+
+    // ========== axios / node-fetch ==========
+    module.declare_function("js_axios_create", DOUBLE, &[I64]);
+    module.declare_function("js_axios_delete", I64, &[I64]);
+    module.declare_function("js_axios_get", I64, &[I64]);
+    module.declare_function("js_axios_post", I64, &[I64, I64]);
+    module.declare_function("js_axios_put", I64, &[I64, I64]);
+    module.declare_function("js_axios_request", I64, &[I64]);
+
+    // ========== sharp / image ==========
+    module.declare_function("js_sharp_blur", I64, &[I64, DOUBLE]);
+    module.declare_function("js_sharp_flip", I64, &[I64]);
+    module.declare_function("js_sharp_flop", I64, &[I64]);
+    module.declare_function("js_sharp_from_buffer", I64, &[I64, DOUBLE]);
+    module.declare_function("js_sharp_from_file", I64, &[I64]);
+    module.declare_function("js_sharp_grayscale", I64, &[I64]);
+    module.declare_function("js_sharp_metadata", I64, &[I64]);
+    module.declare_function("js_sharp_negate", I64, &[I64]);
+    module.declare_function("js_sharp_quality", I64, &[I64, DOUBLE]);
+    module.declare_function("js_sharp_resize", I64, &[I64, DOUBLE, DOUBLE]);
+    module.declare_function("js_sharp_rotate", I64, &[I64, DOUBLE]);
+    module.declare_function("js_sharp_to_buffer", I64, &[I64]);
+    module.declare_function("js_sharp_to_file", I64, &[I64, I64]);
+    module.declare_function("js_sharp_to_format", I64, &[I64, I64]);
+
+    // ========== cron / scheduler ==========
+    module.declare_function("js_cron_clear_interval", VOID, &[I64]);
+    module.declare_function("js_cron_clear_timeout", VOID, &[I64]);
+    module.declare_function("js_cron_describe", I64, &[I64]);
+    module.declare_function("js_cron_job_is_running", DOUBLE, &[I64]);
+    module.declare_function("js_cron_job_start", VOID, &[I64]);
+    module.declare_function("js_cron_job_stop", VOID, &[I64]);
+    module.declare_function("js_cron_next_date", I64, &[I64]);
+    module.declare_function("js_cron_next_dates", I64, &[I64, DOUBLE]);
+    module.declare_function("js_cron_schedule", I64, &[I64, I64]);
+    module.declare_function("js_cron_set_interval", I64, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_cron_set_timeout", I64, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_cron_timer_has_pending", I32, &[]);
+    module.declare_function("js_cron_timer_tick", I32, &[]);
+    module.declare_function("js_cron_validate", DOUBLE, &[I64]);
+
+    // ========== async_hooks / AsyncLocalStorage ==========
+    module.declare_function("js_async_local_storage_disable", VOID, &[I64]);
+    module.declare_function("js_async_local_storage_enter_with", VOID, &[I64, DOUBLE]);
+    module.declare_function("js_async_local_storage_exit", DOUBLE, &[I64, I64]);
+    module.declare_function("js_async_local_storage_get_store", DOUBLE, &[I64]);
+    module.declare_function("js_async_local_storage_new", I64, &[]);
+    module.declare_function("js_async_local_storage_run", DOUBLE, &[I64, DOUBLE, I64]);
+
+    // ========== zlib ==========
+    module.declare_function("js_zlib_deflate_sync", I64, &[I64]);
+    module.declare_function("js_zlib_gunzip", I64, &[I64]);
+    module.declare_function("js_zlib_gunzip_sync", I64, &[I64]);
+    module.declare_function("js_zlib_gzip", I64, &[I64]);
+    module.declare_function("js_zlib_gzip_sync", I64, &[I64]);
+    module.declare_function("js_zlib_inflate_sync", I64, &[I64]);
+
+    // ========== Buffer ==========
+    module.declare_function("js_buffer_alloc_unsafe", I64, &[I32]);
+    module.declare_function("js_buffer_byte_length", I32, &[I64]);
+    module.declare_function("js_buffer_concat", I64, &[I64]);
+    module.declare_function("js_buffer_copy", I32, &[I64, I64, I32, I32, I32]);
+    module.declare_function("js_buffer_equals", I32, &[I64, I64]);
+    module.declare_function("js_buffer_fill", I64, &[I64, I32]);
+    module.declare_function("js_buffer_from_value", I64, &[I64, I32]);
+    module.declare_function("js_buffer_is_buffer", I32, &[I64]);
+    module.declare_function("js_buffer_print", VOID, &[I64]);
+    module.declare_function("js_buffer_set", VOID, &[I64, I32, I32]);
+    module.declare_function("js_buffer_set_from", VOID, &[I64, I64, I32]);
+    module.declare_function("js_buffer_slice", I64, &[I64, I32, I32]);
+    module.declare_function("js_buffer_to_string", I64, &[I64, I32]);
+    module.declare_function("js_buffer_write", I32, &[I64, I64, I32, I32]);
+
+    // ========== child_process ==========
+    module.declare_function("js_child_process_exec_sync", I64, &[I64, I64]);
+    module.declare_function("js_child_process_get_process_status", I64, &[DOUBLE]);
+    module.declare_function("js_child_process_kill_process", I32, &[DOUBLE]);
+    module.declare_function("js_child_process_spawn_background", I64, &[DOUBLE, I64, DOUBLE, DOUBLE]);
+    module.declare_function("js_child_process_spawn_sync", I64, &[I64, I64, I64]);
+
+    // ========== cheerio ==========
+    module.declare_function("js_cheerio_load", I64, &[I64]);
+    module.declare_function("js_cheerio_load_fragment", I64, &[I64]);
+    module.declare_function("js_cheerio_select", I64, &[I64, I64]);
+    module.declare_function("js_cheerio_selection_attr", I64, &[I64, I64]);
+    module.declare_function("js_cheerio_selection_attrs", I64, &[I64, I64]);
+    module.declare_function("js_cheerio_selection_children", I64, &[I64, I64]);
+    module.declare_function("js_cheerio_selection_eq", I64, &[I64, DOUBLE]);
+    module.declare_function("js_cheerio_selection_find", I64, &[I64, I64]);
+    module.declare_function("js_cheerio_selection_first", I64, &[I64]);
+    module.declare_function("js_cheerio_selection_has_class", DOUBLE, &[I64, I64]);
+    module.declare_function("js_cheerio_selection_html", I64, &[I64]);
+    module.declare_function("js_cheerio_selection_is", DOUBLE, &[I64, I64]);
+    module.declare_function("js_cheerio_selection_last", I64, &[I64]);
+    module.declare_function("js_cheerio_selection_length", DOUBLE, &[I64]);
+    module.declare_function("js_cheerio_selection_parent", I64, &[I64]);
+    module.declare_function("js_cheerio_selection_text", I64, &[I64]);
+    module.declare_function("js_cheerio_selection_texts", I64, &[I64]);
+    module.declare_function("js_cheerio_selection_to_array", I64, &[I64]);
+
+    // ========== URL / URLSearchParams ==========
+    module.declare_function("js_url_file_url_to_path", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_url_get_hash", I64, &[I64]);
+    module.declare_function("js_url_get_host", I64, &[I64]);
+    module.declare_function("js_url_get_hostname", I64, &[I64]);
+    module.declare_function("js_url_get_href", I64, &[I64]);
+    module.declare_function("js_url_get_origin", I64, &[I64]);
+    module.declare_function("js_url_get_pathname", I64, &[I64]);
+    module.declare_function("js_url_get_port", I64, &[I64]);
+    module.declare_function("js_url_get_protocol", I64, &[I64]);
+    module.declare_function("js_url_get_search", I64, &[I64]);
+    module.declare_function("js_url_get_search_params", I64, &[I64]);
+    module.declare_function("js_url_new", I64, &[I64]);
+    module.declare_function("js_url_new_with_base", I64, &[I64, I64]);
+    module.declare_function("js_url_search_params_append", VOID, &[I64, I64, I64]);
+    module.declare_function("js_url_search_params_delete", VOID, &[I64, I64]);
+    module.declare_function("js_url_search_params_get", I64, &[I64, I64]);
+    module.declare_function("js_url_search_params_get_all", DOUBLE, &[I64, I64]);
+    module.declare_function("js_url_search_params_has", DOUBLE, &[I64, I64]);
+    module.declare_function("js_url_search_params_new", I64, &[I64]);
+    module.declare_function("js_url_search_params_new_empty", I64, &[]);
+    module.declare_function("js_url_search_params_set", VOID, &[I64, I64, I64]);
+    module.declare_function("js_url_search_params_to_string", I64, &[I64]);
+
+    // ========== WebSocket ==========
+    module.declare_function("js_ws_close", VOID, &[I64]);
+    module.declare_function("js_ws_connect", I64, &[I64]);
+    module.declare_function("js_ws_connect_start", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_ws_handle_to_i64", I64, &[DOUBLE]);
+    module.declare_function("js_ws_is_open", DOUBLE, &[I64]);
+    module.declare_function("js_ws_message_count", DOUBLE, &[I64]);
+    module.declare_function("js_ws_on", I64, &[I64, I64, I64]);
+    module.declare_function("js_ws_receive", I64, &[I64]);
+    module.declare_function("js_ws_send", VOID, &[I64, I64]);
+    module.declare_function("js_ws_server_close", VOID, &[I64]);
+    module.declare_function("js_ws_server_new", I64, &[DOUBLE]);
+    module.declare_function("js_ws_wait_for_message", I64, &[I64, DOUBLE]);
+
+    // ========== SQLite ==========
+    module.declare_function("js_sqlite_close", VOID, &[I64]);
+    module.declare_function("js_sqlite_exec", VOID, &[I64, I64]);
+    module.declare_function("js_sqlite_open", I64, &[I64]);
+    module.declare_function("js_sqlite_pragma", I64, &[I64, I64, I64]);
+    module.declare_function("js_sqlite_prepare", I64, &[I64, I64]);
+    module.declare_function("js_sqlite_stmt_all", I64, &[I64, I64]);
+    module.declare_function("js_sqlite_stmt_get", I64, &[I64, I64]);
+    module.declare_function("js_sqlite_stmt_run", I64, &[I64, I64]);
+    module.declare_function("js_sqlite_transaction", I64, &[I64, I64]);
+    module.declare_function("js_sqlite_transaction_commit", VOID, &[I64]);
+    module.declare_function("js_sqlite_transaction_rollback", VOID, &[I64]);
+
+    // ========== OS ==========
+    module.declare_function("js_os_cpus", I64, &[]);
+    module.declare_function("js_os_freemem", DOUBLE, &[]);
+    module.declare_function("js_os_homedir", I64, &[]);
+    module.declare_function("js_os_network_interfaces", I64, &[]);
+    module.declare_function("js_os_tmpdir", I64, &[]);
+    module.declare_function("js_os_totalmem", DOUBLE, &[]);
+    module.declare_function("js_os_uptime", DOUBLE, &[]);
+    module.declare_function("js_os_user_info", I64, &[]);
+
+    // ========== Crypto ==========
+    module.declare_function("js_crypto_aes256_decrypt", I64, &[I64, I64, I64]);
+    module.declare_function("js_crypto_aes256_encrypt", I64, &[I64, I64, I64]);
+    module.declare_function("js_crypto_aes256_gcm_decrypt", I64, &[I64, I64, I64]);
+    module.declare_function("js_crypto_aes256_gcm_encrypt", I64, &[I64, I64, I64]);
+    module.declare_function("js_crypto_hkdf_sha256", I64, &[I64, I64, I64, DOUBLE]);
+    module.declare_function("js_crypto_pbkdf2", I64, &[I64, I64, DOUBLE, DOUBLE]);
+    module.declare_function("js_crypto_random_bytes_hex", I64, &[DOUBLE]);
+    module.declare_function("js_crypto_random_nonce", I64, &[]);
+    module.declare_function("js_crypto_scrypt", I64, &[I64, I64, DOUBLE]);
+    module.declare_function("js_crypto_scrypt_custom", I64, &[I64, I64, DOUBLE, DOUBLE, DOUBLE, DOUBLE]);
+    module.declare_function("js_crypto_x25519_keypair", I64, &[]);
+    module.declare_function("js_crypto_x25519_shared_secret", I64, &[I64, I64]);
+    module.declare_function("js_keccak256_native", I64, &[I64]);
+    module.declare_function("js_keccak256_native_bytes", I64, &[I64]);
+
+    // ========== Nanoid ==========
+    module.declare_function("js_nanoid", I64, &[DOUBLE]);
+    module.declare_function("js_nanoid_custom", I64, &[I64, DOUBLE]);
+
+    // ========== Commander CLI ==========
+    module.declare_function("js_commander_action", I64, &[I64, I64]);
+    module.declare_function("js_commander_command", I64, &[I64, I64]);
+    module.declare_function("js_commander_description", I64, &[I64, I64]);
+    module.declare_function("js_commander_get_option", I64, &[I64, I64]);
+    module.declare_function("js_commander_get_option_bool", DOUBLE, &[I64, I64]);
+    module.declare_function("js_commander_get_option_number", DOUBLE, &[I64, I64]);
+    module.declare_function("js_commander_name", I64, &[I64, I64]);
+    module.declare_function("js_commander_new", I64, &[]);
+    module.declare_function("js_commander_option", I64, &[I64, I64, I64, I64]);
+    module.declare_function("js_commander_opts", I64, &[I64]);
+    module.declare_function("js_commander_parse", I64, &[I64]);
+    module.declare_function("js_commander_required_option", I64, &[I64, I64, I64, I64]);
+    module.declare_function("js_commander_version", I64, &[I64, I64]);
+
+    // ========== Dotenv ==========
+    module.declare_function("js_dotenv_config", DOUBLE, &[]);
+    module.declare_function("js_dotenv_config_path", DOUBLE, &[I64]);
+    module.declare_function("js_dotenv_parse", I64, &[I64]);
+
+    // ========== Date libs (dayjs/datefns/moment) ==========
+    module.declare_function("js_datefns_add_days", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_datefns_add_months", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_datefns_add_years", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_datefns_difference_in_days", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_datefns_difference_in_hours", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_datefns_difference_in_minutes", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_datefns_end_of_day", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_datefns_format", I64, &[DOUBLE, I64]);
+    module.declare_function("js_datefns_is_after", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_datefns_is_before", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_datefns_parse_iso", DOUBLE, &[I64]);
+    module.declare_function("js_datefns_start_of_day", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_dayjs_add", DOUBLE, &[I64, DOUBLE, I64]);
+    module.declare_function("js_dayjs_date", DOUBLE, &[I64]);
+    module.declare_function("js_dayjs_day", DOUBLE, &[I64]);
+    module.declare_function("js_dayjs_diff", DOUBLE, &[I64, I64, I64]);
+    module.declare_function("js_dayjs_end_of", DOUBLE, &[I64, I64]);
+    module.declare_function("js_dayjs_format", I64, &[I64, I64]);
+    module.declare_function("js_dayjs_from_timestamp", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_dayjs_hour", DOUBLE, &[I64]);
+    module.declare_function("js_dayjs_is_after", DOUBLE, &[I64, I64]);
+    module.declare_function("js_dayjs_is_before", DOUBLE, &[I64, I64]);
+    module.declare_function("js_dayjs_is_same", DOUBLE, &[I64, I64]);
+    module.declare_function("js_dayjs_is_valid", DOUBLE, &[I64]);
+    module.declare_function("js_dayjs_millisecond", DOUBLE, &[I64]);
+    module.declare_function("js_dayjs_minute", DOUBLE, &[I64]);
+    module.declare_function("js_dayjs_month", DOUBLE, &[I64]);
+    module.declare_function("js_dayjs_now", DOUBLE, &[]);
+    module.declare_function("js_dayjs_parse", DOUBLE, &[I64]);
+    module.declare_function("js_dayjs_second", DOUBLE, &[I64]);
+    module.declare_function("js_dayjs_start_of", DOUBLE, &[I64, I64]);
+    module.declare_function("js_dayjs_subtract", DOUBLE, &[I64, DOUBLE, I64]);
+    module.declare_function("js_dayjs_to_iso_string", I64, &[I64]);
+    module.declare_function("js_dayjs_unix", DOUBLE, &[I64]);
+    module.declare_function("js_dayjs_value_of", DOUBLE, &[I64]);
+    module.declare_function("js_dayjs_year", DOUBLE, &[I64]);
+    module.declare_function("js_moment_add", I64, &[I64, DOUBLE, I64]);
+    module.declare_function("js_moment_date", DOUBLE, &[I64]);
+    module.declare_function("js_moment_day", DOUBLE, &[I64]);
+    module.declare_function("js_moment_diff", DOUBLE, &[I64, I64, I64]);
+    module.declare_function("js_moment_end_of", I64, &[I64, I64]);
+    module.declare_function("js_moment_format", I64, &[I64, I64]);
+    module.declare_function("js_moment_from_timestamp", I64, &[DOUBLE]);
+    module.declare_function("js_moment_hour", DOUBLE, &[I64]);
+    module.declare_function("js_moment_is_valid", DOUBLE, &[I64]);
+    module.declare_function("js_moment_millisecond", DOUBLE, &[I64]);
+    module.declare_function("js_moment_minute", DOUBLE, &[I64]);
+    module.declare_function("js_moment_month", DOUBLE, &[I64]);
+    module.declare_function("js_moment_now", I64, &[]);
+    module.declare_function("js_moment_parse", I64, &[I64]);
+    module.declare_function("js_moment_second", DOUBLE, &[I64]);
+    module.declare_function("js_moment_start_of", I64, &[I64, I64]);
+    module.declare_function("js_moment_subtract", I64, &[I64, DOUBLE, I64]);
+    module.declare_function("js_moment_unix", DOUBLE, &[I64]);
+    module.declare_function("js_moment_value_of", DOUBLE, &[I64]);
+    module.declare_function("js_moment_year", DOUBLE, &[I64]);
+
+    // ========== Decimal.js ==========
+    module.declare_function("js_decimal_abs", I64, &[I64]);
+    module.declare_function("js_decimal_div", I64, &[I64, I64]);
+    module.declare_function("js_decimal_eq", DOUBLE, &[I64, I64]);
+    module.declare_function("js_decimal_from_number", I64, &[DOUBLE]);
+    module.declare_function("js_decimal_from_string", I64, &[I64]);
+    module.declare_function("js_decimal_gt", DOUBLE, &[I64, I64]);
+    module.declare_function("js_decimal_lt", DOUBLE, &[I64, I64]);
+    module.declare_function("js_decimal_minus", I64, &[I64, I64]);
+    module.declare_function("js_decimal_plus", I64, &[I64, I64]);
+    module.declare_function("js_decimal_plus_number", I64, &[I64, DOUBLE]);
+    module.declare_function("js_decimal_sqrt", I64, &[I64]);
+    module.declare_function("js_decimal_times", I64, &[I64, I64]);
+    module.declare_function("js_decimal_to_fixed", I64, &[I64, DOUBLE]);
+    module.declare_function("js_decimal_to_number", DOUBLE, &[I64]);
+    module.declare_function("js_decimal_to_string", I64, &[I64]);
+
+    // ========== Ethers / blockchain ==========
+    module.declare_function("js_ethers_format_ether", I64, &[I64]);
+    module.declare_function("js_ethers_format_units", I64, &[I64, DOUBLE]);
+    module.declare_function("js_ethers_get_address", I64, &[I64]);
+    module.declare_function("js_ethers_parse_ether", I64, &[I64]);
+    module.declare_function("js_ethers_parse_units", I64, &[I64, DOUBLE]);
+
+    // ========== Lodash ==========
+    module.declare_function("js_lodash_camel_case", I64, &[I64]);
+    module.declare_function("js_lodash_capitalize", I64, &[I64]);
+    module.declare_function("js_lodash_chunk", I64, &[I64, DOUBLE]);
+    module.declare_function("js_lodash_clamp", DOUBLE, &[DOUBLE, DOUBLE, DOUBLE]);
+    module.declare_function("js_lodash_compact", I64, &[I64]);
+    module.declare_function("js_lodash_concat", I64, &[I64, I64]);
+    module.declare_function("js_lodash_difference", I64, &[I64, I64]);
+    module.declare_function("js_lodash_drop", I64, &[I64, DOUBLE]);
+    module.declare_function("js_lodash_drop_right", I64, &[I64, DOUBLE]);
+    module.declare_function("js_lodash_ends_with", DOUBLE, &[I64, I64]);
+    module.declare_function("js_lodash_escape", I64, &[I64]);
+    module.declare_function("js_lodash_first", DOUBLE, &[I64]);
+    module.declare_function("js_lodash_flatten", I64, &[I64]);
+    module.declare_function("js_lodash_in_range", DOUBLE, &[DOUBLE, DOUBLE, DOUBLE]);
+    module.declare_function("js_lodash_includes", DOUBLE, &[I64, I64]);
+    module.declare_function("js_lodash_initial", I64, &[I64]);
+    module.declare_function("js_lodash_kebab_case", I64, &[I64]);
+    module.declare_function("js_lodash_last", DOUBLE, &[I64]);
+    module.declare_function("js_lodash_lower_case", I64, &[I64]);
+    module.declare_function("js_lodash_lower_first", I64, &[I64]);
+    module.declare_function("js_lodash_pad", I64, &[I64, DOUBLE]);
+    module.declare_function("js_lodash_pad_end", I64, &[I64, DOUBLE]);
+    module.declare_function("js_lodash_pad_start", I64, &[I64, DOUBLE]);
+    module.declare_function("js_lodash_random", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_lodash_repeat", I64, &[I64, DOUBLE]);
+    module.declare_function("js_lodash_replace", I64, &[I64, I64, I64]);
+    module.declare_function("js_lodash_reverse", I64, &[I64]);
+    module.declare_function("js_lodash_size", DOUBLE, &[I64]);
+    module.declare_function("js_lodash_snake_case", I64, &[I64]);
+    module.declare_function("js_lodash_split", I64, &[I64, I64]);
+    module.declare_function("js_lodash_start_case", I64, &[I64]);
+    module.declare_function("js_lodash_starts_with", DOUBLE, &[I64, I64]);
+    module.declare_function("js_lodash_tail", I64, &[I64]);
+    module.declare_function("js_lodash_take", I64, &[I64, DOUBLE]);
+    module.declare_function("js_lodash_take_right", I64, &[I64, DOUBLE]);
+    module.declare_function("js_lodash_trim", I64, &[I64]);
+    module.declare_function("js_lodash_trim_end", I64, &[I64]);
+    module.declare_function("js_lodash_trim_start", I64, &[I64]);
+    module.declare_function("js_lodash_truncate", I64, &[I64, DOUBLE]);
+    module.declare_function("js_lodash_unescape", I64, &[I64]);
+    module.declare_function("js_lodash_uniq", I64, &[I64]);
+    module.declare_function("js_lodash_upper_case", I64, &[I64]);
+    module.declare_function("js_lodash_upper_first", I64, &[I64]);
+
+    // ========== LRU Cache ==========
+    module.declare_function("js_lru_cache_clear", VOID, &[I64]);
+    module.declare_function("js_lru_cache_delete", DOUBLE, &[I64, DOUBLE]);
+    module.declare_function("js_lru_cache_get", DOUBLE, &[I64, DOUBLE]);
+    module.declare_function("js_lru_cache_has", DOUBLE, &[I64, DOUBLE]);
+    module.declare_function("js_lru_cache_new", I64, &[DOUBLE]);
+    module.declare_function("js_lru_cache_peek", DOUBLE, &[I64, DOUBLE]);
+    module.declare_function("js_lru_cache_set", I64, &[I64, DOUBLE, DOUBLE]);
+    module.declare_function("js_lru_cache_size", DOUBLE, &[I64]);
+
+    // ========== Event emitter ==========
+    module.declare_function("js_event_emitter_emit", DOUBLE, &[I64, I64, DOUBLE]);
+    module.declare_function("js_event_emitter_emit0", DOUBLE, &[I64, I64]);
+    module.declare_function("js_event_emitter_listener_count", DOUBLE, &[I64, I64]);
+    module.declare_function("js_event_emitter_new", I64, &[]);
+    module.declare_function("js_event_emitter_on", I64, &[I64, I64, I64]);
+    module.declare_function("js_event_emitter_remove_all_listeners", I64, &[I64, I64]);
+    module.declare_function("js_event_emitter_remove_listener", I64, &[I64, I64, I64]);
+
+    // ========== Fastify ==========
+    module.declare_function("js_fastify_add_hook", I32, &[I64, I64, I64]);
+    module.declare_function("js_fastify_all", I32, &[I64, I64, I64]);
+    module.declare_function("js_fastify_create", I64, &[]);
+    module.declare_function("js_fastify_create_with_opts", I64, &[DOUBLE]);
+    module.declare_function("js_fastify_ctx_html", DOUBLE, &[I64, I64, DOUBLE]);
+    module.declare_function("js_fastify_ctx_json", DOUBLE, &[I64, DOUBLE, DOUBLE]);
+    module.declare_function("js_fastify_ctx_redirect", DOUBLE, &[I64, I64, DOUBLE]);
+    module.declare_function("js_fastify_ctx_text", DOUBLE, &[I64, I64, DOUBLE]);
+    module.declare_function("js_fastify_delete", I32, &[I64, I64, I64]);
+    module.declare_function("js_fastify_get", I32, &[I64, I64, I64]);
+    module.declare_function("js_fastify_head", I32, &[I64, I64, I64]);
+    module.declare_function("js_fastify_listen", VOID, &[I64, DOUBLE, I64]);
+    module.declare_function("js_fastify_options", I32, &[I64, I64, I64]);
+    module.declare_function("js_fastify_patch", I32, &[I64, I64, I64]);
+    module.declare_function("js_fastify_post", I32, &[I64, I64, I64]);
+    module.declare_function("js_fastify_put", I32, &[I64, I64, I64]);
+    module.declare_function("js_fastify_register", I32, &[I64, I64, DOUBLE]);
+    module.declare_function("js_fastify_reply_header", I64, &[I64, I64, I64]);
+    module.declare_function("js_fastify_reply_send", I32, &[I64, DOUBLE]);
+    module.declare_function("js_fastify_reply_status", I64, &[I64, DOUBLE]);
+    module.declare_function("js_fastify_req_body", I64, &[I64]);
+    module.declare_function("js_fastify_req_get_user_data", DOUBLE, &[I64]);
+    module.declare_function("js_fastify_req_header", I64, &[I64, I64]);
+    module.declare_function("js_fastify_req_headers", I64, &[I64]);
+    module.declare_function("js_fastify_req_json", DOUBLE, &[I64]);
+    module.declare_function("js_fastify_req_method", I64, &[I64]);
+    module.declare_function("js_fastify_req_param", I64, &[I64, I64]);
+    module.declare_function("js_fastify_req_params", I64, &[I64]);
+    module.declare_function("js_fastify_req_query", I64, &[I64]);
+    module.declare_function("js_fastify_req_query_object", DOUBLE, &[I64]);
+    module.declare_function("js_fastify_req_set_user_data", VOID, &[I64, DOUBLE]);
+    module.declare_function("js_fastify_req_url", I64, &[I64]);
+    module.declare_function("js_fastify_route", I32, &[I64, I64, I64, I64]);
+    module.declare_function("js_fastify_set_error_handler", I32, &[I64, I64]);
+
+    // ========== Nodemailer ==========
+    module.declare_function("js_nodemailer_create_transport", DOUBLE, &[I64]);
+    module.declare_function("js_nodemailer_send_mail", I64, &[I64, I64]);
+    module.declare_function("js_nodemailer_verify", I64, &[I64]);
+
+    // ========== Rate limit ==========
+    module.declare_function("js_ratelimit_block", I64, &[I64, I64, DOUBLE]);
+    module.declare_function("js_ratelimit_consume", I64, &[I64, I64, DOUBLE]);
+    module.declare_function("js_ratelimit_create", I64, &[I64]);
+    module.declare_function("js_ratelimit_delete", I64, &[I64, I64]);
+    module.declare_function("js_ratelimit_get", I64, &[I64, I64]);
+    module.declare_function("js_ratelimit_penalty", I64, &[I64, I64, DOUBLE]);
+    module.declare_function("js_ratelimit_reward", I64, &[I64, I64, DOUBLE]);
+
+    // ========== Validator ==========
+    module.declare_function("js_validator_contains", DOUBLE, &[I64, I64]);
+    module.declare_function("js_validator_equals", DOUBLE, &[I64, I64]);
+    module.declare_function("js_validator_is_alpha", DOUBLE, &[I64]);
+    module.declare_function("js_validator_is_alphanumeric", DOUBLE, &[I64]);
+    module.declare_function("js_validator_is_email", DOUBLE, &[I64]);
+    module.declare_function("js_validator_is_empty", DOUBLE, &[I64]);
+    module.declare_function("js_validator_is_float", DOUBLE, &[I64]);
+    module.declare_function("js_validator_is_hexadecimal", DOUBLE, &[I64]);
+    module.declare_function("js_validator_is_int", DOUBLE, &[I64]);
+    module.declare_function("js_validator_is_json", DOUBLE, &[I64]);
+    module.declare_function("js_validator_is_length", DOUBLE, &[I64, DOUBLE, DOUBLE]);
+    module.declare_function("js_validator_is_lowercase", DOUBLE, &[I64]);
+    module.declare_function("js_validator_is_numeric", DOUBLE, &[I64]);
+    module.declare_function("js_validator_is_uppercase", DOUBLE, &[I64]);
+    module.declare_function("js_validator_is_url", DOUBLE, &[I64]);
+    module.declare_function("js_validator_is_uuid", DOUBLE, &[I64]);
+
+    // ========== Date ==========
+    module.declare_function("js_date_to_locale_string", I64, &[DOUBLE]);
+
+    // ========== String ==========
+    module.declare_function("js_string_split_regex", I64, &[I64, I64]);
+
+    // ========== Object ==========
+    module.declare_function("js_object_delete_dynamic", I32, &[I64, DOUBLE]);
+    module.declare_function("js_object_get_prototype_of", DOUBLE, &[DOUBLE]);
+
+    // ========== Math ==========
+    module.declare_function("js_math_acos", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_math_asin", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_math_atan", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_math_atan2", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_math_cos", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_math_expm1", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_math_log", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_math_log10", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_math_log1p", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_math_log2", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_math_sin", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_math_tan", DOUBLE, &[DOUBLE]);
+
+    // ========== Number ==========
+    module.declare_function("js_number_is_finite", DOUBLE, &[DOUBLE]);
+
+    // ========== JSON ==========
+    module.declare_function("js_json_get_bool", DOUBLE, &[I64, I64]);
+    module.declare_function("js_json_get_number", DOUBLE, &[I64, I64]);
+    module.declare_function("js_json_get_string", I64, &[I64, I64]);
+    module.declare_function("js_json_is_valid", DOUBLE, &[I64]);
+    module.declare_function("js_json_stringify_bool", I64, &[DOUBLE]);
+    module.declare_function("js_json_stringify_null", I64, &[]);
+    module.declare_function("js_json_stringify_number", I64, &[DOUBLE]);
+    module.declare_function("js_json_stringify_string", I64, &[I64]);
+
+    // ========== Map / Set / WeakMap ==========
+    module.declare_function("js_set_property", VOID, &[DOUBLE, I64, I64, DOUBLE]);
+
+    // ========== Error ==========
+    module.declare_function("js_error_get_message", I64, &[I64]);
+
+    // ========== Promise ==========
+    module.declare_function("js_await_js_promise", DOUBLE, &[DOUBLE]);
+
+    // ========== Text encoding ==========
+    module.declare_function("js_text_decoder_decode", I64, &[I64]);
+    module.declare_function("js_text_encoder_encode", I64, &[DOUBLE]);
+
+    // ========== Closures / functions ==========
+    module.declare_function("js_call_function", DOUBLE, &[I64, I64, I64, I64, I64]);
+    module.declare_function("js_create_callback", DOUBLE, &[I64, I64, I64]);
+
+    // ========== NaN-boxing / typeof / is_* ==========
+    module.declare_function("js_dynamic_neg", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_dynamic_string_equals", I32, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_is_nan", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_jsvalue_compare", I32, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_jsvalue_equals", I32, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_jsvalue_loose_equals", I32, &[DOUBLE, DOUBLE]);
+
+    // ========== GC ==========
+    module.declare_function("js_gc_collect", VOID, &[]);
+
+    // ========== Console ==========
+    module.declare_function("js_console_assert", VOID, &[DOUBLE, I64]);
+    module.declare_function("js_console_group", VOID, &[I64]);
+
+    // ========== Fetch ==========
+    module.declare_function("js_fetch_get", I64, &[I64]);
+    module.declare_function("js_fetch_get_with_auth", I64, &[I64, I64]);
+    module.declare_function("js_fetch_post", I64, &[I64, I64, I64]);
+    module.declare_function("js_fetch_post_with_auth", I64, &[I64, I64, I64]);
+    module.declare_function("js_fetch_stream_close", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_fetch_stream_poll", I64, &[DOUBLE]);
+    module.declare_function("js_fetch_stream_start", DOUBLE, &[I64, I64, I64, I64]);
+    module.declare_function("js_fetch_stream_status", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_fetch_text", I64, &[I64]);
+    module.declare_function("js_fetch_with_options", I64, &[I64, I64, I64, I64]);
+
+    // ========== Net ==========
+    module.declare_function("js_net_create_connection", DOUBLE, &[I32, I64, I64]);
+    module.declare_function("js_net_create_server", DOUBLE, &[I64, I64]);
+
+    // ========== Performance ==========
+    module.declare_function("js_performance_now", DOUBLE, &[]);
+
+    // ========== Slugify ==========
+    module.declare_function("js_slugify", I64, &[I64]);
+    module.declare_function("js_slugify_strict", I64, &[I64]);
+
+    // ========== Class registration ==========
+    module.declare_function("js_register_class_getter", VOID, &[I64, I64, I64, I64]);
+    module.declare_function("js_register_class_method", VOID, &[I64, I64, I64, I64, I64]);
+
+    // ========== Runtime init / module loader ==========
+    module.declare_function("js_get_export", DOUBLE, &[I64, I64, I64]);
+    module.declare_function("js_get_property", DOUBLE, &[DOUBLE, I64, I64]);
+    module.declare_function("js_load_module", I64, &[I64, I64]);
+    module.declare_function("js_native_call_method", DOUBLE, &[DOUBLE, I64, I64, I64, I64]);
+    module.declare_function("js_native_call_value", DOUBLE, &[DOUBLE, I64, I64]);
+    module.declare_function("js_new_from_handle", DOUBLE, &[DOUBLE, I64, I64]);
+    module.declare_function("js_new_instance", DOUBLE, &[I64, I64, I64, I64, I64]);
+    module.declare_function("js_runtime_init", VOID, &[]);
 }

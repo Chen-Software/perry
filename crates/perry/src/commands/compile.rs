@@ -4391,8 +4391,14 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 let type_alias_map: std::collections::HashMap<String, perry_types::Type> =
                     all_type_aliases.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
+                // Resolve the CLI's short target name (ios/android/etc.) to
+                // an LLVM triple. `None` falls through to the host default
+                // inside `compile_module`.
+                let resolved_triple = target
+                    .as_deref()
+                    .and_then(perry_codegen_llvm::resolve_target_triple);
                 let opts = perry_codegen_llvm::CompileOptions {
-                    target: target.clone(),
+                    target: resolved_triple,
                     is_entry_module: is_entry,
                     non_entry_module_prefixes,
                     import_function_prefixes,

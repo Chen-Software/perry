@@ -1653,6 +1653,9 @@ fn sanitize(name: &str) -> String {
 }
 
 /// Host default triple.
+/// Host-default LLVM target triple. Used when `CompileOptions.target`
+/// is `None`. Mirrors Cranelift's native-host detection in
+/// `crates/perry-codegen/src/codegen.rs:223-229`.
 fn default_target_triple() -> String {
     if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         "arm64-apple-macosx15.0.0".to_string()
@@ -1662,7 +1665,41 @@ fn default_target_triple() -> String {
         "x86_64-unknown-linux-gnu".to_string()
     } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
         "aarch64-unknown-linux-gnu".to_string()
+    } else if cfg!(target_os = "windows") {
+        "x86_64-pc-windows-msvc".to_string()
     } else {
         "arm64-apple-macosx15.0.0".to_string()
+    }
+}
+
+/// Map a Perry `--target <name>` string to the LLVM triple used by
+/// `clang -target <triple>` / `llc -mtriple=<triple>`. Mirrors the
+/// Cranelift mapping in `perry-codegen/src/codegen.rs:152-230`. The
+/// short names are the public `--target` surface exposed by the CLI;
+/// returning `None` leaves the triple to the host default.
+///
+/// Supported:
+///  * `ios`, `ios-simulator`           → aarch64-apple-ios
+///  * `watchos`, `watchos-simulator`   → aarch64-apple-watchos
+///  * `tvos`, `tvos-simulator`         → aarch64-apple-tvos
+///  * `android`                        → aarch64-unknown-linux-android
+///  * `linux` (x86_64 alias)           → x86_64-unknown-linux-gnu
+///  * `linux-aarch64`                  → aarch64-unknown-linux-gnu
+///  * `macos` (aarch64 alias)          → arm64-apple-macosx15.0.0
+///  * `macos-x86_64`                   → x86_64-apple-macosx15.0.0
+///  * `windows`                        → x86_64-pc-windows-msvc
+///  * anything else                    → None (use host default)
+pub fn resolve_target_triple(name: &str) -> Option<String> {
+    match name {
+        "ios" | "ios-simulator" => Some("aarch64-apple-ios".to_string()),
+        "watchos" | "watchos-simulator" => Some("aarch64-apple-watchos".to_string()),
+        "tvos" | "tvos-simulator" => Some("aarch64-apple-tvos".to_string()),
+        "android" => Some("aarch64-unknown-linux-android".to_string()),
+        "linux" => Some("x86_64-unknown-linux-gnu".to_string()),
+        "linux-aarch64" => Some("aarch64-unknown-linux-gnu".to_string()),
+        "macos" => Some("arm64-apple-macosx15.0.0".to_string()),
+        "macos-x86_64" => Some("x86_64-apple-macosx15.0.0".to_string()),
+        "windows" => Some("x86_64-pc-windows-msvc".to_string()),
+        _ => None,
     }
 }
