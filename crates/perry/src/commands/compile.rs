@@ -3067,7 +3067,7 @@ fn compile_for_wasm(ctx: &CompilationContext, args: &CompileArgs, format: Output
     })
 }
 
-pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: u8) -> Result<CompileResult> {
+pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u8) -> Result<CompileResult> {
     match format {
         OutputFormat::Text => println!("Collecting modules..."),
         OutputFormat::Json => {}
@@ -4476,11 +4476,93 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             }
             Err(msg) => {
                 eprintln!("{}", msg);
-                // Extract module name from error message for failed_modules
+                // Extract module name from error message for failed_modules.
+                // The error format is `Error compiling module '<name>' (<path>) ...`.
                 if let Some(name) = msg.split('\'').nth(1) {
                     failed_modules.push(name.to_string());
                 }
             }
+        }
+    }
+
+    // ── Loud failure summary ─────────────────────────────────────────
+    //
+    // Render the per-module compile errors prominently *here*, before
+    // `build_optimized_libs` runs cargo and floods stdout/stderr with
+    // hundreds of lines of warnings. The individual `eprintln!("{}", msg)`
+    // calls above produced one line per failure that gets buried in the
+    // cargo noise; this block re-surfaces them in a box-drawn header so
+    // it's the last thing the user sees before the linking step.
+    //
+    // Critically: if the *entry* module is in the failed list, the
+    // linker can't possibly produce a working executable — `main` is
+    // emitted by the entry module's `compile_module_entry` path, and a
+    // stub `_perry_init_*` doesn't satisfy that. The original 0.5.0
+    // mango bug was exactly this: 13 modules failed (including
+    // `mango/src/app.ts` itself), the driver replaced them all with
+    // empty inits, and the link step exploded with `Undefined symbols
+    // for architecture arm64: "_main"` — which is a downstream symptom
+    // that took a lot of digging to trace back to the real codegen
+    // errors hidden in the build noise. Hard-fail here instead.
+    let entry_module_name: Option<String> = ctx
+        .native_modules
+        .get(&entry_path)
+        .map(|h| h.name.clone());
+    if !failed_modules.is_empty() {
+        let entry_failed = entry_module_name
+            .as_deref()
+            .map(|name| failed_modules.iter().any(|m| m == name))
+            .unwrap_or(false);
+
+        let bar = "═".repeat(72);
+        let (red_on, red_off, bold_on, bold_off) = if use_color {
+            ("\x1b[1;31m", "\x1b[0m", "\x1b[1m", "\x1b[0m")
+        } else {
+            ("", "", "", "")
+        };
+        eprintln!();
+        if entry_failed {
+            eprintln!("{}{}{}", red_on, bar, red_off);
+            eprintln!(
+                "{}✗ ENTRY MODULE FAILED TO COMPILE — REFUSING TO LINK{}",
+                red_on, red_off
+            );
+            eprintln!("{}{}{}", red_on, bar, red_off);
+        } else {
+            eprintln!("{}{}{}", red_on, bar, red_off);
+            eprintln!(
+                "{}⚠ {} module(s) failed to compile — linking with empty stubs{}",
+                red_on,
+                failed_modules.len(),
+                red_off
+            );
+            eprintln!("{}{}{}", red_on, bar, red_off);
+        }
+        eprintln!();
+        for m in &failed_modules {
+            let is_entry = Some(m.as_str()) == entry_module_name.as_deref();
+            let marker = if is_entry { " (entry)" } else { "" };
+            eprintln!("  - {}{}{}{}", bold_on, m, marker, bold_off);
+        }
+        eprintln!();
+        if entry_failed {
+            eprintln!(
+                "Aborting: the entry module's `main` symbol is required by the linker."
+            );
+            eprintln!("Fix the codegen errors above (search for `Error compiling module`)");
+            eprintln!("and re-run. The driver previously emitted an empty `_perry_init_*`");
+            eprintln!("stub here and continued to link, which produced the misleading");
+            eprintln!("`Undefined symbols: \"_main\"` error far downstream.");
+            eprintln!();
+            return Err(anyhow!(
+                "entry module '{}' failed to compile (see errors above)",
+                entry_module_name.as_deref().unwrap_or("?")
+            ));
+        } else {
+            eprintln!("Continuing with linking. Empty `_perry_init_*` stubs will be");
+            eprintln!("emitted for the failed modules so the binary still links, but");
+            eprintln!("any code in those modules will be inert at runtime.");
+            eprintln!();
         }
     }
 
@@ -4748,23 +4830,31 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     });
 
     if !failed_modules.is_empty() {
-        eprintln!("\n{} module(s) failed to compile:", failed_modules.len());
-        for m in &failed_modules {
-            eprintln!("  - {}", m);
-        }
-        eprintln!("Continuing with linking despite failed modules...");
-
-        // Generate stub init functions for failed modules so the binary still links
-        let stub_init_names: Vec<String> = failed_modules.iter().map(|m| {
-            let sanitized = m.replace(|c: char| !c.is_alphanumeric() && c != '_', "_");
-            format!("_perry_init_{}", sanitized)
-        }).collect();
+        // The loud failure summary + entry-module abort already ran
+        // earlier (right after the parallel compile loop), so by the
+        // time we get here we know the entry module compiled OK and
+        // every entry in `failed_modules` is a non-entry module that
+        // we're consciously stubbing out so the binary can still link.
+        // Generate one empty `_perry_init_*` per failed module — the
+        // entry main calls each non-entry init in order, so the symbols
+        // need to exist or the linker will fail.
+        let stub_init_names: Vec<String> = failed_modules
+            .iter()
+            .map(|m| {
+                let sanitized = m.replace(|c: char| !c.is_alphanumeric() && c != '_', "_");
+                format!("_perry_init_{}", sanitized)
+            })
+            .collect();
         if !stub_init_names.is_empty() {
-            let stub_bytes = perry_codegen::stubs::generate_stub_object(&[], &stub_init_names, &[], target.as_deref())?;
+            let stub_bytes = perry_codegen::stubs::generate_stub_object(
+                &[],
+                &stub_init_names,
+                &[],
+                target.as_deref(),
+            )?;
             let stub_path = PathBuf::from("_perry_failed_stubs.o");
             fs::write(&stub_path, &stub_bytes)?;
             obj_paths.push(stub_path);
-            eprintln!("Generated {} stub init functions for failed modules", stub_init_names.len());
         }
     }
 

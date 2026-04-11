@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.2
+**Current Version:** 0.5.3
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.144 and earlier), see CHANGELOG.md.
+
+### v0.5.3 (llvm-backend) — driver hard-fails on entry-module codegen errors
+- **fix**: `crates/perry/src/commands/compile.rs` now refuses to link when the entry module is in `failed_modules`. The original 0.5.0 mango bug was a misdiagnosis chain: 13 modules (including `mango/src/app.ts`) failed codegen, the driver silently replaced each with an empty `_perry_init_*` stub, and the link step exploded with `Undefined symbols for architecture arm64: "_main"` — a downstream symptom that took manual digging to trace back to the real codegen errors hidden in cargo build noise. The driver now (a) prints a loud box-drawn failure summary right after the parallel compile loop, *before* `build_optimized_libs` floods stdout, (b) marks the entry module with `(entry)` in the failure list, and (c) returns `Err` immediately if the entry module is in the list, with a message explaining why. Non-entry failures keep the previous "stub the init, continue linking" behavior but get the same loud summary so the codegen errors aren't drowned in the cargo noise. `use_color` (was `_use_color`) is now wired through to ANSI red on the headers.
 
 ### v0.5.2 (llvm-backend) — crushing the numeric benchmarks
 - **perf**: `fadd/fsub/fmul/fdiv/frem/fneg` IR builder now emits `reassoc contract` fast-math flags. Clang's `-ffast-math` does NOT retroactively apply to ops in a `.ll` input — the FMFs must be on each instruction. Adding `reassoc contract` lets LLVM break serial accumulator chains into parallel accumulators + 8x-unroll + NEON 2-wide vectorize. **`loop_overhead` 99ms → 13ms (4.1x faster than Node 54ms); `math_intensive` 50ms → 14ms (3.3x faster than Node)**.

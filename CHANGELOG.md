@@ -2,6 +2,44 @@
 
 Detailed changelog for Perry. See CLAUDE.md for concise summaries.
 
+## v0.5.3 (llvm-backend) — driver hard-fails on entry-module codegen errors
+
+The first followup from the v0.5.1 mango compile sweep. Fixes the misdiagnosis chain that wasted ~an hour of debugging on mango: codegen errors hidden in cargo build noise, driver silently stubbing them, link step exploding with `Undefined symbols for architecture arm64: "_main"` — and you have to dig backwards through the build log to figure out that the real bugs are 13 module-level codegen failures, one of which is the entry file itself.
+
+### What changed
+
+`crates/perry/src/commands/compile.rs::run`
+
+1. **Promoted `_use_color` parameter to `use_color`** so the new failure renderer can emit ANSI red on the box-drawn header. The argument was previously underscored as unused; `run()` was the only consumer that needed it for this purpose.
+
+2. **Loud failure summary moved to right after the parallel compile loop**, before `build_optimized_libs` runs cargo and dumps hundreds of lines of stdlib build warnings. The previous summary lived inside the same block as the stub generation, far below the auto-optimize step, so by the time it printed it was already off-screen on most terminals. The new summary is the last thing the user sees before either the link step or the `Err` return.
+
+3. **Hard-fail when the entry module is in `failed_modules`.** Resolves the entry's HIR name via `ctx.native_modules.get(&entry_path).map(|h| h.name.clone())`, walks `failed_modules` for a match, and if it's there:
+   - Prints a `═══`-bar header that says `✗ ENTRY MODULE FAILED TO COMPILE — REFUSING TO LINK` (in bold red when `use_color`).
+   - Lists every failed module with the entry one marked `(entry)`.
+   - Explains why: "the entry module's `main` symbol is required by the linker."
+   - Tells the user how to find the real errors: `Fix the codegen errors above (search for "Error compiling module")`.
+   - Documents the previous behavior: "The driver previously emitted an empty `_perry_init_*` stub here and continued to link, which produced the misleading `Undefined symbols: \"_main\"` error far downstream."
+   - Returns `Err(anyhow!("entry module '{name}' failed to compile (see errors above)"))`.
+
+4. **Non-entry failures keep the existing stub-generation behavior** but get the same loud `⚠ {N} module(s) failed to compile — linking with empty stubs` header so the user can't miss the codegen errors. Empty `_perry_init_*` stubs are still emitted (the entry main calls each non-entry init in topological order, and missing symbols would also fail to link), and the build continues. Note: this still produces a downstream link error if the failed module exports any *other* symbols (functions, classes) that the entry references — only the init is stubbed, not exports — but at least the user now sees the real codegen error first instead of trying to decode what `Undefined symbols: "_perry_fn_helper_ts__good"` means.
+
+5. **Removed the duplicate stub-block summary** at the old location. The block at line 4750 now just generates stubs (with a comment cross-referencing the loud summary above).
+
+### Verified
+
+| Case | Old behavior | New behavior |
+|---|---|---|
+| `Buffer.from(s, "rot13")` in entry file | Empty stub, link fails: `Undefined symbols: "_main"` | Loud `✗ ENTRY MODULE FAILED TO COMPILE` header, exits 1, no binary emitted |
+| Same in a non-entry helper file | Silent stub, link continues, fails downstream on missing exports | Loud `⚠ 1 module(s) failed to compile` header, stubs init, link still fails on exports but the user already has the real error in front of them |
+| Mango (everything compiles cleanly) | Wrote executable | Wrote executable (no false positives) |
+
+### Followup ideas
+
+- **Stub exported symbols too**, not just inits, so non-entry failures produce a binary that runs (with the failed-module functions returning undefined / throwing). This would be a stronger "best-effort link" mode. Currently the driver only stubs inits, which is enough to satisfy main's call sequence but leaves cross-module function references unresolved.
+- **Render the per-module error messages with more structure** (collapse the long file paths, deduplicate the `Error compiling module` prefix). Most of the noise in mango's original output was 13 nearly-identical lines starting with `Error compiling module 'hone/...'`. A two-column `module → error` table would be much more scannable.
+- **Cargo-style coloring**: bold red for the header, red for "Error", yellow for "warning", reset for body text. The current emit only colorizes the box bar and header line; the body is plain.
+
 ## v0.5.2 (llvm-backend) — crushing the numeric benchmarks
 
 Two LLVM IR codegen wins that flip Perry from "within spitting distance of Node" to "decisively faster than Node" on the tight-loop numeric benchmarks.
