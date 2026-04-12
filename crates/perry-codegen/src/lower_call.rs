@@ -545,6 +545,14 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
                 | "replaceAll" | "padStart" | "padEnd" | "repeat"
                 | "normalize" | "codePointAt"
                 | "localeCompare" => true,
+                // slice/indexOf/includes/startsWith/endsWith exist on both
+                // strings and arrays. Route to string path only when args
+                // rule out the array variant (e.g., slice(0) is ambiguous
+                // but slice() with 0 args is always array.slice to copy).
+                "slice" if args.len() >= 1 => true,
+                "indexOf" | "includes" if args.len() == 1 => true,
+                "startsWith" | "endsWith" if args.len() == 1 => true,
+                "lastIndexOf" if args.len() == 1 => true,
                 _ => false,
             };
             if is_string_only_method && !is_array_expr(ctx, object) {
