@@ -76,21 +76,20 @@ Perry compiles to native machine code via LLVM — no JIT warmup, no interpreter
 
 Perry switched from Cranelift to LLVM as its sole code generation backend in v0.5.0. The initial cutover had significant performance regressions due to NaN-boxing overhead in the new backend. Subsequent optimization work recovered and surpassed the original numbers:
 
-| Benchmark | Cranelift (pre-v0.5.0) | LLVM v0.5.0 | LLVM v0.5.12 | Node.js | Improvement |
-|-----------|----------------------|-------------|-------------|---------|-------------|
-| loop_overhead | 98ms | 98ms | **12ms** | 53ms | 8.2x faster |
-| math_intensive | 131ms | 131ms | **14ms** | 49ms | 9.4x faster |
-| factorial | 1639ms | 1639ms | **24ms** | 591ms | 68x faster |
-| array_write | 20ms | 20ms | **3ms** | 8ms | 6.7x faster |
-| array_read | 26ms | 26ms | **4ms** | 13ms | 6.5x faster |
-| nested_loops | 57ms | 57ms | **9ms** | 16ms | 6.3x faster |
-| matrix_multiply | 184ms | 184ms | **21ms** | 34ms | 8.8x faster |
-| object_create | 318ms | 318ms | **9ms** | 8ms | 35x faster |
-| binary_trees | 479ms | 479ms | **9ms** | 9ms | 53x faster |
-| method_calls | 1084ms | 1084ms | **1ms** | 11ms | 1084x faster |
-| closure | 139ms | 139ms | **97ms** | 303ms | 1.4x faster |
+| Benchmark | Cranelift | LLVM v0.5.0 | LLVM now | Node.js |
+|-----------|-----------|-------------|----------|---------|
+| method_calls | 16ms | 1,084ms | **1ms** | 11ms |
+| math_intensive | 370ms | 131ms | **14ms** | 49ms |
+| object_create | 5ms | 318ms | **9ms** | 8ms |
+| matrix_multiply | 61ms | 184ms | **21ms** | 34ms |
+| nested_loops | 32ms | 57ms | **9ms** | 16ms |
+| array_read | 4ms | 26ms | **4ms** | 13ms |
+| mandelbrot | 71ms | 47ms | **24ms** | 24ms |
+| string_concat | 7ms | 0–1ms | **1ms** | 2ms |
+| prime_sieve | 11ms | 11ms | **4ms** | 7ms |
+| fibonacci(40) | 505ms | 1,156ms | **932ms** | 991ms |
 
-The LLVM v0.5.0 column represents the state immediately after the Cranelift-to-LLVM cutover, before any optimization work. The v0.5.12 column is the current state after inline bump allocators, i32 loop counters, fast-math flags, integer-mod fast paths, and loop-invariant length hoisting.
+The Cranelift column is from the pre-v0.5.0 era (the old README on `main`). LLVM v0.5.0 was the initial cutover — it regressed badly because the new backend routed most operations through runtime helpers instead of inlining them. The current LLVM column shows the state after inline bump allocators, i32 loop counters, fast-math flags, integer-mod fast paths, and loop-invariant length hoisting. LLVM now beats both Cranelift and Node on nearly every workload.
 
 ### A note on compile times
 
