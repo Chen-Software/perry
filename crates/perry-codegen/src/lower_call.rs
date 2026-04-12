@@ -8,6 +8,32 @@ use perry_types::Type as HirType;
 
 use crate::expr::{lower_expr, nanbox_pointer_inline, nanbox_string_inline, unbox_to_i64, variant_name, FnCtx};
 use crate::lower_array_method::lower_array_method;
+
+/// Heuristic: is this expression likely an integer handle (pointer value
+/// stored as a number) rather than a real float? Used for extern C FFI
+/// calls to decide whether to pass the arg in an x-register (i64) or
+/// d-register (double).
+///
+/// Returns true for variables, property accesses, casts, function calls —
+/// anything that's likely a handle value obtained from a prior FFI call.
+/// Returns false for number/integer literals and arithmetic — likely
+/// actual float values (width, height, color components, etc.).
+fn is_integer_handle_arg(expr: &Expr) -> bool {
+    match expr {
+        // Literal numbers are real floats (width, height, color, etc.)
+        Expr::Integer(_) | Expr::Number(_) => false,
+        // Unary minus on a literal (e.g. -1) — still a real number
+        Expr::Unary { operand, .. } => !matches!(operand.as_ref(), Expr::Integer(_) | Expr::Number(_)),
+        // Variables, property access — likely handles
+        Expr::LocalGet(_) | Expr::PropertyGet { .. } => true,
+        // Arithmetic on handles (handle + offset) — still integer
+        Expr::Binary { .. } => true,
+        // Function call results — likely handles from other FFI calls
+        Expr::Call { .. } => true,
+        // Everything else — default to double (safer for floats)
+        _ => false,
+    }
+}
 use crate::lower_string_method::lower_string_method;
 use crate::nanbox::{double_literal, POINTER_MASK_I64};
 use crate::type_analysis::{is_array_expr, is_map_expr, is_promise_expr, is_set_expr, is_string_expr, receiver_class_name};
@@ -219,17 +245,18 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
             // Without this, bloom_draw_text(text, x, y, ...) passes
             // the NaN-boxed string in d0 but the native function reads
             // x0 as a *const u8 → SIGSEGV.
-            // Extern C functions use the platform C ABI, which separates
-            // integer (x0-x7) and float (d0-d7) registers on ARM64.
-            // Perry stores all values as `double` (NaN-boxed), but native
-            // C/Rust functions expect integer args in x-registers. We
-            // convert each arg based on its expression type:
-            //   - String → ptr (unbox to raw C string pointer)
-            //   - Number literal or handle → i64 (fptosi)
-            //   - Everything else → i64 (fptosi, safe for integer handles)
-            // This matches the convention that extern C functions take
-            // integer/pointer args (handles, sizes, flags) not NaN-boxed
-            // doubles.
+            // Extern C functions use the platform C ABI. Perry stores
+            // all values as `double`, but native C/Rust functions may
+            // take a mix of i64 (pointers/handles) and f64 (floats).
+            //
+            // The LLVM IR declaration type determines ARM64 register
+            // placement: i64 → x-register, double → d-register. Since
+            // Perry can't know the actual C signature, we use a
+            // heuristic: if the arg expression is a VARIABLE (LocalGet,
+            // PropertyGet, etc.) that's not a literal number, assume
+            // it's an integer handle → pass as i64 via fptosi. If it's
+            // a number literal, keep as double (likely a real float
+            // like width/height/color).
             let mut lowered: Vec<String> = Vec::with_capacity(args.len());
             let mut arg_types: Vec<crate::types::LlvmType> = Vec::with_capacity(args.len());
             for a in args {
@@ -241,16 +268,16 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
                     let ptr_val = blk.inttoptr(I64, &raw_ptr);
                     lowered.push(ptr_val);
                     arg_types.push(PTR);
-                } else {
-                    // Convert double → i64 for the C ABI. For integer
-                    // handles (e.g. 42.0 → 42), fptosi is correct. For
-                    // actual float args in a mixed-type C function, this
-                    // is wrong — but Perry's extern FFI convention requires
-                    // all non-string args to be integer-typed.
+                } else if is_integer_handle_arg(a) {
+                    // Handle/pointer arg: convert to i64 for x-register.
                     let blk = ctx.block();
                     let i64_val = blk.fptosi(DOUBLE, &val, I64);
                     lowered.push(i64_val);
                     arg_types.push(I64);
+                } else {
+                    // Float arg: keep as double for d-register.
+                    lowered.push(val);
+                    arg_types.push(DOUBLE);
                 }
             }
             let arg_slices: Vec<(crate::types::LlvmType, &str)> =
