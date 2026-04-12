@@ -1721,10 +1721,22 @@ fn compile_module_entry(
         }
     } else {
         let init_name = format!("{}__init", module_prefix);
+        // Debug: emit puts("INIT: <prefix>") at the top of each module init
+        let debug_init_const = if std::env::var("PERRY_DEBUG_INIT").is_ok() {
+            let debug_msg = format!("INIT: {}\0", module_prefix);
+            let (const_name, _) = llmod.add_string_constant(&debug_msg);
+            llmod.declare_function("puts", I32, &[PTR]);
+            Some(const_name)
+        } else {
+            None
+        };
         let init_fn = llmod.define_function(&init_name, VOID, vec![]);
         let _ = init_fn.create_block("entry");
         {
             let blk = init_fn.block_mut(0).unwrap();
+            if let Some(ref cname) = debug_init_const {
+                blk.call_void("puts", &[(PTR, &format!("@{}", cname))]);
+            }
             // Each non-entry module runs its own string pool init at
             // the start of its module init function. The entry main
             // calls each module init in order (after running its own
