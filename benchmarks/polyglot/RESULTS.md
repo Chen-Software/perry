@@ -8,7 +8,7 @@ Best of 3 runs, macOS ARM64 (Apple Silicon M-series), April 2026.
 
 | Benchmark      | Perry |  Rust |   C++ |    Go | Swift |  Java |  Node |  Python |
 |----------------|-------|-------|-------|-------|-------|-------|-------|---------|
-| fibonacci      |   401 |   315 |   308 |   446 |   399 |   279 |   991 |   15935 |
+| fibonacci      |   309 |   316 |   309 |   446 |   399 |   279 |   991 |   15935 |
 | loop_overhead  |    12 |    95 |    96 |    96 |    95 |    97 |    53 |    2979 |
 | array_write    |     2 |     6 |     2 |     8 |     2 |     6 |     8 |     392 |
 | array_read     |     4 |     9 |     9 |    10 |     9 |    11 |    13 |     330 |
@@ -64,9 +64,13 @@ The other languages use `double` array indices (to match TS semantics), paying a
 
 ## Where Perry loses — and why
 
-### fibonacci (1.3x slower than C++)
+### fibonacci (tied with C++, faster than Rust)
 
-Recursive `fib(40)` is dominated by function call overhead. Perry at 401ms (down from 936ms after eliminating redundant `js_number_coerce` calls) is now competitive with Go (446ms) and Swift (399ms). The remaining gap vs C++ (308ms) and Rust (315ms) is the f64 calling convention: Perry passes arguments through floating-point registers (`d0-d7`) while C++/Rust use integer registers (`x0-x7`). Integer `sub`/`add`/`cmp` are 1 cycle each vs f64 `fsub`/`fadd`/`fcmp` at 2-3 cycles.
+Perry at 309ms ties C++ (309ms) and beats Rust (316ms) on recursive `fib(40)`. This happened through two optimizations: eliminating redundant `js_number_coerce` calls (936ms → 401ms), then i64 specialization for pure numeric recursive functions (401ms → 309ms).
+
+Perry beats Rust because the Rust benchmark uses `f64` (to match TypeScript's `number` type), while Perry's codegen detects that `fib` only receives integers and emits an `i64` variant with `sub`/`add`/`cmp` (1 cycle each) instead of `fsub`/`fadd`/`fcmp` (2-3 cycles). Both compile through LLVM — same optimizer, different input. If Rust used `fn fib(n: i64) -> i64`, it would run at ~308ms.
+
+Only Java (279ms) is faster — the JVM JIT applies aggressive inlining on the recursive hot path that AOT compilation can't match without whole-program optimization.
 
 ### object_create (Rust/C++/Go/Swift show 0ms)
 

@@ -61,7 +61,7 @@ Perry beats Node.js on every benchmark. Median of 3 runs, macOS ARM64 (Apple Sil
 | array_read | 4ms | 13ms | **3.2x faster** | Sequential read (10M elements) |
 | closure | 97ms | 303ms | **3.1x faster** | Closure creation + invocation (10M calls) |
 | array_write | 3ms | 8ms | **2.6x faster** | Sequential write (10M elements) |
-| fibonacci(40) | 401ms | 991ms | **2.5x faster** | Recursive function calls |
+| fibonacci(40) | 309ms | 991ms | **3.2x faster** | Recursive function calls (i64 specialization) |
 | string_concat | 1ms | 2ms | **2x faster** | 100K string appends |
 | nested_loops | 9ms | 16ms | **1.7x faster** | Nested array access (3000x3000) |
 | prime_sieve | 4ms | 7ms | **1.7x faster** | Sieve of Eratosthenes |
@@ -70,7 +70,7 @@ Perry beats Node.js on every benchmark. Median of 3 runs, macOS ARM64 (Apple Sil
 | mandelbrot | 24ms | 24ms | **tied** | Complex f64 iteration (1000x1000) |
 | object_create | 9ms | 8ms | 0.9x | Object allocation (1M objects) |
 
-Perry compiles to native machine code via LLVM — no JIT warmup, no interpreter overhead. Key optimizations: inline bump allocator for object allocation, i32 loop counters for bounded array access, `reassoc contract` fast-math flags for f64 vectorization, integer-modulo fast path (`fptosi → srem → sitofp` instead of `fmod`), and elimination of redundant `js_number_coerce` calls on numeric function returns.
+Perry compiles to native machine code via LLVM — no JIT warmup, no interpreter overhead. Key optimizations: inline bump allocator for object allocation, i32 loop counters for bounded array access, `reassoc contract` fast-math flags for f64 vectorization, integer-modulo fast path (`fptosi → srem → sitofp` instead of `fmod`), elimination of redundant `js_number_coerce` calls on numeric function returns, and i64 specialization for pure numeric recursive functions.
 
 ### Perry vs compiled languages
 
@@ -78,7 +78,7 @@ Perry also competes with systems languages. All implementations use `f64`/`doubl
 
 | Benchmark | Perry | Rust | C++ | Go | Swift | Java | Node | Python |
 |-----------|-------|------|-----|----|-------|------|------|--------|
-| fibonacci | 401 | 315 | 308 | 446 | 399 | 279 | 991 | 15935 |
+| fibonacci | **309** | 316 | **309** | 446 | 399 | 279 | 991 | 15935 |
 | loop_overhead | **12** | 95 | 96 | 96 | 95 | 97 | 53 | 2979 |
 | array_write | **2** | 6 | **2** | 8 | **2** | 6 | 8 | 392 |
 | array_read | **4** | 9 | 9 | 10 | 9 | 11 | 13 | 330 |
@@ -87,7 +87,7 @@ Perry also competes with systems languages. All implementations use `f64`/`doubl
 | nested_loops | **8** | **8** | **8** | 9 | **8** | 10 | 17 | 470 |
 | accumulate | **25** | 98 | 96 | 96 | 96 | 100 | 592 | 4919 |
 
-Perry beats Rust, C++, Go, Swift, and Java on loop_overhead (8x), math_intensive (3.4x), and accumulate (4x) thanks to `reassoc` fast-math flags and the integer-modulo fast path. These optimizations exploit properties of TypeScript's `number` type that strict-IEEE compilers can't assume by default. See [`benchmarks/polyglot/RESULTS.md`](benchmarks/polyglot/RESULTS.md) for full analysis.
+Perry beats or ties Rust and C++ on 7 of 8 benchmarks. The polyglot benchmarks all use `f64`/`double` to match TypeScript's `number` type. Perry's advantage comes from domain-specific optimizations — `reassoc` fast-math flags, integer-modulo fast path, and i64 specialization for recursive numeric functions — that exploit properties of TypeScript's `number` type which strict-IEEE compilers can't assume by default. Perry beats Rust on fibonacci because it detects the integer pattern and specializes to `i64` registers, while Rust faithfully compiles the `f64` version. See [`benchmarks/polyglot/RESULTS.md`](benchmarks/polyglot/RESULTS.md) for full analysis.
 
 ### LLVM backend progress
 
@@ -104,7 +104,7 @@ Perry switched from Cranelift to LLVM as its sole code generation backend in v0.
 | mandelbrot | 71ms | 47ms | **24ms** | 24ms |
 | string_concat | 7ms | 0–1ms | **1ms** | 2ms |
 | prime_sieve | 11ms | 11ms | **4ms** | 7ms |
-| fibonacci(40) | 505ms | 1,156ms | **401ms** | 991ms |
+| fibonacci(40) | 505ms | 1,156ms | **309ms** | 991ms |
 
 The Cranelift column is from the pre-v0.5.0 era (the old README on `main`). LLVM v0.5.0 was the initial cutover — it regressed badly because the new backend routed most operations through runtime helpers instead of inlining them. The current LLVM column shows the state after inline bump allocators, i32 loop counters, fast-math flags, integer-mod fast paths, loop-invariant length hoisting, and redundant number-coerce elimination. LLVM now beats both Cranelift and Node on every workload.
 
