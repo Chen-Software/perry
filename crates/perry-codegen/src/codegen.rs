@@ -8,15 +8,8 @@
 //! ```
 //!
 //! The returned bytes are a regular object file produced by `clang -c`.
-//! Perry's existing linking stage in `crates/perry/src/commands/compile.rs`
-//! picks them up identically to the Cranelift output.
-//!
-//! ## Phase A scope (in progress — primary-backend migration)
-//!
-//! Building toward feature parity with the Cranelift backend so LLVM can
-//! become Perry's primary build platform. See
-//! `/Users/amlug/.claude/plans/sorted-noodling-quilt.md` for the full
-//! migration plan.
+//! Perry's linking stage in `crates/perry/src/commands/compile.rs`
+//! links them against `libperry_runtime.a` and `libperry_stdlib.a`.
 //!
 //! Currently supported (Phases 1, 2, 2.1, A-strings):
 //!
@@ -48,7 +41,7 @@ use crate::stmt;
 use crate::strings::StringPool;
 use crate::types::{DOUBLE, I32, I64, LlvmType, PTR, VOID};
 
-/// Options mirrored from the Cranelift backend's setter API.
+/// Options controlling code generation for a single module.
 #[derive(Debug, Clone, Default)]
 pub struct CompileOptions {
     /// Target triple override. `None` uses the host default.
@@ -75,7 +68,7 @@ pub struct CompileOptions {
     /// Used by the bitcode-link path (`PERRY_LLVM_BITCODE_LINK=1`).
     pub emit_ir_only: bool,
 
-    // ── Cross-module import plumbing (mirrors Cranelift setter chain) ──
+    // ── Cross-module import plumbing ──
 
     /// Locals that are namespace imports (`import * as X from "./mod"`).
     /// Codegen uses this to know that `X.foo()` should be dispatched as
@@ -100,15 +93,11 @@ pub struct CompileOptions {
     /// Imported function return types, keyed by local function name.
     pub imported_func_return_types: std::collections::HashMap<String, perry_types::Type>,
 
-    // ── Feature plumbing (mirrors Cranelift setter chain) ──
+    // ── Feature plumbing ──
     //
     // These fields control which runtime libraries and FFI surfaces are
-    // compiled into the resulting binary. Before this, the LLVM dispatch
-    // site silently skipped the Cranelift setter calls — so the auto-
-    // optimize feature detection didn't fire and real-world programs
-    // with UI/HTTP/DB/native-library deps couldn't link. The fields below
-    // propagate the CLI's feature detection into the LLVM codegen so
-    // both backends honor the same project configuration.
+    // compiled into the resulting binary. They propagate the CLI's feature
+    // detection into the codegen so auto-optimize and linker steps work.
     //
     // NOTE: most of these are informational for the CLI driver's auto-
     // optimize rebuild + linker step — `compile_module` itself only
@@ -212,8 +201,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     let mut llmod = LlModule::new(&triple);
     runtime_decls::declare_phase1(&mut llmod);
 
-    // Phase F.1: derive a per-module symbol prefix from the HIR module
-    // name. Mirrors `perry-codegen` (Cranelift):
+    // Derive a per-module symbol prefix from the HIR module name:
     //
     //     self.module_symbol_prefix = hir.name.replace(|c: char|
     //         !c.is_alphanumeric() && c != '_', "_");
@@ -647,7 +635,6 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
 
         // Constructor: declared as
         // `<source_prefix>__<class>_constructor(i64 this, double arg0, …) → void`
-        // matching the Cranelift convention.
         let ctor_fn = format!(
             "{}__{}_constructor",
             sanitize(src),
@@ -2212,8 +2199,7 @@ fn sanitize(name: &str) -> String {
 
 /// Host default triple.
 /// Host-default LLVM target triple. Used when `CompileOptions.target`
-/// is `None`. Mirrors Cranelift's native-host detection in
-/// `crates/perry-codegen/src/codegen.rs:223-229`.
+/// is `None`.
 fn default_target_triple() -> String {
     if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         "arm64-apple-macosx15.0.0".to_string()
@@ -2231,9 +2217,8 @@ fn default_target_triple() -> String {
 }
 
 /// Map a Perry `--target <name>` string to the LLVM triple used by
-/// `clang -target <triple>` / `llc -mtriple=<triple>`. Mirrors the
-/// Cranelift mapping in `perry-codegen/src/codegen.rs:152-230`. The
-/// short names are the public `--target` surface exposed by the CLI;
+/// `clang -target <triple>` / `llc -mtriple=<triple>`. The short
+/// names are the public `--target` surface exposed by the CLI;
 /// returning `None` leaves the triple to the host default.
 ///
 /// Supported:

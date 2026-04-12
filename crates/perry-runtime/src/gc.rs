@@ -486,7 +486,7 @@ fn try_mark_value(value_bits: u64, valid_ptrs: &ValidPointerSet) -> bool {
 /// Conservative stack scan: scan the current thread's stack for heap pointers.
 /// Handles BOTH NaN-boxed pointers (POINTER_TAG/STRING_TAG/BIGINT_TAG) AND raw I64 pointers.
 /// Raw I64 pointers arise from Perry's `is_array`/`is_string`/`is_pointer`/`is_closure` local
-/// variables — Cranelift stores these as raw I64 words (not NaN-boxed) in registers and on stack.
+/// variables — codegen stores these as raw I64 words (not NaN-boxed) in registers and on stack.
 fn mark_stack_roots(valid_ptrs: &ValidPointerSet) {
     // Capture callee-saved registers into a buffer via setjmp
     let mut jmp_buf = [0u64; 32]; // oversized for safety
@@ -549,7 +549,7 @@ fn try_mark_value_or_raw(word: u64, valid_ptrs: &ValidPointerSet) -> bool {
         return true;
     }
     // Fallback: treat as raw (non-NaN-boxed) heap pointer.
-    // Perry's is_string/is_array/is_pointer/is_closure Cranelift locals store raw I64 addresses.
+    // Perry's is_string/is_array/is_pointer/is_closure locals store raw I64 addresses.
     // Validate against the known-heap-pointer set to avoid false positives from return addresses
     // and plain integers. Valid heap pointers are in the lower 48-bit address space and
     // won't have NaN-boxing tags in upper bits (already rejected above).

@@ -4391,8 +4391,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
                 .as_deref()
                 .and_then(perry_codegen::resolve_target_triple);
             // ── Feature plumbing ──
-            // Mirror every setter the Cranelift dispatch site calls
-            // below (lines ~4435-4471) so the LLVM backend honors
+            // Set all compile options so the codegen honors
             // the same project configuration. Without this, the
             // auto-optimize feature detection + linker flag
             // construction can't see which modules the program

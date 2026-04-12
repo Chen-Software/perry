@@ -577,7 +577,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // whose value is the assigned value).
         //
         // SPECIAL FAST PATH: `x = x + y` where `x` is a string-typed local.
-        // Mirrors Cranelift's `expr.rs:5611` pattern. We use
+        // Uses
         // `js_string_append` (in-place for refcount=1 unique owners)
         // instead of `js_string_concat` (always allocates). For a 10K-
         // iteration `str = str + "a"` build loop, this turns O(n²) total
@@ -1314,8 +1314,8 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         //   load double, ptr element_ptr
         //
         // Saves a function call (~5-10 ns) per access. For
-        // bench_array_ops with ~400K reads per iteration this is the
-        // bulk of the LLVM-vs-Cranelift gap.
+        // bench_array_ops with ~400K reads per iteration this is a
+        // major performance win.
         Expr::IndexGet { object, index } => {
             // String indexing fast path: `s[i]` returns the char at
             // position i as a single-char string. Handled before the
@@ -1625,7 +1625,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
 
         // `arr[i] = v` — typed-Number array element write.
         //
-        // INLINE FAST PATH (matches Cranelift's expr.rs:18886+ pattern):
+        // INLINE FAST PATH:
         //
         //   load length from arr_ptr+0
         //   if idx < length: inline store, done
@@ -2556,8 +2556,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // auto-optimizer's dead-stripping was removing from the
         // built `libperry_runtime.a`.
         //
-        // Mirrors Cranelift's approach (`crates/perry-codegen/src/expr.rs:1497`)
-        // which uses `builder.ins().floor()` etc.
+        // Uses LLVM intrinsics (llvm.sqrt.f64, llvm.floor.f64, etc.).
         Expr::MathSqrt(operand) => {
             let v = lower_expr(ctx, operand)?;
             Ok(ctx.block().call(DOUBLE, "llvm.sqrt.f64", &[(DOUBLE, &v)]))
@@ -2572,8 +2571,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         }
         Expr::MathRound(operand) => {
             // JS Math.round: round-half-toward-positive-infinity. We
-            // emulate via floor(x + 0.5) then fcopysign to preserve
-            // the -0 case (matching Cranelift's expr.rs:1521 approach).
+            // emulate via floor(x + 0.5) then fcopysign to preserve -0.
             let v = lower_expr(ctx, operand)?;
             let blk = ctx.block();
             let half = blk.fadd(&v, "0.5");
@@ -3133,7 +3131,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // -------- fs.readFileBuffer(path) / fs.readFileSync(path) -> Buffer --------
         // Calls js_fs_read_file_binary(path: f64) -> i64 (raw *BufferHeader),
         // then bitcasts the raw pointer directly to f64 WITHOUT NaN-boxing
-        // (matching the Cranelift backend). The runtime's
+        // The runtime's
         // `js_console_log_dynamic` → `format_jsvalue` path detects raw buffer
         // pointers via the thread-local BUFFER_REGISTRY and formats them as
         // `<Buffer xx xx ...>`. Buffer methods (`.length`, `.toString`, etc.)
@@ -4046,8 +4044,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // args, callee is a known FuncRef whose declared param count we
         // can read. Lower the spread source as an array, then extract
         // expected_count elements via `js_array_get_f64` and call the
-        // function with the unpacked args. Mirrors Cranelift's strategy
-        // in `crates/perry-codegen/src/expr.rs::CallSpread`.
+        // function with the unpacked args.
         //
         // For unsupported shapes (multiple spread args, mixed regular
         // + spread, non-FuncRef callees, unknown signature) we fall
@@ -4324,8 +4321,8 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         }
 
         // -------- process.on(event, handler) — register a handler so its
-        // closure is rooted. We don't fire on real exit (matching Cranelift
-        // behavior) but the runtime records the handler pointer.
+        // closure is rooted. We don't fire on real exit but the runtime
+        // records the handler pointer.
         Expr::ProcessOn { event, handler } => {
             let event_box = lower_expr(ctx, event)?;
             let handler_box = lower_expr(ctx, handler)?;
@@ -5288,9 +5285,9 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(double_literal(0.0))
         }
 
-        // -------- Phase E: await with busy-wait loop --------
+        // -------- Await with busy-wait loop --------
         //
-        // Mirrors Cranelift's expr.rs:19436. The structure:
+        // Structure:
         //
         //   <current>:
         //     %promise = unbox(<inner>)
@@ -6646,9 +6643,9 @@ fn lower_array_literal(ctx: &mut FnCtx<'_>, elements: &[Expr]) -> Result<String>
     Ok(nanbox_pointer_inline(ctx.block(), &current_arr))
 }
 
-/// Inline fast-path lowering for `local_arr[i] = v` (Phase B.9).
+/// Inline fast-path lowering for `local_arr[i] = v`.
 ///
-/// Mirrors Cranelift's `expr.rs:18886+` pattern. Compiles to:
+/// Compiles to:
 ///
 /// ```text
 ///   <current>:

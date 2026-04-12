@@ -1,14 +1,13 @@
 //! LLVM IR basic-block builder.
 //!
-//! Direct port of `anvil/src/llvm/block.ts`. Each method appends one textual
-//! LLVM IR instruction to an internal buffer; `to_ir` produces the final text.
+//! Each method appends one textual LLVM IR instruction to an internal buffer;
+//! `to_ir` produces the final text.
 //!
 //! We use `alloca` + `load`/`store` for locals and rely on LLVM's `mem2reg`
 //! pass (run automatically by `clang -O2` or higher) to promote them to SSA
-//! form. This avoids the phi-node bookkeeping the Cranelift backend needs —
-//! locals just become stack slots at codegen time and LLVM's optimizer sorts
-//! out the registers. Explicit `phi` nodes are still emitted for control-flow
-//! merges (if/else value context, short-circuit logical ops).
+//! form — locals just become stack slots at codegen time and LLVM's optimizer
+//! sorts out the registers. Explicit `phi` nodes are still emitted for
+//! control-flow merges (if/else value context, short-circuit logical ops).
 
 use std::cell::Cell;
 use std::rc::Rc;

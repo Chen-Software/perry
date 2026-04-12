@@ -1,9 +1,8 @@
-// Phase 2.1 LLVM-backend benchmark variant.
+// Fibonacci benchmark variant.
 //
 // Identical compute workload to `bench_fibonacci.ts` (recursive fib(35),
 // 5 warmup + 100 timed iterations) but the output uses raw `console.log`
-// of numbers instead of string concatenation, so it can compile under
-// `--backend llvm` while strings are still out of scope.
+// of numbers instead of string concatenation.
 //
 // Output format (3 lines):
 //   <total_ms>

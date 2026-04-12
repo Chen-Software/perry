@@ -17,7 +17,7 @@ use crate::nanbox::TAG_UNDEFINED;
 
 /// Generate a stub object file for missing symbols from unresolved imports.
 ///
-/// Three kinds of stubs are produced, mirroring the Cranelift port:
+/// Three kinds of stubs are produced:
 ///
 /// 1. **Data symbols** — exported `i64` globals initialized to NaN-boxed
 ///    `TAG_UNDEFINED`. Used when an `extern` data slot is referenced but
@@ -82,8 +82,7 @@ pub fn generate_stub_object(
 
     // If absolutely nothing was requested, emit a single dummy symbol so
     // the resulting object isn't empty (some linkers complain about empty
-    // objects, and this matches the Cranelift port's behavior of always
-    // producing a non-trivial output).
+    // objects).
     if missing_data_symbols.is_empty()
         && missing_func_symbols.is_empty()
         && identity_func_symbols.is_empty()

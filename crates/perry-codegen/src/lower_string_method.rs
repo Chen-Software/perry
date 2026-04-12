@@ -565,8 +565,7 @@ pub(crate) fn lower_string_method(
 /// slot — `js_string_append` may realloc when growing past capacity.
 ///
 /// This is the load-bearing optimization for the canonical `let str = "";
-/// for (...) str = str + "a"` string-build pattern. Mirrors Cranelift's
-/// expr.rs:5611+ detection.
+/// for (...) str = str + "a"` string-build pattern.
 pub(crate) fn lower_string_self_append(
     ctx: &mut FnCtx<'_>,
     local_id: u32,

@@ -80,7 +80,7 @@ pub extern "C" fn js_console_log_dynamic(value: f64) {
         println!("{}{}", p, jsval.as_int32());
     } else {
         // Must be a regular number — but first check for a raw (non-NaN-boxed)
-        // heap pointer. The LLVM / Cranelift backends return Buffer pointers as
+        // heap pointer. The codegen returns Buffer pointers as
         // raw `i64` bitcast to `f64` (no POINTER_TAG), so `is_pointer()` is
         // false yet the bit pattern is a valid buffer address. Detect by
         // looking up the raw bits in the thread-local BUFFER_REGISTRY.
@@ -441,7 +441,7 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
             jsval.as_int32().to_string()
         } else {
             // Regular number — but first check for raw (non-NaN-boxed) heap
-            // pointers. The Cranelift / LLVM backends sometimes return a raw
+            // pointers. The codegen sometimes returns a raw
             // i64 buffer pointer bitcast directly to f64 (no POINTER_TAG), so
             // `jsval.is_pointer()` is false yet the bit pattern is a valid
             // buffer address. Detect this case by looking up the raw bits

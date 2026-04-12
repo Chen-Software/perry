@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Perry LLVM Backend Sweep
-# Compiles all test-files/test_*.ts with --backend llvm, diffs output against Node.js,
+# Perry Parity Sweep
+# Compiles all test-files/test_*.ts, diffs output against Node.js,
 # and reports MATCH/DIFF/CRASH/COMPILE_FAIL counts.
 #
 # Usage:

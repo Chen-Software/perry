@@ -1,9 +1,8 @@
-//! TextEncoder / TextDecoder runtime — LLVM backend variant.
+//! TextEncoder / TextDecoder runtime.
 //!
-//! These mirror the Cranelift `js_text_encoder_encode` / `js_text_decoder_decode`
-//! but with a twist: the LLVM backend's inline `encoded[i]` / `encoded.length`
-//! fast path expects an ArrayHeader (with `f64` elements) rather than a
-//! BufferHeader (with packed `u8`s). So we allocate a proper `ArrayHeader`,
+//! `js_text_encoder_encode` / `js_text_decoder_decode` return an ArrayHeader
+//! (with `f64` elements) so the inline `encoded[i]` / `encoded.length`
+//! fast path works. We allocate a proper `ArrayHeader`,
 //! widen each UTF-8 byte to f64, AND register the pointer in the buffer
 //! registry so `encoded instanceof Uint8Array` still returns true.
 //!
@@ -106,7 +105,7 @@ pub extern "C" fn js_text_decoder_decode_llvm(value: f64) -> i64 {
 
     // Unbox the pointer. Accept both POINTER_TAG NaN-boxing and raw small
     // pointer fallback (covers both `encoded` values and `new Uint8Array(...)`
-    // bitcast results from Cranelift-style paths).
+    // bitcast results).
     let ptr_usize: usize = {
         const POINTER_TAG: u64 = 0x7FFD_0000_0000_0000;
         const POINTER_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;

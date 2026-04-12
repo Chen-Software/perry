@@ -74,8 +74,7 @@ pub fn declare_phase_a_strings(module: &mut LlModule) {
 pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_string_concat", I64, &[I64, I64]);
     // Dynamic string coercion: takes any NaN-boxed JSValue and returns a
-    // raw string handle, formatting numbers via the same codegen path
-    // Cranelift uses (`crates/perry-runtime/src/value.rs:813`).
+    // raw string handle (`crates/perry-runtime/src/value.rs:813`).
     module.declare_function("js_jsvalue_to_string", I64, &[DOUBLE]);
 
     // In-place append for the `x = x + y` pattern. When `x` has
@@ -812,9 +811,8 @@ pub fn declare_phase_b_arrays(module: &mut LlModule) {
 /// strings use, so `obj.x` and `obj["x"]` and `let s = "x"; obj[s]` all
 /// share one allocation per unique key.
 ///
-/// Phase C will replace the bare `js_object_alloc(0, N)` path with the
-/// shape-cached `js_object_alloc_with_shape` Cranelift uses
-/// (`crates/perry-codegen/src/expr.rs:17942`) for repeated literals.
+/// The inline bump allocator now handles most object allocation directly;
+/// `js_object_alloc(0, N)` is the fallback for dynamic cases.
 pub fn declare_phase_b_objects(module: &mut LlModule) {
     module.declare_function("js_object_alloc", I64, &[I32, I32]);
     module.declare_function("js_object_set_field_by_name", VOID, &[I64, I64, DOUBLE]);
@@ -851,17 +849,14 @@ pub fn declare_phase_b_objects(module: &mut LlModule) {
     declare_stdlib_ffi(module);
 }
 
-/// Stdlib / FFI runtime functions — ported from the Cranelift backend's
-/// `crates/perry-codegen/src/runtime_decls.rs`. Without these declarations,
-/// user code that touches any of the third-party stdlib modules (http, mysql2,
-/// pg, redis, mongodb, bcrypt, jsonwebtoken, axios, sharp, cron, WebSocket,
+/// Stdlib / FFI runtime functions. Without these declarations, user code
+/// that touches any of the third-party stdlib modules (http, mysql2, pg,
+/// redis, mongodb, bcrypt, jsonwebtoken, axios, sharp, cron, WebSocket,
 /// zlib, etc.) emits `use of undefined value '@js_*'` at clang -c time
 /// because the IR references the name without a preceding `declare`.
 ///
 /// Signatures cross-checked against `crates/perry-runtime/src/` and
-/// `crates/perry-stdlib/src/`. A handful of Cranelift-only stubs
-/// (`js_json_parse_reviver`, `js_json_stringify_pretty`) were skipped because
-/// no Rust definition exists.
+/// `crates/perry-stdlib/src/`.
 pub fn declare_stdlib_ffi(module: &mut LlModule) {
     // ========== HTTP server ==========
     module.declare_function("js_http_client_request_end", I64, &[I64, DOUBLE]);

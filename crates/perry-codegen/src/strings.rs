@@ -54,15 +54,14 @@
 //! is paid exactly once at process startup, no matter how often the literal
 //! appears in hot code.
 //!
-//! ### Trade-offs vs Cranelift's per-use-site approach
+//! ### Why a pool instead of per-use-site allocation
 //!
-//! Cranelift today (`crates/perry-codegen/src/expr.rs:260–321`) re-creates
-//! every string literal at every use site: stack-allocates the bytes, calls
-//! `js_string_from_bytes`, NaN-boxes the result. That's ~5 IR instructions
-//! per use, plus a heap allocation that goes through the GC tracker. For a
-//! literal used 1000 times in a loop, Cranelift performs 1000 allocations
-//! and produces 1000 short-lived StringHeaders that GC eventually has to
-//! sweep. Our approach: 1 allocation, 1 root registration, 1000 loads.
+//! A naive approach would re-create every string literal at every use
+//! site: stack-allocate the bytes, call `js_string_from_bytes`, NaN-box
+//! the result. That's ~5 IR instructions per use, plus a heap allocation.
+//! For a literal used 1000 times in a loop, that's 1000 allocations and
+//! 1000 short-lived StringHeaders the GC has to sweep.
+//! The pool approach: 1 allocation, 1 root registration, 1000 loads.
 
 use std::collections::HashMap;
 

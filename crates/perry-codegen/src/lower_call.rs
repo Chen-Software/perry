@@ -991,8 +991,7 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
             // js_console_log_dynamic so the user at least sees the
             // values, then return undefined-as-double. Spec-compliant
             // dispatch (separate stderr for warn/error, dir's depth
-            // option, table's tabular layout) lives in a future
-            // phase that ports the Cranelift dispatch table.
+            // option, table's tabular layout) is a future improvement.
             // Zero-arg console.* calls — handle the truly nullary
             // methods (groupEnd, clear) and the dataless variants of
             // log/info/warn/error/debug (which print nothing). Methods
@@ -1189,7 +1188,7 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
     //
     // The HIR doesn't have dedicated PromiseResolve/Reject variants —
     // they appear as Call { callee: PropertyGet { GlobalGet(0), "resolve" } }.
-    // Following Cranelift's `expr.rs:9617` heuristic, we assume any
+    // We assume any
     // GlobalGet receiver with a Promise-shaped property name is the
     // Promise constructor. (This conflicts with `console.resolve` etc.
     // — but those don't exist in JS.)
@@ -1921,9 +1920,7 @@ pub(crate) fn lower_native_method_call(
     // shows a window. Pre-v0.5.10 this fell into the receiver-less early-
     // out below and returned `double 0.0`, so the program completed
     // without entering the AppKit run loop — mango compiled cleanly but
-    // exited immediately on launch with no output. The Cranelift backend
-    // (deleted in v0.5.0) had per-method dispatch for the entire `perry/ui`
-    // surface; the LLVM backend port left that gap. This is the smallest
+    // exited immediately on launch with no output. This is the smallest
     // dispatch that proves the linking + runtime + Mach-O code path works
     // end to end. Other perry/ui constructors (Text, Button, VStack,
     // HStack, etc.) are NOT dispatched yet so the body is the

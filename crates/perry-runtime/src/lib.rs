@@ -109,7 +109,7 @@ mod stdlib_pump {
 }
 
 // Module init guard for preventing circular dependency stack overflow.
-// Uses a simple bitset in the runtime so Cranelift cannot optimize it away.
+// Uses a simple bitset in the runtime so the compiler cannot optimize it away.
 mod init_guard {
     use std::sync::atomic::{AtomicU8, Ordering};
 

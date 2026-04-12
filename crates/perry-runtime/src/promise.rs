@@ -917,7 +917,7 @@ extern "C" fn promise_race_reject_handler(closure: *const crate::closure::Closur
 
 /// Await any promise value.
 /// In native-only mode (no V8), all promises are native POINTER_TAG promises.
-/// The Cranelift-generated busy-wait loop handles polling the promise state,
+/// The codegen-emitted busy-wait loop handles polling the promise state,
 /// so we just return the value as-is.
 /// In V8 mode (perry-jsruntime), this function is overridden by the V8-aware
 /// version that can also handle JS_HANDLE_TAG promises.

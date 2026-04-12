@@ -251,7 +251,7 @@ pub struct WidgetDecl {
     pub entry_param_name: String,
     /// AppIntent configuration parameters
     pub config_params: Vec<WidgetConfigParam>,
-    /// Name of the lowered provider function (compiled via Cranelift)
+    /// Name of the lowered provider function (compiled via LLVM)
     pub provider_func_name: Option<String>,
     /// Placeholder data for widget gallery preview
     pub placeholder: Option<Vec<(String, WidgetPlaceholderValue)>>,
