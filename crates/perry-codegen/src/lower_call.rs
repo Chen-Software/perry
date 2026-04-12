@@ -2277,6 +2277,60 @@ pub(crate) fn lower_native_method_call(
         }
     }
 
+    // fs module functions: readdirSync, statSync, mkdirSync, etc.
+    // These are receiver-less NativeMethodCalls (`import { readdirSync }
+    // from 'fs'` → `NativeMethodCall { module: "fs", object: None }`).
+    // Dispatch before the catch-all so they call the runtime instead of
+    // returning TAG_UNDEFINED.
+    if module == "fs" && object.is_none() {
+        match method {
+            "readdirSync" if args.len() >= 1 => {
+                let p = lower_expr(ctx, &args[0])?;
+                let blk = ctx.block();
+                let raw = blk.call(DOUBLE, "js_fs_readdir_sync", &[(DOUBLE, &p)]);
+                let raw_bits = blk.bitcast_double_to_i64(&raw);
+                return Ok(nanbox_pointer_inline(blk, &raw_bits));
+            }
+            "statSync" if args.len() >= 1 => {
+                let p = lower_expr(ctx, &args[0])?;
+                return Ok(ctx.block().call(DOUBLE, "js_fs_stat_sync", &[(DOUBLE, &p)]));
+            }
+            "renameSync" if args.len() >= 2 => {
+                let from = lower_expr(ctx, &args[0])?;
+                let to = lower_expr(ctx, &args[1])?;
+                ctx.block().call_void("js_fs_rename_sync", &[(DOUBLE, &from), (DOUBLE, &to)]);
+                return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
+            }
+            "unlinkSync" if args.len() >= 1 => {
+                let p = lower_expr(ctx, &args[0])?;
+                ctx.block().call_void("js_fs_unlink_sync", &[(DOUBLE, &p)]);
+                return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
+            }
+            "mkdirSync" if args.len() >= 1 => {
+                let p = lower_expr(ctx, &args[0])?;
+                ctx.block().call_void("js_fs_mkdir_sync", &[(DOUBLE, &p)]);
+                return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
+            }
+            "rmdirSync" if args.len() >= 1 => {
+                let p = lower_expr(ctx, &args[0])?;
+                ctx.block().call_void("js_fs_rmdir_sync", &[(DOUBLE, &p)]);
+                return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
+            }
+            "copyFileSync" if args.len() >= 2 => {
+                let src = lower_expr(ctx, &args[0])?;
+                let dst = lower_expr(ctx, &args[1])?;
+                ctx.block().call_void("js_fs_copy_file_sync", &[(DOUBLE, &src), (DOUBLE, &dst)]);
+                return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
+            }
+            _ => {
+                // Fall through — readFileSync/writeFileSync/existsSync/etc.
+                // are handled as dedicated HIR Expr variants, not
+                // NativeMethodCall. Warn on truly unhandled ones.
+                eprintln!("perry-codegen: unhandled fs.{}() NativeMethodCall ({})", method, args.len());
+            }
+        }
+    }
+
     // Receiver-less native method calls (e.g. plugin::setConfig(...)
     // as a static module function): lower args for side effects and
     // return TAG_UNDEFINED. Using TAG_UNDEFINED (not 0.0) so that
