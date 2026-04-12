@@ -510,12 +510,43 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     }
 
     let mut module_globals: HashMap<u32, String> = HashMap::new();
+    // Collect exported variable names so we can create external
+    // globals + getter functions for cross-module access.
+    let exported_var_names: std::collections::HashSet<String> =
+        hir.exported_objects.iter().cloned().collect();
     for s in &hir.init {
-        if let perry_hir::Stmt::Let { id, .. } = s {
-            if referenced_from_fn.contains(id) {
-                let name = format!("perry_global_{}__{}", module_prefix, id);
-                llmod.add_internal_global(&name, DOUBLE, "0.0");
-                module_globals.insert(*id, name);
+        if let perry_hir::Stmt::Let { id, name, .. } = s {
+            if referenced_from_fn.contains(id) || exported_var_names.contains(name) {
+                // Use external linkage for exported vars so other
+                // modules can reference them. Internal for the rest.
+                let is_exported = exported_var_names.contains(name);
+                let global_name = format!("perry_global_{}__{}", module_prefix, id);
+                if is_exported {
+                    llmod.add_global(&global_name, DOUBLE, "0.0");
+                } else {
+                    llmod.add_internal_global(&global_name, DOUBLE, "0.0");
+                }
+                module_globals.insert(*id, global_name.clone());
+
+                // For exported variables, also emit a trivial getter
+                // function `perry_fn_<prefix>__<name>` that returns
+                // the global. The ExternFuncRef wrapper in importing
+                // modules calls this symbol — without it, exported
+                // constants (like `export const Key = { ... }`) cause
+                // linker errors because the wrapper tries to call a
+                // function that doesn't exist.
+                if is_exported {
+                    let fn_name = format!(
+                        "perry_fn_{}__{}",
+                        module_prefix,
+                        sanitize(name),
+                    );
+                    let getter = llmod.define_function(&fn_name, DOUBLE, vec![]);
+                    let _ = getter.create_block("entry");
+                    let blk = getter.block_mut(0).unwrap();
+                    let val = blk.load(DOUBLE, &format!("@{}", global_name));
+                    blk.ret(DOUBLE, &val);
+                }
             }
         }
     }
