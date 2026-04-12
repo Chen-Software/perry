@@ -11,7 +11,7 @@ use crate::lower_array_method::lower_array_method;
 use crate::lower_string_method::lower_string_method;
 use crate::nanbox::{double_literal, POINTER_MASK_I64};
 use crate::type_analysis::{is_array_expr, is_map_expr, is_promise_expr, is_set_expr, is_string_expr, receiver_class_name};
-use crate::types::{DOUBLE, I32, I64, I8, PTR};
+use crate::types::{DOUBLE, I32, I64, I8, PTR, VOID};
 
 /// Lower a `Call` expression. Two shapes are supported:
 /// 1. `FuncRef(id)(args...)` — direct call to a user function by HIR id.
@@ -146,7 +146,7 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
     // declared in the OTHER module's compilation; here we just emit a
     // direct LLVM call to its scoped name and the system linker
     // resolves the symbol when the .o files are linked together.
-    if let Expr::ExternFuncRef { name, .. } = callee {
+    if let Expr::ExternFuncRef { name, return_type: ext_return_type, .. } = callee {
         // Map JS global names (setTimeout, queueMicrotask, etc.) to the
         // right runtime C functions. These aren't `js_*` prefixed in the
         // HIR but need to call specific runtime entrypoints with the
@@ -237,9 +237,42 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
             }
             let arg_slices: Vec<(crate::types::LlvmType, &str)> =
                 arg_types.iter().zip(lowered.iter()).map(|(t, v)| (*t, v.as_str())).collect();
-            ctx.pending_declares
-                .push((name.clone(), DOUBLE, arg_types));
-            return Ok(ctx.block().call(DOUBLE, name, &arg_slices));
+            // Determine return type. If the ExternFuncRef declares
+            // return_type: String, the native function returns
+            // *const u8 (ptr in x0). If return_type: Void, no return.
+            // Otherwise (Number/Any), assume f64 (d0).
+            //
+            // Heuristic fallback: even if declared as Number, if the
+            // function name matches a known "returns-string" pattern
+            // AND has string args, treat as ptr return. This covers
+            // native libraries like Bloom that declare string-returning
+            // functions as `number` for NaN-boxing compat.
+            let has_string_args = arg_types.iter().any(|t| *t == PTR);
+            let returns_string = matches!(ext_return_type, HirType::String)
+                || (has_string_args && (
+                    name.contains("read_file")
+                    || name.contains("clipboard_text")
+                    || name.contains("file_dialog")
+                ));
+            let returns_void = matches!(ext_return_type, HirType::Void);
+            if returns_void {
+                ctx.pending_declares
+                    .push((name.clone(), crate::types::VOID, arg_types));
+                ctx.block().call_void(name, &arg_slices);
+                return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
+            } else if returns_string {
+                ctx.pending_declares
+                    .push((name.clone(), PTR, arg_types));
+                let raw_ptr = ctx.block().call(PTR, name, &arg_slices);
+                // Convert raw *const u8 back to a NaN-boxed string.
+                let blk = ctx.block();
+                let ptr_i64 = blk.ptrtoint(&raw_ptr, I64);
+                return Ok(nanbox_string_inline(blk, &ptr_i64));
+            } else {
+                ctx.pending_declares
+                    .push((name.clone(), DOUBLE, arg_types));
+                return Ok(ctx.block().call(DOUBLE, name, &arg_slices));
+            }
         };
         let fname = format!("perry_fn_{}__{}", source_prefix, name);
         // Record the cross-module call so the caller can add a `declare`
