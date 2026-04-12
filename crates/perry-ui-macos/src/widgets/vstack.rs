@@ -3,12 +3,17 @@ use objc2::{msg_send};
 use objc2_app_kit::{NSStackView, NSView, NSUserInterfaceLayoutOrientation, NSLayoutAttribute, NSStackViewGravity};
 use objc2_foundation::MainThreadMarker;
 
-/// Set distribution to GravityAreas (-1) so children pack into gravity zones.
-/// Combined with addView:inGravity:NSStackViewGravityTop (in add_child),
-/// this ensures children pack tightly from the top without stretching.
+/// Set distribution to Fill (0) so children fill available space based on
+/// their content hugging priorities. Children with low hugging priority (1)
+/// stretch to fill remaining space; children with high hugging priority
+/// (750+) stay at their intrinsic size. This matches the behavior expected
+/// by Hone IDE's layout where `widgetSetHugging(mainRow, 1)` means "stretch
+/// to fill". The previous GravityAreas (-1) distribution packed children
+/// tightly from the top without stretching, causing the workbench to occupy
+/// only ~40% of the window height.
 fn set_gravity_distribution(stack: &NSStackView) {
     unsafe {
-        let _: () = msg_send![stack, setDistribution: -1i64]; // NSStackViewDistributionGravityAreas
+        let _: () = msg_send![stack, setDistribution: 0i64]; // NSStackViewDistributionFill
     }
 }
 
