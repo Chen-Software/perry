@@ -1834,8 +1834,6 @@ fn emit_string_pool(
     for entry in strings.iter() {
         // .rodata bytes — `[N+1 x i8]` because we include the null terminator.
         llmod.add_named_string_constant(&entry.bytes_global, entry.byte_len + 1, &entry.escaped_ir);
-        // Mutable handle global initialized to 0.0; populated by
-        // __perry_init_strings_<prefix>.
         llmod.add_internal_global(&entry.handle_global, DOUBLE, "0.0");
     }
 
