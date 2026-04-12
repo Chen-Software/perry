@@ -685,7 +685,8 @@ fn get_parent_class_id(class_id: u32) -> Option<u32> {
 #[inline(always)]
 fn is_valid_obj_ptr(ptr: *const u8) -> bool {
     let addr = ptr as usize;
-    addr > 0x100000 && (addr >> 48) == 0
+    // macOS ARM64: heap/code/stack pointers are > 0x100000000 (4GB).
+    addr > 0x100000000 && addr < 0x800000000000
 }
 
 /// Object header - precedes the fields in memory

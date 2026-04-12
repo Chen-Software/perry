@@ -1566,7 +1566,7 @@ pub(crate) fn lower_new(
     // Imported classes have fields: Vec::new() (stub). Use a generous
     // minimum so the constructor has enough space to write fields.
     if field_count == 0 && class.constructor.is_none() {
-        field_count = 16; // enough for most imported classes
+        field_count = 48; // generous default for imported classes (EditorViewModel has 35)
     }
     let mut parent = class.extends_name.as_deref();
     while let Some(parent_name) = parent {
