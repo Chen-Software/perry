@@ -5,11 +5,11 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Convert a UTC timestamp (seconds) to local-time components via
-/// libc::localtime_r. Falls back to UTC components if localtime_r fails.
+/// Convert a UTC timestamp (seconds) to local-time components.
 /// Returns (year, month [1-12], day, hour, minute, second, tz_offset_seconds).
 /// tz_offset_seconds is the number of seconds that need to be added to the
 /// UTC timestamp to get the local-time representation (i.e. local - UTC).
+#[cfg(unix)]
 fn timestamp_to_local_components(secs: i64) -> (i32, u32, u32, u32, u32, u32, i64) {
     unsafe {
         let t: libc::time_t = secs as libc::time_t;
@@ -19,16 +19,52 @@ fn timestamp_to_local_components(secs: i64) -> (i32, u32, u32, u32, u32, u32, i6
             let (y, m, d, h, mi, s) = timestamp_to_components(secs);
             return (y, m, d, h, mi, s, 0);
         }
-        // tm_year: years since 1900; tm_mon: 0-11
         let year = tm.tm_year + 1900;
         let month = (tm.tm_mon + 1) as u32;
         let day = tm.tm_mday as u32;
         let hour = tm.tm_hour as u32;
         let minute = tm.tm_min as u32;
         let second = tm.tm_sec as u32;
-        // tm_gmtoff is the number of seconds east of UTC (positive for
-        // east). This is the correct sign convention for "local - UTC".
         let tz_offset = tm.tm_gmtoff as i64;
+        (year, month, day, hour, minute, second, tz_offset)
+    }
+}
+
+#[cfg(windows)]
+fn timestamp_to_local_components(secs: i64) -> (i32, u32, u32, u32, u32, u32, i64) {
+    unsafe {
+        let t: libc::time_t = secs as libc::time_t;
+        let mut tm: libc::tm = std::mem::zeroed();
+        // localtime_s is the Windows thread-safe equivalent of localtime_r
+        // (links to _localtime64_s). Returns 0 on success.
+        let err = libc::localtime_s(&mut tm, &t);
+        if err != 0 {
+            let (y, m, d, h, mi, s) = timestamp_to_components(secs);
+            return (y, m, d, h, mi, s, 0);
+        }
+        let year = tm.tm_year + 1900;
+        let month = (tm.tm_mon + 1) as u32;
+        let day = tm.tm_mday as u32;
+        let hour = tm.tm_hour as u32;
+        let minute = tm.tm_min as u32;
+        let second = tm.tm_sec as u32;
+        // Windows tm doesn't have tm_gmtoff. Derive the offset by also
+        // computing the UTC breakdown and comparing.
+        let mut utm: libc::tm = std::mem::zeroed();
+        let tz_offset = if libc::gmtime_s(&mut utm, &t) == 0 {
+            let local_secs = components_to_timestamp(year, month, day, hour, minute, second);
+            let utc_secs = components_to_timestamp(
+                utm.tm_year + 1900,
+                (utm.tm_mon + 1) as u32,
+                utm.tm_mday as u32,
+                utm.tm_hour as u32,
+                utm.tm_min as u32,
+                utm.tm_sec as u32,
+            );
+            local_secs - utc_secs
+        } else {
+            0
+        };
         (year, month, day, hour, minute, second, tz_offset)
     }
 }

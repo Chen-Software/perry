@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.13
+**Current Version:** 0.5.14
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.144 and earlier), see CHANGELOG.md.
+
+### v0.5.14 (llvm-backend) — Windows build fix: date.rs POSIX-only APIs
+- **fix**: `timestamp_to_local_components` used `libc::localtime_r` and `tm_gmtoff`, both POSIX-only — broke the Windows CI build. Split into `#[cfg(unix)]` (keeps `localtime_r` + `tm_gmtoff`) and `#[cfg(windows)]` (uses `libc::localtime_s` / `libc::gmtime_s`, derives tz offset by comparing local vs UTC breakdowns).
 
 ### v0.5.13 (llvm-backend) — Buffer.indexOf/includes dispatch fix
 - **fix**: `Buffer.indexOf()` and `Buffer.includes()` were incorrectly routed through the string method path in codegen, because the `is_string_only_method` guard didn't exclude `Uint8Array`/`Buffer` types. Added a `static_type_of` check that skips the string dispatch when the receiver is typed as `Uint8Array` or `Buffer`, letting these methods fall through to `dispatch_buffer_method` via `js_native_call_method` as intended.
