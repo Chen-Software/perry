@@ -1309,14 +1309,32 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                         );
                     }
                     ArrayElement::Spread(e) => {
-                        let src_box = lower_expr(ctx, e)?;
-                        let blk = ctx.block();
-                        let src_handle = unbox_to_i64(blk, &src_box);
-                        current_arr = blk.call(
-                            I64,
-                            "js_array_concat",
-                            &[(I64, &current_arr), (I64, &src_handle)],
-                        );
+                        if is_string_expr(ctx, e) {
+                            // String spread: `[..."hello"]` → split into
+                            // individual character strings.
+                            let src_box = lower_expr(ctx, e)?;
+                            let blk = ctx.block();
+                            let src_handle = unbox_to_i64(blk, &src_box);
+                            let char_arr = blk.call(
+                                I64,
+                                "js_string_to_char_array",
+                                &[(I64, &src_handle)],
+                            );
+                            current_arr = blk.call(
+                                I64,
+                                "js_array_concat",
+                                &[(I64, &current_arr), (I64, &char_arr)],
+                            );
+                        } else {
+                            let src_box = lower_expr(ctx, e)?;
+                            let blk = ctx.block();
+                            let src_handle = unbox_to_i64(blk, &src_box);
+                            current_arr = blk.call(
+                                I64,
+                                "js_array_concat",
+                                &[(I64, &current_arr), (I64, &src_handle)],
+                            );
+                        }
                     }
                 }
             }
