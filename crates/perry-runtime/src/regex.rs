@@ -45,11 +45,9 @@ pub(crate) fn is_regex_pointer(ptr: *const u8) -> bool {
 
 thread_local! {
     /// Cache of compiled regex objects, keyed by (pattern, flags).
-    /// Without this cache, every call like `str.match(/^(\w+)/)` compiles a
-    /// fresh Regex (tens to hundreds of KB of DFA/NFA state) and leaks it
-    /// since RegExpHeader is never freed. Long-running services with
-    /// frequent regex literals exhaust RSS quickly.
     static REGEX_CACHE: RefCell<HashMap<(String, String), Arc<Regex>>> = RefCell::new(HashMap::new());
+    /// Fancy-regex fallback cache for patterns with lookbehind/lookahead.
+    static FANCY_CACHE: RefCell<HashMap<(String, String), Arc<fancy_regex::Regex>>> = RefCell::new(HashMap::new());
 }
 
 fn get_or_compile_regex(pattern: &str, flags: &str) -> Arc<Regex> {
@@ -71,8 +69,27 @@ fn get_or_compile_regex(pattern: &str, flags: &str) -> Arc<Regex> {
         } else {
             translated
         };
-        let regex = Regex::new(&regex_pattern)
-            .unwrap_or_else(|_| Regex::new(r"[^\s\S]").unwrap());
+        let regex = match Regex::new(&regex_pattern) {
+            Ok(re) => re,
+            Err(_) => {
+                // Pattern has features regex crate doesn't support
+                // (lookbehind, lookahead). Try fancy-regex which supports
+                // the full JS regex feature set, and if it compiles, wrap
+                // the result via a find-and-replace approach at the exec
+                // call sites. For now, store a never-matching pattern so
+                // existing callers don't crash — the fancy-regex fallback
+                // is handled in js_regexp_exec_fancy below.
+                FANCY_CACHE.with(|fc| {
+                    if let Ok(fre) = fancy_regex::Regex::new(&regex_pattern) {
+                        fc.borrow_mut().insert(
+                            (pattern.to_string(), flags.to_string()),
+                            std::sync::Arc::new(fre),
+                        );
+                    }
+                });
+                Regex::new(r"[^\s\S]").unwrap()
+            }
+        };
         let arc = Arc::new(regex);
         cache.insert((pattern.to_string(), flags.to_string()), arc.clone());
         arc
@@ -549,6 +566,46 @@ pub extern "C" fn js_regexp_exec(re: *mut RegExpHeader, s: *const StringHeader) 
         }
 
         let search_str = &str_data[search_start_byte..];
+
+        // Check if this regex has a fancy-regex fallback (lookbehind/lookahead).
+        let fancy_captures = FANCY_CACHE.with(|fc| {
+            let fc = fc.borrow();
+            let pat = string_as_str((*re).pattern_ptr);
+            let flags_str = string_as_str((*re).flags_ptr);
+            if let Some(fre) = fc.get(&(pat.to_string(), flags_str.to_string())) {
+                if let Ok(Some(caps)) = fre.captures(search_str) {
+                    let full = caps.get(0).unwrap();
+                    // Build result: just the full match for now
+                    let match_byte_offset = full.start() + search_start_byte;
+                    let match_char_offset = str_data[..match_byte_offset].chars().count();
+                    let match_str = full.as_str();
+                    let match_ptr = crate::string::js_string_from_bytes(
+                        match_str.as_ptr(), match_str.len() as u32
+                    );
+                    let arr = crate::array::js_array_alloc_with_length(1);
+                    let elements = (arr as *mut u8).add(8) as *mut f64;
+                    *elements = f64::from_bits(
+                        crate::value::STRING_TAG | (match_ptr as u64 & crate::value::POINTER_MASK)
+                    );
+                    if global {
+                        (*re).last_index = (match_char_offset + match_str.chars().count()) as u32;
+                    }
+                    LAST_EXEC_INDEX.with(|idx| *idx.borrow_mut() = match_char_offset as f64);
+                    return Some(arr);
+                }
+                return Some(ptr::null_mut()); // fancy-regex tried but no match
+            }
+            None // no fancy fallback — use standard regex
+        });
+        if let Some(result) = fancy_captures {
+            if result.is_null() {
+                if global { (*re).last_index = 0; }
+                LAST_EXEC_INDEX.with(|idx| *idx.borrow_mut() = -1.0);
+                LAST_EXEC_GROUPS.with(|g| *g.borrow_mut() = ptr::null_mut());
+                return ptr::null_mut();
+            }
+            return result;
+        }
 
         match regex.captures(search_str) {
             Some(caps) => {
