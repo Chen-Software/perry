@@ -284,8 +284,8 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
             ar
         }
         None => {
-            eprintln!("[strip-dedup] ERROR: llvm-ar not found — cannot strip duplicates from {lib_name}");
-            return Err(anyhow::anyhow!("llvm-ar not found (install llvm-tools: rustup component add llvm-tools)"));
+            eprintln!("[strip-dedup] llvm-ar not found, skipping dedup for {lib_name} (optional — install with: rustup component add llvm-tools)");
+            return Err(anyhow::anyhow!("llvm-ar not found"));
         }
     };
 
@@ -5633,7 +5633,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
                 match strip_duplicate_objects_from_lib(&ui_lib) {
                     Ok(trimmed) => trimmed,
                     Err(e) => {
-                        eprintln!("[strip-dedup] FAILED for UI lib, using original: {e}");
+                        eprintln!("[strip-dedup] skipped for UI lib (non-fatal): {e}");
                         ui_lib
                     }
                 }
