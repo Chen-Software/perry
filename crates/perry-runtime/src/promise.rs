@@ -1184,10 +1184,19 @@ extern "C" fn promise_any_reject_handler(closure: *const crate::closure::Closure
     js_array_set_f64(state_arr, 0, remaining);
 
     if remaining == 0.0 {
-        // All rejected — settle with the errors array as the rejection reason
+        // All rejected — create an AggregateError with the collected
+        // errors array and reject the result promise with it.
         js_array_set_f64(state_arr, 1, 1.0);
-        let arr_f64 = crate::value::js_nanbox_pointer(errors_arr as i64);
-        js_promise_reject(result_promise, arr_f64);
+        let msg = crate::string::js_string_from_bytes(
+            b"All promises were rejected".as_ptr(),
+            26,
+        );
+        let agg_err = crate::error::js_aggregateerror_new(
+            errors_arr,
+            msg,
+        );
+        let err_f64 = crate::value::js_nanbox_pointer(agg_err as i64);
+        js_promise_reject(result_promise, err_f64);
     }
     0.0
 }
