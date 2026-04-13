@@ -679,9 +679,9 @@ pub extern "C" fn js_closure_unbind_this(val: f64) -> f64 {
 #[no_mangle] pub extern "C" fn js_sharp_negate() -> i64 { 0 }
 #[no_mangle] pub extern "C" fn js_sharp_quality() -> i64 { 0 }
 #[no_mangle] pub extern "C" fn js_sharp_to_format() -> i64 { 0 }
-#[no_mangle] pub extern "C" fn js_sqlite_transaction() -> i64 { 0 }
-#[no_mangle] pub extern "C" fn js_sqlite_transaction_commit() -> i64 { 0 }
-#[no_mangle] pub extern "C" fn js_sqlite_transaction_rollback() -> i64 { 0 }
+// js_sqlite_transaction / _commit / _rollback stubs removed — the real
+// implementations live in perry-stdlib/src/sqlite.rs and would collide at
+// link time when both crates are present (e.g. `cargo test --workspace`).
 #[cfg(test)]
 mod tests {
     use super::*;

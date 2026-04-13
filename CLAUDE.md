@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.15
+**Current Version:** 0.5.16
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,10 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.144 and earlier), see CHANGELOG.md.
+
+### v0.5.16 (llvm-backend) — Linux build fixes: clang discovery + duplicate symbol
+- **fix**: `find_clang()` and `find_llvm_tool()` now search common Linux LLVM install paths (`/usr/lib64/rocm/llvm/bin`, `/usr/lib/llvm-{17,18,19}/bin`) in addition to Homebrew prefixes, so Perry compiles `.ll` → `.o` on Linux without requiring `PERRY_LLVM_CLANG` env var.
+- **fix**: removed 3 AOT stubs (`js_sqlite_transaction`, `_commit`, `_rollback`) from `perry-runtime/src/closure.rs` that collided with real implementations in `perry-stdlib/src/sqlite.rs`, causing `duplicate symbol` linker errors during `cargo test --workspace`.
 
 ### v0.5.15 (llvm-backend) — perry/ui State dispatch + check-deps fix (closes #24, #25)
 - **fix**: `State(0)` constructor and `.value`/`.set()` instance methods were missing from the LLVM codegen dispatch tables, producing "not in dispatch table" warnings and silently returning `undefined`. Added `State` → `perry_ui_state_create` to `PERRY_UI_TABLE` and `value` → `perry_ui_state_get` / `set` → `perry_ui_state_set` to `PERRY_UI_INSTANCE_TABLE`.

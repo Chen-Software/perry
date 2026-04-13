@@ -114,6 +114,20 @@ fn find_clang() -> Option<PathBuf> {
     if which("clang") {
         return Some(PathBuf::from("clang"));
     }
+    // Well-known install prefixes (Homebrew on macOS, ROCm / distro LLVM on Linux).
+    for prefix in &[
+        "/opt/homebrew/opt/llvm/bin",
+        "/usr/local/opt/llvm/bin",
+        "/usr/lib64/rocm/llvm/bin",
+        "/usr/lib/llvm-19/bin",
+        "/usr/lib/llvm-18/bin",
+        "/usr/lib/llvm-17/bin",
+    ] {
+        let candidate = PathBuf::from(prefix).join("clang");
+        if candidate.exists() && is_executable(&candidate) {
+            return Some(candidate);
+        }
+    }
     None
 }
 
@@ -157,7 +171,14 @@ fn find_llvm_tool(tool: &str) -> Option<PathBuf> {
             return Some(candidate);
         }
     }
-    for prefix in &["/opt/homebrew/opt/llvm/bin", "/usr/local/opt/llvm/bin"] {
+    for prefix in &[
+        "/opt/homebrew/opt/llvm/bin",
+        "/usr/local/opt/llvm/bin",
+        "/usr/lib64/rocm/llvm/bin",
+        "/usr/lib/llvm-19/bin",
+        "/usr/lib/llvm-18/bin",
+        "/usr/lib/llvm-17/bin",
+    ] {
         let candidate = PathBuf::from(prefix).join(tool);
         if candidate.exists() && is_executable(&candidate) {
             return Some(candidate);
