@@ -686,6 +686,29 @@ pub extern "C" fn js_string_char_at(s: *const StringHeader, index: i32) -> *mut 
     }
 }
 
+/// Split a string into an array of single-character strings.
+/// Used by the spread operator: `[..."hello"]` → `["h","e","l","l","o"]`.
+/// Returns an ArrayHeader pointer with NaN-boxed STRING_TAG elements.
+#[no_mangle]
+pub extern "C" fn js_string_to_char_array(s: i64) -> i64 {
+    let str_ptr = (s as u64 & crate::value::POINTER_MASK) as *const StringHeader;
+    if str_ptr.is_null() || !is_valid_string_ptr(str_ptr) {
+        return crate::array::js_array_alloc(0) as i64;
+    }
+    let len = unsafe { (*str_ptr).length } as usize;
+    let arr = crate::array::js_array_alloc_with_length(len as u32);
+    let elements = unsafe { (arr as *mut u8).add(8) as *mut f64 };
+    let data = unsafe { string_data(str_ptr) };
+    for i in 0..len {
+        let ch_ptr = unsafe { js_string_from_bytes(data.add(i), 1) };
+        let nanboxed = f64::from_bits(
+            crate::value::STRING_TAG | (ch_ptr as u64 & crate::value::POINTER_MASK),
+        );
+        unsafe { *elements.add(i) = nanboxed; }
+    }
+    arr as i64
+}
+
 /// Create a string from a character code (String.fromCharCode)
 /// Takes a single character code and returns a 1-character string
 #[no_mangle]

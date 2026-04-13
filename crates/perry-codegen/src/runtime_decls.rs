@@ -233,6 +233,7 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_string_trim_start", I64, &[I64]);
     module.declare_function("js_string_trim_end", I64, &[I64]);
     module.declare_function("js_string_char_at", I64, &[I64, I32]);
+    module.declare_function("js_string_to_char_array", I64, &[I64]);
     module.declare_function("js_string_repeat", I64, &[I64, I32]);
     module.declare_function("js_string_replace_string", I64, &[I64, I64, I64]);
     module.declare_function("js_string_replace_all_string", I64, &[I64, I64, I64]);
