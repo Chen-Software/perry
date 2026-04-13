@@ -583,12 +583,24 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     }
 
     let mut module_globals: HashMap<u32, String> = HashMap::new();
+    // Module global types: propagated to every FnCtx so functions that
+    // access module globals (via LocalGet/LocalSet) see the correct
+    // declared type. Without this, `editorInstance` (Named("Editor"))
+    // in render.ts has its type only in the entry function's FnCtx,
+    // so method calls in other functions fall through to the generic
+    // dispatch instead of the class method registry.
+    let mut module_global_types: HashMap<u32, perry_types::Type> = HashMap::new();
     // Collect exported variable names so we can create external
     // globals + getter functions for cross-module access.
     let exported_var_names: std::collections::HashSet<String> =
         hir.exported_objects.iter().cloned().collect();
     for s in &hir.init {
-        if let perry_hir::Stmt::Let { id, name, .. } = s {
+        if let perry_hir::Stmt::Let { id, name, ty, .. } = s {
+            // Always record the declared type for module-level lets
+            // so all functions see it (not just the entry function).
+            if !matches!(ty, perry_types::Type::Any) {
+                module_global_types.insert(*id, ty.clone());
+            }
             if referenced_from_fn.contains(id) || exported_var_names.contains(name) {
                 // Use external linkage for exported vars so other
                 // modules can reference them. Internal for the rest.
@@ -958,7 +970,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     // Lower each user function into the module (skip i64-specialized ones).
     for f in &hir.functions {
         if i64_specialized.contains(&f.id) { continue; }
-        compile_function(&mut llmod, f, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars, &closure_rest_params, &cross_module)
+        compile_function(&mut llmod, f, &func_names, &mut strings, &class_table, &method_names, &module_globals, &module_global_types, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars, &closure_rest_params, &cross_module)
             .with_context(|| format!("lowering function '{}'", f.name))?;
     }
 
@@ -993,7 +1005,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     // them directly.
     for class in &hir.classes {
         for method in &class.methods {
-            compile_method(&mut llmod, class, method, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars, &closure_rest_params, &cross_module)
+            compile_method(&mut llmod, class, method, &func_names, &mut strings, &class_table, &method_names, &module_globals, &module_global_types, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars, &closure_rest_params, &cross_module)
                 .with_context(|| format!("lowering method '{}::{}'", class.name, method.name))?;
         }
         // Getters and setters are also methods, just registered under
@@ -1002,13 +1014,13 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         for (prop, getter_fn) in &class.getters {
             let mut renamed = getter_fn.clone();
             renamed.name = format!("__get_{}", prop);
-            compile_method(&mut llmod, class, &renamed, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars, &closure_rest_params, &cross_module)
+            compile_method(&mut llmod, class, &renamed, &func_names, &mut strings, &class_table, &method_names, &module_globals, &module_global_types, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars, &closure_rest_params, &cross_module)
                 .with_context(|| format!("lowering getter '{}::{}'", class.name, prop))?;
         }
         for (prop, setter_fn) in &class.setters {
             let mut renamed = setter_fn.clone();
             renamed.name = format!("__set_{}", prop);
-            compile_method(&mut llmod, class, &renamed, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars, &closure_rest_params, &cross_module)
+            compile_method(&mut llmod, class, &renamed, &func_names, &mut strings, &class_table, &method_names, &module_globals, &module_global_types, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars, &closure_rest_params, &cross_module)
                 .with_context(|| format!("lowering setter '{}::{}'", class.name, prop))?;
         }
         // Emit standalone constructor for cross-module use.
@@ -1034,7 +1046,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
             };
             compile_method(
                 &mut llmod, class, &ctor_as_method, &func_names, &mut strings,
-                &class_table, &method_names, &module_globals,
+                &class_table, &method_names, &module_globals, &module_global_types,
                 &opts.import_function_prefixes, &enum_table,
                 &static_field_globals, &class_ids, &func_signatures,
                 &module_boxed_vars, &closure_rest_params, &cross_module,
@@ -1259,6 +1271,7 @@ fn compile_function(
     classes: &HashMap<String, &perry_hir::Class>,
     methods: &HashMap<(String, String), String>,
     module_globals: &HashMap<u32, String>,
+    module_global_types: &HashMap<u32, perry_types::Type>,
     import_function_prefixes: &HashMap<String, String>,
     enums: &HashMap<(String, String), perry_hir::EnumValue>,
     static_field_globals: &HashMap<(String, String), String>,
@@ -1301,11 +1314,15 @@ fn compile_function(
 
     // Param types feed local_types so type-aware dispatch (e.g. string
     // concat detection on a `: string` parameter) works inside the body.
-    let local_types: HashMap<u32, perry_types::Type> = f
-        .params
+    // Also seed with module global types so functions that access module
+    // globals see the correct declared types (e.g., Named("Editor")).
+    let mut local_types: HashMap<u32, perry_types::Type> = module_global_types
         .iter()
-        .map(|p| (p.id, p.ty.clone()))
+        .map(|(k, v)| (*k, v.clone()))
         .collect();
+    for p in &f.params {
+        local_types.insert(p.id, p.ty.clone());
+    }
 
     // Pre-walk: which locals need to be boxed? A local is boxed when
     // it's captured by a closure AND written by someone (either the
@@ -1631,6 +1648,7 @@ fn compile_method(
     classes: &HashMap<String, &perry_hir::Class>,
     methods: &HashMap<(String, String), String>,
     module_globals: &HashMap<u32, String>,
+    module_global_types: &HashMap<u32, perry_types::Type>,
     import_function_prefixes: &HashMap<String, String>,
     enums: &HashMap<(String, String), perry_hir::EnumValue>,
     static_field_globals: &HashMap<(String, String), String>,
@@ -1676,11 +1694,13 @@ fn compile_method(
         (this_slot, map)
     };
 
-    let local_types: HashMap<u32, perry_types::Type> = method
-        .params
+    let mut local_types: HashMap<u32, perry_types::Type> = module_global_types
         .iter()
-        .map(|p| (p.id, p.ty.clone()))
+        .map(|(k, v)| (*k, v.clone()))
         .collect();
+    for p in &method.params {
+        local_types.insert(p.id, p.ty.clone());
+    }
 
     let method_boxed_vars = module_boxed_vars.clone();
 

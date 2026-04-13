@@ -601,7 +601,10 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // on bench_string_ops.
         Expr::LocalSet(id, value) => {
             // Detect the `x = x + y` self-append pattern.
-            if matches!(ctx.local_types.get(id), Some(HirType::String)) {
+            // Skip for module globals — they use global variable loads,
+            // not alloca slots, and the self-append helper requires a slot.
+            if matches!(ctx.local_types.get(id), Some(HirType::String))
+                && !ctx.module_globals.contains_key(id) {
                 if let Expr::Binary { op: BinaryOp::Add, left, right } = value.as_ref() {
                     if let Expr::LocalGet(left_id) = left.as_ref() {
                         if left_id == id {
