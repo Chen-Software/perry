@@ -630,7 +630,13 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
                 // constants (like `export const Key = { ... }`) cause
                 // linker errors because the wrapper tries to call a
                 // function that doesn't exist.
-                if is_exported {
+                // Skip the getter for names that are also functions — the
+                // compiled function body will provide the correct symbol.
+                // Without this, `export function isSetupComplete()` gets
+                // a trivial getter that wraps a broken _i64 stub (returns 0)
+                // instead of the real function that reads the module global.
+                let is_also_function = hir.functions.iter().any(|f| f.is_exported && f.name == *name);
+                if is_exported && !is_also_function {
                     let fn_name = format!(
                         "perry_fn_{}__{}",
                         module_prefix,
@@ -943,7 +949,21 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     // integer arithmetic. The f64 wrapper calls fptosi → i64_fn → sitofp.
     let mut i64_specialized: std::collections::HashSet<u32> = std::collections::HashSet::new();
     for f in &hir.functions {
-        if crate::collectors::is_integer_specializable(f) {
+        // Skip integer specialization for functions that access module globals.
+        // The i64 body emitter can't handle module global loads (it produces
+        // `ret 0` instead of reading the global), creating a broken stub
+        // that shadows the real compiled function.
+        let uses_module_globals = f.body.iter().any(|s| {
+            fn walks(s: &perry_hir::Stmt, mg: &HashMap<u32, String>) -> bool {
+                match s {
+                    perry_hir::Stmt::Return(Some(perry_hir::Expr::LocalGet(id))) => mg.contains_key(id),
+                    perry_hir::Stmt::Expr(perry_hir::Expr::LocalGet(id)) => mg.contains_key(id),
+                    _ => false,
+                }
+            }
+            walks(s, &module_globals)
+        });
+        if crate::collectors::is_integer_specializable(f) && !uses_module_globals {
             if let Some(llvm_name) = func_names.get(&f.id) {
                 let i64_name = format!("{}_i64", llvm_name);
                 crate::collectors::emit_i64_function(&mut llmod, f, &i64_name);
