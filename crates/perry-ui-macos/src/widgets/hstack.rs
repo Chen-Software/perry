@@ -3,12 +3,11 @@ use objc2::{msg_send};
 use objc2_app_kit::{NSStackView, NSView, NSUserInterfaceLayoutOrientation, NSLayoutAttribute};
 use objc2_foundation::MainThreadMarker;
 
-/// Set distribution to GravityAreas (-1) so children pack into gravity zones.
-/// Combined with addView:inGravity:NSStackViewGravityLeading (in add_child),
-/// this ensures children pack from the leading edge without stretching.
+/// Set distribution to Fill (0) so children fill available space based on
+/// their content hugging priorities.
 fn set_gravity_distribution(stack: &NSStackView) {
     unsafe {
-        let _: () = msg_send![stack, setDistribution: -1i64]; // NSStackViewDistributionGravityAreas
+        let _: () = msg_send![stack, setDistribution: 0i64]; // NSStackViewDistributionFill
     }
 }
 
