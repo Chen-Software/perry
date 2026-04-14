@@ -96,6 +96,26 @@ pub extern "C" fn js_string_from_bytes(data: *const u8, len: u32) -> *mut String
     js_string_from_bytes_with_capacity(data, len, len)
 }
 
+/// Fast path: create a string from bytes known to be pure ASCII.
+/// Skips the `compute_utf16_len` byte scan — sets utf16_len = byte_len directly.
+#[inline]
+fn js_string_from_ascii_bytes(data: *const u8, len: u32) -> *mut StringHeader {
+    let total_size = std::mem::size_of::<StringHeader>() + len as usize;
+    let raw = crate::gc::gc_malloc(total_size, crate::gc::GC_TYPE_STRING);
+    let ptr = raw as *mut StringHeader;
+    unsafe {
+        (*ptr).utf16_len = len; // ASCII: utf16_len == byte_len
+        (*ptr).byte_len = len;
+        (*ptr).capacity = len;
+        (*ptr).refcount = 0;
+        if len > 0 && !data.is_null() {
+            let data_ptr = (ptr as *mut u8).add(std::mem::size_of::<StringHeader>());
+            ptr::copy_nonoverlapping(data, data_ptr, len as usize);
+        }
+    }
+    ptr
+}
+
 /// Create a string from raw bytes with extra capacity for future appending
 #[no_mangle]
 pub extern "C" fn js_string_from_bytes_with_capacity(data: *const u8, len: u32, capacity: u32) -> *mut StringHeader {
@@ -433,12 +453,12 @@ pub extern "C" fn js_string_slice(s: *const StringHeader, start: i32, end: i32) 
         return js_string_from_bytes(ptr::null(), 0);
     }
 
-    // ASCII fast path: byte offsets == UTF-16 offsets
+    // ASCII fast path: byte offsets == UTF-16 offsets, skip utf16_len scan
     if is_ascii_string(s) {
         let slice_len = (end - start) as u32;
         unsafe {
             let src = string_data(s).add(start as usize);
-            return js_string_from_bytes(src, slice_len);
+            return js_string_from_ascii_bytes(src, slice_len);
         }
     }
 
@@ -475,12 +495,12 @@ pub extern "C" fn js_string_substring(s: *const StringHeader, start: i32, end: i
         return js_string_from_bytes(ptr::null(), 0);
     }
 
-    // ASCII fast path
+    // ASCII fast path: skip utf16_len scan in allocator
     if is_ascii_string(s) {
         let slice_len = (end - start) as u32;
         unsafe {
             let src = string_data(s).add(start as usize);
-            return js_string_from_bytes(src, slice_len);
+            return js_string_from_ascii_bytes(src, slice_len);
         }
     }
 
@@ -561,34 +581,53 @@ pub extern "C" fn js_string_index_of_from(haystack: *const StringHeader, needle:
         return -1;
     }
 
-    let h = string_as_str(haystack);
-    let n = string_as_str(needle);
+    unsafe {
+        let h_blen = (*haystack).byte_len as usize;
+        let n_blen = (*needle).byte_len as usize;
 
-    // ASCII fast path: byte offsets == UTF-16 offsets
-    if is_ascii_string(haystack) {
-        let start = if from_index < 0 { 0 } else { from_index as usize };
-        if start > h.len() {
-            // JS spec: if fromIndex >= string.length, return -1 (unless needle is empty)
-            if n.is_empty() { return h.len() as i32; }
+        // ASCII fast path: raw byte search, no &str construction
+        if is_ascii_string(haystack) {
+            let start = if from_index < 0 { 0usize } else { from_index as usize };
+            if n_blen == 0 {
+                return start.min(h_blen) as i32;
+            }
+            if start + n_blen > h_blen {
+                return -1;
+            }
+            let h_ptr = string_data(haystack);
+            let n_ptr = string_data(needle);
+            let first = *n_ptr;
+            let search_end = h_blen - n_blen + 1;
+            let mut i = start;
+            while i < search_end {
+                if *h_ptr.add(i) == first
+                    && (n_blen == 1
+                        || libc::memcmp(
+                            h_ptr.add(i) as *const libc::c_void,
+                            n_ptr as *const libc::c_void,
+                            n_blen,
+                        ) == 0)
+                {
+                    return i as i32;
+                }
+                i += 1;
+            }
             return -1;
         }
-        return match h[start..].find(n) {
-            Some(pos) => (start + pos) as i32,
+
+        // Non-ASCII: construct &str, convert UTF-16 from_index to byte offset
+        let h = string_as_str(haystack);
+        let n = string_as_str(needle);
+        let u16_start = if from_index < 0 { 0usize } else { from_index as usize };
+        let byte_start = utf16_offset_to_byte_offset(h, u16_start);
+        if byte_start > h.len() {
+            if n.is_empty() { return (*haystack).utf16_len as i32; }
+            return -1;
+        }
+        match h[byte_start..].find(n) {
+            Some(byte_pos) => byte_offset_to_utf16_index(h, byte_start + byte_pos) as i32,
             None => -1,
-        };
-    }
-
-    // Convert UTF-16 from_index to byte offset
-    let u16_start = if from_index < 0 { 0usize } else { from_index as usize };
-    let byte_start = utf16_offset_to_byte_offset(h, u16_start);
-    if byte_start > h.len() {
-        if n.is_empty() { return unsafe { (*haystack).utf16_len as i32 }; }
-        return -1;
-    }
-
-    match h[byte_start..].find(n) {
-        Some(byte_pos) => byte_offset_to_utf16_index(h, byte_start + byte_pos) as i32,
-        None => -1,
+        }
     }
 }
 
@@ -604,21 +643,43 @@ pub extern "C" fn js_string_last_index_of(haystack: *const StringHeader, needle:
         return unsafe { (*haystack).utf16_len as i32 };
     }
 
-    let h = string_as_str(haystack);
-    let n = string_as_str(needle);
+    unsafe {
+        let n_blen = (*needle).byte_len as usize;
+        if n_blen == 0 {
+            return (*haystack).utf16_len as i32;
+        }
 
-    if n.is_empty() {
-        return unsafe { (*haystack).utf16_len as i32 };
+        // ASCII fast path: raw byte reverse search
+        if is_ascii_string(haystack) {
+            let h_blen = (*haystack).byte_len as usize;
+            if n_blen > h_blen { return -1; }
+            let h_ptr = string_data(haystack);
+            let n_ptr = string_data(needle);
+            let first = *n_ptr;
+            let mut i = h_blen - n_blen;
+            loop {
+                if *h_ptr.add(i) == first
+                    && (n_blen == 1
+                        || libc::memcmp(
+                            h_ptr.add(i) as *const libc::c_void,
+                            n_ptr as *const libc::c_void,
+                            n_blen,
+                        ) == 0)
+                {
+                    return i as i32;
+                }
+                if i == 0 { break; }
+                i -= 1;
+            }
+            return -1;
+        }
     }
 
+    // Non-ASCII path
+    let h = string_as_str(haystack);
+    let n = string_as_str(needle);
     match h.rfind(n) {
-        Some(byte_pos) => {
-            if is_ascii_string(haystack) {
-                byte_pos as i32
-            } else {
-                byte_offset_to_utf16_index(h, byte_pos) as i32
-            }
-        }
+        Some(byte_pos) => byte_offset_to_utf16_index(h, byte_pos) as i32,
         None => -1,
     }
 }
@@ -775,12 +836,12 @@ pub extern "C" fn js_string_char_at(s: *const StringHeader, index: i32) -> *mut 
         return js_string_from_bytes(std::ptr::null(), 0);
     }
 
-    // ASCII fast path
+    // ASCII fast path: skip utf16_len scan
     if is_ascii_string(s) {
         unsafe {
             let data = string_data(s);
             let char_ptr = data.add(index as usize);
-            return js_string_from_bytes(char_ptr, 1);
+            return js_string_from_ascii_bytes(char_ptr, 1);
         }
     }
 
