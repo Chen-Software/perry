@@ -2588,6 +2588,11 @@ fn lower_module_decl(
                                                         ("mysql2" | "mysql2/promise", "createConnection") => Some("Connection"),
                                                         ("pg", "connect") => Some("Client"),
                                                         ("http" | "https", "request" | "get") => Some("ClientRequest"),
+                                                        // net.createConnection(host, port) returns a Socket handle.
+                                                        // Without registering this, subsequent `sock.write/on/end/destroy`
+                                                        // calls fall through to dynamic dispatch and never reach
+                                                        // the `js_net_socket_*` FFI functions.
+                                                        ("net", "createConnection") => Some("Socket"),
                                                         // node-cron's `cron.schedule(expr, cb)` returns a job
                                                         // handle whose `start()`/`stop()`/`isRunning()` etc.
                                                         // dispatch via the ("node-cron", true, METHOD) entries
@@ -3560,6 +3565,27 @@ fn lower_stmt(
                                     if let Some(cn) = class_name {
                                         ctx.register_native_instance(name.clone(), mod_name.clone(), cn.to_string());
                                     }
+                                }
+                            }
+                            // Track synchronous native module factories as native instances.
+                            // Added for workstream A1.5 so `const sock = net.createConnection(...)`
+                            // registers `sock` as a Socket instance; without this, subsequent
+                            // `sock.write/on/end/destroy` miss the NATIVE_MODULE_TABLE dispatch
+                            // and never reach the `js_net_socket_*` FFI in perry-stdlib.
+                            if let Stmt::Let { name, init: Some(Expr::NativeMethodCall { module: mod_name, method, object: None, .. }), .. } = s {
+                                let class_name = match (mod_name.as_str(), method.as_str()) {
+                                    ("net", "createConnection" | "connect") => Some("Socket"),
+                                    // tls.connect returns the same Socket class — reuses
+                                    // all the write/end/destroy/on/upgradeToTLS dispatch.
+                                    ("tls", "connect") => Some("Socket"),
+                                    _ => None,
+                                };
+                                if let Some(cn) = class_name {
+                                    // Register under `"net"` (the module the Socket class belongs to)
+                                    // regardless of which module the factory lived in, so method
+                                    // dispatch resolves correctly.
+                                    ctx.register_native_instance(name.clone(), "net".to_string(), cn.to_string());
+                                    let _ = mod_name; // suppress unused on tls branch
                                 }
                             }
                         }
@@ -4771,6 +4797,25 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
             // Check if any argument has spread
             let has_spread = call.args.iter().any(|arg| arg.spread.is_some());
 
+            // Pre-scan: if this call is `<fastify app>.get|post|...|addHook(path, handler)`,
+            // the handler is an arrow function whose first two params are
+            // the FastifyRequest and FastifyReply. Register them as native
+            // instances BEFORE lowering the arrow so that `request.header(...)`
+            // and `request.headers[...]` inside the handler dispatch through
+            // `Expr::NativeMethodCall` instead of generic object access.
+            //
+            // In v0.4.51 this was (presumably) handled by the old codegen's
+            // per-method dispatch table; in v0.5.x the dispatch happens at
+            // HIR lower time via `lookup_native_instance(name)`, so we need
+            // the annotation here for the lookup to succeed.
+            let fastify_handler_names: Option<(String, String)> = pre_scan_fastify_handler_params(ctx, call);
+            if let Some((req_name, reply_name)) = &fastify_handler_names {
+                ctx.register_native_instance(req_name.clone(), "fastify".to_string(), "Request".to_string());
+                if !reply_name.is_empty() {
+                    ctx.register_native_instance(reply_name.clone(), "fastify".to_string(), "Reply".to_string());
+                }
+            }
+
             let mut args = call.args.iter()
                 .map(|arg| lower_expr(ctx, &arg.expr))
                 .collect::<Result<Vec<_>>>()?;
@@ -5320,16 +5365,12 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             let connection_listener = args.get(1).cloned().map(Box::new);
                                             return Ok(Expr::NetCreateServer { options, connection_listener });
                                         }
-                                        "createConnection" | "connect" => {
-                                            let port = args.get(0).cloned().unwrap_or(Expr::Number(0.0));
-                                            let host = args.get(1).cloned().map(Box::new);
-                                            let connect_listener = args.get(2).cloned().map(Box::new);
-                                            return Ok(Expr::NetCreateConnection {
-                                                port: Box::new(port),
-                                                host,
-                                                connect_listener
-                                            });
-                                        }
+                                        // createConnection/connect fall through to generic NativeMethodCall
+                                        // so they dispatch via NATIVE_MODULE_TABLE to the new
+                                        // event-driven `js_net_socket_connect` in perry-stdlib (A1/A1.5).
+                                        // The dedicated `Expr::NetCreateConnection` variant was never
+                                        // lowered by the LLVM backend and remained as vestigial HIR;
+                                        // the generic path gives us working codegen for free.
                                         _ => {} // Fall through to generic handling
                                     }
                                 }
@@ -5337,12 +5378,16 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
 
                             if let Some((module_name, _imported_method)) = ctx.lookup_native_module(&obj_name) {
                                 // Skip modules handled specifically below (path, fs, child_process, etc.)
+                                // `net` used to be in this list back when its method calls
+                                // were short-circuited into `Expr::NetCreateConnection` etc.
+                                // After A1.5 `net` goes through the generic NativeMethodCall
+                                // path so the LLVM backend's NATIVE_MODULE_TABLE dispatches
+                                // to `js_net_socket_*` in perry-stdlib.
                                 let is_handled_module = module_name == "path" || module_name == "node:path"
                                     || module_name == "fs" || module_name == "node:fs"
                                     || module_name == "child_process" || module_name == "node:child_process"
                                     || module_name == "crypto" || module_name == "node:crypto"
-                                    || module_name == "os" || module_name == "node:os"
-                                    || module_name == "net" || module_name == "node:net";
+                                    || module_name == "os" || module_name == "node:os";
                                 if !is_handled_module {
                                     // This is a call on a native module (e.g., mysql.createConnection)
                                     if let ast::MemberProp::Ident(method_ident) = &member.prop {
@@ -6205,19 +6250,9 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                 connection_listener,
                                             });
                                         }
-                                        "createConnection" | "connect" => {
-                                            if args.len() >= 1 {
-                                                let mut args_iter = args.into_iter();
-                                                let port = args_iter.next().unwrap();
-                                                let host = args_iter.next().map(Box::new);
-                                                let connect_listener = args_iter.next().map(Box::new);
-                                                return Ok(Expr::NetCreateConnection {
-                                                    port: Box::new(port),
-                                                    host,
-                                                    connect_listener,
-                                                });
-                                            }
-                                        }
+                                        // createConnection/connect: see sibling site above —
+                                        // falls through to generic NativeMethodCall so the LLVM
+                                        // backend's NATIVE_MODULE_TABLE dispatch can handle it.
                                         _ => {} // Fall through to generic handling
                                     }
                                 }

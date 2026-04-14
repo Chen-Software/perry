@@ -217,6 +217,79 @@ pub(crate) fn is_destructuring_pattern(pat: &ast::Pat) -> bool {
     matches!(pat, ast::Pat::Array(_) | ast::Pat::Object(_))
 }
 
+/// Detect fastify route-handler calls (`app.get|post|put|delete|patch|head|
+/// options|all|addHook(path, handler)` and `app.setErrorHandler(handler)`)
+/// and return the names of the first two arrow-function params — which
+/// should be registered as fastify `Request` and `Reply` native instances
+/// so that `request.header(...)`, `request.headers[...]`, `reply.send(...)`
+/// etc. inside the handler body dispatch through the fastify FFI instead
+/// of falling through to generic object access.
+///
+/// Returns `Some((request_name, reply_name))` when the pattern matches,
+/// where `reply_name` is empty if the handler takes only one param.
+/// Returns `None` for any other call shape.
+pub(crate) fn pre_scan_fastify_handler_params(
+    ctx: &crate::lower::LoweringContext,
+    call: &ast::CallExpr,
+) -> Option<(String, String)> {
+    use ast::Callee;
+    let callee_expr = match &call.callee {
+        Callee::Expr(e) => e,
+        _ => return None,
+    };
+    // Callee must be `<obj>.<method>` where <obj> is a registered fastify
+    // App (or a chain that resolves to one; for simplicity we only handle
+    // the direct Ident case here — app.get(...), not getApp().get(...)).
+    let member = match callee_expr.as_ref() {
+        ast::Expr::Member(m) => m,
+        _ => return None,
+    };
+    let obj_ident = match member.obj.as_ref() {
+        ast::Expr::Ident(i) => i,
+        _ => return None,
+    };
+    let obj_name = obj_ident.sym.to_string();
+    let native = ctx.lookup_native_instance(&obj_name)?;
+    if native.0 != "fastify" {
+        return None;
+    }
+    let method_name = match &member.prop {
+        ast::MemberProp::Ident(i) => i.sym.to_string(),
+        _ => return None,
+    };
+    // The handler is the last arg for route methods (skip the path arg).
+    // - `app.get(path, handler)`    → handler_idx = 1
+    // - `app.setErrorHandler(hnd)`  → handler_idx = 0
+    // - `app.addHook(name, hnd)`    → handler_idx = 1
+    let handler_idx = match method_name.as_str() {
+        "get" | "post" | "put" | "delete" | "patch" | "head" | "options" | "all" => 1,
+        "addHook" => 1,
+        "setErrorHandler" => 0,
+        _ => return None,
+    };
+    let handler_arg = call.args.get(handler_idx)?;
+    if handler_arg.spread.is_some() {
+        return None;
+    }
+    let arrow = match handler_arg.expr.as_ref() {
+        ast::Expr::Arrow(a) => a,
+        ast::Expr::Fn(_) => return None, // fn expressions handled separately
+        _ => return None,
+    };
+    let req_name = arrow.params.first().and_then(|p| pat_ident_name(p))?;
+    let reply_name = arrow.params.get(1).and_then(|p| pat_ident_name(p)).unwrap_or_default();
+    Some((req_name, reply_name))
+}
+
+/// Extract a plain-ident name from an arrow function param (skip
+/// destructured / rest params — those aren't Request/Reply by shape).
+fn pat_ident_name(pat: &ast::Pat) -> Option<String> {
+    match pat {
+        ast::Pat::Ident(i) => Some(i.id.sym.to_string()),
+        _ => None,
+    }
+}
+
 /// Detect if an expression represents a native handle instance (Big, Decimal, etc.)
 /// Returns the module name if it does.
 pub(crate) fn detect_native_instance_expr(expr: &ast::Expr) -> Option<&'static str> {

@@ -265,11 +265,11 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
             // like width/height/color).
             let mut lowered: Vec<String> = Vec::with_capacity(args.len());
             let mut arg_types: Vec<crate::types::LlvmType> = Vec::with_capacity(args.len());
-            // Native library functions (Bloom, etc.) use an all-double
-            // ABI: every arg is f64, passed in d-registers on ARM64.
-            // Handles/pointers are encoded as f64 bit patterns (NaN-boxed
-            // or raw integer-to-double). String args are the exception:
-            // they need to be unboxed to raw *const u8 pointers.
+            // Native library functions (Bloom, etc.) pass numbers as f64
+            // (d-registers) but need raw pointers for string/array args
+            // (x-registers). Strings are unboxed to *const u8; arrays are
+            // unboxed and offset past the 8-byte ArrayHeader to the
+            // inline f64 data so the C/Rust side gets a valid *const f64.
             for a in args.iter() {
                 let val = lower_expr(ctx, a)?;
                 if is_string_expr(ctx, a) {
@@ -277,6 +277,17 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
                     let raw_ptr = blk.call(I64, "js_get_string_pointer_unified", &[(DOUBLE, &val)]);
                     let ptr_val = blk.inttoptr(I64, &raw_ptr);
                     lowered.push(ptr_val);
+                    arg_types.push(PTR);
+                } else if is_array_expr(ctx, a) {
+                    let blk = ctx.block();
+                    let bits = blk.bitcast_double_to_i64(&val);
+                    let header_handle = blk.and(I64, &bits, POINTER_MASK_I64);
+                    let header_ptr = blk.inttoptr(I64, &header_handle);
+                    // Skip 8-byte ArrayHeader (u32 length + u32 capacity)
+                    // to reach the inline f64 data.
+                    let eight = "8".to_string();
+                    let data_ptr = blk.gep(I8, &header_ptr, &[(I64, &eight)]);
+                    lowered.push(data_ptr);
                     arg_types.push(PTR);
                 } else {
                     lowered.push(val);
@@ -333,13 +344,32 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
         // this, clang errors with `use of undefined value @perry_fn_*`
         // for any cross-module call hidden inside a closure body, try
         // block, switch, etc. — the old pre-walker missed those shapes.
+        //
+        // Determine the actual param count from the imported function
+        // signature. Calls that pass fewer args than the function declares
+        // (because the trailing params have defaults) need to be padded
+        // with `undefined` so the function body sees defined values for
+        // the missing args (and can apply its defaults). Without this,
+        // the d-registers for the missing params hold stale data and
+        // the function reads garbage (e.g. alpha = -3e-5 instead of 1).
+        let target_arity = ctx
+            .imported_func_param_counts
+            .get(name)
+            .copied()
+            .unwrap_or(args.len())
+            .max(args.len());
         let param_types: Vec<crate::types::LlvmType> =
-            std::iter::repeat(DOUBLE).take(args.len()).collect();
+            std::iter::repeat(DOUBLE).take(target_arity).collect();
         ctx.pending_declares
             .push((fname.clone(), DOUBLE, param_types));
-        let mut lowered: Vec<String> = Vec::with_capacity(args.len());
+        let mut lowered: Vec<String> = Vec::with_capacity(target_arity);
         for a in args {
             lowered.push(lower_expr(ctx, a)?);
+        }
+        // Pad with TAG_UNDEFINED for the missing trailing args.
+        let undefined_lit = double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED));
+        while lowered.len() < target_arity {
+            lowered.push(undefined_lit.clone());
         }
         let arg_slices: Vec<(crate::types::LlvmType, &str)> =
             lowered.iter().map(|s| (DOUBLE, s.as_str())).collect();
@@ -2656,6 +2686,26 @@ pub(crate) fn lower_builtin_new(
     args: &[Expr],
 ) -> Result<Option<String>> {
     match class_name {
+        "Array" => {
+            // `new Array()` → empty array, `new Array(n)` → length-n array
+            // (zero-initialized slots), `new Array(a, b, c)` → 3-element array
+            // [a, b, c]. We handle the no-arg and single-numeric-arg cases
+            // here. Multi-arg / non-numeric single arg falls back to the
+            // generic Expr::New path.
+            let blk = ctx.block();
+            let handle = if args.is_empty() {
+                blk.call(I64, "js_array_create", &[])
+            } else if args.len() == 1 {
+                let cap = lower_expr(ctx, &args[0])?;
+                let blk = ctx.block();
+                let cap_i32 = blk.fptosi(DOUBLE, &cap, I32);
+                blk.call(I64, "js_array_alloc_with_length", &[(I32, &cap_i32)])
+            } else {
+                return Ok(None);
+            };
+            let blk = ctx.block();
+            return Ok(Some(nanbox_pointer_inline(blk, &handle)));
+        }
         "Response" => {
             // new Response(body?, init?) — init = { status?, statusText?, headers? }
             let body_ptr = if !args.is_empty() {
@@ -3906,9 +3956,16 @@ enum NativeArgKind {
     /// NaN-boxed f64 — pass as-is (objects, generic JSValues).
     F64,
     /// NaN-boxed string → extract raw i64 pointer via js_get_string_pointer_unified.
+    /// Use for Rust signatures like `*const StringHeader`.
     StrPtr,
     /// NaN-boxed closure/pointer → unbox to i64 via the standard mask.
     PtrI64,
+    /// Pass the NaN-boxed JSValue bits as-is (bitcast f64 → i64, no
+    /// unboxing). Use for Rust signatures where the function receives
+    /// `name: i64` and internally calls `string_from_nanboxed(name)` or
+    /// similar — the callee expects the full NaN-boxed value, not an
+    /// unboxed raw pointer. Common pattern in fastify context methods.
+    JsvalI64,
 }
 
 /// What the runtime function returns.
@@ -3916,6 +3973,11 @@ enum NativeArgKind {
 enum NativeRetKind {
     /// Returns i64 handle → NaN-box as POINTER.
     Ptr,
+    /// Returns `*mut StringHeader` → NaN-box as STRING. Use for runtime
+    /// functions whose Rust signature returns a raw string pointer; the
+    /// caller (and `JSON.stringify`, string-comparison, etc.) needs the
+    /// STRING_TAG to recognize it as a string rather than a heap object.
+    Str,
     /// Returns f64 → pass through (NaN-boxed JSValue).
     F64,
     /// Returns i32 → ignored, return TAG_UNDEFINED.
@@ -3943,7 +4005,9 @@ struct NativeModSig {
 const NA_F64: NativeArgKind = NativeArgKind::F64;
 const NA_STR: NativeArgKind = NativeArgKind::StrPtr;
 const NA_PTR: NativeArgKind = NativeArgKind::PtrI64;
+const NA_JSV: NativeArgKind = NativeArgKind::JsvalI64;
 const NR_PTR: NativeRetKind = NativeRetKind::Ptr;
+const NR_STR: NativeRetKind = NativeRetKind::Str;
 const NR_F64: NativeRetKind = NativeRetKind::F64;
 const NR_I32: NativeRetKind = NativeRetKind::I32Void;
 const NR_VOID: NativeRetKind = NativeRetKind::Void;
@@ -4001,28 +4065,28 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
     // Fastify request methods
     NativeModSig { module: "fastify", has_receiver: true, method: "method",
         class_filter: None,
-        runtime: "js_fastify_req_method", args: &[], ret: NR_PTR },
+        runtime: "js_fastify_req_method", args: &[], ret: NR_STR },
     NativeModSig { module: "fastify", has_receiver: true, method: "url",
         class_filter: None,
-        runtime: "js_fastify_req_url", args: &[], ret: NR_PTR },
+        runtime: "js_fastify_req_url", args: &[], ret: NR_STR },
     NativeModSig { module: "fastify", has_receiver: true, method: "params",
         class_filter: None,
-        runtime: "js_fastify_req_params", args: &[], ret: NR_PTR },
+        runtime: "js_fastify_req_params", args: &[], ret: NR_STR },
     NativeModSig { module: "fastify", has_receiver: true, method: "param",
         class_filter: None,
-        runtime: "js_fastify_req_param", args: &[NA_STR], ret: NR_PTR },
+        runtime: "js_fastify_req_param", args: &[NA_JSV], ret: NR_STR },
     NativeModSig { module: "fastify", has_receiver: true, method: "query",
         class_filter: None,
         runtime: "js_fastify_req_query_object", args: &[], ret: NR_F64 },
     NativeModSig { module: "fastify", has_receiver: true, method: "rawBody",
         class_filter: None,
-        runtime: "js_fastify_req_body", args: &[], ret: NR_PTR },
+        runtime: "js_fastify_req_body", args: &[], ret: NR_STR },
     NativeModSig { module: "fastify", has_receiver: true, method: "headers",
         class_filter: None,
         runtime: "js_fastify_req_headers", args: &[], ret: NR_PTR },
     NativeModSig { module: "fastify", has_receiver: true, method: "header",
         class_filter: None,
-        runtime: "js_fastify_req_header", args: &[NA_STR], ret: NR_PTR },
+        runtime: "js_fastify_req_header", args: &[NA_JSV], ret: NR_STR },
     NativeModSig { module: "fastify", has_receiver: true, method: "user",
         class_filter: None,
         runtime: "js_fastify_req_get_user_data", args: &[], ret: NR_F64 },
@@ -4036,13 +4100,13 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
     // Fastify context methods (Hono-style)
     NativeModSig { module: "fastify", has_receiver: true, method: "text",
         class_filter: None,
-        runtime: "js_fastify_ctx_text", args: &[NA_STR, NA_F64], ret: NR_F64 },
+        runtime: "js_fastify_ctx_text", args: &[NA_JSV, NA_F64], ret: NR_F64 },
     NativeModSig { module: "fastify", has_receiver: true, method: "html",
         class_filter: None,
-        runtime: "js_fastify_ctx_html", args: &[NA_STR, NA_F64], ret: NR_F64 },
+        runtime: "js_fastify_ctx_html", args: &[NA_JSV, NA_F64], ret: NR_F64 },
     NativeModSig { module: "fastify", has_receiver: true, method: "redirect",
         class_filter: None,
-        runtime: "js_fastify_ctx_redirect", args: &[NA_STR, NA_F64], ret: NR_F64 },
+        runtime: "js_fastify_ctx_redirect", args: &[NA_JSV, NA_F64], ret: NR_F64 },
     NativeModSig { module: "fastify", has_receiver: true, method: "json",
         class_filter: None,
         runtime: "js_fastify_ctx_json", args: &[NA_F64, NA_F64], ret: NR_F64 },
@@ -4278,6 +4342,43 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
         class_filter: None,
         runtime: "js_ws_close", args: &[], ret: NR_VOID },
 
+    // ========== Raw TCP sockets (net) + TLS ==========
+    // Factory: `net.createConnection(host, port)` returns a Socket handle.
+    // HIR lowering at crates/perry-hir/src/lower.rs registers the return
+    // value as class "Socket" so subsequent methods dispatch via the
+    // class_filter entries below.
+    NativeModSig { module: "net", has_receiver: false, method: "createConnection",
+        class_filter: None,
+        runtime: "js_net_socket_connect", args: &[NA_STR, NA_F64], ret: NR_PTR },
+    NativeModSig { module: "net", has_receiver: true, method: "write",
+        class_filter: Some("Socket"),
+        runtime: "js_net_socket_write", args: &[NA_PTR], ret: NR_VOID },
+    NativeModSig { module: "net", has_receiver: true, method: "end",
+        class_filter: Some("Socket"),
+        runtime: "js_net_socket_end", args: &[], ret: NR_VOID },
+    NativeModSig { module: "net", has_receiver: true, method: "destroy",
+        class_filter: Some("Socket"),
+        runtime: "js_net_socket_destroy", args: &[], ret: NR_VOID },
+    NativeModSig { module: "net", has_receiver: true, method: "on",
+        class_filter: Some("Socket"),
+        runtime: "js_net_socket_on", args: &[NA_STR, NA_PTR], ret: NR_VOID },
+    // upgradeToTLS returns a Promise (handle pointer) — await it to wait
+    // for the TLS handshake before sending anything over the upgraded stream.
+    // upgradeToTLS(servername, verify): verify is 0/1 (number, not bool).
+    // verify=1 uses the system trust store + hostname check (sslmode=verify-full);
+    // verify=0 accepts any cert (sslmode=require, for local self-signed DBs).
+    NativeModSig { module: "net", has_receiver: true, method: "upgradeToTLS",
+        class_filter: Some("Socket"),
+        runtime: "js_net_socket_upgrade_tls", args: &[NA_STR, NA_F64], ret: NR_PTR },
+
+    // Factory: `tls.connect(host, port, servername, verify)` opens plain TCP
+    // then runs a full TLS handshake before firing 'connect'. Returns a Socket
+    // handle that behaves identically to one produced by net.createConnection
+    // (same write/end/destroy/on surface).
+    NativeModSig { module: "tls", has_receiver: false, method: "connect",
+        class_filter: None,
+        runtime: "js_tls_connect", args: &[NA_STR, NA_F64, NA_STR, NA_F64], ret: NR_PTR },
+
     // ========== Events ==========
     NativeModSig { module: "events", has_receiver: false, method: "EventEmitter",
         class_filter: None,
@@ -4470,6 +4571,14 @@ fn lower_native_module_dispatch(
                 llvm_args.push((I64, handle));
                 arg_types.push(I64);
             }
+            NativeArgKind::JsvalI64 => {
+                // Bitcast the NaN-boxed f64 to i64 without unboxing —
+                // the callee will interpret the raw bits.
+                let blk = ctx.block();
+                let bits = blk.bitcast_double_to_i64(&lowered);
+                llvm_args.push((I64, bits));
+                arg_types.push(I64);
+            }
         }
     }
     // If fewer args than sig expects, pad with undefined / 0.
@@ -4479,7 +4588,7 @@ fn lower_native_module_dispatch(
                 llvm_args.push((DOUBLE, double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED))));
                 arg_types.push(DOUBLE);
             }
-            NativeArgKind::StrPtr | NativeArgKind::PtrI64 => {
+            NativeArgKind::StrPtr | NativeArgKind::PtrI64 | NativeArgKind::JsvalI64 => {
                 llvm_args.push((I64, "0".to_string()));
                 arg_types.push(I64);
             }
@@ -4488,7 +4597,7 @@ fn lower_native_module_dispatch(
 
     // Determine return type for the declare
     let ret_type = match sig.ret {
-        NativeRetKind::Ptr => I64,
+        NativeRetKind::Ptr | NativeRetKind::Str => I64,
         NativeRetKind::F64 => DOUBLE,
         NativeRetKind::I32Void => I32,
         NativeRetKind::Void => crate::types::VOID,
@@ -4504,6 +4613,19 @@ fn lower_native_module_dispatch(
             let blk = ctx.block();
             let raw = blk.call(I64, sig.runtime, &arg_slices);
             Ok(nanbox_pointer_inline(blk, &raw))
+        }
+        NativeRetKind::Str => {
+            // Returned raw *mut StringHeader — NaN-box with STRING_TAG so
+            // downstream string ops (JSON.stringify, ===, .length) work.
+            // Null pointer (header value 0) is returned as TAG_NULL so
+            // `request.header('missing')` reads as `null` instead of a
+            // dangling string pointer.
+            let blk = ctx.block();
+            let raw = blk.call(I64, sig.runtime, &arg_slices);
+            let is_null = blk.icmp_eq(I64, &raw, "0");
+            let boxed = nanbox_string_inline(blk, &raw);
+            let null_val = double_literal(f64::from_bits(crate::nanbox::TAG_NULL));
+            Ok(blk.select(crate::types::I1, &is_null, DOUBLE, &null_val, &boxed))
         }
         NativeRetKind::F64 => {
             Ok(ctx.block().call(DOUBLE, sig.runtime, &arg_slices))
