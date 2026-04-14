@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.20
+**Current Version:** 0.5.21
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,10 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.144 and earlier), see CHANGELOG.md.
+
+### v0.5.21 — fastify header dispatch + gc() safety in servers (closes #30, #31)
+- **fix**: `request.header('X')` / `request.headers['X']` returned undefined/null in Fastify handlers because the handler param was typed `any`, so the HIR didn't tag it as `FastifyRequest` → property access fell through to generic object lookup instead of the fastify FFI. New `pre_scan_fastify_handler_params()` in the HIR pre-registers the first two params of `app.get|post|put|delete|patch|head|options|all|addHook|setErrorHandler` arrow handlers as fastify Request/Reply native instances. Also added `NA_JSV` (pass NaN-boxed bits as i64) and `NR_STR` (NaN-box string return with STRING_TAG) arg/return kinds so the receiver methods `js_fastify_req_header(ctx, name: i64)` etc. get the right ABI shape; without this the bitcast was wrong and `JSON.stringify` on the returned string segfaulted.
+- **fix**: `gc()` from `setInterval` SEGVd in Fastify+WS servers because the mark-sweep GC only scans the main thread's stack, but tokio worker threads hold live JSValue refs on their stacks that the scanner can't see → GC frees still-referenced objects → next access crashes. Added `GC_UNSAFE_ZONES` atomic in perry-runtime; Fastify/WS server creation increments it, WS server close decrements it. `js_gc_collect()` now checks the counter and skips collection (with a one-shot warning) when any tokio-based server is active. Full stop-the-world GC synchronization is a v0.5.22 followup.
 
 ### v0.5.20 — String.length returns UTF-16 code units (closes #18 partially)
 - **fix**: `String.length` now returns UTF-16 code unit count instead of UTF-8 byte count, matching JavaScript semantics. `"café".length` → 4 (was 5), `"日本語".length` → 3 (was 9), `"😀".length` → 2 (was 4). `StringHeader` gains `utf16_len` at offset 0 (codegen inline `.length` unchanged) + `byte_len` for internal ops. All position-based APIs (`charAt`, `slice`, `substring`, `indexOf`, `lastIndexOf`, `padStart`, `padEnd`, `toCharArray`) converted to UTF-16 indexing with ASCII fast path. `test_gap_string_methods` DIFF (4) → DIFF (2, lone surrogates only). Fixes NFC/NFD `.normalize().length` parity.

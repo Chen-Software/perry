@@ -80,6 +80,12 @@ pub unsafe extern "C" fn js_fastify_listen(app_handle: Handle, opts: f64, callba
     };
     let routes_arc = Arc::new(app_for_server);
 
+    // Fastify dispatches request callbacks on tokio worker threads whose
+    // stacks the main-thread GC can't scan. Mark GC-unsafe so user-level
+    // `gc()` calls from setInterval don't collect objects still
+    // referenced from worker stacks (issue #31).
+    perry_runtime::gc::js_gc_enter_unsafe_zone();
+
     // Spawn the server
     let routes_for_spawn = routes_arc.clone();
     RUNTIME.spawn(async move {

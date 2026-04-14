@@ -321,10 +321,54 @@ pub fn gc_check_trigger() {
     }
 }
 
-/// Manual GC trigger (callable from TypeScript as `gc()`)
+/// Counter tracking "worker threads hold JSValue roots we can't scan"
+/// state. Incremented by stdlib entry points that spawn tokio tasks which
+/// invoke user closures on worker threads (WS server, HTTP server, etc.).
+/// When > 0, the conservative main-thread stack scanner can't see all
+/// live roots — collecting would free objects still referenced from
+/// worker-thread stacks and SEGV on next access.
+///
+/// Issue #31: gc() from setInterval in a Fastify+WebSocket server crashed
+/// within 60s of the first tick because WS worker threads held live refs
+/// to message payload strings on their stacks. This counter lets stdlib
+/// features signal "please skip user-initiated gc() while I'm running"
+/// without a full stop-the-world mutex.
+pub static GC_UNSAFE_ZONES: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// One-shot warning so we don't spam stderr on every tick.
+static GC_UNSAFE_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Manual GC trigger (callable from TypeScript as `gc()`). Skipped when
+/// worker threads are active (see GC_UNSAFE_ZONES).
 #[no_mangle]
 pub extern "C" fn js_gc_collect() {
+    if GC_UNSAFE_ZONES.load(std::sync::atomic::Ordering::Acquire) > 0 {
+        // One-shot warning — user likely has `setInterval(() => gc(), N)`
+        // in a server; we don't want to print every 30s.
+        if !GC_UNSAFE_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!(
+                "perry: gc() skipped — a tokio-based server (WebSocket/HTTP) is active \
+                 and may hold JSValue refs on worker threads that the main-thread GC \
+                 can't see. Manual gc() is a no-op for the rest of this process."
+            );
+        }
+        return;
+    }
     gc_collect_inner();
+}
+
+/// Increment GC_UNSAFE_ZONES. Called by stdlib when spawning tokio tasks
+/// that invoke user closures on worker threads.
+#[no_mangle]
+pub extern "C" fn js_gc_enter_unsafe_zone() {
+    GC_UNSAFE_ZONES.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+}
+
+/// Decrement GC_UNSAFE_ZONES. Called when a stdlib feature that owns
+/// worker threads shuts down (e.g. ws_server_close).
+#[no_mangle]
+pub extern "C" fn js_gc_exit_unsafe_zone() {
+    GC_UNSAFE_ZONES.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
 }
 
 /// Threshold-based GC trigger (safe for use from the event loop).
