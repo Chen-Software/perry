@@ -5220,9 +5220,13 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
         {
             c.arg("-target").arg("x86_64-unknown-linux-gnu");
         }
-        // Allow unresolved symbols — native libs and UI libs may not implement
-        // all functions on Linux. Matches /FORCE:UNRESOLVED on Windows.
-        c.arg("-Wl,--warn-unresolved-symbols");
+        // Unresolved symbols are now link errors (not warnings). The
+        // v0.5.0→0.5.18 Fastify/MySQL segfault (#28) was caused by
+        // --warn-unresolved-symbols silently producing binaries with
+        // null function pointers that crashed at runtime. With the
+        // native module dispatch table restored, all expected symbols
+        // are resolved; any remaining unresolved symbol is a real bug
+        // that should fail the link rather than produce a broken binary.
         c
     } else if is_windows {
         // Windows target — use MSVC link.exe (native) or lld-link (cross)

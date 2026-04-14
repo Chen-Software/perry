@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.18
+**Current Version:** 0.5.19
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,11 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.144 and earlier), see CHANGELOG.md.
+
+### v0.5.19 — fix Fastify/MySQL segfault on Linux, restore native module dispatch, fix gc() (closes #28)
+- **fix**: `gc()` calls emitted bare `gc` symbol instead of `js_gc_collect` — caused `undefined reference to 'gc'` linker error (macOS) or segfault at runtime (Linux with `--warn-unresolved-symbols`). Added explicit dispatch in `lower_call.rs` ExternFuncRef handler.
+- **fix**: Fastify/MySQL/WS/pg/ioredis/MongoDB/better-sqlite3 binaries compiled but did nothing at runtime — the entire native module dispatch table from the old Cranelift codegen was lost in the v0.5.0 LLVM cutover. All `NativeMethodCall` nodes for these modules fell through to the catch-all that returns `double 0.0`, so no runtime functions were ever called. Added `NATIVE_MODULE_TABLE` with table-driven dispatch for ~100 methods across 15+ native modules.
+- **fix**: removed `--warn-unresolved-symbols` from Linux linker flags — this flag silently converted link errors to warnings, producing binaries with null function pointers that segfaulted at runtime instead of failing at link time.
 
 ### v0.5.18 — native axios, fetch segfault fix, type stubs (closes #24, #25, #26, #27)
 - **feat**: native `axios` dispatch — `axios.get/post/put/delete/patch` and `response.status/.data/.statusText` now compile natively without `--enable-js-runtime` or npm install. Added to `NATIVE_MODULES`, HIR native instance tracking, codegen dispatch, and `http-client` feature mapping.
