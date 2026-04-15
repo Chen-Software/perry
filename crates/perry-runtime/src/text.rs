@@ -65,7 +65,7 @@ pub extern "C" fn js_text_encoder_encode_llvm(value: f64) -> i64 {
             let elems =
                 (arr as *mut u8).add(std::mem::size_of::<ArrayHeader>()) as *mut f64;
             for i in 0..len {
-                let byte = *data_ptr.add(i);
+                let byte = *(data_ptr as *const u8).add(i);
                 *elems.add(i) = byte as f64;
             }
         }
