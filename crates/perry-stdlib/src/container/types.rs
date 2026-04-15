@@ -8,26 +8,142 @@ use perry_runtime::{JSValue, StringHeader};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
-// ============ Handle Registry ============
+use crate::common::handle::{self, Handle};
 
-static NEXT_HANDLE_ID: AtomicU64 = AtomicU64::new(1);
+// ============ Global Handle Registries ============
+//
+// CONTAINER_HANDLES stores ContainerHandle values keyed by a monotonically
+// increasing u64 ID.  COMPOSE_HANDLES stores live ComposeEngine instances
+// (from perry-container-compose) so that subsequent compose operations
+// (down, ps, logs, exec, …) can look up the engine by the handle ID that
+// was returned to TypeScript.
 
-fn next_id() -> u64 {
-    NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst)
+/// Global registry of live `ContainerHandle` values.
+pub static CONTAINER_HANDLES: OnceLock<dashmap::DashMap<u64, ContainerHandle>> = OnceLock::new();
+
+/// Global registry of live `ComposeEngine` instances.
+pub static COMPOSE_HANDLES: OnceLock<dashmap::DashMap<u64, perry_container_compose::compose::ComposeEngine>> = OnceLock::new();
+
+/// Monotonically increasing handle ID counter shared by both registries.
+pub static NEXT_HANDLE_ID: AtomicU64 = AtomicU64::new(1);
+
+fn container_handles() -> &'static dashmap::DashMap<u64, ContainerHandle> {
+    CONTAINER_HANDLES.get_or_init(dashmap::DashMap::new)
 }
 
-pub fn register_container_handle(_handle: ContainerHandle) -> u64 { next_id() }
-pub fn register_container_info(_info: ContainerInfo) -> u64 { next_id() }
-pub fn register_container_info_list(_list: Vec<ContainerInfo>) -> u64 { next_id() }
-pub fn register_compose_handle(_handle: ComposeHandle) -> u64 { next_id() }
-pub fn register_container_logs(_logs: ContainerLogs) -> u64 { next_id() }
-pub fn register_image_info_list(_list: Vec<ImageInfo>) -> u64 { next_id() }
+fn compose_handles() -> &'static dashmap::DashMap<u64, perry_container_compose::compose::ComposeEngine> {
+    COMPOSE_HANDLES.get_or_init(dashmap::DashMap::new)
+}
+
+/// Insert a `ContainerHandle` into the global registry and return its new ID.
+pub fn register_container_handle(h: ContainerHandle) -> u64 {
+    let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
+    container_handles().insert(id, h);
+    id
+}
+
+/// Insert a `ComposeEngine` into the global registry and return its new ID.
+pub fn register_compose_engine(engine: perry_container_compose::compose::ComposeEngine) -> u64 {
+    let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
+    compose_handles().insert(id, engine);
+    id
+}
+
+// ============ Legacy Handle Registry (common::handle) ============
+//
+// The functions below delegate to crate::common::handle for types that are
+// not stored in the OnceLock registries above (ContainerInfo lists, logs,
+// image lists, and the old ComposeHandle struct).  They are kept for
+// backwards compatibility with the existing FFI functions in mod.rs.
+
+/// Register a `ContainerHandle` in the legacy registry and return an opaque integer handle.
+/// Prefer `register_container_handle` for new code.
+pub fn register_container_handle_legacy(h: ContainerHandle) -> u64 {
+    handle::register_handle(h) as u64
+}
+
+/// Retrieve a `ContainerHandle` by handle id (read-only) from the legacy registry.
+pub fn get_container_handle(id: u64) -> Option<handle::Handle> {
+    let h = id as Handle;
+    if handle::handle_exists(h) { Some(h) } else { None }
+}
+
+/// Register a single `ContainerInfo` and return an opaque integer handle.
+pub fn register_container_info(info: ContainerInfo) -> u64 {
+    handle::register_handle(info) as u64
+}
+
+/// Register a `Vec<ContainerInfo>` (list result from `list` / `ps`) and return an opaque integer handle.
+pub fn register_container_info_list(list: Vec<ContainerInfo>) -> u64 {
+    handle::register_handle(list) as u64
+}
+
+/// Retrieve the container info list associated with a handle.
+pub fn with_container_info_list<R>(id: u64, f: impl FnOnce(&Vec<ContainerInfo>) -> R) -> Option<R> {
+    handle::with_handle(id as Handle, f)
+}
+
+/// Take (remove and return) the container info list from the registry.
+pub fn take_container_info_list(id: u64) -> Option<Vec<ContainerInfo>> {
+    handle::take_handle(id as Handle)
+}
+
+/// Register a `ComposeHandle` and return an opaque integer handle.
+pub fn register_compose_handle(h: ComposeHandle) -> u64 {
+    handle::register_handle(h) as u64
+}
+
+/// Retrieve a `ComposeHandle` by handle id.
+pub fn get_compose_handle(id: u64) -> Option<&'static ComposeHandle> {
+    handle::get_handle(id as Handle)
+}
+
+/// Take (remove and return) the `ComposeHandle` from the registry.
+pub fn take_compose_handle(id: u64) -> Option<ComposeHandle> {
+    handle::take_handle(id as Handle)
+}
+
+/// Register `ContainerLogs` and return an opaque integer handle.
+pub fn register_container_logs(logs: ContainerLogs) -> u64 {
+    handle::register_handle(logs) as u64
+}
+
+/// Retrieve `ContainerLogs` by handle id (read-only).
+pub fn with_container_logs<R>(id: u64, f: impl FnOnce(&ContainerLogs) -> R) -> Option<R> {
+    handle::with_handle(id as Handle, f)
+}
+
+/// Take (remove and return) `ContainerLogs` from the registry.
+pub fn take_container_logs(id: u64) -> Option<ContainerLogs> {
+    handle::take_handle(id as Handle)
+}
+
+/// Register a `Vec<ImageInfo>` and return an opaque integer handle.
+pub fn register_image_info_list(list: Vec<ImageInfo>) -> u64 {
+    handle::register_handle(list) as u64
+}
+
+/// Retrieve the image info list associated with a handle.
+pub fn with_image_info_list<R>(id: u64, f: impl FnOnce(&Vec<ImageInfo>) -> R) -> Option<R> {
+    handle::with_handle(id as Handle, f)
+}
+
+/// Take (remove and return) the image info list from the registry.
+pub fn take_image_info_list(id: u64) -> Option<Vec<ImageInfo>> {
+    handle::take_handle(id as Handle)
+}
+
+/// Drop a handle from the registry (force cleanup from JS GC / explicit close).
+pub fn drop_container_handle(id: u64) -> bool {
+    handle::drop_handle(id as Handle)
+}
 
 // ============ Core Container Types ============
 
 /// Configuration for a single container.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ContainerSpec {
     /// Container image (required)
     pub image: String,
@@ -50,7 +166,7 @@ pub struct ContainerSpec {
 }
 
 /// Opaque handle returned by `run()` / `create()`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContainerHandle {
     pub id: String,
     pub name: Option<String>,

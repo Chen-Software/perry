@@ -1,14 +1,20 @@
+//! CLI entry point for `perry-compose` binary.
+//!
+//! clap-based CLI with all subcommands.
+
+use crate::compose::ComposeEngine;
 use crate::error::Result;
-use crate::orchestrate::Orchestrator;
+use crate::project::ComposeProject;
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
+use std::sync::Arc;
 
-/// perry-compose: Docker Compose-like experience for Apple Container
+/// perry-compose: Docker Compose-like experience for Apple Container / Podman
 #[derive(Parser, Debug)]
 #[command(
     name = "perry-compose",
     version,
-    about = "Docker Compose-like CLI for Apple Container, powered by Perry",
+    about = "Docker Compose-like CLI for container backends, powered by Perry",
     long_about = None
 )]
 pub struct Cli {
@@ -30,9 +36,9 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Start services (alias: start)
+    /// Start services
     Up(UpArgs),
-    /// Stop and remove services (alias: down)
+    /// Stop and remove services
     Down(DownArgs),
     /// Start existing stopped services
     Start(ServiceArgs),
@@ -50,88 +56,65 @@ pub enum Commands {
     Config(ConfigArgs),
 }
 
-// ============ Argument structs ============
-
 #[derive(Args, Debug)]
 pub struct UpArgs {
-    /// Start in detached mode
     #[arg(short = 'd', long = "detach")]
     pub detach: bool,
-    /// Build images before starting
     #[arg(long = "build")]
     pub build: bool,
-    /// Remove containers for services not in the compose file
     #[arg(long = "remove-orphans")]
     pub remove_orphans: bool,
-    /// Services to start (empty = all)
     pub services: Vec<String>,
 }
 
 #[derive(Args, Debug)]
 pub struct DownArgs {
-    /// Remove named volumes
     #[arg(short = 'v', long = "volumes")]
     pub volumes: bool,
-    /// Remove containers for services not in the compose file
     #[arg(long = "remove-orphans")]
     pub remove_orphans: bool,
-    /// Services to remove (empty = all)
     pub services: Vec<String>,
 }
 
 #[derive(Args, Debug)]
 pub struct ServiceArgs {
-    /// Services to act on (empty = all)
     pub services: Vec<String>,
 }
 
 #[derive(Args, Debug)]
 pub struct PsArgs {
-    /// Show all containers (including stopped)
     #[arg(short = 'a', long = "all")]
     pub all: bool,
-    /// Filter by service name
     pub services: Vec<String>,
 }
 
 #[derive(Args, Debug)]
 pub struct LogsArgs {
-    /// Follow log output
     #[arg(short = 'f', long = "follow")]
     pub follow: bool,
-    /// Number of lines to show from the end
     #[arg(long = "tail")]
     pub tail: Option<u32>,
-    /// Show timestamps
     #[arg(short = 't', long = "timestamps")]
     pub timestamps: bool,
-    /// Services to show logs for (empty = all)
     pub services: Vec<String>,
 }
 
 #[derive(Args, Debug)]
 pub struct ExecArgs {
-    /// Service name
     pub service: String,
-    /// Command to run
     pub cmd: Vec<String>,
-    /// User context
     #[arg(short = 'u', long = "user")]
     pub user: Option<String>,
-    /// Working directory
     #[arg(short = 'w', long = "workdir")]
     pub workdir: Option<String>,
-    /// Environment variables
     #[arg(short = 'e', long = "env")]
     pub env: Vec<String>,
 }
 
 #[derive(Args, Debug)]
 pub struct ConfigArgs {
-    /// Output format
     #[arg(long = "format", default_value = "yaml")]
     pub format: String,
-    /// Resolve environment variables
     #[arg(long = "resolve-image-digests")]
     pub resolve: bool,
 }
@@ -139,64 +122,60 @@ pub struct ConfigArgs {
 // ============ Command dispatch ============
 
 pub async fn run(cli: Cli) -> Result<()> {
-    let orchestrator = Orchestrator::new(
-        &cli.files,
-        cli.project_name.as_deref(),
-        &cli.env_files,
-    )?;
+    let config = crate::config::ProjectConfig::new(
+        cli.files.clone(),
+        cli.project_name.clone(),
+        cli.env_files.clone(),
+    );
+    let project = ComposeProject::load(&config)?;
+    let backend: Arc<dyn crate::backend::ContainerBackend> =
+        Arc::from(crate::backend::detect_backend().await?);
+    let engine = Arc::new(ComposeEngine::new(
+        project.spec.clone(),
+        project.project_name.clone(),
+        backend,
+    ));
 
     match cli.command {
         Commands::Up(args) => {
-            orchestrator
-                .up(&args.services, args.detach, args.build)
+            engine
+                .up(&args.services, args.detach, args.build, args.remove_orphans)
                 .await?;
         }
 
         Commands::Down(args) => {
-            orchestrator
-                .down(&args.services, args.remove_orphans, args.volumes)
-                .await?;
+            engine.down(args.volumes, args.remove_orphans).await?;
         }
 
         Commands::Start(args) => {
-            // `start` = up without --build (services that already have an image or container)
-            orchestrator.up(&args.services, true, false).await?;
+            engine.start(&args.services).await?;
         }
 
         Commands::Stop(args) => {
-            orchestrator.down(&args.services, false, false).await?;
+            engine.stop(&args.services).await?;
         }
 
         Commands::Restart(args) => {
-            orchestrator.down(&args.services, false, false).await?;
-            orchestrator.up(&args.services, true, false).await?;
+            engine.restart(&args.services).await?;
         }
 
         Commands::Ps(_args) => {
-            let statuses = orchestrator.ps().await?;
-            print_ps_table(&statuses);
+            let infos = engine.ps().await?;
+            print_ps_table(&infos);
         }
 
         Commands::Logs(args) => {
-            let logs_map = orchestrator
-                .logs(&args.services, args.tail, args.follow)
-                .await?;
-
-            // Print logs sorted by service name
-            let mut names: Vec<&String> = logs_map.keys().collect();
-            names.sort();
-            for name in names {
-                let log = &logs_map[name];
-                if !log.is_empty() {
-                    for line in log.lines() {
-                        println!("{} | {}", name, line);
-                    }
-                }
+            let service = args.services.first().map(|s| s.as_str());
+            let logs = engine.logs(service, args.tail).await?;
+            if !logs.stdout.is_empty() {
+                print!("{}", logs.stdout);
+            }
+            if !logs.stderr.is_empty() {
+                eprint!("{}", logs.stderr);
             }
         }
 
         Commands::Exec(args) => {
-            // Parse -e KEY=VALUE pairs
             let env: std::collections::HashMap<String, String> = args
                 .env
                 .iter()
@@ -208,28 +187,39 @@ pub async fn run(cli: Cli) -> Result<()> {
                 })
                 .collect();
 
-            let result = orchestrator
-                .exec(
-                    &args.service,
-                    &args.cmd,
-                    args.user.as_deref(),
-                    args.workdir.as_deref(),
-                    if env.is_empty() { None } else { Some(&env) },
-                )
-                .await?;
+            let cmd = args.cmd.clone();
+            if args.user.is_some() || args.workdir.is_some() || !env.is_empty() {
+                // Use backend directly for user/workdir/env support
+                let svc = engine
+                    .spec
+                    .services
+                    .get(&args.service)
+                    .ok_or_else(|| crate::error::ComposeError::NotFound(args.service.clone()))?;
+                let container_name =
+                    crate::service::service_container_name(svc, &args.service);
 
-            print!("{}", result.stdout);
-            eprint!("{}", result.stderr);
+                let result = engine
+                    .backend
+                    .exec(
+                        &container_name,
+                        &cmd,
+                        if env.is_empty() { None } else { Some(&env) },
+                        args.workdir.as_deref(),
+                    )
+                    .await?;
 
-            if result.exit_code != 0 {
-                std::process::exit(result.exit_code);
+                print!("{}", result.stdout);
+                eprint!("{}", result.stderr);
+            } else {
+                let result = engine.exec(&args.service, &cmd).await?;
+                print!("{}", result.stdout);
+                eprint!("{}", result.stderr);
             }
         }
 
         Commands::Config(args) => {
-            let yaml = orchestrator.config()?;
+            let yaml = engine.config()?;
             if args.format == "json" {
-                // Convert YAML → JSON for --format=json
                 let value: serde_yaml::Value = serde_yaml::from_str(&yaml)?;
                 let json = serde_json::to_string_pretty(&value)?;
                 println!("{}", json);
@@ -242,9 +232,7 @@ pub async fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-// ============ Output formatting ============
-
-fn print_ps_table(statuses: &[crate::orchestrate::ServiceStatus]) {
+fn print_ps_table(infos: &[crate::types::ContainerInfo]) {
     let col_w_svc = 24usize;
     let col_w_status = 12usize;
     let col_w_container = 36usize;
@@ -256,19 +244,17 @@ fn print_ps_table(statuses: &[crate::orchestrate::ServiceStatus]) {
         col_w_status = col_w_status,
         col_w_container = col_w_container,
     );
-    println!("{}", "-".repeat(col_w_svc + col_w_status + col_w_container + 4));
+    println!(
+        "{}",
+        "-".repeat(col_w_svc + col_w_status + col_w_container + 4)
+    );
 
-    for s in statuses {
-        let status_str = match s.status {
-            crate::commands::ContainerStatus::Running => "running",
-            crate::commands::ContainerStatus::Stopped => "stopped",
-            crate::commands::ContainerStatus::NotFound => "not found",
-        };
+    for info in infos {
         println!(
             "{:<col_w_svc$}  {:<col_w_status$}  {:<col_w_container$}",
-            s.service_name,
-            status_str,
-            s.container_name,
+            info.name,
+            info.status,
+            info.id,
             col_w_svc = col_w_svc,
             col_w_status = col_w_status,
             col_w_container = col_w_container,

@@ -1,29 +1,20 @@
-//! Provides a Docker Compose-like experience for Apple's native Container
-//! framework.  Can be used:
+//! `perry-container-compose` — Docker Compose-like experience for Apple Container / Podman.
+//!
+//! Can be used:
 //!
 //! 1. As a standalone CLI binary (`perry-compose`)
 //! 2. As a library imported from Perry TypeScript applications
 //! 3. Via FFI from compiled Perry TypeScript code (requires `ffi` feature)
-//!
-//! # Quick Start
-//!
-//! ```rust,no_run
-//! use perry_container_compose::orchestrate::Orchestrator;
-//!
-//! # #[tokio::main]
-//! # async fn main() -> perry_container_compose::error::Result<()> {
-//! let orchestrator = Orchestrator::new(&[], None, &[])?;
-//! orchestrator.up(&[], true, false).await?;
-//! # Ok(())
-//! # }
-//! ```
 
 pub mod backend;
 pub mod cli;
-pub mod commands;
-pub mod entities;
+pub mod compose;
+pub mod config;
 pub mod error;
-pub mod orchestrate;
+pub mod project;
+pub mod service;
+pub mod types;
+pub mod yaml;
 
 // FFI exports (Perry TypeScript integration)
 #[cfg(feature = "ffi")]
@@ -31,4 +22,14 @@ pub mod ffi;
 
 // Re-exports
 pub use error::{ComposeError, Result};
-pub use orchestrate::Orchestrator;
+pub use types::{ComposeHandle, ComposeService, ComposeSpec};
+pub use compose::ComposeEngine;
+pub use project::ComposeProject;
+pub use backend::{
+    ContainerBackend, CliBackend, CliProtocol, DockerProtocol, AppleContainerProtocol,
+    LimaProtocol, detect_backend,
+    // Legacy shims kept for backward compatibility
+    Backend, ContainerStatus, ExecResult, get_backend, get_container_backend,
+    NetworkConfig, VolumeConfig,
+};
+pub use error::BackendProbeResult;
