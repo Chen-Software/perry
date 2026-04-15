@@ -1,424 +1,119 @@
-//! ComposeEngine implementation
-//!
-//! Provides native multi-container orchestration without external CLI tools.
+//! Compose orchestration wrapper.
 
-use super::backend::ContainerBackend;
-use super::types::{
-    ComposeDependsOnEntry, ComposeHandle, ComposeNetwork, ComposePortEntry, ComposeService,
-    ComposeServiceNetworks, ComposeSpec, ComposeVolume, ComposeVolumeEntry, ContainerError,
-    ContainerHandle, ContainerSpec, ListOrDict,
-};
-use std::collections::{HashMap, HashSet};
+use super::types::{ArcComposeEngine, ContainerInfo, ContainerLogs};
+use perry_container_compose::types::{ComposeHandle, ComposeSpec};
+use perry_container_compose::ComposeEngine;
 use std::sync::Arc;
+use crate::container::mod_private::get_global_backend_instance;
+use crate::container::types::COMPOSE_HANDLES;
+use dashmap::DashMap;
 
-/// ComposeEngine for orchestrating multi-container applications
-pub struct ComposeEngine {
-    spec: ComposeSpec,
-    backend: Arc<dyn ContainerBackend>,
+pub async fn compose_up(spec: ComposeSpec) -> Result<ComposeHandle, String> {
+    let backend = get_global_backend_instance().await.map_err(|e| e.to_string())?;
+    let project_name = spec.name.clone().unwrap_or_else(|| "default".to_string());
+    let engine = ComposeEngine::new(spec, project_name, Arc::clone(&backend) as Arc<dyn perry_container_compose::ContainerBackend>);
+
+    let handle = engine.up(&[], true, false, false).await.map_err(|e| e.to_string())?;
+
+    // We need to store the engine to perform operations on the handle later
+    COMPOSE_HANDLES.get_or_init(DashMap::new).insert(handle.stack_id, ArcComposeEngine(Arc::new(engine)));
+
+    Ok(handle)
 }
 
-impl ComposeEngine {
-    /// Create a new ComposeEngine
-    pub fn new(spec: ComposeSpec, backend: Arc<dyn ContainerBackend>) -> Self {
-        Self { spec, backend }
+pub async fn compose_down(id: u64, volumes: bool) -> Result<(), String> {
+    let engine = COMPOSE_HANDLES.get_or_init(DashMap::new)
+        .get(&id)
+        .map(|e| Arc::clone(&e.0))
+        .ok_or_else(|| format!("Compose stack {} not found", id))?;
+
+    engine.down(&[], false, volumes).await.map_err(|e| e.to_string())?;
+    COMPOSE_HANDLES.get_or_init(DashMap::new).remove(&id);
+    Ok(())
+}
+
+pub async fn compose_ps(id: u64) -> Result<Vec<ContainerInfo>, String> {
+    let engine = COMPOSE_HANDLES.get_or_init(DashMap::new)
+        .get(&id)
+        .map(|e| Arc::clone(&e.0))
+        .ok_or_else(|| format!("Compose stack {} not found", id))?;
+
+    let infos = engine.ps().await.map_err(|e| e.to_string())?;
+    Ok(infos.into_iter().map(|i| ContainerInfo {
+        id: i.id,
+        name: i.name,
+        image: i.image,
+        status: i.status,
+        ports: i.ports,
+        created: i.created,
+    }).collect())
+}
+
+pub async fn compose_logs(id: u64, service: Option<String>, tail: Option<u32>) -> Result<ContainerLogs, String> {
+    let engine = COMPOSE_HANDLES.get_or_init(DashMap::new)
+        .get(&id)
+        .map(|e| Arc::clone(&e.0))
+        .ok_or_else(|| format!("Compose stack {} not found", id))?;
+
+    let services = service.map(|s| vec![s]).unwrap_or_default();
+    let logs_map = engine.logs(&services, tail).await.map_err(|e| e.to_string())?;
+
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+
+    for (svc, logs) in logs_map {
+        stdout.push_str(&format!("[{}] {}\n", svc, logs.stdout));
+        stderr.push_str(&format!("[{}] {}\n", svc, logs.stderr));
     }
 
-    /// Bring up the compose stack
-    pub async fn up(&self) -> Result<ComposeHandle, ContainerError> {
-        // 1. Validate dependency graph
-        let startup_order = self.resolve_startup_order()?;
+    Ok(ContainerLogs { stdout, stderr })
+}
 
-        // 2. Create networks (skip external)
-        let mut created_networks = Vec::new();
-        if let Some(networks) = &self.spec.networks {
-            for (name, network_opt) in networks {
-                if let Some(network) = network_opt {
-                    if network.external.unwrap_or(false) {
-                        continue;
-                    }
-                }
-                let resolved_name = network_opt
-                    .as_ref()
-                    .and_then(|n| n.name.as_deref())
-                    .unwrap_or(name.as_str());
-                let driver = network_opt.as_ref().and_then(|n| n.driver.as_deref());
-                let labels: Option<Vec<(String, String)>> = network_opt
-                    .as_ref()
-                    .and_then(|n| n.labels.as_ref())
-                    .map(|l| {
-                        let map = l.to_map();
-                        map.into_iter().collect()
-                    })
-                    .filter(|v| !v.is_empty());
-                self.backend
-                    .create_network(resolved_name, driver, labels.as_deref().map(|v| v.as_slice()))
-                    .await?;
-                created_networks.push(resolved_name.to_string());
-            }
-        }
+pub async fn compose_exec(id: u64, service: String, cmd: Vec<String>) -> Result<ContainerLogs, String> {
+    let engine = COMPOSE_HANDLES.get_or_init(DashMap::new)
+        .get(&id)
+        .map(|e| Arc::clone(&e.0))
+        .ok_or_else(|| format!("Compose stack {} not found", id))?;
 
-        // 3. Create volumes (skip external)
-        let mut created_volumes = Vec::new();
-        if let Some(volumes) = &self.spec.volumes {
-            for (name, volume_opt) in volumes {
-                if let Some(volume) = volume_opt {
-                    if volume.external.unwrap_or(false) {
-                        continue;
-                    }
-                }
-                let resolved_name = volume_opt
-                    .as_ref()
-                    .and_then(|v| v.name.as_deref())
-                    .unwrap_or(name.as_str());
-                let driver = volume_opt.as_ref().and_then(|v| v.driver.as_deref());
-                let labels: Option<Vec<(String, String)>> = volume_opt
-                    .as_ref()
-                    .and_then(|v| v.labels.as_ref())
-                    .map(|l| {
-                        let map = l.to_map();
-                        map.into_iter().collect()
-                    })
-                    .filter(|v| !v.is_empty());
-                self.backend
-                    .create_volume(resolved_name, driver, labels.as_deref().map(|v| v.as_slice()))
-                    .await?;
-                created_volumes.push(resolved_name.to_string());
-            }
-        }
+    let logs = engine.exec(&service, &cmd).await.map_err(|e| e.to_string())?;
+    Ok(ContainerLogs {
+        stdout: logs.stdout,
+        stderr: logs.stderr,
+    })
+}
 
-        // 4. Start services in dependency order
-        let mut started_containers = HashMap::new();
-        let mut started_services = Vec::new();
+pub async fn compose_config(id: u64) -> Result<String, String> {
+    let engine = COMPOSE_HANDLES.get_or_init(DashMap::new)
+        .get(&id)
+        .map(|e| Arc::clone(&e.0))
+        .ok_or_else(|| format!("Compose stack {} not found", id))?;
 
-        for service_name in &startup_order {
-            if let Some(service) = self.spec.services.get(service_name) {
-                match self.start_service(service_name, service).await {
-                    Ok(handle) => {
-                        started_containers.insert(service_name.clone(), handle);
-                        started_services.push(service_name.clone());
-                    }
-                    Err(e) => {
-                        // Rollback: stop and remove all started containers
-                        for (name, handle) in &started_containers {
-                            let _ = self.backend.stop(&handle.id, 10).await;
-                            let _ = self.backend.remove(&handle.id, true).await;
-                        }
-                        // Remove created networks and volumes
-                        for network in &created_networks {
-                            let _ = self.remove_network(network).await;
-                        }
-                        for volume in &created_volumes {
-                            let _ = self.remove_volume(volume).await;
-                        }
-                        return Err(ContainerError::ServiceStartupFailed {
-                            service: service_name.clone(),
-                            error: e.to_string(),
-                        });
-                    }
-                }
-            }
-        }
+    engine.config().map_err(|e| e.to_string())
+}
 
-        Ok(ComposeHandle {
-            name: self
-                .spec
-                .name
-                .clone()
-                .unwrap_or_else(|| "perry-compose-stack".to_string()),
-            services: started_services,
-            networks: created_networks,
-            volumes: created_volumes,
-            containers: started_containers,
-        })
-    }
+pub async fn compose_start(id: u64, services: Vec<String>) -> Result<(), String> {
+    let engine = COMPOSE_HANDLES.get_or_init(DashMap::new)
+        .get(&id)
+        .map(|e| Arc::clone(&e.0))
+        .ok_or_else(|| format!("Compose stack {} not found", id))?;
 
-    /// Resolve service startup order based on dependencies
-    fn resolve_startup_order(&self) -> Result<Vec<String>, ContainerError> {
-        let mut visited = HashSet::new();
-        let mut visiting = HashSet::new();
-        let mut order = Vec::new();
+    engine.start(&services).await.map_err(|e| e.to_string())
+}
 
-        for service_name in self.spec.services.keys() {
-            if !visited.contains(service_name) {
-                self.visit(service_name, &mut visited, &mut visiting, &mut order)?;
-            }
-        }
+pub async fn compose_stop(id: u64, services: Vec<String>) -> Result<(), String> {
+    let engine = COMPOSE_HANDLES.get_or_init(DashMap::new)
+        .get(&id)
+        .map(|e| Arc::clone(&e.0))
+        .ok_or_else(|| format!("Compose stack {} not found", id))?;
 
-        Ok(order)
-    }
+    engine.stop(&services).await.map_err(|e| e.to_string())
+}
 
-    /// DFS visit for topological sort
-    fn visit(
-        &self,
-        service: &str,
-        visited: &mut HashSet<String>,
-        visiting: &mut HashSet<String>,
-        order: &mut Vec<String>,
-    ) -> Result<(), ContainerError> {
-        if visited.contains(service) {
-            return Ok(());
-        }
+pub async fn compose_restart(id: u64, services: Vec<String>) -> Result<(), String> {
+    let engine = COMPOSE_HANDLES.get_or_init(DashMap::new)
+        .get(&id)
+        .map(|e| Arc::clone(&e.0))
+        .ok_or_else(|| format!("Compose stack {} not found", id))?;
 
-        if visiting.contains(service) {
-            // Cycle detected
-            return Err(ContainerError::DependencyCycle {
-                cycle: visiting
-                    .iter()
-                    .cloned()
-                    .chain(std::iter::once(service.to_string()))
-                    .collect(),
-            });
-        }
-
-        visiting.insert(service.to_string());
-
-        // Visit dependencies
-        if let Some(service_spec) = self.spec.services.get(service) {
-            if let Some(deps) = &service_spec.depends_on {
-                for dep in deps.service_names() {
-                    if self.spec.services.contains_key(&dep) {
-                        self.visit(&dep, visited, visiting, order)?;
-                    }
-                }
-            }
-        }
-
-        visiting.remove(service);
-        visited.insert(service.to_string());
-        order.push(service.to_string());
-
-        Ok(())
-    }
-
-    /// Start a single service
-    async fn start_service(
-        &self,
-        name: &str,
-        service: &ComposeService,
-    ) -> Result<ContainerHandle, ContainerError> {
-        // Build support - check early
-        if service.build.is_some() {
-            return Err(ContainerError::InvalidConfig(
-                "Build configuration not yet supported".to_string(),
-            ));
-        }
-
-        // Resolve image (required when no build)
-        let image = service
-            .image
-            .clone()
-            .ok_or_else(|| ContainerError::InvalidConfig(format!(
-                "Service '{}' has no image or build configuration",
-                name
-            )))?;
-
-        // ── Environment: ListOrDict → HashMap<String, String> ──
-        let env: Option<HashMap<String, String>> = service
-            .environment
-            .as_ref()
-            .map(|e| e.to_map())
-            .filter(|m| !m.is_empty());
-
-        // ── Command: serde_json::Value → Option<Vec<String>> ──
-        let cmd: Option<Vec<String>> = service.command.as_ref().and_then(|v| {
-            match v {
-                serde_json::Value::String(s) => Some(vec![s.clone()]),
-                serde_json::Value::Array(arr) => {
-                    let strs: Option<Vec<String>> =
-                        arr.iter().map(|item| item.as_str().map(String::from)).collect();
-                    strs.filter(|v| !v.is_empty())
-                }
-                _ => None,
-            }
-        });
-
-        // ── Entrypoint: same shape as command ──
-        let entrypoint: Option<Vec<String>> = service.entrypoint.as_ref().and_then(|v| {
-            match v {
-                serde_json::Value::String(s) => Some(vec![s.clone()]),
-                serde_json::Value::Array(arr) => {
-                    let strs: Option<Vec<String>> =
-                        arr.iter().map(|item| item.as_str().map(String::from)).collect();
-                    strs.filter(|v| !v.is_empty())
-                }
-                _ => None,
-            }
-        });
-
-        // ── Network: ComposeServiceNetworks → Option<String> ──
-        let network: Option<String> = service.networks.as_ref().and_then(|n| match n {
-            ComposeServiceNetworks::List(names) => names.first().cloned(),
-            ComposeServiceNetworks::Map(map) => map.keys().next().cloned(),
-        });
-
-        // ── Ports: Vec<ComposePortEntry> → Vec<String> ──
-        let ports: Option<Vec<String>> = service.ports.as_ref().map(|entries| {
-            entries
-                .iter()
-                .map(|entry| match entry {
-                    ComposePortEntry::Short(v) => v.to_string(),
-                    ComposePortEntry::Long(p) => {
-                        let published = p
-                            .published
-                            .as_ref()
-                            .map(|v| v.to_string())
-                            .unwrap_or_default();
-                        let target = p.target.to_string();
-                        let protocol = p
-                            .protocol
-                            .as_deref()
-                            .unwrap_or("tcp");
-                        if published.is_empty() {
-                            target
-                        } else {
-                            format!("{}:{}/{}", published, target, protocol)
-                        }
-                    }
-                })
-                .collect()
-        });
-
-        // ── Volumes: Vec<ComposeVolumeEntry> → Vec<String> ──
-        let volumes: Option<Vec<String>> = service.volumes.as_ref().map(|entries| {
-            entries
-                .iter()
-                .map(|entry| match entry {
-                    ComposeVolumeEntry::Short(s) => s.clone(),
-                    ComposeVolumeEntry::Long(v) => {
-                        let source = v.source.as_deref().unwrap_or("");
-                        let target = v.target.as_deref().unwrap_or("");
-                        let ro = if v.read_only.unwrap_or(false) {
-                            ":ro"
-                        } else {
-                            ""
-                        };
-                        format!("{}:{}{}", source, target, ro)
-                    }
-                })
-                .collect()
-        });
-
-        // ── Container name ──
-        let container_name = service
-            .container_name
-            .clone()
-            .unwrap_or_else(|| format!("{}_{}", name, std::process::id()));
-
-        let spec = ContainerSpec {
-            image,
-            name: Some(container_name),
-            ports,
-            volumes,
-            env,
-            cmd,
-            entrypoint,
-            network,
-            rm: Some(true),
-        };
-
-        // Run the container
-        self.backend.run(&spec).await
-    }
-
-    /// Stop and remove all resources in the compose stack
-    pub async fn down(
-        &self,
-        handle: &ComposeHandle,
-        remove_volumes: bool,
-    ) -> Result<(), ContainerError> {
-        // Stop and remove containers
-        for (name, container) in &handle.containers {
-            let _ = self.backend.stop(&container.id, 10).await;
-            let _ = self.backend.remove(&container.id, true).await;
-            eprintln!("[perry-compose] Stopped and removed service: {}", name);
-        }
-
-        // Remove networks (idempotent)
-        for network in &handle.networks {
-            let _ = self.backend.remove_network(network).await;
-        }
-
-        // Remove volumes if requested (idempotent)
-        if remove_volumes {
-            for volume in &handle.volumes {
-                let _ = self.backend.remove_volume(volume).await;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Get container info for all services in the stack
-    pub async fn ps(
-        &self,
-        handle: &ComposeHandle,
-    ) -> Result<Vec<super::types::ContainerInfo>, ContainerError> {
-        let mut result = Vec::new();
-
-        for container in handle.containers.values() {
-            match self.backend.inspect(&container.id).await {
-                Ok(info) => result.push(info),
-                Err(_) => {
-                    // Container might not exist anymore
-                    continue;
-                }
-            }
-        }
-
-        Ok(result)
-    }
-
-    /// Get logs for a specific service (or all services)
-    pub async fn logs(
-        &self,
-        handle: &ComposeHandle,
-        service: Option<&str>,
-        tail: Option<u32>,
-    ) -> Result<super::types::ContainerLogs, ContainerError> {
-        if let Some(service_name) = service {
-            if let Some(container) = handle.containers.get(service_name) {
-                return self.backend.logs(&container.id, tail).await;
-            }
-            return Err(ContainerError::NotFound(format!(
-                "Service not found: {}",
-                service_name
-            )));
-        }
-
-        // Get logs from all services
-        let mut combined_stdout = String::new();
-        let mut combined_stderr = String::new();
-
-        for (name, container) in &handle.containers {
-            match self.backend.logs(&container.id, tail).await {
-                Ok(logs) => {
-                    combined_stdout.push_str(&format!("=== {} ===\n{}\n", name, logs.stdout));
-                    combined_stderr.push_str(&format!("=== {} ===\n{}\n", name, logs.stderr));
-                }
-                Err(_) => continue,
-            }
-        }
-
-        Ok(super::types::ContainerLogs {
-            stdout: combined_stdout,
-            stderr: combined_stderr,
-        })
-    }
-
-    /// Execute a command in a service container
-    pub async fn exec(
-        &self,
-        handle: &ComposeHandle,
-        service: &str,
-        cmd: &[String],
-    ) -> Result<super::types::ContainerLogs, ContainerError> {
-        if let Some(container) = handle.containers.get(service) {
-            self.backend.exec(&container.id, cmd, None).await
-        } else {
-            Err(ContainerError::NotFound(format!(
-                "Service not found: {}",
-                service
-            )))
-        }
-    }
+    engine.restart(&services).await.map_err(|e| e.to_string())
 }
