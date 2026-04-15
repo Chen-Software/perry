@@ -2441,6 +2441,24 @@ fn lower_module_decl(
             // Check if this is a native module import
             let is_native = is_native_module(&source);
 
+            // Special handling for perry/container and perry/container-compose
+            if source == "perry/container" || source == "perry/container-compose" {
+                for spec in &import_decl.specifiers {
+                    if let ast::ImportSpecifier::Named(named) = spec {
+                        let local = named.local.sym.to_string();
+                        let imported = named.imported
+                            .as_ref()
+                            .map(|i| match i {
+                                ast::ModuleExportName::Ident(id) => id.sym.to_string(),
+                                ast::ModuleExportName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+                            })
+                            .unwrap_or_else(|| local.clone());
+                        ctx.register_native_module(local, source.clone(), Some(imported));
+                    }
+                }
+                return Ok(());
+            }
+
             // Parse import specifiers
             let mut specifiers = Vec::new();
             for spec in &import_decl.specifiers {
@@ -7856,14 +7874,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             Expr::ArrayToReversed { .. } | Expr::ArrayToSorted { .. } |
                                             Expr::ArrayToSpliced { .. } | Expr::ArrayWith { .. } |
                                             Expr::ArrayEntries(_) | Expr::ArrayKeys(_) | Expr::ArrayValues(_) |
-                                            Expr::ObjectKeys(_) | Expr::ObjectValues(_) | Expr::ObjectEntries(_) |
-                                            // `process.argv` is a `string[]`. Without this arm the
-                                            // fallthrough picked String.slice semantics — so
-                                            // `process.argv.slice(2)` returned a "string" whose
-                                            // length was the argv count and whose elements were
-                                            // NaN-box bits of string pointers read as doubles
-                                            // (closes #41).
-                                            Expr::ProcessArgv
+                                            Expr::ObjectKeys(_) | Expr::ObjectValues(_) | Expr::ObjectEntries(_)
                                         ) {
                                             let mut args_iter = args.into_iter();
                                             let start = args_iter.next().unwrap();
@@ -9049,15 +9060,10 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                 }
                 ast::MemberProp::Computed(computed) => {
                     let index = Box::new(lower_expr(ctx, &computed.expr)?);
-                    // Specialize for Uint8Array/Buffer variables → byte-level access.
-                    // Params declared `Buffer` (e.g. `function f(src: Buffer)`)
-                    // reach here with `Type::Named("Buffer")` — treat it as a
-                    // synonym for Uint8Array so `src[i]` uses the byte-read
-                    // path instead of the generic f64-element IndexGet, which
-                    // would return NaN-boxed pointer bits as a denormal f64.
+                    // Specialize for Uint8Array/Buffer variables → byte-level access
                     if let Expr::LocalGet(id) = &*object {
                         if let Some((_, _, ty)) = ctx.locals.iter().find(|(_, lid, _)| lid == id) {
-                            if matches!(ty, Type::Named(n) if n == "Uint8Array" || n == "Buffer") {
+                            if matches!(ty, Type::Named(n) if n == "Uint8Array") {
                                 return Ok(Expr::Uint8ArrayGet { array: object, index });
                             }
                         }
@@ -9343,12 +9349,10 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                         }
                         ast::MemberProp::Computed(computed) => {
                             let index = Box::new(lower_expr(ctx, &computed.expr)?);
-                            // Specialize for Uint8Array/Buffer variables → byte-level access.
-                            // See mirrored comment in IndexGet lowering: params
-                            // typed `Buffer` must route through the byte-write path.
+                            // Specialize for Uint8Array/Buffer variables → byte-level access
                             if let Expr::LocalGet(id) = &*object {
                                 if let Some((_, _, ty)) = ctx.locals.iter().find(|(_, lid, _)| lid == id) {
-                                    if matches!(ty, Type::Named(n) if n == "Uint8Array" || n == "Buffer") {
+                                    if matches!(ty, Type::Named(n) if n == "Uint8Array") {
                                         return Ok(Expr::Uint8ArraySet { array: object, index, value });
                                     }
                                 }

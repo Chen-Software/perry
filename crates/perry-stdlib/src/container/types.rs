@@ -7,22 +7,100 @@
 use perry_runtime::{JSValue, StringHeader};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::common::handle::{self, Handle};
 
 // ============ Handle Registry ============
+//
+// All container-related opaque objects are stored in the global DashMap-based
+// handle registry (crate::common::handle) so they can be retrieved later by
+// their integer handle from the JS side (e.g. composeHandle.ps(), etc.).
 
-static NEXT_HANDLE_ID: AtomicU64 = AtomicU64::new(1);
-
-fn next_id() -> u64 {
-    NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst)
+/// Register a `ContainerHandle` and return an opaque integer handle.
+pub fn register_container_handle(h: ContainerHandle) -> u64 {
+    handle::register_handle(h) as u64
 }
 
-pub fn register_container_handle(_handle: ContainerHandle) -> u64 { next_id() }
-pub fn register_container_info(_info: ContainerInfo) -> u64 { next_id() }
-pub fn register_container_info_list(_list: Vec<ContainerInfo>) -> u64 { next_id() }
-pub fn register_compose_handle(_handle: ComposeHandle) -> u64 { next_id() }
-pub fn register_container_logs(_logs: ContainerLogs) -> u64 { next_id() }
-pub fn register_image_info_list(_list: Vec<ImageInfo>) -> u64 { next_id() }
+/// Retrieve a `ContainerHandle` by handle id (read-only).
+pub fn get_container_handle(id: u64) -> Option<handle::Handle> {
+    let h = id as Handle;
+    if handle::handle_exists(h) { Some(h) } else { None }
+}
+
+/// Register a single `ContainerInfo` and return an opaque integer handle.
+pub fn register_container_info(info: ContainerInfo) -> u64 {
+    handle::register_handle(info) as u64
+}
+
+/// Register a `Vec<ContainerInfo>` (list result from `list` / `ps`) and return an opaque integer handle.
+pub fn register_container_info_list(list: Vec<ContainerInfo>) -> u64 {
+    handle::register_handle(list) as u64
+}
+
+/// Retrieve the container info list associated with a handle.
+pub fn with_container_info_list<R>(id: u64, f: impl FnOnce(&Vec<ContainerInfo>) -> R) -> Option<R> {
+    handle::with_handle(id as Handle, f)
+}
+
+/// Take (remove and return) the container info list from the registry.
+pub fn take_container_info_list(id: u64) -> Option<Vec<ContainerInfo>> {
+    handle::take_handle(id as Handle)
+}
+
+/// Register a `ComposeEngine` and return an opaque integer handle.
+pub fn register_compose_engine(engine: perry_container_compose::ComposeEngine, stack_id: u64) -> u64 {
+    handle::register_handle_with_id(engine, stack_id as Handle) as u64
+}
+
+/// Retrieve a `ComposeEngine` by handle id.
+pub fn get_compose_engine(id: u64) -> Option<&'static perry_container_compose::ComposeEngine> {
+    handle::get_handle(id as Handle)
+}
+
+/// Take (remove and return) the `ComposeEngine` from the registry.
+pub fn take_compose_engine(id: u64) -> Option<perry_container_compose::ComposeEngine> {
+    handle::take_handle(id as Handle)
+}
+
+/// Register a string and return an opaque integer handle.
+pub fn register_string(s: String) -> u64 {
+    handle::register_handle(s) as u64
+}
+
+/// Register `ContainerLogs` and return an opaque integer handle.
+pub fn register_container_logs(logs: ContainerLogs) -> u64 {
+    handle::register_handle(logs) as u64
+}
+
+/// Retrieve `ContainerLogs` by handle id (read-only).
+pub fn with_container_logs<R>(id: u64, f: impl FnOnce(&ContainerLogs) -> R) -> Option<R> {
+    handle::with_handle(id as Handle, f)
+}
+
+/// Take (remove and return) `ContainerLogs` from the registry.
+pub fn take_container_logs(id: u64) -> Option<ContainerLogs> {
+    handle::take_handle(id as Handle)
+}
+
+/// Register a `Vec<ImageInfo>` and return an opaque integer handle.
+pub fn register_image_info_list(list: Vec<ImageInfo>) -> u64 {
+    handle::register_handle(list) as u64
+}
+
+/// Retrieve the image info list associated with a handle.
+pub fn with_image_info_list<R>(id: u64, f: impl FnOnce(&Vec<ImageInfo>) -> R) -> Option<R> {
+    handle::with_handle(id as Handle, f)
+}
+
+/// Take (remove and return) the image info list from the registry.
+pub fn take_image_info_list(id: u64) -> Option<Vec<ImageInfo>> {
+    handle::take_handle(id as Handle)
+}
+
+/// Drop a handle from the registry (force cleanup from JS GC / explicit close).
+pub fn drop_container_handle(id: u64) -> bool {
+    handle::drop_handle(id as Handle)
+}
 
 // ============ Core Container Types ============
 
@@ -68,11 +146,33 @@ pub struct ContainerInfo {
     pub created: String,
 }
 
+impl From<perry_container_compose::types::ContainerInfo> for ContainerInfo {
+    fn from(info: perry_container_compose::types::ContainerInfo) -> Self {
+        Self {
+            id: info.id,
+            name: info.name,
+            image: info.image,
+            status: info.status,
+            ports: info.ports,
+            created: info.created,
+        }
+    }
+}
+
 /// Stdout + stderr captured from a container operation.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ContainerLogs {
     pub stdout: String,
     pub stderr: String,
+}
+
+impl From<perry_container_compose::types::ContainerLogs> for ContainerLogs {
+    fn from(logs: perry_container_compose::types::ContainerLogs) -> Self {
+        Self {
+            stdout: logs.stdout,
+            stderr: logs.stderr,
+        }
+    }
 }
 
 /// Metadata about a locally-available OCI image.
@@ -606,28 +706,24 @@ impl std::fmt::Display for ContainerError {
 
 impl std::error::Error for ContainerError {}
 
-// ============ JSValue Parsing ============
+// ============ StringHeader Parsing ============
 
-/// Parse `ContainerSpec` from a JSValue pointer.
-///
-/// In production Perry binaries the compiler generates native struct
-/// construction directly; this path is only exercised in testing scaffolds
-/// that pass raw JSON strings.
-pub fn parse_container_spec(_spec_ptr: *const JSValue) -> Result<ContainerSpec, String> {
-    Err(
-        "ContainerSpec must be constructed by the Perry compiler via native codegen, \
-         not parsed at runtime."
-            .to_string(),
-    )
+/// Parse `ContainerSpec` from a JSON StringHeader pointer.
+pub unsafe fn parse_container_spec_json(ptr: *const StringHeader) -> Result<ContainerSpec, String> {
+    let s = string_from_header(ptr).ok_or("Invalid spec pointer")?;
+    serde_json::from_str(&s).map_err(|e| e.to_string())
 }
 
-/// Parse `ComposeSpec` from a JSValue pointer.
-///
-/// Same note as `parse_container_spec` above.
-pub fn parse_compose_spec(_spec_ptr: *const JSValue) -> Result<ComposeSpec, String> {
-    Err(
-        "ComposeSpec must be constructed by the Perry compiler via native codegen, \
-         not parsed at runtime."
-            .to_string(),
-    )
+/// Parse `ComposeSpec` from a JSON StringHeader pointer.
+pub unsafe fn parse_compose_spec_json(ptr: *const StringHeader) -> Result<perry_container_compose::ComposeSpec, String> {
+    let s = string_from_header(ptr).ok_or("Invalid spec pointer")?;
+    serde_json::from_str(&s).map_err(|e| e.to_string())
+}
+
+unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
+    if ptr.is_null() || (ptr as usize) < 0x1000 { return None; }
+    let len = (*ptr).byte_len as usize;
+    let data_ptr = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+    let bytes = std::slice::from_raw_parts(data_ptr, len);
+    Some(String::from_utf8_lossy(bytes).to_string())
 }
