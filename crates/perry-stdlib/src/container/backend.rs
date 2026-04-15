@@ -717,6 +717,171 @@ impl ContainerBackend for PodmanBackend {
     }
 }
 
+// ─── Backend Adapter ─────────────────────────────────────────────────────────
+
+/// Bridges stdlib's `ContainerBackend` with compose crate's legacy `Backend` trait.
+pub struct BackendAdapter {
+    pub inner: Arc<dyn ContainerBackend>,
+}
+
+#[async_trait]
+impl perry_container_compose::backend::Backend for BackendAdapter {
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+
+    async fn build(
+        &self,
+        _context: &str,
+        _dockerfile: Option<&str>,
+        _tag: &str,
+        _args: Option<&HashMap<String, String>>,
+        _target: Option<&str>,
+        _network: Option<&str>,
+    ) -> perry_container_compose::Result<()> {
+        // Build not yet implemented in PodmanBackend, but AppleContainerBackend has it.
+        // For now, return error if not implemented.
+        Err(perry_container_compose::error::ComposeError::BackendError {
+            code: 1,
+            message: "Build not implemented for this backend".to_string(),
+        })
+    }
+
+    async fn run(
+        &self,
+        image: &str,
+        name: &str,
+        ports: Option<&[String]>,
+        env: Option<&HashMap<String, String>>,
+        volumes: Option<&[String]>,
+        _labels: Option<&HashMap<String, String>>,
+        cmd: Option<&[String]>,
+        detach: bool,
+    ) -> perry_container_compose::Result<()> {
+        let spec = ContainerSpec {
+            image: image.to_string(),
+            name: Some(name.to_string()),
+            ports: ports.map(|p| p.to_vec()),
+            volumes: volumes.map(|v| v.to_vec()),
+            env: env.cloned(),
+            cmd: cmd.map(|c| c.to_vec()),
+            entrypoint: None,
+            network: None,
+            rm: Some(true),
+        };
+        if detach {
+            self.inner.run(&spec).await.map(|_| ()).map_err(to_compose_err)
+        } else {
+            self.inner.run(&spec).await.map(|_| ()).map_err(to_compose_err)
+        }
+    }
+
+    async fn start(&self, name: &str) -> perry_container_compose::Result<()> {
+        self.inner.start(name).await.map_err(to_compose_err)
+    }
+
+    async fn stop(&self, name: &str) -> perry_container_compose::Result<()> {
+        self.inner.stop(name, None).await.map_err(to_compose_err)
+    }
+
+    async fn remove(&self, name: &str, force: bool) -> perry_container_compose::Result<()> {
+        self.inner.remove(name, force).await.map_err(to_compose_err)
+    }
+
+    async fn inspect(&self, name: &str) -> perry_container_compose::Result<perry_container_compose::backend::ContainerStatus> {
+        match self.inner.inspect(name).await {
+            Ok(info) => {
+                if info.status.to_lowercase().contains("running") {
+                    Ok(perry_container_compose::backend::ContainerStatus::Running)
+                } else {
+                    Ok(perry_container_compose::backend::ContainerStatus::Stopped)
+                }
+            }
+            Err(ContainerError::NotFound(_)) => Ok(perry_container_compose::backend::ContainerStatus::NotFound),
+            Err(e) => Err(to_compose_err(e)),
+        }
+    }
+
+    async fn list(&self, _label_filter: Option<&str>) -> perry_container_compose::Result<Vec<perry_container_compose::types::ContainerInfo>> {
+        let list = self.inner.list(true).await.map_err(to_compose_err)?;
+        Ok(list.into_iter().map(|i| perry_container_compose::types::ContainerInfo {
+            id: i.id,
+            name: i.name,
+            image: i.image,
+            status: i.status,
+            ports: i.ports,
+            created: i.created,
+        }).collect())
+    }
+
+    async fn logs(&self, name: &str, tail: Option<u32>, _follow: bool) -> perry_container_compose::Result<String> {
+        let logs = self.inner.logs(name, tail).await.map_err(to_compose_err)?;
+        Ok(format!("{}{}", logs.stdout, logs.stderr))
+    }
+
+    async fn exec(
+        &self,
+        name: &str,
+        cmd: &[String],
+        _user: Option<&str>,
+        workdir: Option<&str>,
+        env: Option<&HashMap<String, String>>,
+    ) -> perry_container_compose::Result<perry_container_compose::backend::ExecResult> {
+        let logs = self.inner.exec(name, cmd, env, workdir).await.map_err(to_compose_err)?;
+        Ok(perry_container_compose::backend::ExecResult {
+            stdout: logs.stdout,
+            stderr: logs.stderr,
+            exit_code: 0, // We don't have exit code in ContainerLogs yet
+        })
+    }
+
+    async fn create_network(
+        &self,
+        name: &str,
+        driver: Option<&str>,
+        _labels: Option<&HashMap<String, String>>,
+    ) -> perry_container_compose::Result<()> {
+        let config = ComposeNetwork {
+            driver: driver.map(|s| s.to_string()),
+            ..Default::default()
+        };
+        self.inner.create_network(name, &config).await.map_err(to_compose_err)
+    }
+
+    async fn remove_network(&self, name: &str) -> perry_container_compose::Result<()> {
+        self.inner.remove_network(name).await.map_err(to_compose_err)
+    }
+
+    async fn create_volume(
+        &self,
+        name: &str,
+        driver: Option<&str>,
+        _labels: Option<&HashMap<String, String>>,
+    ) -> perry_container_compose::Result<()> {
+        let config = ComposeVolume {
+            driver: driver.map(|s| s.to_string()),
+            ..Default::default()
+        };
+        self.inner.create_volume(name, &config).await.map_err(to_compose_err)
+    }
+
+    async fn remove_volume(&self, name: &str) -> perry_container_compose::Result<()> {
+        self.inner.remove_volume(name).await.map_err(to_compose_err)
+    }
+}
+
+fn to_compose_err(e: ContainerError) -> perry_container_compose::error::ComposeError {
+    match e {
+        ContainerError::NotFound(id) => perry_container_compose::error::ComposeError::NotFound(id),
+        ContainerError::DependencyCycle { cycle } => perry_container_compose::error::ComposeError::DependencyCycle { services: cycle },
+        ContainerError::ServiceStartupFailed { service, error } => perry_container_compose::error::ComposeError::ServiceStartupFailed { service, message: error },
+        other => perry_container_compose::error::ComposeError::BackendError {
+            code: 1,
+            message: other.to_string(),
+        },
+    }
+}
+
 // ─── Backend selection ────────────────────────────────────────────────────────
 
 pub fn get_backend() -> Result<Arc<dyn ContainerBackend>, ContainerError> {
@@ -728,6 +893,22 @@ pub fn get_backend() -> Result<Arc<dyn ContainerBackend>, ContainerError> {
         _ => Arc::new(PodmanBackend::new()),
     };
     Ok(backend)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_get_backend_non_null() {
+        let backend = get_backend();
+        assert!(backend.is_ok());
+        let b = backend.unwrap();
+        #[cfg(target_os = "macos")]
+        assert_eq!(b.name(), "apple/container");
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(b.name(), "podman");
+    }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

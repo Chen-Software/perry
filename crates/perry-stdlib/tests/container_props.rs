@@ -8,6 +8,7 @@
 //! Note: These tests use the perry-stdlib types (serde_json::Value based)
 //! which are the actual types exposed through the FFI boundary.
 
+use perry_stdlib::container::types::*;
 use proptest::prelude::*;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -138,16 +139,16 @@ proptest! {
         let mut map = HashMap::new();
         // Mix different value types across keys
         for (i, key) in keys.iter().enumerate() {
-            let val: Option<Value> = match i % 4 {
-                0 => Some(Value::String(str_val.clone())),
-                1 => Some(Value::Number(int_val.into())),
-                2 => Some(Value::Bool(bool_val)),
+            let val: Option<serde_json::Value> = match i % 4 {
+                0 => Some(serde_json::Value::String(str_val.clone())),
+                1 => Some(serde_json::Value::Number(int_val.into())),
+                2 => Some(serde_json::Value::Bool(bool_val)),
                 _ => None, // Null
             };
             map.insert(key.clone(), val);
         }
 
-        let lod = perry_stdlib::container::ListOrDict::Dict(map);
+        let lod = ListOrDict::Dict(map);
         let result = lod.to_map();
 
         // All keys should be preserved
@@ -169,7 +170,7 @@ proptest! {
         entries in proptest::collection::vec("[A-Z][A-Z0-9_]{1,8}=[a-z0-9_]{0,10}", 1..=8),
     ) {
         let list: Vec<String> = entries.clone();
-        let lod = perry_stdlib::container::ListOrDict::List(list);
+        let lod = ListOrDict::List(list);
         let result = lod.to_map();
 
         // All unique keys should be present with non-None values
@@ -199,14 +200,14 @@ proptest! {
         keys in proptest::collection::vec("[A-Z][A-Z0-9_]{1,8}", 1..=5),
     ) {
         let list: Vec<String> = keys.clone();
-        let lod = perry_stdlib::container::ListOrDict::List(list);
+        let lod = ListOrDict::List(list);
         let result = lod.to_map();
 
         // All unique keys should be present with empty values
         // (HashMap deduplicates keys, so len may be <= keys.len())
         for key in &keys {
             prop_assert_eq!(
-                result.get(key).map(|s| s.as_str()),
+                result.get(key).map(|s: &String| s.as_str()),
                 Some(""),
                 "key {} without '=' should have empty value",
                 key
@@ -226,7 +227,7 @@ proptest! {
         names in proptest::collection::vec("[a-z][a-z0-9_-]{1,10}", 1..=6),
     ) {
         // List variant
-        let list_entry = perry_stdlib::container::ComposeDependsOnEntry::List(names.clone());
+        let list_entry = ComposeDependsOnEntry::List(names.clone());
         let list_names = list_entry.service_names();
 
         // Map variant (same keys)
@@ -234,14 +235,14 @@ proptest! {
         for name in &names {
             map.insert(
                 name.clone(),
-                perry_stdlib::container::ComposeDependsOn {
+                ComposeDependsOn {
                     condition: "service_started".to_string(),
                     required: None,
                     restart: None,
                 },
             );
         }
-        let map_entry = perry_stdlib::container::ComposeDependsOnEntry::Map(map);
+        let map_entry = ComposeDependsOnEntry::Map(map);
         let map_names = map_entry.service_names();
 
         // Both should yield the same service names (order may differ for Map)
@@ -265,23 +266,23 @@ proptest! {
         msg in "[a-z A-Z0-9_]{1,40}",
     ) {
         let error = match variant {
-            0 => perry_stdlib::container::ContainerError::NotFound(msg.clone()),
-            1 => perry_stdlib::container::ContainerError::BackendError {
+            0 => ContainerError::NotFound(msg.clone()),
+            1 => ContainerError::BackendError {
                 code: 1,
                 message: msg.clone(),
             },
-            2 => perry_stdlib::container::ContainerError::VerificationFailed {
+            2 => ContainerError::VerificationFailed {
                 image: msg.clone(),
                 reason: "test reason".to_string(),
             },
-            3 => perry_stdlib::container::ContainerError::DependencyCycle {
+            3 => ContainerError::DependencyCycle {
                 cycle: vec![msg.clone()],
             },
-            4 => perry_stdlib::container::ContainerError::ServiceStartupFailed {
+            4 => ContainerError::ServiceStartupFailed {
                 service: msg.clone(),
                 error: "test error".to_string(),
             },
-            _ => perry_stdlib::container::ContainerError::InvalidConfig(msg.clone()),
+            _ => ContainerError::InvalidConfig(msg.clone()),
         };
 
         let display = format!("{}", error);
@@ -315,17 +316,17 @@ proptest! {
         svc_names in proptest::collection::vec("[a-z][a-z0-9_-]{1,10}", 1..=5),
         images in proptest::collection::vec("[a-z][a-z0-9_.-]{3,30}(:[a-z0-9._-]+)?", 1..=5),
     ) {
-        let mut spec = perry_stdlib::container::ComposeSpec::default();
+        let mut spec = ComposeSpec::default();
         spec.name = name;
 
         for (svc_name, image) in svc_names.iter().zip(images.iter()) {
-            let mut service = perry_stdlib::container::ComposeService::default();
+            let mut service = ComposeService::default();
             service.image = Some(image.clone());
             spec.services.insert(svc_name.clone(), service);
         }
 
         let json_str = serde_json::to_string(&spec).unwrap();
-        let reparsed: perry_stdlib::container::ComposeSpec =
+        let reparsed: ComposeSpec =
             serde_json::from_str(&json_str).unwrap();
 
         prop_assert_eq!(reparsed.name, spec.name);
@@ -351,8 +352,6 @@ proptest! {
         stdout in "[a-z0-9 ]{0,50}",
         stderr in "[a-z0-9 ]{0,50}",
     ) {
-        use perry_stdlib::container::{ContainerInfo, ContainerLogs};
-
         // Register a Vec<ContainerInfo> and take it back
         let infos: Vec<ContainerInfo> = ids
             .iter()
@@ -367,9 +366,9 @@ proptest! {
             })
             .collect();
 
-        let h = perry_stdlib::container::types::register_container_info_list(infos.clone());
+        let h = register_container_info_list(infos.clone());
         let taken: Option<Vec<ContainerInfo>> =
-            perry_stdlib::container::types::take_container_info_list(h);
+            take_container_info_list(h);
         prop_assert!(taken.is_some());
         let taken = taken.unwrap();
         prop_assert_eq!(taken.len(), infos.len());
@@ -383,9 +382,9 @@ proptest! {
             stdout: stdout.clone(),
             stderr: stderr.clone(),
         };
-        let lh = perry_stdlib::container::types::register_container_logs(logs);
+        let lh = register_container_logs(logs);
         let taken_logs: Option<ContainerLogs> =
-            perry_stdlib::container::types::take_container_logs(lh);
+            take_container_logs(lh);
         prop_assert!(taken_logs.is_some());
         let taken_logs = taken_logs.unwrap();
         prop_assert_eq!(taken_logs.stdout, stdout);
@@ -404,12 +403,12 @@ proptest! {
         name in proptest::option::of("[a-z][a-z0-9_-]{1,20}"),
         driver in proptest::option::of("[a-z]{3,10}"),
     ) {
-        let mut network = perry_stdlib::container::ComposeNetwork::default();
+        let mut network = ComposeNetwork::default();
         network.name = name;
         network.driver = driver;
 
         let json_str = serde_json::to_string(&network).unwrap();
-        let reparsed: perry_stdlib::container::ComposeNetwork =
+        let reparsed: ComposeNetwork =
             serde_json::from_str(&json_str).unwrap();
 
         prop_assert_eq!(reparsed.name, network.name);
