@@ -15,11 +15,93 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 
 /// Overflow field storage for objects that exceed their pre-allocated inline slot count.
-/// Keyed by (obj_ptr as usize) -> (field_index -> JSValue bits).
+/// Keyed by (obj_ptr as usize) -> Vec<JSValue bits> indexed by absolute field_index
+/// (inline slots 0..alloc_limit remain `TAG_UNDEFINED` placeholders in the Vec;
+/// they're never read since the inline slots are checked first).
+///
+/// Was a `HashMap<usize, HashMap<usize, u64>>` through v0.5.29 — the inner HashMap
+/// dominated the row-decode hot path: a 20-property row object touches the overflow
+/// storage on each of its 12 post-8-slot writes, and HashMap ops (hash + probe +
+/// mut insert) cost ~40-50ns each. Flat `Vec<u64>` is ~5ns per append + index;
+/// removes most of the residual gap after the shape-transition cache landed.
+///
 /// This handles cases like Object.assign() adding many fields to an object
 /// that was allocated with only 8 slots (e.g., @noble/curves Fp field with 21 properties).
 thread_local! {
-    static OVERFLOW_FIELDS: RefCell<HashMap<usize, HashMap<usize, u64>>> = RefCell::new(HashMap::new());
+    static OVERFLOW_FIELDS: RefCell<HashMap<usize, Vec<u64>>> = RefCell::new(HashMap::new());
+}
+
+/// Last-accessed overflow Vec cache — one entry, keyed by `obj_ptr`.
+/// Skips the outer HashMap lookup on consecutive writes to the same
+/// object (exactly the row-build pattern: a single object gets its
+/// overflow slots filled back-to-back). Refreshed on every slow-path
+/// HashMap access; invalidated by `clear_overflow_for_ptr` when GC
+/// sweep frees the corresponding object.
+///
+/// Safety: the cached pointer references the `Vec<u64>` struct stored
+/// inside a HashMap bucket. That struct only moves when the HashMap
+/// resizes, which only happens on `entry().or_default()` inserting a
+/// fresh key. The slow path below does both the potentially-resizing
+/// call and the cache refresh inside a single `OVERFLOW_FIELDS.with`
+/// closure, so no other thread-local mutation can interleave between
+/// obtaining `&mut Vec` and caching its address.
+thread_local! {
+    static OVERFLOW_LAST: std::cell::UnsafeCell<(usize, *mut Vec<u64>)> =
+        std::cell::UnsafeCell::new((0, std::ptr::null_mut()));
+}
+
+/// Read the u64 bits stored at `field_index` for `obj`, or `None` if absent.
+/// Positions never written are stored as `TAG_UNDEFINED`; this helper reports
+/// them as `None` so callers can return JS `undefined` uniformly with the
+/// "no Vec entry at all" case.
+#[inline]
+fn overflow_get(obj_ptr: usize, field_index: usize) -> Option<u64> {
+    OVERFLOW_FIELDS.with(|m| {
+        m.borrow()
+            .get(&obj_ptr)
+            .and_then(|v| v.get(field_index).copied())
+            .filter(|&bits| bits != crate::value::TAG_UNDEFINED)
+    })
+}
+
+/// Write `vbits` to the overflow slot `field_index` for `obj`. Grows the
+/// per-object `Vec` to `field_index + 1` with `TAG_UNDEFINED` fillers if
+/// needed (filler slots correspond to the object's inline region and are
+/// never read).
+///
+/// Fast path skips the outer HashMap when `obj_ptr` matches the last-
+/// accessed Vec — the common row-build pattern where an object's
+/// overflow slots fill in sequence.
+#[inline]
+fn overflow_set(obj_ptr: usize, field_index: usize, vbits: u64) {
+    let hit = OVERFLOW_LAST.with(|c| unsafe {
+        let (cached_obj, cached_vec) = *c.get();
+        if cached_obj == obj_ptr && !cached_vec.is_null() {
+            let v = &mut *cached_vec;
+            if v.len() <= field_index {
+                v.resize(field_index + 1, crate::value::TAG_UNDEFINED);
+            }
+            *v.get_unchecked_mut(field_index) = vbits;
+            true
+        } else {
+            false
+        }
+    });
+    if hit {
+        return;
+    }
+    OVERFLOW_FIELDS.with(|m| {
+        let mut map = m.borrow_mut();
+        let v = map.entry(obj_ptr).or_default();
+        if v.len() <= field_index {
+            v.resize(field_index + 1, crate::value::TAG_UNDEFINED);
+        }
+        v[field_index] = vbits;
+        let vec_ptr = v as *mut Vec<u64>;
+        OVERFLOW_LAST.with(|c| unsafe {
+            *c.get() = (obj_ptr, vec_ptr);
+        });
+    });
 }
 
 /// Per-property attribute flags set by `Object.defineProperty` / `Object.freeze` / `Object.seal`.
@@ -76,6 +158,12 @@ thread_local! {
     /// skip the `.to_string()` allocation required to look up a descriptor
     /// that almost never exists.
     pub(crate) static PROPERTY_ATTRS_IN_USE: Cell<bool> = const { Cell::new(false) };
+    /// OR of the above two — checked by the single-load fast path in
+    /// `js_object_set_field_by_name`. Set alongside either individual
+    /// flag; never unset (same monotonic invariant as the parent
+    /// flags). One thread-local read instead of two on every dynamic
+    /// property write.
+    pub(crate) static ANY_DESCRIPTORS_IN_USE: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Look up the property descriptor for (obj, key). Returns None if no entry exists,
@@ -87,6 +175,7 @@ pub(crate) fn get_property_attrs(obj: usize, key: &str) -> Option<PropertyAttrs>
 /// Store a property descriptor for (obj, key).
 pub(crate) fn set_property_attrs(obj: usize, key: String, attrs: PropertyAttrs) {
     PROPERTY_ATTRS_IN_USE.with(|c| c.set(true));
+    ANY_DESCRIPTORS_IN_USE.with(|c| c.set(true));
     PROPERTY_DESCRIPTORS.with(|m| { m.borrow_mut().insert((obj, key), attrs); });
 }
 
@@ -98,6 +187,7 @@ pub(crate) fn get_accessor_descriptor(obj: usize, key: &str) -> Option<AccessorD
 /// Store an accessor descriptor for (obj, key).
 pub(crate) fn set_accessor_descriptor(obj: usize, key: String, acc: AccessorDescriptor) {
     ACCESSORS_IN_USE.with(|c| c.set(true));
+    ANY_DESCRIPTORS_IN_USE.with(|c| c.set(true));
     ACCESSOR_DESCRIPTORS.with(|m| { m.borrow_mut().insert((obj, key), acc); });
 }
 
@@ -277,6 +367,114 @@ fn shape_cache_insert(shape_id: u32, keys_array: *mut ArrayHeader) {
     });
 }
 
+/// Thread-local shape-transition cache for the dynamic-key write path
+/// (`obj[name] = value`). One entry per `(prev_keys_array, key_ptr)` edge
+/// in the shape lattice.
+///
+/// When `js_object_set_field_by_name` would otherwise do a linear scan
+/// over `keys_array` to locate-or-append a key, it first looks up
+/// `(obj.keys_array, key)` here. A hit tells us directly which
+/// keys_array to transition the object to and which slot the field
+/// lives in — no scan, no clone, no `js_array_push`.
+///
+/// The cache is populated on the slow (append) path: after the scan
+/// confirms the key is new and a new keys_array is built, the
+/// transition `(prev_keys, key_ptr) → (new_keys, slot_idx)` is stored
+/// here and `new_keys` is stamped `GC_FLAG_SHAPE_SHARED` so any future
+/// extension clones before mutating (same invariant as the SHAPE_CACHE
+/// for compile-time object literals).
+///
+/// Direct-mapped, 4096 entries, each a self-describing record (full
+/// key included) so a collision just misses instead of returning the
+/// wrong slot. The target pointers are GC-rooted via
+/// `scan_transition_cache_roots`.
+///
+/// Two sentinel values: `prev_keys == 0` is the "keys_array is null"
+/// edge (first property on a fresh `{}`), which lets a second object
+/// building the same shape reuse the first's keys_array from the very
+/// first write — no per-row allocation of a 1-entry keys_array.
+#[derive(Clone, Copy)]
+struct TransitionEntry {
+    prev_keys: usize,
+    key_ptr: usize,
+    next_keys: usize,
+    slot_idx: u32,
+}
+
+const TRANSITION_CACHE_SIZE: usize = 4096;
+
+thread_local! {
+    static TRANSITION_CACHE: std::cell::UnsafeCell<[TransitionEntry; TRANSITION_CACHE_SIZE]> =
+        std::cell::UnsafeCell::new([TransitionEntry {
+            prev_keys: 0, key_ptr: 0, next_keys: 0, slot_idx: 0,
+        }; TRANSITION_CACHE_SIZE]);
+}
+
+#[inline(always)]
+fn transition_cache_slot(prev_keys: usize, key_ptr: usize) -> usize {
+    // Both keys are pointer-aligned (8-byte); shift the low 3 bits out
+    // and mix with two distinct multipliers so the same key_ptr across
+    // different prev_keys maps to different slots.
+    let mixed = (prev_keys >> 3).wrapping_mul(0x9E3779B97F4A7C15)
+        ^ (key_ptr >> 3).wrapping_mul(0xC6BC279692B5C323);
+    (mixed as usize) & (TRANSITION_CACHE_SIZE - 1)
+}
+
+#[inline(always)]
+fn transition_cache_lookup(prev_keys: usize, key_ptr: usize) -> Option<(usize, u32)> {
+    TRANSITION_CACHE.with(|c| {
+        let slot = transition_cache_slot(prev_keys, key_ptr);
+        let entry = unsafe { (*c.get())[slot] };
+        if entry.next_keys != 0 && entry.prev_keys == prev_keys && entry.key_ptr == key_ptr {
+            Some((entry.next_keys, entry.slot_idx))
+        } else {
+            None
+        }
+    })
+}
+
+fn transition_cache_insert(prev_keys: usize, key_ptr: usize, next_keys: usize, slot_idx: u32) {
+    if next_keys == 0 {
+        return;
+    }
+    TRANSITION_CACHE.with(|c| {
+        let slot = transition_cache_slot(prev_keys, key_ptr);
+        unsafe {
+            (*c.get())[slot] = TransitionEntry { prev_keys, key_ptr, next_keys, slot_idx };
+        }
+    });
+    // Mark the target as shape-shared so any future extension on the
+    // original owning object clones before mutating. Without this flag,
+    // the first row's next append would extend `next_keys` in place
+    // and every object that picked up `next_keys` via a cache hit
+    // would observe the mutation.
+    unsafe {
+        let gc_header = (next_keys as *const u8)
+            .wrapping_sub(crate::gc::GC_HEADER_SIZE) as *mut crate::gc::GcHeader;
+        if (next_keys) >= crate::gc::GC_HEADER_SIZE
+            && (*gc_header).obj_type == crate::gc::GC_TYPE_ARRAY
+        {
+            (*gc_header).gc_flags |= crate::gc::GC_FLAG_SHAPE_SHARED;
+        }
+    }
+}
+
+/// GC root scanner for the transition cache. Same contract as
+/// `scan_shape_cache_roots` — without this the mark phase would free
+/// cached target arrays that no live object currently holds directly,
+/// and the next cache-hit store would dereference freed memory.
+pub fn scan_transition_cache_roots(mark: &mut dyn FnMut(f64)) {
+    TRANSITION_CACHE.with(|c| {
+        let entries = unsafe { *c.get() };
+        for entry in entries.iter() {
+            if entry.next_keys != 0 {
+                let jsval = JSValue::pointer(entry.next_keys as *const u8);
+                mark(f64::from_bits(jsval.bits()));
+            }
+        }
+    });
+}
+
 /// GC root scanner: mark all cached shape keys arrays so they're not freed.
 /// The inline cache + overflow map both hold the raw `*mut ArrayHeader`
 /// pointers; without this scanner, GC would free those arrays, leaving
@@ -311,7 +509,7 @@ pub fn scan_overflow_fields_roots(mark: &mut dyn FnMut(f64)) {
     OVERFLOW_FIELDS.with(|m| {
         let m = m.borrow();
         for fields in m.values() {
-            for &val_bits in fields.values() {
+            for &val_bits in fields.iter() {
                 // Mark any NaN-boxed heap pointer (POINTER_TAG, STRING_TAG, BIGINT_TAG)
                 let tag = val_bits >> 48;
                 if tag == 0x7FFD || tag == 0x7FFF || tag == 0x7FFA {
@@ -328,6 +526,13 @@ pub fn scan_overflow_fields_roots(mark: &mut dyn FnMut(f64)) {
 pub fn clear_overflow_for_ptr(obj_ptr: usize) {
     OVERFLOW_FIELDS.with(|m| {
         m.borrow_mut().remove(&obj_ptr);
+    });
+    // If the freed object is the one our last-accessed cache points at,
+    // the cached `Vec` pointer is now dangling — clear it.
+    OVERFLOW_LAST.with(|c| unsafe {
+        if (*c.get()).0 == obj_ptr {
+            *c.get() = (0, std::ptr::null_mut());
+        }
     });
 }
 
@@ -1221,10 +1426,7 @@ pub extern "C" fn js_object_get_field(obj: *const ObjectHeader, field_index: u32
         let fc = (*obj).field_count;
         if field_index >= fc {
             // Check overflow map for fields that didn't fit in inline storage
-            let overflow_val = OVERFLOW_FIELDS.with(|m| {
-                m.borrow().get(&(obj as usize)).and_then(|fields| fields.get(&(field_index as usize)).copied())
-            });
-            return match overflow_val {
+            return match overflow_get(obj as usize, field_index as usize) {
                 Some(bits) => JSValue::from_bits(bits),
                 None => JSValue::undefined(),
             };
@@ -1911,13 +2113,10 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
                     if i < alloc_limit {
                         return js_object_get_field(obj, i as u32);
                     } else {
-                        return OVERFLOW_FIELDS.with(|m| {
-                            m.borrow()
-                                .get(&(obj as usize))
-                                .and_then(|fields| fields.get(&i))
-                                .map(|&bits| JSValue::from_bits(bits))
-                                .unwrap_or(JSValue::undefined())
-                        });
+                        return match overflow_get(obj as usize, i) {
+                            Some(bits) => JSValue::from_bits(bits),
+                            None => JSValue::undefined(),
+                        };
                     }
                 }
             }
@@ -2037,6 +2236,72 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
             }
         }
 
+        // Capture the keys_array pointer as it stood on entry. This is the
+        // `prev_keys` half of the transition-cache key; any append done by
+        // the slow path below records `(prev_keys_usize, key) → (new_keys,
+        // slot_idx)` so subsequent callers hit the fast path here.
+        let prev_keys_usize = keys as usize;
+
+        // FAST PATH: shape-transition cache.
+        //
+        // `obj[name] = value` when the same `(obj.keys_array, key_ptr)` pair
+        // has been seen before — either on this object (UPDATE) or on a
+        // previous object that took the same shape path (APPEND sharing
+        // a cached target). The cache tells us directly which
+        // keys_array to transition to and which slot the field lives
+        // in, skipping both the linear scan and the clone-on-shared
+        // `js_array_push`.
+        //
+        // Skipped when accessors / per-property attrs / freeze / seal /
+        // no_extend semantics are in play — those paths need the full
+        // slow scan to consult the descriptor tables.
+        if !key.is_null()
+            && !is_frozen
+            && !is_sealed_or_no_extend
+            && !ANY_DESCRIPTORS_IN_USE.with(|c| c.get())
+        {
+            if let Some((next_keys, slot_idx)) = transition_cache_lookup(prev_keys_usize, key as usize) {
+                // Defensive: strip a raw-null POINTER_TAG value the same
+                // way the slow overflow path below does, so a bogus
+                // 0x7FFD_0000_0000_0000 store doesn't leak into an
+                // overflow map.
+                let vbits = value.to_bits();
+                let vbits = if (vbits >> 48) == 0x7FFD && (vbits & 0x0000_FFFF_FFFF_FFFF) == 0 {
+                    crate::value::TAG_UNDEFINED
+                } else { vbits };
+                (*obj).keys_array = next_keys as *mut ArrayHeader;
+                let alloc_limit = std::cmp::max((*obj).field_count, 8) as usize;
+                if (slot_idx as usize) < alloc_limit {
+                    // Inline the field write — `obj` has already been
+                    // validated (GC header read, type check, closure
+                    // check) by the prelude above, and `vbits` has had
+                    // the null-POINTER-TAG replacement applied. No
+                    // point re-doing it in `js_object_set_field`.
+                    let fields_ptr = (obj as *mut u8)
+                        .add(std::mem::size_of::<ObjectHeader>()) as *mut JSValue;
+                    ptr::write(fields_ptr.add(slot_idx as usize), JSValue::from_bits(vbits));
+                    // Bump field_count only for inline slots — leaving
+                    // it at the physical capacity is what steers
+                    // `js_object_get_field_by_name`'s reads to the
+                    // overflow map for slots ≥ alloc_limit. Bumping it
+                    // past capacity would make reads dereference past
+                    // the object's inline field array into adjacent
+                    // arena data.
+                    if slot_idx >= (*obj).field_count {
+                        (*obj).field_count = slot_idx + 1;
+                    }
+                } else {
+                    // Cached slot is past the object's inline capacity —
+                    // store in the overflow map (same as the slow path's
+                    // `new_index >= alloc_limit` branch).
+                    overflow_set(obj as usize, slot_idx as usize, vbits);
+                    // Deliberately do NOT bump field_count here — see
+                    // above.
+                }
+                return;
+            }
+        }
+
         // If no keys array exists, create one (adding new key)
         if keys.is_null() {
             // Frozen or sealed/non-extensible objects reject new keys
@@ -2055,6 +2320,11 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
             if (*obj).field_count == 0 {
                 (*obj).field_count = 1;
             }
+            // Record the null→single-key transition so the next object
+            // that starts with `{}` and sets the same first key hits the
+            // fast path above instead of allocating a fresh 4-elem
+            // keys_array here.
+            transition_cache_insert(0, key as usize, new_keys as usize, 0);
             return;
         }
 
@@ -2124,12 +2394,7 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
                         let vbits = if (vbits >> 48) == 0x7FFD && (vbits & 0x0000_FFFF_FFFF_FFFF) == 0 {
                             crate::value::TAG_UNDEFINED
                         } else { vbits };
-                        OVERFLOW_FIELDS.with(|m| {
-                            m.borrow_mut()
-                                .entry(obj as usize)
-                                .or_default()
-                                .insert(i, vbits);
-                        });
+                        overflow_set(obj as usize, i, vbits);
                     }
                     return;
                 }
@@ -2196,12 +2461,13 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
             } else { vbits };
             let new_keys = crate::array::js_array_push(owned_keys, JSValue::string_ptr(key as *mut _));
             (*obj).keys_array = new_keys;
-            OVERFLOW_FIELDS.with(|m| {
-                m.borrow_mut()
-                    .entry(obj as usize)
-                    .or_default()
-                    .insert(new_index, vbits);
-            });
+            overflow_set(obj as usize, new_index, vbits);
+            // Record the shape transition so the next object sharing
+            // `prev_keys` that adds the same key hits the fast path.
+            // The cached target is stamped `GC_FLAG_SHAPE_SHARED` by
+            // `transition_cache_insert`, which triggers clone-on-extend
+            // on either object if someone later appends past this key.
+            transition_cache_insert(prev_keys_usize, key as usize, new_keys as usize, new_index as u32);
             return;
         }
         // First, add the key to the keys array (may reallocate)
@@ -2215,6 +2481,8 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
         if new_index as u32 >= (*obj).field_count {
             (*obj).field_count = new_index as u32 + 1;
         }
+        // Record the shape transition — see above for semantics.
+        transition_cache_insert(prev_keys_usize, key as usize, new_keys as usize, new_index as u32);
     }
 }
 

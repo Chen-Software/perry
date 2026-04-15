@@ -1269,6 +1269,14 @@ pub fn shape_cache_root_scanner(mark: &mut dyn FnMut(f64)) {
     crate::object::scan_shape_cache_roots(mark);
 }
 
+/// Root scanner for the shape-transition cache used by the dynamic-key
+/// write path (`obj[name] = value`). Same role as `shape_cache_root_scanner`
+/// — without it, GC would free cached target keys_arrays that no live
+/// object currently references directly.
+pub fn transition_cache_root_scanner(mark: &mut dyn FnMut(f64)) {
+    crate::object::scan_transition_cache_roots(mark);
+}
+
 /// Root scanner for OVERFLOW_FIELDS (per-object extra properties beyond inline slots)
 pub fn overflow_fields_root_scanner(mark: &mut dyn FnMut(f64)) {
     crate::object::scan_overflow_fields_roots(mark);
@@ -1280,6 +1288,7 @@ pub fn gc_init() {
     gc_register_root_scanner(timer_root_scanner);
     gc_register_root_scanner(exception_root_scanner);
     gc_register_root_scanner(shape_cache_root_scanner);
+    gc_register_root_scanner(transition_cache_root_scanner);
     gc_register_root_scanner(overflow_fields_root_scanner);
 }
 
