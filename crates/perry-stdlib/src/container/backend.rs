@@ -3,48 +3,84 @@
 //! Platform-adaptive selection:
 //! - macOS / iOS  → AppleContainerBackend (wraps perry-container-compose AppleContainerBackend)
 //! - All others   → PodmanBackend
+//!
+//! The `ContainerBackend` trait mirrors the signature of
+//! `perry_container_compose::backend::ContainerBackend` so that the
+//! `AppleContainerBackend` adapter is nearly zero-cost.
 
 use super::types::{
-    ContainerError, ContainerHandle, ContainerInfo, ContainerLogs, ContainerSpec, ImageInfo,
+    ComposeNetwork, ComposeVolume, ContainerError, ContainerHandle, ContainerInfo,
+    ContainerLogs, ContainerSpec, ImageInfo,
 };
 use async_trait::async_trait;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::process::Command;
 
 // ─── ContainerBackend trait ───────────────────────────────────────────────────
+//
+// Mirrors perry_container_compose::backend::ContainerBackend but uses the
+// stdlib's own type aliases (serde_json-based) so the rest of the stdlib
+// does not need to depend on serde_yaml.
 
 #[async_trait]
 pub trait ContainerBackend: Send + Sync {
+    /// Backend name for display (e.g. "apple-container", "podman")
     fn name(&self) -> &'static str;
+
+    /// Check whether the backend binary is available on PATH.
     async fn check_available(&self) -> Result<(), ContainerError>;
 
+    /// Run a container (create + start). Returns a handle.
     async fn run(&self, spec: &ContainerSpec) -> Result<ContainerHandle, ContainerError>;
+
+    /// Create a container (without starting it).
     async fn create(&self, spec: &ContainerSpec) -> Result<ContainerHandle, ContainerError>;
+
+    /// Start an existing stopped container.
     async fn start(&self, id: &str) -> Result<(), ContainerError>;
-    async fn stop(&self, id: &str, timeout: u32) -> Result<(), ContainerError>;
+
+    /// Stop a running container. `timeout` = seconds to wait before SIGKILL.
+    async fn stop(&self, id: &str, timeout: Option<u32>) -> Result<(), ContainerError>;
+
+    /// Remove a container.
     async fn remove(&self, id: &str, force: bool) -> Result<(), ContainerError>;
+
+    /// List all containers.
     async fn list(&self, all: bool) -> Result<Vec<ContainerInfo>, ContainerError>;
+
+    /// Inspect a container.
     async fn inspect(&self, id: &str) -> Result<ContainerInfo, ContainerError>;
+
+    /// Fetch logs from a container.
     async fn logs(&self, id: &str, tail: Option<u32>) -> Result<ContainerLogs, ContainerError>;
+
+    /// Execute a command inside a running container.
     async fn exec(
         &self,
         id: &str,
         cmd: &[String],
-        env: Option<&[(String, String)]>,
+        env: Option<&HashMap<String, String>>,
+        workdir: Option<&str>,
     ) -> Result<ContainerLogs, ContainerError>;
+
+    /// Pull an image.
     async fn pull_image(&self, reference: &str) -> Result<(), ContainerError>;
+
+    /// List images.
     async fn list_images(&self) -> Result<Vec<ImageInfo>, ContainerError>;
+
+    /// Remove an image.
     async fn remove_image(&self, reference: &str, force: bool) -> Result<(), ContainerError>;
 
     // ── Network operations ──
 
-    /// Create a network with optional driver and labels.
+    /// Create a network with full config.
     async fn create_network(
         &self,
         name: &str,
-        driver: Option<&str>,
-        labels: Option<&[(String, String)]>,
+        config: &ComposeNetwork,
     ) -> Result<(), ContainerError>;
 
     /// Remove a network (idempotent — "not found" is OK).
@@ -52,12 +88,11 @@ pub trait ContainerBackend: Send + Sync {
 
     // ── Volume operations ──
 
-    /// Create a named volume with optional driver and labels.
+    /// Create a named volume with full config.
     async fn create_volume(
         &self,
         name: &str,
-        driver: Option<&str>,
-        labels: Option<&[(String, String)]>,
+        config: &ComposeVolume,
     ) -> Result<(), ContainerError>;
 
     /// Remove a named volume (idempotent — "not found" is OK).
@@ -66,11 +101,10 @@ pub trait ContainerBackend: Send + Sync {
 
 // ─── AppleContainerBackend ────────────────────────────────────────────────────
 //
-// On macOS / iOS this delegates to the `container` CLI via the same helper
-// that `perry-container-compose` uses (its `AppleContainerBackend`), so there
-// is exactly ONE place where CLI invocations live.
-//
-// The `perry-stdlib` backend simply adapts between the two type systems.
+// On macOS / iOS this delegates to the `perry-container-compose` crate's
+// `AppleContainerBackend` so CLI invocations live in exactly one place.
+// The stdlib adapter only converts between the two type systems at the
+// boundary.
 
 #[cfg(target_os = "macos")]
 pub struct AppleContainerBackend {
@@ -86,6 +120,22 @@ impl AppleContainerBackend {
     }
 }
 
+/// Convert stdlib `ContainerSpec` → compose-crate `ContainerSpec`.
+#[cfg(target_os = "macos")]
+fn spec_to_compose(spec: &super::types::ContainerSpec) -> perry_container_compose::types::ContainerSpec {
+    perry_container_compose::types::ContainerSpec {
+        image: spec.image.clone(),
+        name: spec.name.clone(),
+        ports: spec.ports.clone(),
+        volumes: spec.volumes.clone(),
+        env: spec.env.clone(),
+        cmd: spec.cmd.clone(),
+        entrypoint: spec.entrypoint.clone(),
+        network: spec.network.clone(),
+        rm: spec.rm,
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[async_trait]
 impl ContainerBackend for AppleContainerBackend {
@@ -94,7 +144,6 @@ impl ContainerBackend for AppleContainerBackend {
     }
 
     async fn check_available(&self) -> Result<(), ContainerError> {
-        // Try running `container --version`
         Command::new("container")
             .arg("--version")
             .output()
@@ -107,95 +156,52 @@ impl ContainerBackend for AppleContainerBackend {
     }
 
     async fn run(&self, spec: &ContainerSpec) -> Result<ContainerHandle, ContainerError> {
-        use perry_container_compose::backend::Backend;
-        use std::collections::HashMap;
-
-        let env: HashMap<String, String> = spec.env.clone().unwrap_or_default();
-        let ports: Vec<String> = spec.ports.clone().unwrap_or_default();
-        let volumes: Vec<String> = spec.volumes.clone().unwrap_or_default();
-
-        self.inner
-            .run(
-                &spec.image,
-                spec.name.as_deref().unwrap_or(""),
-                if ports.is_empty() { None } else { Some(&ports) },
-                if env.is_empty() { None } else { Some(&env) },
-                if volumes.is_empty() { None } else { Some(&volumes) },
-                None,
-                spec.cmd.as_deref(),
-                true, // detach
-            )
-            .await
-            .map(|_| ContainerHandle {
-                id: spec.name.clone().unwrap_or_default(),
-                name: spec.name.clone(),
-            })
-            .map_err(map_compose_err)
+        use perry_container_compose::backend::ContainerBackend as CCB;
+        let cspec = spec_to_compose(spec);
+        let h = CCB::run(&self.inner, &cspec).await.map_err(map_compose_err)?;
+        Ok(ContainerHandle { id: h.id, name: h.name })
     }
 
     async fn create(&self, spec: &ContainerSpec) -> Result<ContainerHandle, ContainerError> {
-        // Apple Container doesn't have a separate create; run detached then stop.
-        let handle = self.run(spec).await?;
-        let _ = self.stop(&handle.id, 0).await;
-        Ok(handle)
+        use perry_container_compose::backend::ContainerBackend as CCB;
+        let cspec = spec_to_compose(spec);
+        let h = CCB::create(&self.inner, &cspec).await.map_err(map_compose_err)?;
+        Ok(ContainerHandle { id: h.id, name: h.name })
     }
 
     async fn start(&self, id: &str) -> Result<(), ContainerError> {
-        use perry_container_compose::backend::Backend;
-        self.inner.start(id).await.map_err(map_compose_err)
+        use perry_container_compose::backend::ContainerBackend as CCB;
+        CCB::start(&self.inner, id).await.map_err(map_compose_err)
     }
 
-    async fn stop(&self, id: &str, _timeout: u32) -> Result<(), ContainerError> {
-        use perry_container_compose::backend::Backend;
-        self.inner.stop(id).await.map_err(map_compose_err)
+    async fn stop(&self, id: &str, timeout: Option<u32>) -> Result<(), ContainerError> {
+        use perry_container_compose::backend::ContainerBackend as CCB;
+        CCB::stop(&self.inner, id, timeout).await.map_err(map_compose_err)
     }
 
     async fn remove(&self, id: &str, force: bool) -> Result<(), ContainerError> {
-        use perry_container_compose::backend::Backend;
-        self.inner.remove(id, force).await.map_err(map_compose_err)
+        use perry_container_compose::backend::ContainerBackend as CCB;
+        CCB::remove(&self.inner, id, force).await.map_err(map_compose_err)
     }
 
-    async fn list(&self, _all: bool) -> Result<Vec<ContainerInfo>, ContainerError> {
-        use perry_container_compose::backend::Backend;
-        let infos = self
-            .inner
-            .list(None)
-            .await
-            .map_err(map_compose_err)?;
+    async fn list(&self, all: bool) -> Result<Vec<ContainerInfo>, ContainerError> {
+        use perry_container_compose::backend::ContainerBackend as CCB;
+        let infos = CCB::list(&self.inner, all).await.map_err(map_compose_err)?;
         Ok(infos.into_iter().map(compose_info_to_stdlib).collect())
     }
 
     async fn inspect(&self, id: &str) -> Result<ContainerInfo, ContainerError> {
-        use perry_container_compose::backend::Backend;
-        use perry_container_compose::commands::ContainerStatus;
-
-        let status = self.inner.inspect(id).await.map_err(map_compose_err)?;
-        Ok(ContainerInfo {
-            id: id.to_string(),
-            name: id.to_string(),
-            image: String::new(),
-            status: match status {
-                ContainerStatus::Running => "running".to_string(),
-                ContainerStatus::Stopped => "exited".to_string(),
-                ContainerStatus::NotFound => {
-                    return Err(ContainerError::NotFound(id.to_string()))
-                }
-            },
-            ports: Vec::new(),
-            created: String::new(),
-        })
+        use perry_container_compose::backend::ContainerBackend as CCB;
+        let info = CCB::inspect(&self.inner, id).await.map_err(map_compose_err)?;
+        Ok(compose_info_to_stdlib(info))
     }
 
     async fn logs(&self, id: &str, tail: Option<u32>) -> Result<ContainerLogs, ContainerError> {
-        use perry_container_compose::backend::Backend;
-        let stdout = self
-            .inner
-            .logs(id, tail, false)
-            .await
-            .map_err(map_compose_err)?;
+        use perry_container_compose::backend::ContainerBackend as CCB;
+        let logs = CCB::logs(&self.inner, id, tail).await.map_err(map_compose_err)?;
         Ok(ContainerLogs {
-            stdout,
-            stderr: String::new(),
+            stdout: logs.stdout,
+            stderr: logs.stderr,
         })
     }
 
@@ -203,134 +209,97 @@ impl ContainerBackend for AppleContainerBackend {
         &self,
         id: &str,
         cmd: &[String],
-        env: Option<&[(String, String)]>,
+        env: Option<&HashMap<String, String>>,
+        workdir: Option<&str>,
     ) -> Result<ContainerLogs, ContainerError> {
-        use perry_container_compose::backend::Backend;
-        let env_map: Option<std::collections::HashMap<String, String>> = env.map(|pairs| {
-            pairs.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-        });
-        let result = self
-            .inner
-            .exec(id, cmd, None, None, env_map.as_ref())
+        use perry_container_compose::backend::ContainerBackend as CCB;
+        let logs = CCB::exec(&self.inner, id, cmd, env, workdir)
             .await
             .map_err(map_compose_err)?;
         Ok(ContainerLogs {
-            stdout: result.stdout,
-            stderr: result.stderr,
+            stdout: logs.stdout,
+            stderr: logs.stderr,
         })
     }
 
     async fn pull_image(&self, reference: &str) -> Result<(), ContainerError> {
-        // `container pull <reference>`
-        let output = Command::new("container")
-            .args(["pull", reference])
-            .output()
-            .await
-            .map_err(|e| ContainerError::BackendError {
-                code: 1,
-                message: e.to_string(),
-            })?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(ContainerError::BackendError {
-                code: output.status.code().unwrap_or(-1),
-                message: String::from_utf8_lossy(&output.stderr).to_string(),
-            })
-        }
+        use perry_container_compose::backend::ContainerBackend as CCB;
+        CCB::pull_image(&self.inner, reference).await.map_err(map_compose_err)
     }
 
     async fn list_images(&self) -> Result<Vec<ImageInfo>, ContainerError> {
-        let output = Command::new("container")
-            .args(["images", "--format", "json"])
-            .output()
-            .await
-            .map_err(|e| ContainerError::BackendError {
-                code: 1,
-                message: e.to_string(),
-            })?;
-
-        if !output.status.success() {
-            return Err(ContainerError::BackendError {
-                code: output.status.code().unwrap_or(-1),
-                message: String::from_utf8_lossy(&output.stderr).to_string(),
-            });
-        }
-
-        let json: Value =
-            serde_json::from_slice(&output.stdout).unwrap_or(Value::Array(vec![]));
-        let images = json.as_array().map(|v| v.as_slice()).unwrap_or(&[]);
-        Ok(images.iter().filter_map(parse_image_info).collect())
+        use perry_container_compose::backend::ContainerBackend as CCB;
+        let images = CCB::list_images(&self.inner).await.map_err(map_compose_err)?;
+        Ok(images.into_iter().map(|img| ImageInfo {
+            id: img.id,
+            repository: img.repository,
+            tag: img.tag,
+            size: img.size,
+            created: img.created,
+        }).collect())
     }
 
     async fn remove_image(&self, reference: &str, force: bool) -> Result<(), ContainerError> {
-        let mut args = vec!["rmi"];
-        if force {
-            args.push("-f");
-        }
-        args.push(reference);
-
-        let output = Command::new("container")
-            .args(&args)
-            .output()
-            .await
-            .map_err(|e| ContainerError::BackendError {
-                code: 1,
-                message: e.to_string(),
-            })?;
-
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(ContainerError::BackendError {
-                code: output.status.code().unwrap_or(-1),
-                message: String::from_utf8_lossy(&output.stderr).to_string(),
-            })
-        }
+        use perry_container_compose::backend::ContainerBackend as CCB;
+        CCB::remove_image(&self.inner, reference, force).await.map_err(map_compose_err)
     }
-
-    // ── Network operations ──
 
     async fn create_network(
         &self,
         name: &str,
-        driver: Option<&str>,
-        labels: Option<&[(String, String)]>,
+        config: &ComposeNetwork,
     ) -> Result<(), ContainerError> {
-        use perry_container_compose::backend::Backend;
-        let labels_map: Option<std::collections::HashMap<String, String>> =
-            labels.map(|pairs| pairs.iter().cloned().collect());
-        self.inner
-            .create_network(name, driver, labels_map.as_ref())
-            .await
-            .map_err(map_compose_err)
+        use perry_container_compose::backend::ContainerBackend as CCB;
+        use perry_container_compose::backend::Backend as LegacyBackend;
+
+        // Build a compose-crate ComposeNetwork from stdlib fields.
+        // We use the legacy Backend trait's create_network which takes (name, driver, labels)
+        // to avoid depending on indexmap in the stdlib.
+        let labels_map: Option<HashMap<String, String>> = config
+            .labels
+            .as_ref()
+            .map(|l| l.to_map())
+            .filter(|m| !m.is_empty());
+        LegacyBackend::create_network(
+            &self.inner,
+            name,
+            config.driver.as_deref(),
+            labels_map.as_ref(),
+        )
+        .await
+        .map_err(map_compose_err)
     }
 
     async fn remove_network(&self, name: &str) -> Result<(), ContainerError> {
-        use perry_container_compose::backend::Backend;
-        self.inner.remove_network(name).await.map_err(map_compose_err)
+        use perry_container_compose::backend::ContainerBackend as CCB;
+        CCB::remove_network(&self.inner, name).await.map_err(map_compose_err)
     }
-
-    // ── Volume operations ──
 
     async fn create_volume(
         &self,
         name: &str,
-        driver: Option<&str>,
-        labels: Option<&[(String, String)]>,
+        config: &ComposeVolume,
     ) -> Result<(), ContainerError> {
-        use perry_container_compose::backend::Backend;
-        let labels_map: Option<std::collections::HashMap<String, String>> =
-            labels.map(|pairs| pairs.iter().cloned().collect());
-        self.inner
-            .create_volume(name, driver, labels_map.as_ref())
-            .await
-            .map_err(map_compose_err)
+        use perry_container_compose::backend::Backend as LegacyBackend;
+
+        let labels_map: Option<HashMap<String, String>> = config
+            .labels
+            .as_ref()
+            .map(|l| l.to_map())
+            .filter(|m| !m.is_empty());
+        LegacyBackend::create_volume(
+            &self.inner,
+            name,
+            config.driver.as_deref(),
+            labels_map.as_ref(),
+        )
+        .await
+        .map_err(map_compose_err)
     }
 
     async fn remove_volume(&self, name: &str) -> Result<(), ContainerError> {
-        use perry_container_compose::backend::Backend;
-        self.inner.remove_volume(name).await.map_err(map_compose_err)
+        use perry_container_compose::backend::ContainerBackend as CCB;
+        CCB::remove_volume(&self.inner, name).await.map_err(map_compose_err)
     }
 }
 
@@ -463,15 +432,17 @@ impl ContainerBackend for PodmanBackend {
         require_success(output)
     }
 
-    async fn stop(&self, id: &str, timeout: u32) -> Result<(), ContainerError> {
+    async fn stop(&self, id: &str, timeout: Option<u32>) -> Result<(), ContainerError> {
         let binary = Self::find_binary().ok_or_else(|| ContainerError::BackendError {
             code: 1,
             message: "podman binary not found".to_string(),
         })?;
         let mut cmd = Command::new(&binary);
-        cmd.arg("stop")
-            .arg(format!("--time={}", timeout))
-            .arg(id);
+        cmd.arg("stop");
+        if let Some(t) = timeout {
+            cmd.arg(format!("--time={}", t));
+        }
+        cmd.arg(id);
         let output = execute_cmd(&mut cmd).await?;
         require_success(output)
     }
@@ -562,7 +533,8 @@ impl ContainerBackend for PodmanBackend {
         &self,
         id: &str,
         cmd: &[String],
-        env: Option<&[(String, String)]>,
+        env: Option<&HashMap<String, String>>,
+        workdir: Option<&str>,
     ) -> Result<ContainerLogs, ContainerError> {
         let binary = Self::find_binary().ok_or_else(|| ContainerError::BackendError {
             code: 1,
@@ -570,6 +542,9 @@ impl ContainerBackend for PodmanBackend {
         })?;
         let mut command = Command::new(&binary);
         command.arg("exec");
+        if let Some(wd) = workdir {
+            command.arg("--workdir").arg(wd);
+        }
         if let Some(pairs) = env {
             for (k, v) in pairs {
                 command.arg("-e").arg(format!("{}={}", k, v));
@@ -636,8 +611,7 @@ impl ContainerBackend for PodmanBackend {
     async fn create_network(
         &self,
         name: &str,
-        driver: Option<&str>,
-        labels: Option<&[(String, String)]>,
+        config: &ComposeNetwork,
     ) -> Result<(), ContainerError> {
         let binary = Self::find_binary().ok_or_else(|| ContainerError::BackendError {
             code: 1,
@@ -645,12 +619,16 @@ impl ContainerBackend for PodmanBackend {
         })?;
         let mut cmd = Command::new(&binary);
         cmd.args(["network", "create"]);
-        if let Some(d) = driver {
+        if let Some(d) = &config.driver {
             cmd.arg("--driver").arg(d);
         }
-        if let Some(pairs) = labels {
-            for (k, v) in pairs {
-                cmd.arg("--label").arg(format!("{}={}", k, v));
+        if let Some(labels) = &config.labels {
+            if let super::types::ListOrDict::Dict(map) = labels {
+                for (k, v) in map {
+                    if let Some(val) = v {
+                        cmd.arg("--label").arg(format!("{}={}", k, val));
+                    }
+                }
             }
         }
         cmd.arg(name);
@@ -688,8 +666,7 @@ impl ContainerBackend for PodmanBackend {
     async fn create_volume(
         &self,
         name: &str,
-        driver: Option<&str>,
-        labels: Option<&[(String, String)]>,
+        config: &ComposeVolume,
     ) -> Result<(), ContainerError> {
         let binary = Self::find_binary().ok_or_else(|| ContainerError::BackendError {
             code: 1,
@@ -697,12 +674,16 @@ impl ContainerBackend for PodmanBackend {
         })?;
         let mut cmd = Command::new(&binary);
         cmd.args(["volume", "create"]);
-        if let Some(d) = driver {
+        if let Some(d) = &config.driver {
             cmd.arg("--driver").arg(d);
         }
-        if let Some(pairs) = labels {
-            for (k, v) in pairs {
-                cmd.arg("--label").arg(format!("{}={}", k, v));
+        if let Some(labels) = &config.labels {
+            if let super::types::ListOrDict::Dict(map) = labels {
+                for (k, v) in map {
+                    if let Some(val) = v {
+                        cmd.arg("--label").arg(format!("{}={}", k, val));
+                    }
+                }
             }
         }
         cmd.arg(name);
@@ -771,15 +752,29 @@ fn require_success(output: std::process::Output) -> Result<(), ContainerError> {
 
 #[cfg(target_os = "macos")]
 fn map_compose_err(e: perry_container_compose::error::ComposeError) -> ContainerError {
-    ContainerError::BackendError {
-        code: -1,
-        message: e.to_string(),
+    match e {
+        perry_container_compose::error::ComposeError::NotFound(id) => {
+            ContainerError::NotFound(id)
+        }
+        perry_container_compose::error::ComposeError::DependencyCycle { services } => {
+            ContainerError::DependencyCycle { cycle: services }
+        }
+        perry_container_compose::error::ComposeError::ServiceStartupFailed { service, message } => {
+            ContainerError::ServiceStartupFailed { service, error: message }
+        }
+        perry_container_compose::error::ComposeError::ValidationError { message } => {
+            ContainerError::InvalidConfig(message)
+        }
+        other => ContainerError::BackendError {
+            code: -1,
+            message: other.to_string(),
+        },
     }
 }
 
 #[cfg(target_os = "macos")]
 fn compose_info_to_stdlib(
-    info: perry_container_compose::backend::ContainerInfo,
+    info: perry_container_compose::types::ContainerInfo,
 ) -> ContainerInfo {
     ContainerInfo {
         id: info.id,
