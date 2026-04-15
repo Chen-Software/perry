@@ -13,7 +13,7 @@ crate-type = ["rlib", "staticlib"]
 default = ["full"]
 
 # Full stdlib - everything included
-full = ["http-server", "http-client", "database", "crypto", "compression", "email", "websocket", "image", "scheduler", "ids", "html-parser", "rate-limit", "validation"]
+full = ["http-server", "http-client", "database", "crypto", "compression", "email", "websocket", "image", "scheduler", "ids", "html-parser", "rate-limit", "validation", "container"]
 
 # Minimal core - just what's needed for basic programs
 core = []
@@ -65,6 +65,9 @@ validation = ["dep:validator", "dep:regex"]
 
 # UUID/nanoid
 ids = ["dep:uuid", "dep:nanoid"]
+
+# Container module (OCI container management)
+container = ["dep:async-trait", "dep:tokio", "async-runtime"]
 
 # Async runtime (tokio) - internal feature
 async-runtime = ["dep:tokio"]
@@ -156,6 +159,9 @@ regex = { version = "1.10", optional = true }
 # IDs
 uuid = { version = "1.11", features = ["v4", "v1", "v7"], optional = true }
 nanoid = { version = "0.4", optional = true }
+
+# Container module
+async-trait = { version = "0.1", optional = true }
 
 # LRU Cache
 lru = "0.12"
