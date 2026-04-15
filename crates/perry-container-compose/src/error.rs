@@ -3,6 +3,7 @@
 //! Defines the canonical `ComposeError` enum and FFI error mapping.
 
 use thiserror::Error;
+use crate::backend::BackendProbeResult;
 
 /// Top-level crate error
 #[derive(Debug, Error)]
@@ -36,6 +37,12 @@ pub enum ComposeError {
 
     #[error("File not found: {path}")]
     FileNotFound { path: String },
+
+    #[error("No container backend found. Probed: {probed:?}")]
+    NoBackendFound { probed: Vec<BackendProbeResult> },
+
+    #[error("Specified backend '{name}' is not available: {reason}")]
+    BackendNotAvailable { name: String, reason: String },
 }
 
 impl ComposeError {
@@ -57,6 +64,8 @@ pub fn compose_error_to_js(e: &ComposeError) -> String {
         ComposeError::DependencyCycle { .. } => 422,
         ComposeError::ValidationError { .. } => 400,
         ComposeError::VerificationFailed { .. } => 403,
+        ComposeError::NoBackendFound { .. } => 503,
+        ComposeError::BackendNotAvailable { .. } => 503,
         _ => 500,
     };
     serde_json::json!({
