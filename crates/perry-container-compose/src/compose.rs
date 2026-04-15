@@ -1,18 +1,19 @@
 use indexmap::IndexMap;
-use crate::container::types::*;
-use crate::container::backend::ContainerBackend;
-use std::collections::BTreeSet;
+use crate::error::{ComposeError, Result};
+use crate::types::{ComposeSpec, ContainerInfo, ContainerLogs, ContainerSpec, ComposeHandle, ContainerHandle, ListOrDict};
+use crate::backend::ContainerBackend;
+use crate::service::generate_name;
+use std::collections::{BTreeSet};
 use std::sync::Arc;
-use perry_container_compose::error::{ComposeError, Result};
 
 #[derive(Clone)]
 pub struct ComposeEngine {
     pub spec: ComposeSpec,
-    pub backend: Arc<dyn ContainerBackend>,
+    pub backend: Arc<dyn ContainerBackend + Send + Sync>,
 }
 
 impl ComposeEngine {
-    pub fn new(spec: ComposeSpec, backend: Arc<dyn ContainerBackend>) -> Self {
+    pub fn new(spec: ComposeSpec, backend: Arc<dyn ContainerBackend + Send + Sync>) -> Self {
         Self { spec, backend }
     }
 
@@ -101,9 +102,10 @@ impl ComposeEngine {
 
         for service_name in order {
             let service = self.spec.services.get(&service_name).unwrap();
+            let image = service.image.clone().unwrap_or_default();
             let container_spec = ContainerSpec {
-                image: service.image.clone().unwrap_or_default(),
-                name: Some(service_name.clone()),
+                image: image.clone(),
+                name: Some(generate_name(&image, &service_name)),
                 ports: service.ports.as_ref().map(|p| p.iter().map(|ps| format!("{:?}", ps)).collect()),
                 volumes: service.volumes.as_ref().map(|v| v.iter().map(|vs| format!("{:?}", vs)).collect()),
                 env: match &service.environment {
