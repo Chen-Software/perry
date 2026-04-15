@@ -1,0 +1,15 @@
+{
+  "name": "perry-container-demo",
+  "version": "1.0.0",
+  "description": "Example demonstrating Perry's container module",
+  "main": "src/main.ts",
+  "scripts": {
+    "build": "perry compile src/main.ts -o container-demo",
+    "run": "perry run .",
+    "test": "perry compile src/test.ts -o test-podman && ./test-podman",
+    "verify": "./verify-podman.sh"
+  },
+  "keywords": ["perry", "container", "podman", "oci"],
+  "author": "Perry",
+  "license": "MIT"
+}
