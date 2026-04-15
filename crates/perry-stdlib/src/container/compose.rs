@@ -1,6 +1,11 @@
-//! ComposeEngine implementation
+//! ComposeWrapper — thin orchestration adapter over `ContainerBackend`.
 //!
-//! Provides native multi-container orchestration without external CLI tools.
+//! Wraps individual `ContainerBackend` calls into compose workflows
+//! (up/down/ps/logs/exec) with dependency-ordered service startup and
+//! rollback on failure.
+//!
+//! Uses `perry_container_compose::compose::resolve_startup_order` for
+//! Kahn's algorithm–based topological sort.
 
 use super::backend::ContainerBackend;
 use super::types::{
@@ -11,21 +16,30 @@ use super::types::{
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-/// ComposeEngine for orchestrating multi-container applications
-pub struct ComposeEngine {
+/// Thin compose orchestration wrapper over `ContainerBackend`.
+///
+/// This is **not** the full `perry_container_compose::ComposeEngine`
+/// (which has its own type system based on `serde_yaml` + `IndexMap`).
+/// Instead, it orchestrates the stdlib's `ContainerBackend` calls with
+/// compose-spec semantics (dependency order, rollback, etc.).
+pub struct ComposeWrapper {
     spec: ComposeSpec,
     backend: Arc<dyn ContainerBackend>,
 }
 
-impl ComposeEngine {
-    /// Create a new ComposeEngine
+impl ComposeWrapper {
+    /// Create a new ComposeWrapper.
     pub fn new(spec: ComposeSpec, backend: Arc<dyn ContainerBackend>) -> Self {
         Self { spec, backend }
     }
 
-    /// Bring up the compose stack
+    /// Bring up the compose stack.
+    ///
+    /// Creates networks and volumes first, then starts containers in
+    /// dependency order. On failure, rolls back all previously started
+    /// containers and created resources.
     pub async fn up(&self) -> Result<ComposeHandle, ContainerError> {
-        // 1. Validate dependency graph
+        // 1. Validate dependency graph via compose crate's Kahn's algorithm
         let startup_order = self.resolve_startup_order()?;
 
         // 2. Create networks (skip external)
@@ -41,17 +55,12 @@ impl ComposeEngine {
                     .as_ref()
                     .and_then(|n| n.name.as_deref())
                     .unwrap_or(name.as_str());
-                let driver = network_opt.as_ref().and_then(|n| n.driver.as_deref());
-                let labels: Option<Vec<(String, String)>> = network_opt
+                let config = network_opt
                     .as_ref()
-                    .and_then(|n| n.labels.as_ref())
-                    .map(|l| {
-                        let map = l.to_map();
-                        map.into_iter().collect()
-                    })
-                    .filter(|v| !v.is_empty());
+                    .cloned()
+                    .unwrap_or_else(ComposeNetwork::default);
                 self.backend
-                    .create_network(resolved_name, driver, labels.as_deref().map(|v| v.as_slice()))
+                    .create_network(resolved_name, &config)
                     .await?;
                 created_networks.push(resolved_name.to_string());
             }
@@ -70,17 +79,12 @@ impl ComposeEngine {
                     .as_ref()
                     .and_then(|v| v.name.as_deref())
                     .unwrap_or(name.as_str());
-                let driver = volume_opt.as_ref().and_then(|v| v.driver.as_deref());
-                let labels: Option<Vec<(String, String)>> = volume_opt
+                let config = volume_opt
                     .as_ref()
-                    .and_then(|v| v.labels.as_ref())
-                    .map(|l| {
-                        let map = l.to_map();
-                        map.into_iter().collect()
-                    })
-                    .filter(|v| !v.is_empty());
+                    .cloned()
+                    .unwrap_or_else(ComposeVolume::default);
                 self.backend
-                    .create_volume(resolved_name, driver, labels.as_deref().map(|v| v.as_slice()))
+                    .create_volume(resolved_name, &config)
                     .await?;
                 created_volumes.push(resolved_name.to_string());
             }
@@ -100,15 +104,15 @@ impl ComposeEngine {
                     Err(e) => {
                         // Rollback: stop and remove all started containers
                         for (name, handle) in &started_containers {
-                            let _ = self.backend.stop(&handle.id, 10).await;
+                            let _ = self.backend.stop(&handle.id, Some(10)).await;
                             let _ = self.backend.remove(&handle.id, true).await;
                         }
                         // Remove created networks and volumes
                         for network in &created_networks {
-                            let _ = self.remove_network(network).await;
+                            let _ = self.backend.remove_network(network).await;
                         }
                         for volume in &created_volumes {
-                            let _ = self.remove_volume(volume).await;
+                            let _ = self.backend.remove_volume(volume).await;
                         }
                         return Err(ContainerError::ServiceStartupFailed {
                             service: service_name.clone(),
@@ -132,8 +136,31 @@ impl ComposeEngine {
         })
     }
 
-    /// Resolve service startup order based on dependencies
+    /// Resolve service startup order using the compose crate's Kahn's algorithm.
+    ///
+    /// This delegates to `perry_container_compose::compose::resolve_startup_order`
+    /// after converting the stdlib `ComposeSpec` to the compose crate's type.
+    /// Falls back to local DFS if the conversion fails (e.g. incompatible values).
     fn resolve_startup_order(&self) -> Result<Vec<String>, ContainerError> {
+        // Attempt to use compose crate's Kahn's algorithm via JSON round-trip.
+        // The compose crate's ComposeSpec uses serde_yaml, but both types
+        // are (de)serializable, so we can go through JSON as a common format.
+        if let Ok(compose_spec) = spec_to_compose(&self.spec) {
+            return perry_container_compose::compose::resolve_startup_order(&compose_spec)
+                .map_err(|e| ContainerError::DependencyCycle {
+                    cycle: match e {
+                        perry_container_compose::error::ComposeError::DependencyCycle { services } => services,
+                        _ => vec![],
+                    },
+                });
+        }
+
+        // Fallback: local DFS topological sort
+        self.resolve_startup_order_dfs()
+    }
+
+    /// DFS-based topological sort (fallback).
+    fn resolve_startup_order_dfs(&self) -> Result<Vec<String>, ContainerError> {
         let mut visited = HashSet::new();
         let mut visiting = HashSet::new();
         let mut order = Vec::new();
@@ -147,7 +174,7 @@ impl ComposeEngine {
         Ok(order)
     }
 
-    /// DFS visit for topological sort
+    /// DFS visit for topological sort.
     fn visit(
         &self,
         service: &str,
@@ -160,7 +187,6 @@ impl ComposeEngine {
         }
 
         if visiting.contains(service) {
-            // Cycle detected
             return Err(ContainerError::DependencyCycle {
                 cycle: visiting
                     .iter()
@@ -172,7 +198,6 @@ impl ComposeEngine {
 
         visiting.insert(service.to_string());
 
-        // Visit dependencies
         if let Some(service_spec) = self.spec.services.get(service) {
             if let Some(deps) = &service_spec.depends_on {
                 for dep in deps.service_names() {
@@ -190,7 +215,7 @@ impl ComposeEngine {
         Ok(())
     }
 
-    /// Start a single service
+    /// Start a single service.
     async fn start_service(
         &self,
         name: &str,
@@ -316,29 +341,25 @@ impl ComposeEngine {
             rm: Some(true),
         };
 
-        // Run the container
         self.backend.run(&spec).await
     }
 
-    /// Stop and remove all resources in the compose stack
+    /// Stop and remove all resources in the compose stack.
     pub async fn down(
         &self,
         handle: &ComposeHandle,
         remove_volumes: bool,
     ) -> Result<(), ContainerError> {
-        // Stop and remove containers
         for (name, container) in &handle.containers {
-            let _ = self.backend.stop(&container.id, 10).await;
+            let _ = self.backend.stop(&container.id, Some(10)).await;
             let _ = self.backend.remove(&container.id, true).await;
             eprintln!("[perry-compose] Stopped and removed service: {}", name);
         }
 
-        // Remove networks (idempotent)
         for network in &handle.networks {
             let _ = self.backend.remove_network(network).await;
         }
 
-        // Remove volumes if requested (idempotent)
         if remove_volumes {
             for volume in &handle.volumes {
                 let _ = self.backend.remove_volume(volume).await;
@@ -348,7 +369,7 @@ impl ComposeEngine {
         Ok(())
     }
 
-    /// Get container info for all services in the stack
+    /// Get container info for all services in the stack.
     pub async fn ps(
         &self,
         handle: &ComposeHandle,
@@ -358,17 +379,14 @@ impl ComposeEngine {
         for container in handle.containers.values() {
             match self.backend.inspect(&container.id).await {
                 Ok(info) => result.push(info),
-                Err(_) => {
-                    // Container might not exist anymore
-                    continue;
-                }
+                Err(_) => continue,
             }
         }
 
         Ok(result)
     }
 
-    /// Get logs for a specific service (or all services)
+    /// Get logs for a specific service (or all services).
     pub async fn logs(
         &self,
         handle: &ComposeHandle,
@@ -385,7 +403,6 @@ impl ComposeEngine {
             )));
         }
 
-        // Get logs from all services
         let mut combined_stdout = String::new();
         let mut combined_stderr = String::new();
 
@@ -405,7 +422,7 @@ impl ComposeEngine {
         })
     }
 
-    /// Execute a command in a service container
+    /// Execute a command in a service container.
     pub async fn exec(
         &self,
         handle: &ComposeHandle,
@@ -413,12 +430,93 @@ impl ComposeEngine {
         cmd: &[String],
     ) -> Result<super::types::ContainerLogs, ContainerError> {
         if let Some(container) = handle.containers.get(service) {
-            self.backend.exec(&container.id, cmd, None).await
+            self.backend.exec(&container.id, cmd, None, None).await
         } else {
             Err(ContainerError::NotFound(format!(
                 "Service not found: {}",
                 service
             )))
         }
+    }
+}
+
+// ─── Spec conversion helpers ─────────────────────────────────────────────────
+
+/// Attempt to convert a stdlib `ComposeSpec` to the compose crate's type
+/// via JSON round-trip. This works because both types are (de)serializable
+/// with serde.
+fn spec_to_compose(
+    spec: &ComposeSpec,
+) -> Result<perry_container_compose::types::ComposeSpec, serde_json::Error> {
+    let json = serde_json::to_value(spec)?;
+    serde_json::from_value(json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_spec_to_compose_basic() {
+        let mut spec = ComposeSpec::default();
+        spec.name = Some("test-stack".to_string());
+
+        let mut svc = ComposeService::default();
+        svc.image = Some("nginx:latest".to_string());
+        spec.services.insert("web".to_string(), svc);
+
+        let result = spec_to_compose(&spec).unwrap();
+        assert_eq!(result.name.as_deref(), Some("test-stack"));
+        assert!(result.services.contains_key("web"));
+    }
+
+    #[test]
+    fn test_spec_to_compose_with_depends_on() {
+        let mut spec = ComposeSpec::default();
+
+        let mut db = ComposeService::default();
+        db.image = Some("postgres:16".to_string());
+        spec.services.insert("db".to_string(), db);
+
+        let mut web = ComposeService::default();
+        web.image = Some("nginx:latest".to_string());
+        web.depends_on = Some(ComposeDependsOnEntry::List(vec![
+            "db".to_string(),
+        ]));
+        spec.services.insert("web".to_string(), web);
+
+        let result = spec_to_compose(&spec).unwrap();
+        assert_eq!(result.services.len(), 2);
+        let web_svc = &result.services["web"];
+        assert!(web_svc.depends_on.is_some());
+    }
+
+    #[test]
+    fn test_spec_to_compose_with_env_list() {
+        let mut spec = ComposeSpec::default();
+
+        let mut svc = ComposeService::default();
+        svc.image = Some("redis:7".to_string());
+        svc.environment = Some(ListOrDict::List(vec![
+            "REDIS_HOST=localhost".to_string(),
+            "REDIS_PORT=6379".to_string(),
+        ]));
+        spec.services.insert("cache".to_string(), svc);
+
+        let result = spec_to_compose(&spec).unwrap();
+        let cache_svc = &result.services["cache"];
+        assert!(cache_svc.environment.is_some());
+    }
+
+    #[test]
+    fn test_spec_to_compose_preserves_networks() {
+        let mut spec = ComposeSpec::default();
+
+        let mut net = HashMap::new();
+        net.insert("frontend".to_string(), None);
+        spec.networks = Some(net);
+
+        let result = spec_to_compose(&spec).unwrap();
+        assert!(result.networks.is_some());
     }
 }

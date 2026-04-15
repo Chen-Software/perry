@@ -7,22 +7,95 @@
 use perry_runtime::{JSValue, StringHeader};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::common::handle::{self, Handle};
 
 // ============ Handle Registry ============
+//
+// All container-related opaque objects are stored in the global DashMap-based
+// handle registry (crate::common::handle) so they can be retrieved later by
+// their integer handle from the JS side (e.g. composeHandle.ps(), etc.).
 
-static NEXT_HANDLE_ID: AtomicU64 = AtomicU64::new(1);
-
-fn next_id() -> u64 {
-    NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst)
+/// Register a `ContainerHandle` and return an opaque integer handle.
+pub fn register_container_handle(h: ContainerHandle) -> u64 {
+    handle::register_handle(h) as u64
 }
 
-pub fn register_container_handle(_handle: ContainerHandle) -> u64 { next_id() }
-pub fn register_container_info(_info: ContainerInfo) -> u64 { next_id() }
-pub fn register_container_info_list(_list: Vec<ContainerInfo>) -> u64 { next_id() }
-pub fn register_compose_handle(_handle: ComposeHandle) -> u64 { next_id() }
-pub fn register_container_logs(_logs: ContainerLogs) -> u64 { next_id() }
-pub fn register_image_info_list(_list: Vec<ImageInfo>) -> u64 { next_id() }
+/// Retrieve a `ContainerHandle` by handle id (read-only).
+pub fn get_container_handle(id: u64) -> Option<handle::Handle> {
+    let h = id as Handle;
+    if handle::handle_exists(h) { Some(h) } else { None }
+}
+
+/// Register a single `ContainerInfo` and return an opaque integer handle.
+pub fn register_container_info(info: ContainerInfo) -> u64 {
+    handle::register_handle(info) as u64
+}
+
+/// Register a `Vec<ContainerInfo>` (list result from `list` / `ps`) and return an opaque integer handle.
+pub fn register_container_info_list(list: Vec<ContainerInfo>) -> u64 {
+    handle::register_handle(list) as u64
+}
+
+/// Retrieve the container info list associated with a handle.
+pub fn with_container_info_list<R>(id: u64, f: impl FnOnce(&Vec<ContainerInfo>) -> R) -> Option<R> {
+    handle::with_handle(id as Handle, f)
+}
+
+/// Take (remove and return) the container info list from the registry.
+pub fn take_container_info_list(id: u64) -> Option<Vec<ContainerInfo>> {
+    handle::take_handle(id as Handle)
+}
+
+/// Register a `ComposeHandle` and return an opaque integer handle.
+pub fn register_compose_handle(h: ComposeHandle) -> u64 {
+    handle::register_handle(h) as u64
+}
+
+/// Retrieve a `ComposeHandle` by handle id.
+pub fn get_compose_handle(id: u64) -> Option<&'static ComposeHandle> {
+    handle::get_handle(id as Handle)
+}
+
+/// Take (remove and return) the `ComposeHandle` from the registry.
+pub fn take_compose_handle(id: u64) -> Option<ComposeHandle> {
+    handle::take_handle(id as Handle)
+}
+
+/// Register `ContainerLogs` and return an opaque integer handle.
+pub fn register_container_logs(logs: ContainerLogs) -> u64 {
+    handle::register_handle(logs) as u64
+}
+
+/// Retrieve `ContainerLogs` by handle id (read-only).
+pub fn with_container_logs<R>(id: u64, f: impl FnOnce(&ContainerLogs) -> R) -> Option<R> {
+    handle::with_handle(id as Handle, f)
+}
+
+/// Take (remove and return) `ContainerLogs` from the registry.
+pub fn take_container_logs(id: u64) -> Option<ContainerLogs> {
+    handle::take_handle(id as Handle)
+}
+
+/// Register a `Vec<ImageInfo>` and return an opaque integer handle.
+pub fn register_image_info_list(list: Vec<ImageInfo>) -> u64 {
+    handle::register_handle(list) as u64
+}
+
+/// Retrieve the image info list associated with a handle.
+pub fn with_image_info_list<R>(id: u64, f: impl FnOnce(&Vec<ImageInfo>) -> R) -> Option<R> {
+    handle::with_handle(id as Handle, f)
+}
+
+/// Take (remove and return) the image info list from the registry.
+pub fn take_image_info_list(id: u64) -> Option<Vec<ImageInfo>> {
+    handle::take_handle(id as Handle)
+}
+
+/// Drop a handle from the registry (force cleanup from JS GC / explicit close).
+pub fn drop_container_handle(id: u64) -> bool {
+    handle::drop_handle(id as Handle)
+}
 
 // ============ Core Container Types ============
 
