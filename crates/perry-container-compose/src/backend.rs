@@ -11,7 +11,7 @@ use crate::types::{
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Layer 1: The public contract — what operations exist, completely runtime-agnostic.
@@ -54,6 +54,9 @@ pub trait ContainerBackend: Send + Sync {
 
     /// Inspect a container.
     async fn inspect(&self, id: &str) -> Result<ContainerInfo>;
+
+    /// Inspect an image.
+    async fn inspect_image(&self, reference: &str) -> Result<ImageInfo>;
 
     /// Fetch logs from a container.
     async fn logs(&self, id: &str, tail: Option<u32>) -> Result<ContainerLogs>;
@@ -103,6 +106,7 @@ pub trait CliProtocol: Send + Sync {
     fn remove_args(&self, id: &str, force: bool) -> Vec<String>;
     fn list_args(&self, all: bool) -> Vec<String>;
     fn inspect_args(&self, id: &str) -> Vec<String>;
+    fn inspect_image_args(&self, reference: &str) -> Vec<String>;
     fn logs_args(&self, id: &str, tail: Option<u32>) -> Vec<String>;
     fn exec_args(
         &self,
@@ -130,6 +134,7 @@ pub trait CliProtocol: Send + Sync {
 
     fn parse_list_output(&self, stdout: &str) -> Result<Vec<ContainerInfo>>;
     fn parse_inspect_output(&self, stdout: &str) -> Result<ContainerInfo>;
+    fn parse_inspect_image_output(&self, stdout: &str) -> Result<ImageInfo>;
     fn parse_list_images_output(&self, stdout: &str) -> Result<Vec<ImageInfo>>;
     fn parse_container_id(&self, stdout: &str) -> Result<String>;
 }
@@ -269,6 +274,16 @@ impl CliProtocol for DockerProtocol {
         vec!["inspect".into(), "--format".into(), "json".into(), id.into()]
     }
 
+    fn inspect_image_args(&self, reference: &str) -> Vec<String> {
+        vec![
+            "image".into(),
+            "inspect".into(),
+            "--format".into(),
+            "json".into(),
+            reference.into(),
+        ]
+    }
+
     fn logs_args(&self, id: &str, tail: Option<u32>) -> Vec<String> {
         let mut args = vec!["logs".into()];
         if let Some(t) = tail {
@@ -374,6 +389,19 @@ impl CliProtocol for DockerProtocol {
         })
     }
 
+    fn parse_inspect_image_output(&self, stdout: &str) -> Result<ImageInfo> {
+        let val: serde_json::Value = serde_json::from_str(stdout).map_err(ComposeError::JsonError)?;
+        let e = if val.is_array() { &val[0] } else { &val };
+
+        Ok(ImageInfo {
+            id: e["Id"].as_str().unwrap_or_default().to_string(),
+            repository: String::new(),
+            tag: String::new(),
+            size: e["Size"].as_u64().unwrap_or(0),
+            created: e["Created"].as_str().unwrap_or_default().to_string(),
+        })
+    }
+
     fn parse_list_images_output(&self, stdout: &str) -> Result<Vec<ImageInfo>> {
         let entries: Vec<serde_json::Value> = stdout
             .lines()
@@ -428,6 +456,10 @@ impl CliProtocol for AppleContainerProtocol {
 
     fn inspect_args(&self, id: &str) -> Vec<String> {
         DockerProtocol.inspect_args(id)
+    }
+
+    fn inspect_image_args(&self, reference: &str) -> Vec<String> {
+        DockerProtocol.inspect_image_args(reference)
     }
 
     fn logs_args(&self, id: &str, tail: Option<u32>) -> Vec<String> {
@@ -490,6 +522,10 @@ impl CliProtocol for AppleContainerProtocol {
 
     fn parse_inspect_output(&self, stdout: &str) -> Result<ContainerInfo> {
         DockerProtocol.parse_inspect_output(stdout)
+    }
+
+    fn parse_inspect_image_output(&self, stdout: &str) -> Result<ImageInfo> {
+        DockerProtocol.parse_inspect_image_output(stdout)
     }
 
     fn parse_list_images_output(&self, stdout: &str) -> Result<Vec<ImageInfo>> {
@@ -563,6 +599,12 @@ impl CliProtocol for LimaProtocol {
         args
     }
 
+    fn inspect_image_args(&self, reference: &str) -> Vec<String> {
+        let mut args = vec!["shell".into(), self.instance.clone(), "nerdctl".into()];
+        args.extend(DockerProtocol.inspect_image_args(reference));
+        args
+    }
+
     fn logs_args(&self, id: &str, tail: Option<u32>) -> Vec<String> {
         let mut args = vec!["shell".into(), self.instance.clone(), "nerdctl".into()];
         args.extend(DockerProtocol.logs_args(id, tail));
@@ -629,6 +671,10 @@ impl CliProtocol for LimaProtocol {
 
     fn parse_inspect_output(&self, stdout: &str) -> Result<ContainerInfo> {
         DockerProtocol.parse_inspect_output(stdout)
+    }
+
+    fn parse_inspect_image_output(&self, stdout: &str) -> Result<ImageInfo> {
+        DockerProtocol.parse_inspect_image_output(stdout)
     }
 
     fn parse_list_images_output(&self, stdout: &str) -> Result<Vec<ImageInfo>> {
@@ -746,6 +792,12 @@ impl ContainerBackend for CliBackend {
         let args = self.protocol.inspect_args(id);
         let out = self.exec_raw(&args).await?;
         self.protocol.parse_inspect_output(&out.stdout)
+    }
+
+    async fn inspect_image(&self, reference: &str) -> Result<ImageInfo> {
+        let args = self.protocol.inspect_image_args(reference);
+        let out = self.exec_raw(&args).await?;
+        self.protocol.parse_inspect_image_output(&out.stdout)
     }
 
     async fn logs(&self, id: &str, tail: Option<u32>) -> Result<ContainerLogs> {
@@ -889,6 +941,9 @@ async fn probe_candidate(name: &str) -> std::result::Result<CliBackend, String> 
         }
         "podman" => {
             let bin = which::which("podman").map_err(|_| "binary not found".to_string())?;
+            if cfg!(target_os = "macos") {
+                check_podman_machine_running(&bin).await?;
+            }
             let backend = CliBackend::new(bin, Box::new(DockerProtocol));
             backend.check_available().await.map_err(|e| e.to_string())?;
             Ok(backend)
@@ -900,7 +955,10 @@ async fn probe_candidate(name: &str) -> std::result::Result<CliBackend, String> 
             Ok(backend)
         }
         "orbstack" => {
-            let bin = which::which("orb").or_else(|_| which::which("docker")).map_err(|_| "binary not found".to_string())?;
+            let bin = which::which("orb")
+                .or_else(|_| which::which("docker"))
+                .map_err(|_| "binary not found".to_string())?;
+            check_orbstack_socket_or_version(&bin).await?;
             let backend = CliBackend::new(bin, Box::new(DockerProtocol));
             backend.check_available().await.map_err(|e| e.to_string())?;
             Ok(backend)
@@ -913,22 +971,100 @@ async fn probe_candidate(name: &str) -> std::result::Result<CliBackend, String> 
         }
         "lima" => {
             let bin = which::which("limactl").map_err(|_| "binary not found".to_string())?;
-            let backend = CliBackend::new(bin, Box::new(LimaProtocol { instance: "default".into() }));
+            let instance = check_lima_running_instance(&bin).await?;
+            let backend = CliBackend::new(bin, Box::new(LimaProtocol { instance }));
             backend.check_available().await.map_err(|e| e.to_string())?;
             Ok(backend)
         }
         "colima" => {
             let bin = which::which("colima").map_err(|_| "binary not found".to_string())?;
-            let backend = CliBackend::new(bin, Box::new(DockerProtocol));
+            check_colima_running(&bin).await?;
+            let docker_bin = which::which("docker").map_err(|_| "docker binary not found".to_string())?;
+            let backend = CliBackend::new(docker_bin, Box::new(DockerProtocol));
             backend.check_available().await.map_err(|e| e.to_string())?;
             Ok(backend)
         }
         "rancher-desktop" => {
-            let bin = which::which("nerdctl").map_err(|_| "binary not found".to_string())?;
+            let bin = which::which("nerdctl").map_err(|_| "nerdctl binary not found".to_string())?;
+            check_rancher_socket().await?;
             let backend = CliBackend::new(bin, Box::new(DockerProtocol));
             backend.check_available().await.map_err(|e| e.to_string())?;
             Ok(backend)
         }
         _ => Err("unknown backend".into()),
+    }
+}
+
+async fn check_podman_machine_running(bin: &Path) -> std::result::Result<(), String> {
+    let out = tokio::process::Command::new(bin)
+        .args(["machine", "list", "--format", "json"])
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if stdout.contains("\"Running\":true") || stdout.contains("\"Running\": true") {
+        Ok(())
+    } else {
+        Err("no running podman machine found".to_string())
+    }
+}
+
+async fn check_orbstack_socket_or_version(bin: &Path) -> std::result::Result<(), String> {
+    let out = tokio::process::Command::new(bin)
+        .arg("--version")
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err("orbstack not functional".to_string())
+    }
+}
+
+async fn check_lima_running_instance(bin: &Path) -> std::result::Result<String, String> {
+    let out = tokio::process::Command::new(bin)
+        .args(["list", "--json"])
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for line in stdout.lines() {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+            if val["status"] == "Running" {
+                if let Some(name) = val["name"].as_str() {
+                    return Ok(name.to_string());
+                }
+            }
+        }
+    }
+    Err("no running lima instance found".to_string())
+}
+
+async fn check_colima_running(bin: &Path) -> std::result::Result<(), String> {
+    let out = tokio::process::Command::new(bin)
+        .arg("status")
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if stdout.contains("running") {
+        Ok(())
+    } else {
+        Err("colima not running".to_string())
+    }
+}
+
+async fn check_rancher_socket() -> std::result::Result<(), String> {
+    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    let socket = PathBuf::from(home).join(".rd/run/containerd-shim.sock");
+    if socket.exists() {
+        Ok(())
+    } else {
+        Err("rancher desktop socket not found".to_string())
     }
 }
