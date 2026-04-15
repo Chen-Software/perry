@@ -27,6 +27,10 @@ use perry_runtime::{js_promise_new, Promise, StringHeader};
 use std::sync::Arc;
 use self::mod_priv::get_global_backend_instance;
 
+extern "C" {
+    fn js_json_stringify(value: f64, type_hint: u32) -> *mut StringHeader;
+}
+
 /// Helper to extract string from StringHeader pointer
 unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
     if ptr.is_null() || (ptr as usize) < 0x1000 { return None; }
@@ -45,8 +49,9 @@ unsafe fn string_to_js(s: &str) -> *const StringHeader {
 // ============ Container Lifecycle ============
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_run(spec_json: *const StringHeader) -> *mut Promise {
+pub unsafe extern "C" fn js_container_run(spec_val: f64) -> *mut Promise {
     let promise = js_promise_new();
+    let spec_json = js_json_stringify(spec_val, 0);
     let spec = match types::parse_container_spec_json(spec_json) {
         Ok(s) => s,
         Err(e) => {
@@ -66,8 +71,9 @@ pub unsafe extern "C" fn js_container_run(spec_json: *const StringHeader) -> *mu
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_create(spec_json: *const StringHeader) -> *mut Promise {
+pub unsafe extern "C" fn js_container_create(spec_val: f64) -> *mut Promise {
     let promise = js_promise_new();
+    let spec_json = js_json_stringify(spec_val, 0);
     let spec = match types::parse_container_spec_json(spec_json) {
         Ok(s) => s,
         Err(e) => {
@@ -160,9 +166,10 @@ pub unsafe extern "C" fn js_container_logs(id_ptr: *const StringHeader, tail: f6
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_exec(id_ptr: *const StringHeader, cmd_json: *const StringHeader) -> *mut Promise {
+pub unsafe extern "C" fn js_container_exec(id_ptr: *const StringHeader, cmd_val: f64) -> *mut Promise {
     let promise = js_promise_new();
     let id = string_from_header(id_ptr).unwrap_or_default();
+    let cmd_json = js_json_stringify(cmd_val, 0);
     let cmd_str = string_from_header(cmd_json).unwrap_or_default();
     let cmd: Vec<String> = serde_json::from_str(&cmd_str).unwrap_or_else(|_| {
         cmd_str.split_whitespace().map(String::from).collect()
@@ -216,8 +223,9 @@ pub unsafe extern "C" fn js_container_getBackend() -> *const StringHeader {
 // ============ Compose Functions ============
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_composeUp(spec_json: *const StringHeader) -> *mut Promise {
+pub unsafe extern "C" fn js_container_composeUp(spec_val: f64) -> *mut Promise {
     let promise = js_promise_new();
+    let spec_json = js_json_stringify(spec_val, 0);
     let spec = match types::parse_compose_spec_json(spec_json) {
         Ok(s) => s,
         Err(e) => {
@@ -237,6 +245,11 @@ pub unsafe extern "C" fn js_container_composeUp(spec_json: *const StringHeader) 
         }
     });
     promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_container_compose_up(spec_val: f64) -> *mut Promise {
+    js_container_composeUp(spec_val)
 }
 
 #[no_mangle]
@@ -306,11 +319,12 @@ pub unsafe extern "C" fn js_container_compose_logs(
 pub unsafe extern "C" fn js_container_compose_exec(
     handle_id: u64,
     service_ptr: *const StringHeader,
-    cmd_ptr: *const StringHeader,
+    cmd_val: f64,
 ) -> *mut Promise {
     let promise = js_promise_new();
     let service = string_from_header(service_ptr).unwrap_or_default();
-    let cmd_str = string_from_header(cmd_ptr).unwrap_or_default();
+    let cmd_json = js_json_stringify(cmd_val, 0);
+    let cmd_str = string_from_header(cmd_json).unwrap_or_default();
     let cmd: Vec<String> = serde_json::from_str(&cmd_str).unwrap_or_else(|_| {
         cmd_str.split_whitespace().map(String::from).collect()
     });
@@ -347,8 +361,9 @@ pub unsafe extern "C" fn js_container_compose_config(handle_id: u64) -> *mut Pro
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_start(handle_id: u64, services_json: *const StringHeader) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_start(handle_id: u64, services_val: f64) -> *mut Promise {
     let promise = js_promise_new();
+    let services_json = js_json_stringify(services_val, 0);
     let services_str = string_from_header(services_json).unwrap_or_default();
     let services: Vec<String> = serde_json::from_str(&services_str).unwrap_or_default();
     crate::common::spawn_for_promise(promise as *mut u8, async move {
@@ -362,8 +377,9 @@ pub unsafe extern "C" fn js_container_compose_start(handle_id: u64, services_jso
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_stop(handle_id: u64, services_json: *const StringHeader) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_stop(handle_id: u64, services_val: f64) -> *mut Promise {
     let promise = js_promise_new();
+    let services_json = js_json_stringify(services_val, 0);
     let services_str = string_from_header(services_json).unwrap_or_default();
     let services: Vec<String> = serde_json::from_str(&services_str).unwrap_or_default();
     crate::common::spawn_for_promise(promise as *mut u8, async move {
@@ -377,8 +393,9 @@ pub unsafe extern "C" fn js_container_compose_stop(handle_id: u64, services_json
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_restart(handle_id: u64, services_json: *const StringHeader) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_restart(handle_id: u64, services_val: f64) -> *mut Promise {
     let promise = js_promise_new();
+    let services_json = js_json_stringify(services_val, 0);
     let services_str = string_from_header(services_json).unwrap_or_default();
     let services: Vec<String> = serde_json::from_str(&services_str).unwrap_or_default();
     crate::common::spawn_for_promise(promise as *mut u8, async move {

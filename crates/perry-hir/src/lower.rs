@@ -2441,6 +2441,24 @@ fn lower_module_decl(
             // Check if this is a native module import
             let is_native = is_native_module(&source);
 
+            // Special handling for perry/container and perry/container-compose
+            if source == "perry/container" || source == "perry/container-compose" {
+                for spec in &import_decl.specifiers {
+                    if let ast::ImportSpecifier::Named(named) = spec {
+                        let local = named.local.sym.to_string();
+                        let imported = named.imported
+                            .as_ref()
+                            .map(|i| match i {
+                                ast::ModuleExportName::Ident(id) => id.sym.to_string(),
+                                ast::ModuleExportName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+                            })
+                            .unwrap_or_else(|| local.clone());
+                        ctx.register_native_module(local, source.clone(), Some(imported));
+                    }
+                }
+                return Ok(());
+            }
+
             // Parse import specifiers
             let mut specifiers = Vec::new();
             for spec in &import_decl.specifiers {
