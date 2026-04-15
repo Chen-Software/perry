@@ -25,6 +25,7 @@ pub async fn alloy_container_run_capability(
         name: Some(format!("alloy-cap-{}-{}", name, rand::random::<u32>())),
         network: if grants.network { None } else { Some("none".to_string()) },
         rm: Some(true),
+        read_only: Some(true),
         env: grants.env.clone(),
         cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
         ..Default::default()
@@ -42,6 +43,7 @@ pub async fn alloy_container_run_capability(
         entrypoint: spec.entrypoint,
         network: spec.network,
         rm: spec.rm,
+        read_only: spec.read_only,
     }).await.map_err(|e| e.to_string())?;
 
     // 4. Logs (simplified: wait for completion should be here)

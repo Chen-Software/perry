@@ -70,6 +70,7 @@ pub unsafe extern "C" fn js_container_run(spec_json_ptr: *const StringHeader) ->
             entrypoint: spec.entrypoint,
             network: spec.network,
             rm: spec.rm,
+            read_only: spec.read_only,
         };
         let handle = backend.run(&internal_spec).await.map_err(|e| e.to_string())?;
         let id = register_container_handle(ContainerHandle { id: handle.id, name: handle.name });

@@ -197,6 +197,9 @@ impl CliProtocol for DockerProtocol {
         if spec.rm.unwrap_or(false) {
             args.push("--rm".into());
         }
+        if spec.read_only.unwrap_or(false) {
+            args.push("--read-only".into());
+        }
         if let Some(ep) = &spec.entrypoint {
             args.extend(["--entrypoint".into(), ep.join(" ")]);
         }
@@ -229,6 +232,9 @@ impl CliProtocol for DockerProtocol {
         }
         if let Some(net) = &spec.network {
             args.extend(["--network".into(), net.clone()]);
+        }
+        if spec.read_only.unwrap_or(false) {
+            args.push("--read-only".into());
         }
         if let Some(ep) = &spec.entrypoint {
             args.extend(["--entrypoint".into(), ep.join(" ")]);

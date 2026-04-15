@@ -165,12 +165,14 @@ fn arb_container_spec() -> impl Strategy<Value = ContainerSpec> {
         proptest::option::of(arb_service_name()),
         proptest::option::of(proptest::collection::vec("[0-9]{2,5}:[0-9]{2,5}", 0..=3)),
         proptest::option::of(proptest::collection::vec("/[a-z]:/[a-z]", 0..=3)),
+        proptest::bool::ANY,
     )
-        .prop_map(|(image, name, ports, volumes)| ContainerSpec {
+        .prop_map(|(image, name, ports, volumes, read_only)| ContainerSpec {
             image,
             name,
             ports,
             volumes,
+            read_only: Some(read_only),
             ..Default::default()
         })
 }
@@ -211,6 +213,9 @@ proptest! {
         if let Some(name) = &spec.name {
             prop_assert!(args.contains(&"--name".to_string()));
             prop_assert!(args.contains(name));
+        }
+        if spec.read_only.unwrap_or(false) {
+            prop_assert!(args.contains(&"--read-only".to_string()));
         }
         prop_assert!(args.contains(&spec.image));
     }

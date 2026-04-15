@@ -227,6 +227,7 @@ impl ComposeEngine {
                         env: Some(env),
                         cmd,
                         rm: Some(false),
+                        read_only: svc.read_only,
                         ..Default::default()
                     };
 
