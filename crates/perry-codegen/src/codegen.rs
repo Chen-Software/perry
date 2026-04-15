@@ -171,6 +171,12 @@ pub struct ImportedClass {
     pub parent_name: Option<String>,
     /// Field names in declaration order (for allocation sizing and field index mapping).
     pub field_names: Vec<String>,
+    /// Class id assigned by the source module. When present, the importing
+    /// module reuses this id in its `class_ids` map so that `instanceof`
+    /// on an imported class compares against the same id stamped onto
+    /// instances by the source module's constructor. `None` falls back
+    /// to a freshly-assigned id (legacy behavior).
+    pub source_class_id: Option<u32>,
 }
 
 /// Cross-module import context, bundled into a single struct to avoid
@@ -312,7 +318,11 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     let mut imported_class_stubs: Vec<perry_hir::Class> = Vec::new();
     let next_class_id = (hir.classes.len() as u32) + 1;
     for (idx, ic) in opts.imported_classes.iter().enumerate() {
-        let class_id = next_class_id + (idx as u32);
+        // Prefer the source module's class id so `instanceof` on an
+        // imported class matches the id stamped onto real instances
+        // by the source module's constructor. Fall back to a freshly
+        // assigned id when the caller didn't pass one.
+        let class_id = ic.source_class_id.unwrap_or_else(|| next_class_id + (idx as u32));
         let effective_name = ic.local_alias.as_deref().unwrap_or(&ic.name);
 
         // Skip if already defined locally (local definition takes precedence).
@@ -445,7 +455,12 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         class_keys_globals_map.insert(c.name.clone(), global_name.clone());
         class_keys_init_data.push((global_name, packed_keys, total_field_count));
     }
-    // Same naming convention for IMPORTED class stubs.
+    // Same naming convention for IMPORTED class stubs. Pack the field
+    // names so the importing module allocates the right inline slot count
+    // and the slot index for each field matches what the source module's
+    // constructor wrote. Without this, the object is allocated 0 inline
+    // slots and `this.field = v` in the cross-module constructor writes
+    // past the object, while reads on the importing side return undefined.
     for c in imported_class_stubs.iter() {
         if hir.classes.iter().any(|local| local.name == c.name) {
             continue;
@@ -457,7 +472,12 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         );
         llmod.add_internal_global(&global_name, I64, "0");
         class_keys_globals_map.insert(c.name.clone(), global_name.clone());
-        class_keys_init_data.push((global_name, String::new(), 0));
+        let mut packed_keys = String::new();
+        for f in &c.fields {
+            packed_keys.push_str(&f.name);
+            packed_keys.push('\0');
+        }
+        class_keys_init_data.push((global_name, packed_keys, c.fields.len() as u32));
     }
 
     // Derive __platform__ number from target triple:
@@ -1796,6 +1816,18 @@ fn compile_method(
         scalar_ctor_target: Vec::new(),
         non_escaping_news,
     };
+
+    // Constructors emitted as standalone cross-module LLVM functions (named
+    // `<prefix>__<class>_constructor`) must bake the field initializers into
+    // their body. At the `new ImportedClass(...)` call site, `lower_new`
+    // applies initializers against the imported class stub — which has none
+    // — so without this, imported classes construct with all fields left
+    // as uninitialized register values (read as NaN-boxed undefined).
+    let is_constructor_method = method.name == format!("{}_constructor", class.name);
+    if is_constructor_method {
+        crate::lower_call::apply_field_initializers_recursive_pub(&mut ctx, &class.name)
+            .with_context(|| format!("applying field initializers for '{}' constructor", class.name))?;
+    }
 
     stmt::lower_stmts(&mut ctx, &method.body)
         .with_context(|| format!("lowering body of method '{}::{}'", class.name, method.name))?;

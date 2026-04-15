@@ -125,10 +125,19 @@ fn ensure_pump_registered() {
         extern "C" {
             fn js_register_stdlib_pump(f: extern "C" fn() -> i32);
             fn js_register_stdlib_has_active(f: extern "C" fn() -> i32);
+            fn js_stdlib_init_dispatch();
         }
         unsafe {
             js_register_stdlib_pump(js_stdlib_process_pending);
             js_register_stdlib_has_active(js_stdlib_has_active_handles);
+            // Wire up the runtime-level HANDLE_METHOD_DISPATCH so that
+            // generic `jsObject.method(args)` calls on stdlib handle types
+            // (net.Socket, Fastify, ioredis) fall back to the right FFI
+            // even when codegen lost static type info — e.g. accessing the
+            // socket through a struct field (`state.sock.write(...)`).
+            // Until this was hooked in, HANDLE_METHOD_DISPATCH stayed None
+            // and those calls silently returned undefined.
+            js_stdlib_init_dispatch();
         }
     });
 }
@@ -204,6 +213,16 @@ pub extern "C" fn js_stdlib_process_pending() -> i32 {
         count += http_count;
     }
 
+    // Process pending raw TCP socket events (net.Socket)
+    #[cfg(all(feature = "net", not(target_os = "ios"), not(target_os = "android")))]
+    {
+        extern "C" {
+            fn js_net_process_pending() -> i32;
+        }
+        let net_count = unsafe { js_net_process_pending() };
+        count += net_count;
+    }
+
     // Process pending worker_threads messages (stdin reader)
     count += crate::worker_threads::js_worker_threads_process_pending();
 
@@ -238,6 +257,17 @@ pub extern "C" fn js_stdlib_has_active_handles() -> i32 {
         // (we don't drain here — just check)
         let has_ws = crate::ws::js_ws_has_active_handles();
         if has_ws != 0 {
+            return 1;
+        }
+    }
+    // Check for active raw TCP sockets (net.Socket / tls.connect / upgrade).
+    // Without this, an `await net.connect(...)` returns a Promise that the
+    // runtime can't see is pending, so the event loop exits before the
+    // socket's 'connect' event ever fires through the pump.
+    #[cfg(all(feature = "net", not(target_os = "ios"), not(target_os = "android")))]
+    {
+        let has_net = crate::net::js_net_has_active_handles();
+        if has_net != 0 {
             return 1;
         }
     }

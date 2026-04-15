@@ -1055,6 +1055,14 @@ pub(crate) fn is_array_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
 pub(crate) fn static_type_of(ctx: &FnCtx<'_>, e: &Expr) -> Option<HirType> {
     match e {
         Expr::Array(_) => Some(HirType::Array(Box::new(HirType::Any))),
+        // Built-in `new Array(...)` produces a real array, not a generic
+        // class instance. Without this, the receiver of any chained
+        // `.fill()` / `.push()` / `.length` would not be recognized by
+        // `is_array_expr`, falling out of the array method dispatch
+        // and crashing.
+        Expr::New { class_name, .. } if class_name == "Array" => {
+            Some(HirType::Array(Box::new(HirType::Any)))
+        }
         Expr::String(_) => Some(HirType::String),
         Expr::Number(_) | Expr::Integer(_) => Some(HirType::Number),
         Expr::Bool(_) => Some(HirType::Boolean),

@@ -4320,6 +4320,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
                                         method_names: class.methods.iter().map(|m| m.name.clone()).collect(),
                                         parent_name: class.extends_name.clone(),
                                         field_names: class.fields.iter().map(|f| f.name.clone()).collect(),
+                                        source_class_id: Some(class.id),
                                     });
                                 }
                                 if let Some(members) = exported_enums.get(&key) {
@@ -4377,6 +4378,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
                             method_names: class.methods.iter().map(|m| m.name.clone()).collect(),
                             parent_name: class.extends_name.clone(),
                             field_names: class.fields.iter().map(|f| f.name.clone()).collect(),
+                            source_class_id: Some(class.id),
                         });
                     }
 

@@ -37,7 +37,12 @@ pub mod buffer;
 pub mod typedarray;
 pub mod text;
 pub mod child_process;
-pub mod net;
+// `net` moved to `perry-stdlib::net` (event-driven async) in A1/A1.5.
+// The old sync `perry-runtime::net` module is retained as source but
+// not exported so its `js_net_socket_{write,end,destroy}` symbols don't
+// collide with the new stdlib ones. Delete the file entirely once no
+// in-tree code references it.
+// pub mod net;
 pub mod json;
 pub mod i18n;
 pub mod weakref;

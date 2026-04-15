@@ -623,6 +623,48 @@ impl LoweringContext {
             .find(|(n, _, _)| n == func_name)
             .map(|(_, module, class)| (module.as_str(), class.as_str()))
     }
+}
+
+/// Map a function's declared return type to a native-instance class when it
+/// matches a known stdlib pattern. Lets a wrapper function like
+/// `function openSocket(host, port): Socket { ... }` advertise that calls
+/// to it produce a Socket instance — call sites then register the local
+/// via the user-factory consumer in the var-decl handler, so subsequent
+/// `sock.on(...)` / `sock.write(...)` dispatches statically through the
+/// NATIVE_MODULE_TABLE just like `const sock = net.createConnection(...)`.
+///
+/// Recognizes both `T` and `Promise<T>` return types so async wrappers
+/// work without ceremony.
+fn native_instance_from_return_type(ty: &Type) -> Option<(&'static str, &'static str)> {
+    let inner = match ty {
+        Type::Generic { base, type_args } if base == "Promise" => {
+            type_args.first().unwrap_or(ty)
+        }
+        Type::Promise(inner) => inner.as_ref(),
+        other => other,
+    };
+    if let Type::Named(name) = inner {
+        return match name.as_str() {
+            "Socket" => Some(("net", "Socket")),
+            "Redis" => Some(("ioredis", "Redis")),
+            "EventEmitter" => Some(("events", "EventEmitter")),
+            "Pool" => Some(("mysql2/promise", "Pool")),
+            "PoolConnection" => Some(("mysql2/promise", "PoolConnection")),
+            "WebSocket" => Some(("ws", "WebSocket")),
+            "WebSocketServer" => Some(("ws", "WebSocketServer")),
+            _ => None,
+        };
+    }
+    None
+}
+
+// Internal anchor — keeps the file's outer impl block intact while
+// `native_instance_from_return_type` lives at module scope.
+#[allow(dead_code)]
+struct __PerryHirSentinel;
+impl LoweringContext {
+    #[allow(dead_code)]
+    fn __perry_hir_sentinel(&self) {}
 
     pub(crate) fn register_func_return_type(&mut self, name: String, ty: Type) {
         self.func_return_types.push((name, ty));
@@ -2494,6 +2536,15 @@ fn lower_module_decl(
                     if !matches!(func.return_type, Type::Any) {
                         ctx.register_func_return_type(func_name.clone(), func.return_type.clone());
                     }
+                    // If the declared return type maps to a native instance
+                    // (e.g. `function openSocket(): Socket { ... }`), register
+                    // the function as a factory so call sites can pick up
+                    // the instance class — see lookup_func_return_native_instance.
+                    if let Some((module, class)) = native_instance_from_return_type(&func.return_type) {
+                        ctx.func_return_native_instances.push((
+                            func_name.clone(), module.to_string(), class.to_string()
+                        ));
+                    }
                     // Store parameter defaults for call-site resolution
                     let defaults: Vec<Option<Expr>> = func.params.iter().map(|p| p.default.clone()).collect();
                     let param_ids: Vec<LocalId> = func.params.iter().map(|p| p.id).collect();
@@ -2743,6 +2794,13 @@ fn lower_module_decl(
                                             "Pool" => Some(("mysql2/promise", "Pool")),
                                             "PoolConnection" => Some(("mysql2/promise", "PoolConnection")),
                                             "WebSocket" | "WebSocketServer" => Some(("ws", type_name.as_str())),
+                                            // perry-stdlib net.Socket: lets library wrappers like
+                                            //   export function openSocket(host, port): Socket { ... }
+                                            // propagate native-instance tagging to callers, so
+                                            //   const sock = openSocket(...);
+                                            //   sock.on(...);   // dispatches to js_net_socket_on
+                                            // works without ceremony.
+                                            "Socket" => Some(("net", "Socket")),
                                             _ => {
                                                 // Also check dotted names (e.g., mysql.Pool)
                                                 if let Some(dot_pos) = type_name.find('.') {
@@ -3174,6 +3232,11 @@ fn lower_namespace_as_class(
                         if !matches!(func.return_type, Type::Any) {
                             ctx.register_func_return_type(func.name.clone(), func.return_type.clone());
                         }
+                        if let Some((module, class)) = native_instance_from_return_type(&func.return_type) {
+                            ctx.func_return_native_instances.push((
+                                func.name.clone(), module.to_string(), class.to_string()
+                            ));
+                        }
                         static_methods.push(func);
                     }
                     ast::Decl::Var(var_decl) => {
@@ -3260,6 +3323,11 @@ fn lower_stmt(
                     }
                     let func = lower_fn_decl(ctx, fn_decl)?;
                     // Register return type for call-site inference
+                    if let Some((module, class)) = native_instance_from_return_type(&func.return_type) {
+                        ctx.func_return_native_instances.push((
+                            func.name.clone(), module.to_string(), class.to_string()
+                        ));
+                    }
                     if !matches!(func.return_type, Type::Any) {
                         ctx.register_func_return_type(func.name.clone(), func.return_type.clone());
                     }
@@ -3586,6 +3654,26 @@ fn lower_stmt(
                                     // dispatch resolves correctly.
                                     ctx.register_native_instance(name.clone(), "net".to_string(), cn.to_string());
                                     let _ = mod_name; // suppress unused on tls branch
+                                }
+                            }
+                            // User-defined factory wrappers: when the init is a
+                            // bare call to `userFunc(...)` and `userFunc` was
+                            // registered as a native-instance factory (via
+                            // its declared return type), inherit the class so
+                            // downstream `local.method(...)` dispatches statically.
+                            // Example: `function openSocket(): Socket { ... }`
+                            // followed by `const sock = openSocket(...)` registers
+                            // sock as ("net", "Socket").
+                            if let Stmt::Let { name, init: Some(Expr::Call { callee, .. }), .. } = s {
+                                if let Expr::FuncRef(func_id) = callee.as_ref() {
+                                    let func_name_owned = ctx.lookup_func_name(*func_id).map(|s| s.to_string());
+                                    if let Some(func_name) = func_name_owned {
+                                        let lookup = ctx.lookup_func_return_native_instance(&func_name)
+                                            .map(|(m, c)| (m.to_string(), c.to_string()));
+                                        if let Some((m, c)) = lookup {
+                                            ctx.register_native_instance(name.clone(), m, c);
+                                        }
+                                    }
                                 }
                             }
                         }

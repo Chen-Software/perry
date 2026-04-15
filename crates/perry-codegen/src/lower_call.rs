@@ -914,7 +914,29 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
         // dispatch tower when a user class happens to have a method
         // with the same name (like `SimpleLogger.log()`).
         let is_global = matches!(object.as_ref(), Expr::GlobalGet(_));
-        let needs_dynamic_dispatch = !is_global && match receiver_class_name(ctx, object) {
+        // If the receiver's static type is a well-known built-in with its own
+        // runtime method family (Buffer byte readers, Array, Map, Set, …),
+        // don't enter the user-class dispatch tower. Otherwise an imported
+        // user class that happens to declare the same method name (e.g. a
+        // BufferCursor with `readUInt8`) would be enumerated as an
+        // implementor and `buf.readUInt8(i)` would fall through to the
+        // default 0.0 case when the Buffer's class id doesn't match any
+        // tower entry.
+        let is_builtin_receiver = match receiver_class_name(ctx, object) {
+            Some(name) => matches!(
+                name.as_str(),
+                "Buffer" | "Uint8Array" | "Uint8ClampedArray"
+                    | "Int8Array" | "Int16Array" | "Uint16Array"
+                    | "Int32Array" | "Uint32Array"
+                    | "Float32Array" | "Float64Array"
+                    | "BigInt64Array" | "BigUint64Array"
+                    | "Array" | "ReadonlyArray"
+                    | "Map" | "Set" | "WeakMap" | "WeakSet"
+                    | "Promise" | "RegExp" | "Date"
+            ),
+            None => false,
+        };
+        let needs_dynamic_dispatch = !is_global && !is_builtin_receiver && match receiver_class_name(ctx, object) {
             None => true,
             Some(name) => !ctx.classes.contains_key(&name),
         };
@@ -980,8 +1002,48 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
                     }
                     phi_inputs.push((v, after_label));
                 }
+                // Default branch: receiver's class id didn't match any user
+                // class implementing `property`. Rather than returning 0.0,
+                // fall through to the runtime's `js_native_call_method` so
+                // same-named built-in methods (Buffer.readUInt8, Array.push,
+                // Map.get, …) still reach their native dispatch. Without
+                // this, a `buf.readUInt8(i)` call site ends up in the
+                // default branch and returns 0, silently corrupting reads
+                // any time a user class in scope happens to declare a
+                // method of the same name.
                 ctx.current_block = default_idx;
-                let v_def = double_literal(0.0);
+                let key_idx = ctx.strings.intern(property);
+                let entry = ctx.strings.entry(key_idx);
+                let bytes_global = format!("@{}", entry.bytes_global);
+                let name_len_str = entry.byte_len.to_string();
+                let (fb_args_ptr, fb_args_len) = if args.is_empty() {
+                    ("null".to_string(), "0".to_string())
+                } else {
+                    let n = args.len();
+                    let buf_reg = ctx.block().next_reg();
+                    ctx.block().emit_raw(format!("{} = alloca [{} x double]", buf_reg, n));
+                    for (i, a_val) in lowered_args.iter().skip(1).enumerate() {
+                        let slot = ctx.block().gep(DOUBLE, &buf_reg, &[(I64, &format!("{}", i))]);
+                        ctx.block().store(DOUBLE, a_val, &slot);
+                    }
+                    let ptr_reg = ctx.block().next_reg();
+                    ctx.block().emit_raw(format!(
+                        "{} = getelementptr [{} x double], ptr {}, i64 0, i64 0",
+                        ptr_reg, n, buf_reg
+                    ));
+                    (ptr_reg, n.to_string())
+                };
+                let v_def = ctx.block().call(
+                    DOUBLE,
+                    "js_native_call_method",
+                    &[
+                        (DOUBLE, &recv_box),
+                        (crate::types::PTR, &bytes_global),
+                        (I64, &name_len_str),
+                        (crate::types::PTR, &fb_args_ptr),
+                        (I64, &fb_args_len),
+                    ],
+                );
                 let def_label = ctx.block().label.clone();
                 ctx.block().br(&merge_label);
                 phi_inputs.push((v_def, def_label));

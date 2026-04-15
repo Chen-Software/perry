@@ -27,6 +27,17 @@ pub fn module_to_features(module: &str) -> &'static [&'static str] {
         // ── WebSocket ─────────────────────────────────────────────────
         "ws" => &["websocket"],
 
+        // ── Raw TCP sockets (net.Socket) ──────────────────────────────
+        // `upgradeToTLS` is a method on net.Socket, so any program using
+        // `net` must link the TLS runtime too — otherwise `sock.upgradeToTLS`
+        // fails at link time with `_js_net_socket_upgrade_tls` undefined.
+        // The binary-size cost is small; programs that explicitly want
+        // zero TLS bytes can still opt in via the lower-level feature flags.
+        "net" => &["net", "tls"],
+
+        // ── TLS (tls.connect, socket.upgradeToTLS) ───────────────────
+        "tls" => &["tls"],
+
         // ── Databases ─────────────────────────────────────────────────
         "mysql2" | "mysql2/promise" => &["database-mysql"],
         "pg" => &["database-postgres"],

@@ -68,6 +68,7 @@ pub const NATIVE_MODULES: &[&str] = &[
     "buffer",
     "child_process",
     "net",
+    "tls",
     "stream",
     "fs",
     "path",
@@ -117,7 +118,10 @@ pub fn is_native_module_with_externals(path: &str, externals: &[String]) -> bool
 /// Modules that are handled by perry-runtime alone (no stdlib needed).
 /// These are Node.js builtins and perry-specific modules implemented in the runtime crate.
 const RUNTIME_ONLY_MODULES: &[&str] = &[
-    "fs", "path", "os", "buffer", "child_process", "net", "stream", "url", "util",
+    // `net` moved to perry-stdlib (event-driven async TCP) in A1/A1.5 —
+    // deliberately NOT in this list so `requires_stdlib("net")` returns true
+    // and the auto-optimizer enables the `net` feature on perry-stdlib.
+    "fs", "path", "os", "buffer", "child_process", "stream", "url", "util",
     "perry/ui",
     "perry/system",
     "perry/widget",

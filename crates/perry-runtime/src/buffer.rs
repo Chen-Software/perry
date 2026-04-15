@@ -414,6 +414,53 @@ pub extern "C" fn js_buffer_byte_length(str_ptr: *const StringHeader) -> i32 {
     }
 }
 
+/// Convert a buffer slice to a string. Honors the optional `start`/`end`
+/// range (Node semantics: `start` clamped to `[0, len]`, `end` clamped to
+/// `[start, len]`; defaults are `start=0, end=len`).
+///
+/// `encoding`: 0 = utf8 (default), 1 = hex, 2 = base64.
+#[no_mangle]
+pub extern "C" fn js_buffer_to_string_range(
+    buf_ptr: *const BufferHeader,
+    encoding: i32,
+    start: i32,
+    end: i32,
+) -> *mut StringHeader {
+    let buf_ptr = {
+        let bits = buf_ptr as u64;
+        let top16 = bits >> 48;
+        if top16 >= 0x7FF8 {
+            (bits & 0x0000_FFFF_FFFF_FFFF) as *const BufferHeader
+        } else {
+            buf_ptr
+        }
+    };
+    if buf_ptr.is_null() || (buf_ptr as usize) < 0x1000 {
+        return js_string_from_bytes(ptr::null(), 0);
+    }
+
+    unsafe {
+        let len = (*buf_ptr).length as i32;
+        let s = start.max(0).min(len);
+        let e = end.max(s).min(len);
+        let slice_len = (e - s) as usize;
+        let data = buffer_data(buf_ptr).add(s as usize);
+        let bytes = std::slice::from_raw_parts(data, slice_len);
+
+        match encoding {
+            1 => {
+                let hex = encode_hex(bytes);
+                js_string_from_bytes(hex.as_ptr(), hex.len() as u32)
+            }
+            2 => {
+                let b64 = encode_base64(bytes);
+                js_string_from_bytes(b64.as_ptr(), b64.len() as u32)
+            }
+            _ => js_string_from_bytes(data, slice_len as u32),
+        }
+    }
+}
+
 /// Convert a buffer to a string
 /// encoding: 0 = utf8 (default), 1 = hex, 2 = base64
 #[no_mangle]

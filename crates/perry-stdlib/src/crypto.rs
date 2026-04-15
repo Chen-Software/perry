@@ -23,6 +23,45 @@ unsafe fn string_from_header(ptr: *const StringHeader) -> Option<Vec<u8>> {
     Some(bytes.to_vec())
 }
 
+/// Extract the raw bytes from a pointer that might be a Buffer, a
+/// StringHeader, or anything that uses the `[u32 byte-length prefix][bytes]`
+/// layout. StringHeader has `utf16_len` at offset 0 and `byte_len` at
+/// offset 4; BufferHeader has `length` at offset 0 and `capacity` at
+/// offset 4. Both have the payload bytes immediately after the 8-byte
+/// header, and both store the byte count (in UTF-8 / as raw bytes) in
+/// the same u32 slot for our purposes — but we pick the correct field
+/// based on whether the pointer is a registered Buffer.
+unsafe fn bytes_from_ptr(ptr: i64) -> Vec<u8> {
+    let addr = ptr as usize;
+    if addr < 0x1000 {
+        return Vec::new();
+    }
+    if perry_runtime::buffer::is_registered_buffer(addr) {
+        let buf = ptr as *const perry_runtime::buffer::BufferHeader;
+        let len = (*buf).length as usize;
+        let data = (buf as *const u8).add(std::mem::size_of::<perry_runtime::buffer::BufferHeader>());
+        return std::slice::from_raw_parts(data, len).to_vec();
+    }
+    // Fall back to StringHeader layout — the common case for literal
+    // strings passed to crypto functions.
+    let hdr = ptr as *const StringHeader;
+    let len = (*hdr).byte_len as usize;
+    let data = (hdr as *const u8).add(std::mem::size_of::<StringHeader>());
+    std::slice::from_raw_parts(data, len).to_vec()
+}
+
+/// Allocate a new Buffer, copy `bytes` into it, return the registered pointer.
+unsafe fn alloc_buffer_from_slice(bytes: &[u8]) -> *mut perry_runtime::buffer::BufferHeader {
+    let buf = perry_runtime::buffer::buffer_alloc(bytes.len() as u32);
+    if buf.is_null() {
+        return buf;
+    }
+    (*buf).length = bytes.len() as u32;
+    let dst = perry_runtime::buffer::buffer_data_mut(buf);
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
+    buf
+}
+
 /// Create SHA256 hash of data
 /// crypto.createHash('sha256').update(data).digest('hex') -> string
 #[no_mangle]
@@ -38,6 +77,23 @@ pub unsafe extern "C" fn js_crypto_sha256(data_ptr: *const StringHeader) -> *mut
     let hex_str = hex::encode(result);
 
     js_string_from_bytes(hex_str.as_ptr(), hex_str.len() as u32)
+}
+
+/// SHA256 over arbitrary bytes. Input can be a Buffer or a string (both
+/// share the same `[u32 len][u32 cap_or_utf16_len][bytes...]` header
+/// layout up to the data pointer offset). Output is a Buffer holding the
+/// 32-byte digest. Used by `.digest()` (no arg) — the SCRAM path in
+/// `@perry/postgres` relies on this.
+///
+/// Pointer is passed as `i64` so the codegen can feed either a NaN-unboxed
+/// Buffer handle or a StringHeader pointer through the same FFI slot.
+#[no_mangle]
+pub unsafe extern "C" fn js_crypto_sha256_bytes(data_ptr: i64) -> *mut perry_runtime::buffer::BufferHeader {
+    let bytes = bytes_from_ptr(data_ptr);
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let digest = hasher.finalize();
+    alloc_buffer_from_slice(&digest)
 }
 
 /// Create MD5 hash of data
@@ -134,6 +190,47 @@ pub unsafe extern "C" fn js_crypto_hmac_sha256(
     let hex_str = hex::encode(result.into_bytes());
 
     js_string_from_bytes(hex_str.as_ptr(), hex_str.len() as u32)
+}
+
+/// HMAC-SHA-256 over arbitrary bytes, returning a Buffer. Used by
+/// `.digest()` (no arg) for SCRAM-SHA-256 key derivation.
+#[no_mangle]
+pub unsafe extern "C" fn js_crypto_hmac_sha256_bytes(
+    key_ptr: i64,
+    data_ptr: i64,
+) -> *mut perry_runtime::buffer::BufferHeader {
+    use hmac::{Hmac, Mac};
+    type HmacSha256 = Hmac<Sha256>;
+
+    let key = bytes_from_ptr(key_ptr);
+    let data = bytes_from_ptr(data_ptr);
+    let mut mac = match HmacSha256::new_from_slice(&key) {
+        Ok(m) => m,
+        Err(_) => return perry_runtime::buffer::buffer_alloc(0),
+    };
+    mac.update(&data);
+    let digest = mac.finalize().into_bytes();
+    alloc_buffer_from_slice(&digest)
+}
+
+/// PBKDF2-HMAC-SHA-256 returning a Buffer. Counterpart of
+/// `crypto.pbkdf2Sync(password, salt, iterations, keylen, 'sha256')`.
+/// Accepts string or Buffer for both password and salt.
+#[no_mangle]
+pub unsafe extern "C" fn js_crypto_pbkdf2_bytes(
+    password_ptr: i64,
+    salt_ptr: i64,
+    iterations: f64,
+    keylen: f64,
+) -> *mut perry_runtime::buffer::BufferHeader {
+    use pbkdf2::pbkdf2_hmac;
+    let password = bytes_from_ptr(password_ptr);
+    let salt = bytes_from_ptr(salt_ptr);
+    let iter = iterations as u32;
+    let klen = keylen as usize;
+    let mut out = vec![0u8; klen];
+    pbkdf2_hmac::<Sha256>(&password, &salt, iter, &mut out);
+    alloc_buffer_from_slice(&out)
 }
 
 // Type aliases for AES-256-CBC

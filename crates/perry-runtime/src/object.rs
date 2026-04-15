@@ -2520,7 +2520,6 @@ pub unsafe extern "C" fn js_native_call_method(
         let bytes = std::slice::from_raw_parts(method_name_ptr as *const u8, method_name_len);
         std::str::from_utf8(bytes).unwrap_or("")
     };
-
     // RAII recursion depth guard: prevent stack overflow from circular module deps.
     // The guard auto-decrements on drop, covering all ~20 return points in this function.
     // When max depth is hit, return a pointer to a static empty object instead of undefined.
@@ -3076,7 +3075,14 @@ pub unsafe fn dispatch_buffer_method(
             let enc = if !args.is_empty() {
                 crate::buffer::js_encoding_tag_from_value(args[0])
             } else { 0 };
-            let str_ptr = crate::buffer::js_buffer_to_string(buf_ptr, enc);
+            let str_ptr = if args.len() >= 2 {
+                let len = (*buf_ptr).length as i32;
+                let start = arg_i32(1);
+                let end = if args.len() >= 3 { arg_i32(2) } else { len };
+                crate::buffer::js_buffer_to_string_range(buf_ptr, enc, start, end)
+            } else {
+                crate::buffer::js_buffer_to_string(buf_ptr, enc)
+            };
             f64::from_bits(JSValue::string_ptr(str_ptr).bits())
         }
         "slice" | "subarray" => {
@@ -3085,6 +3091,39 @@ pub unsafe fn dispatch_buffer_method(
             let end = if args.len() >= 2 { arg_i32(1) } else { len };
             let result = crate::buffer::js_buffer_slice(buf_ptr, start, end);
             f64::from_bits(JSValue::pointer(result as *mut u8).bits())
+        }
+        // `src.copy(dst, targetStart?, sourceStart?, sourceEnd?)` — mirrors
+        // Node's Buffer.prototype.copy. Returns the number of bytes copied.
+        "copy" if !args.is_empty() => {
+            let dst_bits = args[0].to_bits();
+            let dst_addr = if (dst_bits >> 48) >= 0x7FF8 {
+                dst_bits & 0x0000_FFFF_FFFF_FFFF
+            } else { dst_bits };
+            let dst_ptr = dst_addr as *mut crate::buffer::BufferHeader;
+            let target_start = if args.len() >= 2 { arg_i32(1) } else { 0 };
+            let source_start = if args.len() >= 3 { arg_i32(2) } else { 0 };
+            let source_end = if args.len() >= 4 { arg_i32(3) } else { (*buf_ptr).length as i32 };
+            crate::buffer::js_buffer_copy(buf_ptr, dst_ptr, target_start, source_start, source_end) as f64
+        }
+        // `buf.write(string, offset?, length?, encoding?)` — writes the
+        // utf8/hex/base64 encoding of `string` into `buf` at `offset`.
+        // Returns the number of bytes written.
+        "write" if !args.is_empty() => {
+            let str_bits = args[0].to_bits();
+            let str_addr = if (str_bits >> 48) >= 0x7FF8 {
+                str_bits & 0x0000_FFFF_FFFF_FFFF
+            } else { str_bits };
+            let str_ptr = str_addr as *const crate::string::StringHeader;
+            let offset = if args.len() >= 2 { arg_i32(1) } else { 0 };
+            // Detect trailing encoding arg (string) vs length arg (number).
+            // Common forms: write(str), write(str, offset), write(str, offset, enc),
+            // write(str, offset, length, enc).
+            let enc = if args.len() >= 4 {
+                crate::buffer::js_encoding_tag_from_value(args[3])
+            } else if args.len() >= 3 {
+                crate::buffer::js_encoding_tag_from_value(args[2])
+            } else { 0 };
+            crate::buffer::js_buffer_write(buf_ptr, str_ptr, offset, enc) as f64
         }
         "fill" => {
             let result = crate::buffer::js_buffer_fill(buf_ptr, arg_i32(0));

@@ -76,6 +76,13 @@ pub mod ws;
 #[cfg(feature = "websocket")]
 pub use ws::*;
 
+// === Raw TCP sockets (net.Socket) + TLS (tls.connect, socket.upgradeToTLS) ===
+// Desktop only; iOS/Android stdlib are stubs for now.
+#[cfg(all(feature = "net", not(target_os = "ios"), not(target_os = "android")))]
+pub mod net;
+#[cfg(all(feature = "net", not(target_os = "ios"), not(target_os = "android")))]
+pub use net::*;
+
 // === Databases ===
 #[cfg(any(feature = "database-postgres", feature = "database-mysql"))]
 pub mod pg;

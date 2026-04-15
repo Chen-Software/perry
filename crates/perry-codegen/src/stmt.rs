@@ -146,8 +146,16 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
             // Scalar replacement: if this Let binds a non-escaping New,
             // skip the heap allocation entirely. Create a stack alloca
             // per field and inline the constructor stores into those allocas.
+            //
+            // Imported classes are excluded: their constructor bodies live
+            // in the source module's .o and aren't available here, so
+            // inlining produces a zero-initialized stub-shaped object with
+            // no fields populated. The call must go through the standard
+            // heap-allocation path so `lower_new` emits the cross-module
+            // `<prefix>__<class>_constructor` call.
             if let Some(perry_hir::Expr::New { class_name, args, .. }) = init.as_ref() {
-                if ctx.non_escaping_news.contains_key(id) {
+                let is_imported = ctx.imported_class_ctors.contains_key(class_name);
+                if ctx.non_escaping_news.contains_key(id) && !is_imported {
                     // Extract all class data we need (field names + ctor) before
                     // taking mutable borrows on ctx. Clone out of the shared
                     // `classes` map so we release the immutable borrow early.

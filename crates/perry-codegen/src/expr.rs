@@ -5898,19 +5898,35 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             } else {
                 ""
             };
-            let _ = digest_args; // digest's "hex" encoding is the only one used
+
+            // `.digest()` (no arg) returns a Buffer of the raw digest bytes;
+            // `.digest('hex')` returns a hex string. SCRAM (and any binary
+            // crypto workload) needs the Buffer path — it XORs, hashes, and
+            // base64-encodes raw bytes. Route to _bytes FFI variants when no
+            // encoding was specified.
+            let want_buffer = matches!(digest_args.first(), None)
+                || matches!(digest_args.first(), Some(Expr::Undefined));
 
             match (create_method, alg) {
                 ("createHash", "sha256") if update_args.len() >= 1 => {
                     let data_box = lower_expr(ctx, &update_args[0])?;
                     let blk = ctx.block();
                     let data_handle = unbox_to_i64(blk, &data_box);
-                    let result = blk.call(
-                        I64,
-                        "js_crypto_sha256",
-                        &[(I64, &data_handle)],
-                    );
-                    Ok(nanbox_string_inline(blk, &result))
+                    if want_buffer {
+                        let result = blk.call(
+                            I64,
+                            "js_crypto_sha256_bytes",
+                            &[(I64, &data_handle)],
+                        );
+                        Ok(nanbox_pointer_inline(blk, &result))
+                    } else {
+                        let result = blk.call(
+                            I64,
+                            "js_crypto_sha256",
+                            &[(I64, &data_handle)],
+                        );
+                        Ok(nanbox_string_inline(blk, &result))
+                    }
                 }
                 ("createHash", "md5") if update_args.len() >= 1 => {
                     let data_box = lower_expr(ctx, &update_args[0])?;
@@ -5929,12 +5945,21 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     let blk = ctx.block();
                     let key_handle = unbox_to_i64(blk, &key_box);
                     let data_handle = unbox_to_i64(blk, &data_box);
-                    let result = blk.call(
-                        I64,
-                        "js_crypto_hmac_sha256",
-                        &[(I64, &key_handle), (I64, &data_handle)],
-                    );
-                    Ok(nanbox_string_inline(blk, &result))
+                    if want_buffer {
+                        let result = blk.call(
+                            I64,
+                            "js_crypto_hmac_sha256_bytes",
+                            &[(I64, &key_handle), (I64, &data_handle)],
+                        );
+                        Ok(nanbox_pointer_inline(blk, &result))
+                    } else {
+                        let result = blk.call(
+                            I64,
+                            "js_crypto_hmac_sha256",
+                            &[(I64, &key_handle), (I64, &data_handle)],
+                        );
+                        Ok(nanbox_string_inline(blk, &result))
+                    }
                 }
                 _ => {
                     // Unsupported — return empty string so the test
@@ -5995,6 +6020,42 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let blk = ctx.block();
             let handle = blk.call(I64, "js_crypto_random_uuid", &[]);
             Ok(nanbox_string_inline(blk, &handle))
+        }
+
+        // crypto.pbkdf2Sync(password, salt, iterations, keylen, algorithm) -> Buffer.
+        // Only SHA-256 is wired through right now — that's what SCRAM needs.
+        // The `algorithm` arg is validated at runtime but ignored by codegen;
+        // callers that need non-SHA256 fall through to the generic path and
+        // get an empty Buffer back.
+        Expr::Call { callee, args, .. }
+            if matches!(
+                callee.as_ref(),
+                Expr::PropertyGet { object, property } if property == "pbkdf2Sync" && matches!(
+                    object.as_ref(),
+                    Expr::NativeModuleRef(n) if n == "crypto"
+                )
+            ) =>
+        {
+            if args.len() < 4 {
+                return Ok(double_literal(0.0));
+            }
+            let pwd_box = lower_expr(ctx, &args[0])?;
+            let salt_box = lower_expr(ctx, &args[1])?;
+            let iter_box = lower_expr(ctx, &args[2])?;
+            let keylen_box = lower_expr(ctx, &args[3])?;
+            // Ignore the digest algorithm arg for now — the FFI is SHA-256 only.
+            if args.len() >= 5 {
+                let _ = lower_expr(ctx, &args[4])?;
+            }
+            let blk = ctx.block();
+            let pwd_handle = unbox_to_i64(blk, &pwd_box);
+            let salt_handle = unbox_to_i64(blk, &salt_box);
+            let buf_handle = blk.call(
+                I64,
+                "js_crypto_pbkdf2_bytes",
+                &[(I64, &pwd_handle), (I64, &salt_handle), (DOUBLE, &iter_box), (DOUBLE, &keylen_box)],
+            );
+            Ok(nanbox_pointer_inline(blk, &buf_handle))
         }
 
         // Phase H fs: `fs.promises.METHOD(args...)` — HIR shape is a

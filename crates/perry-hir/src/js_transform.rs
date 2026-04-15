@@ -1041,7 +1041,16 @@ fn scan_for_native_func_returns(
                         }
                     }
                 }
+                // Recurse into any closures embedded in the init expression
+                // (e.g. `new Promise((resolve, reject) => { const sock = openSocket(...) })`).
+                scan_expr_for_closure_returns(init_expr, func_return_instances, local_native_instances, local_id_native_instances);
             }
+        }
+        Stmt::Expr(e) | Stmt::Throw(e) => {
+            scan_expr_for_closure_returns(e, func_return_instances, local_native_instances, local_id_native_instances);
+        }
+        Stmt::Return(Some(e)) => {
+            scan_expr_for_closure_returns(e, func_return_instances, local_native_instances, local_id_native_instances);
         }
         Stmt::If { then_branch, else_branch, .. } => {
             for s in then_branch {
@@ -1080,6 +1089,54 @@ fn scan_for_native_func_returns(
                 }
             }
         }
+        _ => {}
+    }
+}
+
+/// Walk an expression for nested closures and scan their bodies. Catches
+/// `const sock = openSocket(...)` when wrapped in a closure passed to
+/// `new Promise(...)`, `setTimeout(...)`, callback args, etc.
+fn scan_expr_for_closure_returns(
+    expr: &Expr,
+    func_return_instances: &HashMap<String, (String, String)>,
+    local_native_instances: &mut HashMap<String, (String, String)>,
+    local_id_native_instances: &mut HashMap<perry_types::LocalId, (String, String)>,
+) {
+    match expr {
+        Expr::Closure { body, .. } => {
+            for s in body {
+                scan_for_native_func_returns(s, func_return_instances, local_native_instances, local_id_native_instances);
+            }
+        }
+        Expr::Call { callee, args, .. } => {
+            scan_expr_for_closure_returns(callee, func_return_instances, local_native_instances, local_id_native_instances);
+            for a in args {
+                scan_expr_for_closure_returns(a, func_return_instances, local_native_instances, local_id_native_instances);
+            }
+        }
+        Expr::CallSpread { callee, args, .. } => {
+            scan_expr_for_closure_returns(callee, func_return_instances, local_native_instances, local_id_native_instances);
+            for a in args {
+                let inner = match a {
+                    crate::ir::CallArg::Expr(v) | crate::ir::CallArg::Spread(v) => v,
+                };
+                scan_expr_for_closure_returns(inner, func_return_instances, local_native_instances, local_id_native_instances);
+            }
+        }
+        Expr::New { args, .. } => {
+            for a in args {
+                scan_expr_for_closure_returns(a, func_return_instances, local_native_instances, local_id_native_instances);
+            }
+        }
+        Expr::NativeMethodCall { object, args, .. } => {
+            if let Some(obj) = object {
+                scan_expr_for_closure_returns(obj, func_return_instances, local_native_instances, local_id_native_instances);
+            }
+            for a in args {
+                scan_expr_for_closure_returns(a, func_return_instances, local_native_instances, local_id_native_instances);
+            }
+        }
+        Expr::Await(inner) => scan_expr_for_closure_returns(inner, func_return_instances, local_native_instances, local_id_native_instances),
         _ => {}
     }
 }
