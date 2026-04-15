@@ -5,6 +5,7 @@
 
 pub mod ir;
 pub mod js_transform;
+pub mod container_table;
 pub mod lower;
 pub mod monomorph;
 pub(crate) mod analysis;

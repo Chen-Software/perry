@@ -8,6 +8,7 @@ use swc_ecma_ast as ast;
 use std::collections::{HashMap, HashSet};
 
 use crate::ir::*;
+use crate::container_table::{PERRY_CONTAINER_TABLE, PERRY_COMPOSE_TABLE};
 
 /// Context for lowering, tracks variable bindings
 pub struct LoweringContext {
@@ -2415,9 +2416,21 @@ fn lower_module_decl(
                             })
                             .unwrap_or_else(|| local.clone());
                         if is_native {
+                            // Map perry/container and perry/compose to their FFI symbols
+                            let mut ffi_name = Some(imported.clone());
+                            if source == "perry/container" {
+                                if let Some((_, ffi)) = PERRY_CONTAINER_TABLE.iter().find(|(ts, _)| ts == &imported) {
+                                    ffi_name = Some(ffi.to_string());
+                                }
+                            } else if source == "perry/container-compose" {
+                                if let Some((_, ffi)) = PERRY_COMPOSE_TABLE.iter().find(|(ts, _)| ts == &imported) {
+                                    ffi_name = Some(ffi.to_string());
+                                }
+                            }
+
                             // Register as native module function with the original method name
                             // e.g., import { v4 as uuid } from 'uuid' -> uuid maps to uuid.v4
-                            ctx.register_native_module(local.clone(), source.clone(), Some(imported.clone()));
+                            ctx.register_native_module(local.clone(), source.clone(), ffi_name);
                             // Auto-register parentPort from worker_threads as a native instance
                             // (it's a singleton, not created via `new`)
                             if source == "worker_threads" && imported == "parentPort" {

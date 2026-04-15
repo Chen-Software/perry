@@ -439,9 +439,9 @@ pub unsafe extern "C" fn js_container_composeUp(spec_ptr: *const JSValue) -> *mu
 }
 
 /// Stop and remove compose stack
-/// FFI: js_composeHandle_down(handle_ptr: *const JSValue, volumes: i32) -> *mut Promise
+/// FFI: js_container_compose_down(handle_id: i64, volumes: i32) -> *mut Promise
 #[no_mangle]
-pub unsafe extern "C" fn js_composeHandle_down(_handle_ptr: *const JSValue, _volumes: i32) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_down(handle_id: i64, volumes: i32) -> *mut Promise {
     let promise = js_promise_new();
 
     // TODO: Retrieve ComposeHandle from handle_ptr
