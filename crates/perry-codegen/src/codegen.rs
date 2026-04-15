@@ -277,11 +277,19 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     // starting at 1 (0 is reserved for anonymous object literals).
     // Used by lower_new to tag the object header so virtual
     // dispatch and instanceof can read the actual class at runtime.
+    //
+    // We use the HIR `ClassId` (assigned by `LoweringContext::fresh_class`)
+    // rather than a per-module enumerate index, because in multi-module
+    // compilation the HIR counter is shared across modules (compile.rs
+    // threads `next_class_id` through `lower_module_with_class_id_and_types`).
+    // Importing modules look up imported classes via their HIR id (passed
+    // as `ImportedClass.source_class_id`); using the HIR id here too means
+    // the source module stamps the same id on `new C()` instances that
+    // importing modules check against in `e instanceof C`.
     let mut class_ids: HashMap<String, u32> = hir
         .classes
         .iter()
-        .enumerate()
-        .map(|(i, c)| (c.name.clone(), (i as u32) + 1))
+        .map(|c| (c.name.clone(), c.id))
         .collect();
 
     // Enum lookup table for `Expr::EnumMember`. Each (enum_name,
@@ -316,7 +324,10 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     // metadata for dispatch and the extern LLVM declarations for the
     // linker.
     let mut imported_class_stubs: Vec<perry_hir::Class> = Vec::new();
-    let next_class_id = (hir.classes.len() as u32) + 1;
+    // Fallback id range for imported classes whose source_class_id is None
+    // (legacy callers that didn't populate it). Start above the max local
+    // HIR id so we don't collide with local class ids.
+    let next_class_id = hir.classes.iter().map(|c| c.id).max().unwrap_or(0) + 1;
     for (idx, ic) in opts.imported_classes.iter().enumerate() {
         // Prefer the source module's class id so `instanceof` on an
         // imported class matches the id stamped onto real instances
@@ -1968,6 +1979,19 @@ fn compile_module_entry(
             scalar_ctor_target: Vec::new(),
             non_escaping_news: main_non_escaping_news,
         };
+        // Register every module-level global's ADDRESS as a GC root so
+        // the mark phase can discover pointer-typed values (Maps, Arrays,
+        // user class instances) stored in them. Without this, a Map
+        // held only in a module `const CACHE = new Map<...>()` would be
+        // freed by the next GC cycle because the conservative stack
+        // scan can't see the global's address — only `js_gc_register_global_root`
+        // populates `GLOBAL_ROOTS`, which `mark_global_roots` scans.
+        // Closes issue #36 (pg driver's CONN_STATES Map crash after bulk
+        // decode crossed the malloc-count GC threshold). Safe to register
+        // number-valued globals too — `try_mark_value` + the raw-pointer
+        // fallback both validate against the known-heap-pointer set and
+        // discard non-matching bits.
+        register_module_globals_as_gc_roots(&mut ctx, module_globals);
         // Initialize static class fields with their declared init
         // expressions. Runs once at the top of main, before user code.
         init_static_fields(&mut ctx, hir)?;
@@ -2121,6 +2145,13 @@ fn compile_module_entry(
             scalar_ctor_target: Vec::new(),
             non_escaping_news: init_non_escaping_news,
         };
+        // Register every module-level global's ADDRESS as a GC root —
+        // same reason as the entry-module branch above (issue #36). For
+        // non-entry modules the registration runs inside their __init
+        // function, which the entry main calls in topological order
+        // right after js_gc_init, so by the time any user code executes
+        // every module's globals are already GC-rooted.
+        register_module_globals_as_gc_roots(&mut ctx, module_globals);
         init_static_fields(&mut ctx, hir)?;
         stmt::lower_stmts(&mut ctx, &hir.init)
             .with_context(|| format!("lowering init statements of non-entry module '{}'", hir.name))?;
@@ -2411,6 +2442,48 @@ fn compile_static_method(
         llmod.declare_function(&name, ret, &params);
     }
     Ok(())
+}
+
+/// Register every module-level global's ADDRESS with the runtime GC
+/// root scanner. Emitted at the top of each module's `main` / `__init`
+/// function, right after `js_gc_init` and the strings-init prelude.
+///
+/// Background (issue #36): module globals are just LLVM globals of type
+/// `double` that store NaN-boxed JSValues. Before this fix the GC had
+/// no way to learn about their addresses — only string-handle globals
+/// were registered via `js_gc_register_global_root` (codegen.rs ~2217).
+/// That was fine for programs whose module-level state was reachable
+/// through the conservative stack scan at every GC cycle, but broke
+/// any program where a Map / Array / user-class instance lived only in
+/// a module `const X = new Map(...)` and a GC fired at a moment when
+/// no stack variable held the pointer. The pg driver's CONN_STATES
+/// Map is the canonical victim — after v0.5.25 made `gc_malloc`
+/// trigger GC, the Map was reliably swept mid-decode and the next
+/// `CONN_STATES.get(id)` returned a dangling header.
+///
+/// Registering the global's *address* (not its current value) means
+/// the GC reads the up-to-date pointer every cycle, so reassignments
+/// are followed correctly. `mark_global_roots` handles both NaN-boxed
+/// (POINTER_TAG / STRING_TAG / BIGINT_TAG) and raw-i64 interpretations,
+/// and both fall through the `valid_ptrs` filter, so it's safe to
+/// register every global regardless of its declared type — number /
+/// boolean / undefined bits simply don't match any live heap pointer
+/// and get discarded.
+fn register_module_globals_as_gc_roots(
+    ctx: &mut crate::expr::FnCtx<'_>,
+    module_globals: &HashMap<u32, String>,
+) {
+    // Sort by id for deterministic emit order (helps with diff-testing
+    // the generated IR and matches the existing `class_keys` pattern).
+    let mut entries: Vec<(&u32, &String)> = module_globals.iter().collect();
+    entries.sort_by_key(|(id, _)| **id);
+    for (_, global_name) in entries {
+        let addr = ctx
+            .block()
+            .ptrtoint(&format!("@{}", global_name), I64);
+        ctx.block()
+            .call_void("js_gc_register_global_root", &[(I64, &addr)]);
+    }
 }
 
 /// Initialize each class's static fields with their declared init

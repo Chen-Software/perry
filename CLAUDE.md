@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.27
+**Current Version:** 0.5.28
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,11 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.144 and earlier), see CHANGELOG.md.
+
+### v0.5.28 — module globals registered as GC roots (closes #36)
+- **fix**: module-level user `let`/`const` globals were LLVM `double` globals that held NaN-boxed JSValues but were NOT registered with the GC's root scanner. Only string-handle globals (from the string pool) got `js_gc_register_global_root(&@.str.<idx>.handle)` at startup. The conservative stack scan could still find pointers held by stack variables, so the bug was latent until v0.5.25 made `gc_malloc` trigger GC during long-running decode loops — any program where a `Map` / `Array` / user-class instance lived only in `const X = new Map(...)` (no stack variable holding it at the moment of GC) would have `X` swept mid-cycle. The canonical victim was `@perry/postgres`'s `const CONN_STATES = new Map<number, ConnState>()`: the Map header got freed, the next `CONN_STATES.get(id)` dereferenced a freed pointer, SIGSEGV. Tracked by pg's malloc-count trigger hitting its 10k threshold around the 10-20k row mark — exactly the boundary the ticket reported.
+- New `register_module_globals_as_gc_roots(&mut ctx, module_globals)` in `crates/perry-codegen/src/codegen.rs` emits one `js_gc_register_global_root(ptrtoint @perry_global_<prefix>__<id> to i64)` per module-level let/const at the top of each module's `main` (entry) or `<prefix>__init` (non-entry) function, right after `js_gc_init` + the strings-init prelude. Registration uses the global's **address**, not its current value — so reassignments are followed correctly without re-registering. `mark_global_roots` already handled both NaN-boxed (POINTER_TAG / STRING_TAG / BIGINT_TAG) and raw-i64 interpretations, falling through the `valid_ptrs` filter for both, so registering every global regardless of its declared type is safe: number/boolean/undefined bits just don't match any live heap pointer.
+- Repro (no postgres, minimal synthetic): `const CACHE = new Map<number, string>(); put(...); allocLots(); get(1)`. Before the fix: SIGSEGV after the allocLots burst crosses the malloc-count threshold. After: prints `OK`. Full @perry/postgres bench suite: `perry-bench-crash-repro.ts` (1000×20 mixed types × 5 iterations) and `perry-bench-narrow.ts` (all int4 / bool / text / int8 / numeric × 3 iterations each = 15 queries) both pass end-to-end.
 
 ### v0.5.27 — GC root scanners for `ws` / `http` / `events` / `fastify` closures (refs #35)
 - **fix**: follow-up sweep to v0.5.26 — the net.Socket scanner pattern extended to every other stdlib module that stores user closures in Rust-side registries not visible to the GC mark phase. Same latent bug in each: user closure passed across the FFI, stored as `i64` inside a `Mutex<HashMap>` (ws's `WS_CLIENT_LISTENERS`) or inside a struct held by the handle registry (`WsServerHandle.listeners`, `ClientRequestHandle.response_callback` + `.listeners`, `IncomingMessageHandle.listeners`, `EventEmitterHandle.listeners`, `FastifyApp.routes[].handler` + `.hooks.*` + `.error_handler` + `.plugins[].handler`) — any malloc-triggered GC between registration and dispatch would sweep the closure and the next invocation would hit freed memory.
