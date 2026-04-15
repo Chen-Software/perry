@@ -1,23 +1,13 @@
 //! Property-based tests for the perry-stdlib container module.
-//!
-//! Tests ContainerSpec CLI argument generation, verification cache
-//! idempotence, error propagation, ListOrDict/ComposeDependsOnEntry
-//! behavior, ContainerError Display formatting, typed ComposeSpec
-//! round-trips, and handle registry type safety.
-//!
-//! Note: These tests use the perry-stdlib types (serde_json::Value based)
-//! which are the actual types exposed through the FFI boundary.
 
 use proptest::prelude::*;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use perry_container_compose::indexmap::IndexMap;
 
 // ============ Property 2: ContainerSpec CLI argument round-trip ============
 // Feature: perry-container, Property 2: ContainerSpec CLI argument round-trip
 // Validates: Requirements 12.5
 
-/// Build a ContainerSpec as a serde_json::Value and verify
-/// that all fields survive serialization → deserialization.
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
 
@@ -135,13 +125,13 @@ proptest! {
         bool_val in proptest::bool::ANY,
         str_val in "[a-z0-9_]{1,10}",
     ) {
-        let mut map = HashMap::new();
+        let mut map = IndexMap::new();
         // Mix different value types across keys
         for (i, key) in keys.iter().enumerate() {
-            let val: Option<Value> = match i % 4 {
-                0 => Some(Value::String(str_val.clone())),
-                1 => Some(Value::Number(int_val.into())),
-                2 => Some(Value::Bool(bool_val)),
+            let val: Option<serde_yaml::Value> = match i % 4 {
+                0 => Some(serde_yaml::Value::String(str_val.clone())),
+                1 => Some(serde_yaml::Value::Number(int_val.into())),
+                2 => Some(serde_yaml::Value::Bool(bool_val)),
                 _ => None, // Null
             };
             map.insert(key.clone(), val);
@@ -215,7 +205,7 @@ proptest! {
     }
 }
 
-// ============ Property: ComposeDependsOnEntry service_names — List vs Map ============
+// ============ Property: DependsOnSpec service_names — List vs Map ============
 // Validates: Both List and Map variants produce the same set of service names.
 
 proptest! {
@@ -225,23 +215,25 @@ proptest! {
     fn prop_depends_on_entry_service_names(
         names in proptest::collection::vec("[a-z][a-z0-9_-]{1,10}", 1..=6),
     ) {
+        use perry_container_compose::types::{DependsOnSpec, ComposeDependsOn};
+
         // List variant
-        let list_entry = perry_stdlib::container::ComposeDependsOnEntry::List(names.clone());
+        let list_entry = DependsOnSpec::List(names.clone());
         let list_names = list_entry.service_names();
 
         // Map variant (same keys)
-        let mut map = HashMap::new();
+        let mut map = IndexMap::new();
         for name in &names {
             map.insert(
                 name.clone(),
-                perry_stdlib::container::ComposeDependsOn {
-                    condition: "service_started".to_string(),
+                ComposeDependsOn {
+                    condition: None,
                     required: None,
                     restart: None,
                 },
             );
         }
-        let map_entry = perry_stdlib::container::ComposeDependsOnEntry::Map(map);
+        let map_entry = DependsOnSpec::Map(map);
         let map_names = map_entry.service_names();
 
         // Both should yield the same service names (order may differ for Map)
@@ -315,17 +307,18 @@ proptest! {
         svc_names in proptest::collection::vec("[a-z][a-z0-9_-]{1,10}", 1..=5),
         images in proptest::collection::vec("[a-z][a-z0-9_.-]{3,30}(:[a-z0-9._-]+)?", 1..=5),
     ) {
-        let mut spec = perry_stdlib::container::ComposeSpec::default();
+        use perry_container_compose::types::{ComposeSpec, ComposeService};
+        let mut spec = ComposeSpec::default();
         spec.name = name;
 
         for (svc_name, image) in svc_names.iter().zip(images.iter()) {
-            let mut service = perry_stdlib::container::ComposeService::default();
+            let mut service = ComposeService::default();
             service.image = Some(image.clone());
             spec.services.insert(svc_name.clone(), service);
         }
 
         let json_str = serde_json::to_string(&spec).unwrap();
-        let reparsed: perry_stdlib::container::ComposeSpec =
+        let reparsed: ComposeSpec =
             serde_json::from_str(&json_str).unwrap();
 
         prop_assert_eq!(reparsed.name, spec.name);
@@ -404,12 +397,13 @@ proptest! {
         name in proptest::option::of("[a-z][a-z0-9_-]{1,20}"),
         driver in proptest::option::of("[a-z]{3,10}"),
     ) {
-        let mut network = perry_stdlib::container::ComposeNetwork::default();
+        use perry_container_compose::types::ComposeNetwork;
+        let mut network = ComposeNetwork::default();
         network.name = name;
         network.driver = driver;
 
         let json_str = serde_json::to_string(&network).unwrap();
-        let reparsed: perry_stdlib::container::ComposeNetwork =
+        let reparsed: ComposeNetwork =
             serde_json::from_str(&json_str).unwrap();
 
         prop_assert_eq!(reparsed.name, network.name);

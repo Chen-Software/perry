@@ -127,7 +127,13 @@ pub async fn run(cli: Cli) -> Result<()> {
         cli.env_files.clone(),
     );
     let project = ComposeProject::load(&config)?;
-    let backend = std::sync::Arc::from(crate::backend::get_backend()?);
+
+    let backend_res = crate::backend::detect_backend().await;
+    let backend = match backend_res {
+        Ok(b) => std::sync::Arc::new(b) as std::sync::Arc<dyn crate::backend::ContainerBackend>,
+        Err(probed) => return Err(crate::error::ComposeError::NoBackendFound { probed }),
+    };
+
     let engine = ComposeEngine::new(project.spec.clone(), project.project_name.clone(), backend);
 
     match cli.command {
@@ -161,18 +167,10 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
 
         Commands::Logs(args) => {
-            let logs_map = engine.logs(&args.services, args.tail).await?;
-
-            let mut names: Vec<&String> = logs_map.keys().collect();
-            names.sort();
-            for name in names {
-                let log = &logs_map[name];
-                if !log.is_empty() {
-                    for line in log.lines() {
-                        println!("{} | {}", name, line);
-                    }
-                }
-            }
+            let service = if args.services.is_empty() { None } else { Some(args.services[0].as_str()) };
+            let logs = engine.logs(service, args.tail).await?;
+            print!("{}", logs.stdout);
+            eprint!("{}", logs.stderr);
         }
 
         Commands::Exec(args) => {
@@ -188,8 +186,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                 .collect();
 
             let cmd = args.cmd.clone();
-            if args.user.is_some() || args.workdir.is_some() || !env.is_empty() {
-                // Use backend directly for user/workdir/env support
+            let result = if !env.is_empty() || args.workdir.is_some() {
+                // Use backend directly for workdir/env support
                 let svc = engine
                     .spec
                     .services
@@ -198,34 +196,21 @@ pub async fn run(cli: Cli) -> Result<()> {
                 let container_name =
                     crate::service::service_container_name(svc, &args.service);
 
-                let result = engine
+                engine
                     .backend
                     .exec(
                         &container_name,
                         &cmd,
-                        args.user.as_deref(),
+                        if env.is_empty() { None } else { Some(&env) },
                         args.workdir.as_deref(),
-                        if env.is_empty() {
-                            None
-                        } else {
-                            Some(&env)
-                        },
                     )
-                    .await?;
-
-                print!("{}", result.stdout);
-                eprint!("{}", result.stderr);
-                if result.exit_code != 0 {
-                    std::process::exit(result.exit_code);
-                }
+                    .await?
             } else {
-                let result = engine.exec(&args.service, &cmd).await?;
-                print!("{}", result.stdout);
-                eprint!("{}", result.stderr);
-                if result.exit_code != 0 {
-                    std::process::exit(result.exit_code);
-                }
-            }
+                engine.exec(&args.service, &cmd).await?
+            };
+
+            print!("{}", result.stdout);
+            eprint!("{}", result.stderr);
         }
 
         Commands::Config(args) => {

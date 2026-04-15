@@ -22,7 +22,10 @@ pub mod ffi;
 
 // Re-exports
 pub use error::{ComposeError, Result};
-pub use types::{ComposeHandle, ComposeService, ComposeSpec};
+pub use types::{ComposeHandle, ComposeService, ComposeSpec, ContainerLogs};
 pub use compose::ComposeEngine;
 pub use project::ComposeProject;
-pub use backend::{ContainerBackend, Backend, get_backend, get_container_backend};
+pub use backend::{ContainerBackend, CliBackend, CliProtocol, DockerProtocol, AppleContainerProtocol, LimaProtocol, detect_backend};
+
+// External crate re-exports for integration tests
+pub use indexmap;
