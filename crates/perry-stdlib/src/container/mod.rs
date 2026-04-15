@@ -30,8 +30,8 @@ async fn get_global_backend() -> Result<&'static Arc<dyn ContainerBackend>, Cont
     }
 
     let b = detect_backend().await
-        .map(|b| Arc::new(b) as Arc<dyn ContainerBackend>)
-        .map_err(|probed| ContainerError::NoBackendFound { probed })?;
+        .map(|b| Arc::from(b) as Arc<dyn ContainerBackend>)
+        .map_err(ContainerError::from)?;
 
     let _ = BACKEND.set(b);
     Ok(BACKEND.get().unwrap())
@@ -296,8 +296,12 @@ pub unsafe extern "C" fn js_container_detectBackend() -> *mut Promise {
                 }]).to_string();
                 Ok(json)
             }
-            Err(probed) => {
-                let json = serde_json::to_string(&probed).unwrap_or_default();
+            Err(e) => {
+                let json = if let crate::container::types::ContainerError::NoBackendFound { probed } = crate::container::types::ContainerError::from(e) {
+                    serde_json::to_string(&probed).unwrap_or_default()
+                } else {
+                    "[]".to_string()
+                };
                 Ok(json) // Resolve with probe info array on failure to find any
             }
         }

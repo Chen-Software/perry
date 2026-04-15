@@ -10,8 +10,8 @@ use crate::service;
 use crate::types::{
     ComposeHandle, ComposeSpec, ContainerInfo, ContainerSpec,
 };
+use crate::backend::{NetworkConfig, VolumeConfig};
 use indexmap::IndexMap;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -105,8 +105,9 @@ impl ComposeEngine {
                 if external {
                     continue;
                 }
-                let net_config = net_config_opt.as_ref().cloned().unwrap_or_default();
-                let resolved_name = net_config.name.as_deref().unwrap_or(net_name.as_str());
+                let net_config_spec = net_config_opt.as_ref().cloned().unwrap_or_default();
+                let net_config = NetworkConfig::from(&net_config_spec);
+                let resolved_name = net_config_spec.name.as_deref().unwrap_or(net_name.as_str());
                 tracing::info!("Creating network '{}'…", resolved_name);
                 self.backend
                     .create_network(resolved_name, &net_config)
@@ -125,8 +126,9 @@ impl ComposeEngine {
                 if external {
                     continue;
                 }
-                let vol_config = vol_config_opt.as_ref().cloned().unwrap_or_default();
-                let resolved_name = vol_config.name.as_deref().unwrap_or(vol_name.as_str());
+                let vol_config_spec = vol_config_opt.as_ref().cloned().unwrap_or_default();
+                let vol_config = VolumeConfig::from(&vol_config_spec);
+                let resolved_name = vol_config_spec.name.as_deref().unwrap_or(vol_name.as_str());
                 tracing::info!("Creating volume '{}'…", resolved_name);
                 self.backend
                     .create_volume(resolved_name, &vol_config)
