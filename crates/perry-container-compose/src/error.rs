@@ -1,11 +1,27 @@
-//! Error types for perry-container-compose
+use serde::{Deserialize, Serialize};
 
-use thiserror::Error;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackendProbeResult {
+    pub name: String,
+    pub available: bool,
+    pub reason: String,
+}
 
-/// Top-level crate error
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum ComposeError {
-    #[error("YAML parse error: {0}")]
+    #[error("Dependency cycle detected in services: {services:?}")]
+    DependencyCycle { services: Vec<String> },
+
+    #[error("Service '{service}' failed to start: {message}")]
+    ServiceStartupFailed { service: String, message: String },
+
+    #[error("Backend error (exit {code}): {message}")]
+    BackendError { code: i32, message: String },
+
+    #[error("Not found: {0}")]
+    NotFound(String),
+
+    #[error("Parse error: {0}")]
     ParseError(#[from] serde_yaml::Error),
 
     #[error("JSON error: {0}")]
@@ -14,63 +30,26 @@ pub enum ComposeError {
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
 
-    #[error("Backend error: {0}")]
-    BackendError(#[from] BackendError),
-
     #[error("Validation error: {message}")]
     ValidationError { message: String },
 
-    #[error("Circular dependency detected: {cycle}")]
-    CircularDependency { cycle: String },
+    #[error("Image verification failed for '{image}': {reason}")]
+    VerificationFailed { image: String, reason: String },
 
-    #[error("Service not found: {name}")]
-    ServiceNotFound { name: String },
-
-    #[error("Compose file not found: {path}")]
+    #[error("File not found: {path}")]
     FileNotFound { path: String },
 
-    #[error("Exec error in service '{service}': {message}")]
-    ExecError { service: String, message: String },
+    #[error("No container backend found. Probed: {probed:?}")]
+    NoBackendFound { probed: Vec<BackendProbeResult> },
 
-    #[error("Configuration error: {0}")]
-    ConfigError(String),
-}
-
-/// Backend (Apple Container / Podman) specific errors
-#[derive(Debug, Error)]
-pub enum BackendError {
-    #[error("Container not found: {name}")]
-    NotFound { name: String },
-
-    #[error("Container command failed (exit {code}): {stderr}")]
-    CommandFailed { code: i32, stderr: String },
-
-    #[error("Backend not available: {reason}")]
-    NotAvailable { reason: String },
-
-    #[error("Image not found: {image}")]
-    ImageNotFound { image: String },
-
-    #[error("Build failed: {message}")]
-    BuildFailed { message: String },
-
-    #[error("Network error: {message}")]
-    NetworkError { message: String },
-
-    #[error("Volume error: {message}")]
-    VolumeError { message: String },
-}
-
-impl ComposeError {
-    pub fn validation(msg: impl Into<String>) -> Self {
-        ComposeError::ValidationError {
-            message: msg.into(),
-        }
-    }
-
-    pub fn config(msg: impl Into<String>) -> Self {
-        ComposeError::ConfigError(msg.into())
-    }
+    #[error("Specified backend '{name}' is not available: {reason}")]
+    BackendNotAvailable { name: String, reason: String },
 }
 
 pub type Result<T> = std::result::Result<T, ComposeError>;
+
+impl ComposeError {
+    pub fn validation(message: String) -> Self {
+        ComposeError::ValidationError { message }
+    }
+}
