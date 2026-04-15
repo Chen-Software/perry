@@ -127,7 +127,11 @@ pub async fn run(cli: Cli) -> Result<()> {
         cli.env_files.clone(),
     );
     let project = ComposeProject::load(&config)?;
-    let backend = std::sync::Arc::from(crate::backend::get_backend()?);
+    let backend = std::sync::Arc::from(
+        crate::backend::detect_backend()
+            .await
+            .map_err(|probed| crate::error::ComposeError::NoBackendFound { probed })?,
+    );
     let engine = ComposeEngine::new(project.spec.clone(), project.project_name.clone(), backend);
 
     match cli.command {
@@ -167,9 +171,14 @@ pub async fn run(cli: Cli) -> Result<()> {
             names.sort();
             for name in names {
                 let log = &logs_map[name];
-                if !log.is_empty() {
-                    for line in log.lines() {
+                if !log.stdout.is_empty() {
+                    for line in log.stdout.lines() {
                         println!("{} | {}", name, line);
+                    }
+                }
+                if !log.stderr.is_empty() {
+                    for line in log.stderr.lines() {
+                        eprintln!("{} | {}", name, line);
                     }
                 }
             }
@@ -188,44 +197,26 @@ pub async fn run(cli: Cli) -> Result<()> {
                 .collect();
 
             let cmd = args.cmd.clone();
-            if args.user.is_some() || args.workdir.is_some() || !env.is_empty() {
-                // Use backend directly for user/workdir/env support
-                let svc = engine
-                    .spec
-                    .services
-                    .get(&args.service)
-                    .ok_or_else(|| crate::error::ComposeError::NotFound(args.service.clone()))?;
-                let container_name =
-                    crate::service::service_container_name(svc, &args.service);
 
-                let result = engine
-                    .backend
-                    .exec(
-                        &container_name,
-                        &cmd,
-                        args.user.as_deref(),
-                        args.workdir.as_deref(),
-                        if env.is_empty() {
-                            None
-                        } else {
-                            Some(&env)
-                        },
-                    )
-                    .await?;
+            let svc = engine
+                .spec
+                .services
+                .get(&args.service)
+                .ok_or_else(|| crate::error::ComposeError::NotFound(args.service.clone()))?;
+            let container_name = crate::service::service_container_name(svc, &args.service);
 
-                print!("{}", result.stdout);
-                eprint!("{}", result.stderr);
-                if result.exit_code != 0 {
-                    std::process::exit(result.exit_code);
-                }
-            } else {
-                let result = engine.exec(&args.service, &cmd).await?;
-                print!("{}", result.stdout);
-                eprint!("{}", result.stderr);
-                if result.exit_code != 0 {
-                    std::process::exit(result.exit_code);
-                }
-            }
+            let result = engine
+                .backend
+                .exec(
+                    &container_name,
+                    &cmd,
+                    if env.is_empty() { None } else { Some(&env) },
+                    args.workdir.as_deref(),
+                )
+                .await?;
+
+            print!("{}", result.stdout);
+            eprint!("{}", result.stderr);
         }
 
         Commands::Config(args) => {

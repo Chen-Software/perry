@@ -25,4 +25,4 @@ pub use error::{ComposeError, Result};
 pub use types::{ComposeHandle, ComposeService, ComposeSpec};
 pub use compose::ComposeEngine;
 pub use project::ComposeProject;
-pub use backend::{ContainerBackend, Backend, get_backend, get_container_backend};
+pub use backend::{ContainerBackend, CliBackend, CliProtocol, DockerProtocol, AppleContainerProtocol, LimaProtocol, detect_backend};

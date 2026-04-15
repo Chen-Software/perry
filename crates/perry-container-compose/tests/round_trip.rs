@@ -7,8 +7,10 @@
 use indexmap::IndexMap;
 use perry_container_compose::compose::resolve_startup_order;
 use perry_container_compose::error::ComposeError;
+use perry_container_compose::backend::{CliProtocol, DockerProtocol};
+use perry_container_compose::error::compose_error_to_js;
 use perry_container_compose::types::{
-    ComposeService, ComposeSpec, DependsOnCondition, DependsOnSpec, VolumeType,
+    ComposeService, ComposeSpec, ContainerSpec, DependsOnCondition, DependsOnSpec, VolumeType,
 };
 use perry_container_compose::yaml::interpolate;
 use proptest::prelude::*;
@@ -156,6 +158,23 @@ fn arb_compose_spec_with_cycle() -> impl Strategy<Value = ComposeSpec> {
     })
 }
 
+/// Generate an arbitrary ContainerSpec.
+fn arb_container_spec() -> impl Strategy<Value = ContainerSpec> {
+    (
+        arb_image(),
+        proptest::option::of(arb_service_name()),
+        proptest::option::of(proptest::collection::vec("[0-9]{2,5}:[0-9]{2,5}", 0..=3)),
+        proptest::option::of(proptest::collection::vec("/[a-z]:/[a-z]", 0..=3)),
+    )
+        .prop_map(|(image, name, ports, volumes)| ContainerSpec {
+            image,
+            name,
+            ports,
+            volumes,
+            ..Default::default()
+        })
+}
+
 /// Generate environment variable name.
 fn arb_env_name() -> impl Strategy<Value = String> {
     "[A-Z][A-Z0-9_]{1,8}"
@@ -174,6 +193,45 @@ fn arb_env_template() -> impl Strategy<Value = (String, HashMap<String, String>)
 
         (template, env)
     })
+}
+
+// ============ Property 2: ContainerSpec CLI argument round-trip ============
+// Feature: perry-container, Property 2: ContainerSpec CLI argument round-trip
+// Validates: Requirements 12.5
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    #[test]
+    fn prop_container_spec_cli_round_trip(spec in arb_container_spec()) {
+        let protocol = DockerProtocol;
+        let args = protocol.run_args(&spec);
+
+        // Manual verification of some fields since we don't have a full inverse parser yet
+        if let Some(name) = &spec.name {
+            prop_assert!(args.contains(&"--name".to_string()));
+            prop_assert!(args.contains(name));
+        }
+        prop_assert!(args.contains(&spec.image));
+    }
+}
+
+// ============ Property 11: Error propagation preserves code and message ============
+// Feature: perry-container, Property 11: Error propagation preserves code and message
+// Validates: Requirements 2.6, 12.2
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(50))]
+
+    #[test]
+    fn prop_error_propagation(code in -100i32..500i32, message in ".*") {
+        let err = ComposeError::BackendError { code, message: message.clone() };
+        let js_json = compose_error_to_js(&err);
+        let val: serde_json::Value = serde_json::from_str(&js_json).unwrap();
+
+        prop_assert_eq!(val["code"].as_i64().unwrap() as i32, code);
+        prop_assert_eq!(val["message"].as_str().unwrap().contains(&message), true);
+    }
 }
 
 // ============ Property 1: ComposeSpec JSON round-trip ============

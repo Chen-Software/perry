@@ -3,11 +3,11 @@
 //! Provides `ComposeEngine::up()`, `down()`, `ps()`, `logs()`, `exec()`, etc.
 //! Uses Kahn's algorithm for dependency resolution.
 
-use crate::backend::{Backend, ContainerStatus};
+use crate::backend::ContainerBackend;
 use crate::error::{ComposeError, Result};
 use crate::service;
 use crate::types::{
-    ComposeHandle, ComposeSpec, ContainerInfo,
+    ComposeHandle, ComposeSpec, ContainerInfo, ContainerLogs, ContainerSpec,
 };
 use indexmap::IndexMap;
 use std::collections::HashMap;
@@ -25,7 +25,7 @@ static NEXT_STACK_ID: AtomicU64 = AtomicU64::new(1);
 pub struct ComposeEngine {
     pub spec: ComposeSpec,
     pub project_name: String,
-    pub backend: Arc<dyn Backend>,
+    pub backend: Arc<dyn ContainerBackend>,
     /// Services that were started in this session
     started_containers: std::sync::Mutex<Vec<String>>,
 }
@@ -35,7 +35,7 @@ impl ComposeEngine {
     pub fn new(
         spec: ComposeSpec,
         project_name: String,
-        backend: Arc<dyn Backend>,
+        backend: Arc<dyn ContainerBackend>,
     ) -> Self {
         ComposeEngine {
             spec,
@@ -87,7 +87,7 @@ impl ComposeEngine {
     pub async fn up(
         &self,
         services: &[String],
-        detach: bool,
+        _detach: bool,
         build: bool,
         _remove_orphans: bool,
     ) -> Result<ComposeHandle> {
@@ -103,21 +103,21 @@ impl ComposeEngine {
         // 1. Create networks (skip external)
         if let Some(networks) = &self.spec.networks {
             for (net_name, net_config_opt) in networks {
-                let external = net_config_opt.as_ref().map_or(false, |c| c.external.unwrap_or(false));
+                let external = net_config_opt
+                    .as_ref()
+                    .map_or(false, |c| c.external.unwrap_or(false));
                 if external {
                     continue;
                 }
-                let resolved_name = net_config_opt.as_ref()
+                let resolved_name = net_config_opt
+                    .as_ref()
                     .and_then(|c| c.name.as_deref())
                     .unwrap_or(net_name.as_str());
-                let driver = net_config_opt.as_ref().and_then(|c| c.driver.as_deref());
-                let labels = net_config_opt.as_ref()
-                    .and_then(|c| c.labels.as_ref())
-                    .map(|l| l.to_map())
-                    .filter(|m| !m.is_empty());
+
+                let config = net_config_opt.clone().unwrap_or_default();
                 tracing::info!("Creating network '{}'…", resolved_name);
                 self.backend
-                    .create_network(resolved_name, driver, labels.as_ref())
+                    .create_network(resolved_name, &config)
                     .await
                     .map_err(|e| ComposeError::ServiceStartupFailed {
                         service: format!("network/{}", net_name),
@@ -129,21 +129,21 @@ impl ComposeEngine {
         // 2. Create volumes (skip external)
         if let Some(volumes) = &self.spec.volumes {
             for (vol_name, vol_config_opt) in volumes {
-                let external = vol_config_opt.as_ref().map_or(false, |c| c.external.unwrap_or(false));
+                let external = vol_config_opt
+                    .as_ref()
+                    .map_or(false, |c| c.external.unwrap_or(false));
                 if external {
                     continue;
                 }
-                let resolved_name = vol_config_opt.as_ref()
+                let resolved_name = vol_config_opt
+                    .as_ref()
                     .and_then(|c| c.name.as_deref())
                     .unwrap_or(vol_name.as_str());
-                let driver = vol_config_opt.as_ref().and_then(|c| c.driver.as_deref());
-                let labels = vol_config_opt.as_ref()
-                    .and_then(|c| c.labels.as_ref())
-                    .map(|l| l.to_map())
-                    .filter(|m| !m.is_empty());
+
+                let config = vol_config_opt.clone().unwrap_or_default();
                 tracing::info!("Creating volume '{}'…", resolved_name);
                 self.backend
-                    .create_volume(resolved_name, driver, labels.as_ref())
+                    .create_volume(resolved_name, &config)
                     .await
                     .map_err(|e| ComposeError::ServiceStartupFailed {
                         service: format!("volume/{}", vol_name),
@@ -163,13 +163,13 @@ impl ComposeEngine {
                 .ok_or_else(|| ComposeError::NotFound(svc_name.clone()))?;
 
             let container_name = service::service_container_name(svc, svc_name);
-            let status = self.backend.inspect(&container_name).await?;
+            let inspect_result = self.backend.inspect(&container_name).await;
 
-            match status {
-                ContainerStatus::Running => {
+            match inspect_result {
+                Ok(info) if info.status == "running" => {
                     // Already running
                 }
-                ContainerStatus::Stopped => {
+                Ok(info) if info.status != "not found" => {
                     self.backend.start(&container_name).await.map_err(|e| {
                         ComposeError::ServiceStartupFailed {
                             service: svc_name.clone(),
@@ -178,7 +178,7 @@ impl ComposeEngine {
                     })?;
                     started.push(container_name.clone());
                 }
-                ContainerStatus::NotFound => {
+                _ => {
                     // Build if needed
                     if build && svc.needs_build() {
                         let build_config = svc.build.as_ref().unwrap().as_build();
@@ -219,36 +219,23 @@ impl ComposeEngine {
 
                     let cmd = svc.command_list();
 
-                    self.backend
-                        .run(
-                            &image,
-                            &container_name,
-                            if ports.is_empty() {
-                                None
-                            } else {
-                                Some(&ports)
-                            },
-                            if env.is_empty() {
-                                None
-                            } else {
-                                Some(&env)
-                            },
-                            if vols.is_empty() {
-                                None
-                            } else {
-                                Some(&vols)
-                            },
-                            Some(&all_labels),
-                            cmd.as_deref(),
-                            detach,
-                        )
-                        .await
-                        .map_err(|e| {
-                            ComposeError::ServiceStartupFailed {
-                                service: svc_name.clone(),
-                                message: e.to_string(),
-                            }
-                        })?;
+                    let spec = ContainerSpec {
+                        image: image.clone(),
+                        name: Some(container_name.clone()),
+                        ports: Some(ports),
+                        volumes: Some(vols),
+                        env: Some(env),
+                        cmd,
+                        rm: Some(false),
+                        ..Default::default()
+                    };
+
+                    self.backend.run(&spec).await.map_err(|e| {
+                        ComposeError::ServiceStartupFailed {
+                            service: svc_name.clone(),
+                            message: e.to_string(),
+                        }
+                    })?;
 
                     started.push(container_name.clone());
                 }
@@ -289,13 +276,12 @@ impl ComposeEngine {
                 .ok_or_else(|| ComposeError::NotFound(svc_name.clone()))?;
 
             let container_name = service::service_container_name(svc, svc_name);
-            let status = self.backend.inspect(&container_name).await?;
+            let inspect_result = self.backend.inspect(&container_name).await;
 
-            if status == ContainerStatus::Running {
-                self.backend.stop(&container_name).await?;
-            }
-
-            if status != ContainerStatus::NotFound {
+            if let Ok(info) = inspect_result {
+                if info.status == "running" {
+                    self.backend.stop(&container_name, None).await?;
+                }
                 self.backend.remove(&container_name, true).await?;
             }
         }
@@ -341,19 +327,19 @@ impl ComposeEngine {
 
         for (svc_name, svc) in &self.spec.services {
             let container_name = service::service_container_name(svc, svc_name);
-            let status = self.backend.inspect(&container_name).await?;
-
-            let info = ContainerInfo {
-                id: container_name.clone(),
-                name: container_name,
-                image: svc.image_ref(svc_name),
-                status: match status {
-                    ContainerStatus::Running => "running".to_string(),
-                    ContainerStatus::Stopped => "stopped".to_string(),
-                    ContainerStatus::NotFound => "not found".to_string(),
+            let info = match self.backend.inspect(&container_name).await {
+                Ok(mut info) => {
+                    info.ports = svc.port_strings();
+                    info
+                }
+                Err(_) => ContainerInfo {
+                    id: container_name.clone(),
+                    name: container_name,
+                    image: svc.image_ref(svc_name),
+                    status: "not found".to_string(),
+                    ports: svc.port_strings(),
+                    created: String::new(),
                 },
-                ports: svc.port_strings(),
-                created: String::new(),
             };
             results.push(info);
         }
@@ -369,7 +355,7 @@ impl ComposeEngine {
         &self,
         services: &[String],
         tail: Option<u32>,
-    ) -> Result<HashMap<String, String>> {
+    ) -> Result<HashMap<String, ContainerLogs>> {
         let service_names: Vec<&String> = if services.is_empty() {
             self.spec.services.keys().collect()
         } else {
@@ -385,7 +371,7 @@ impl ComposeEngine {
                 .ok_or_else(|| ComposeError::NotFound(svc_name.clone()))?;
 
             let container_name = service::service_container_name(svc, svc_name);
-            let logs = self.backend.logs(&container_name, tail, false).await?;
+            let logs = self.backend.logs(&container_name, tail).await?;
             all_logs.insert(svc_name.clone(), logs);
         }
 
@@ -395,11 +381,7 @@ impl ComposeEngine {
     // ============ exec ============
 
     /// Execute a command in a running service container.
-    pub async fn exec(
-        &self,
-        service: &str,
-        cmd: &[String],
-    ) -> Result<crate::backend::ExecResult> {
+    pub async fn exec(&self, service: &str, cmd: &[String]) -> Result<ContainerLogs> {
         let svc = self
             .spec
             .services
@@ -407,9 +389,9 @@ impl ComposeEngine {
             .ok_or_else(|| ComposeError::NotFound(service.to_owned()))?;
 
         let container_name = service::service_container_name(svc, service);
-        let status = self.backend.inspect(&container_name).await?;
+        let info = self.backend.inspect(&container_name).await?;
 
-        if status != ContainerStatus::Running {
+        if info.status != "running" {
             return Err(ComposeError::ServiceStartupFailed {
                 service: service.to_owned(),
                 message: format!("container '{}' is not running", container_name),
@@ -417,7 +399,7 @@ impl ComposeEngine {
         }
 
         self.backend
-            .exec(&container_name, cmd, None, None, None)
+            .exec(&container_name, cmd, None, None)
             .await
     }
 
@@ -466,7 +448,7 @@ impl ComposeEngine {
                 .get(&svc_name)
                 .ok_or_else(|| ComposeError::NotFound(svc_name.clone()))?;
             let container_name = service::service_container_name(svc, &svc_name);
-            self.backend.stop(&container_name).await?;
+            self.backend.stop(&container_name, None).await?;
         }
 
         Ok(())

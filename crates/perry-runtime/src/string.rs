@@ -50,6 +50,12 @@ pub struct StringHeader {
     pub refcount: u32,
 }
 
+impl StringHeader {
+    pub fn as_str(&self) -> &str {
+        string_as_str(self as *const StringHeader)
+    }
+}
+
 // ── UTF-8 ↔ UTF-16 conversion helpers ──────────────────────────────────
 
 /// Count UTF-16 code units for a UTF-8 byte slice. Returns 0 for empty/null.
@@ -265,7 +271,7 @@ fn string_data(s: *const StringHeader) -> *const u8 {
 }
 
 /// Get string as a Rust &str (for internal use)
-fn string_as_str<'a>(s: *const StringHeader) -> &'a str {
+pub fn string_as_str<'a>(s: *const StringHeader) -> &'a str {
     unsafe {
         let blen = (*s).byte_len as usize;
         let cap = (*s).capacity as usize;
