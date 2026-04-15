@@ -13,7 +13,7 @@ crate-type = ["rlib", "staticlib"]
 default = ["full"]
 
 # Full stdlib - everything included
-full = ["http-server", "http-client", "database", "crypto", "compression", "email", "websocket", "image", "scheduler", "ids", "html-parser", "rate-limit", "validation", "net", "tls"]
+full = ["http-server", "http-client", "database", "crypto", "compression", "email", "websocket", "image", "scheduler", "ids", "html-parser", "rate-limit", "validation", "container", "net", "tls"]
 
 # Minimal core - just what's needed for basic programs
 core = []
@@ -73,6 +73,9 @@ validation = ["dep:validator", "dep:regex"]
 
 # UUID/nanoid
 ids = ["dep:uuid", "dep:nanoid"]
+
+# Container module (OCI container management)
+container = ["dep:async-trait", "dep:tokio", "async-runtime", "dep:perry-container-compose", "dep:serde_yaml"]
 
 # Async runtime (tokio) - internal feature
 async-runtime = ["dep:tokio"]
@@ -170,6 +173,11 @@ regex = { version = "1.10", optional = true }
 uuid = { version = "1.11", features = ["v4", "v1", "v7"], optional = true }
 nanoid = { version = "0.4", optional = true }
 
+# Container module
+async-trait = { version = "0.1", optional = true }
+perry-container-compose = { path = "../perry-container-compose", optional = true }
+serde_yaml = { version = "0.9", optional = true }
+
 # LRU Cache
 lru = "0.12"
 
@@ -178,3 +186,8 @@ clap = { version = "4.4", features = ["derive"] }
 
 # Decimal math (Big.js / Decimal.js)
 rust_decimal = { version = "1.33", features = ["maths"] }
+
+[dev-dependencies]
+proptest = "1"
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
