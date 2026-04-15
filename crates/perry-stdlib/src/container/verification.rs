@@ -221,9 +221,8 @@ async fn fetch_image_digest(reference: &str) -> Result<String, ContainerError> {
         }
     }
 
-    // Fallback: use reference as-is (unverified but usable)
-    // In production this should be an error; for development we allow it.
-    Ok(reference.to_string())
+    // If all methods fail, return an error. PRODUCTION READINESS: never fall back to unverified tag.
+    Err(ContainerError::NotFound(format!("Could not resolve digest for image: {}", reference)))
 }
 
 // ============ Cosign verification ============
@@ -252,7 +251,7 @@ async fn perform_cosign_verify(
         .await;
 
     match keyless_result {
-        Ok(out) if out.status.success() => return Ok(()),
+        Ok(out) if out.status.success() => Ok(()),
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
             // If keyless fails with "no matching signatures", try basic verify
@@ -260,24 +259,17 @@ async fn perform_cosign_verify(
             {
                 return perform_basic_verify(reference).await;
             }
-            // cosign not available or other error — allow in development
-            if stderr.contains("not found") || stderr.contains("command not found") {
-                return Ok(()); // Dev mode: allow unverified
-            }
-            return Err(ContainerError::VerificationFailed {
+
+            Err(ContainerError::VerificationFailed {
                 image: reference.to_string(),
-                reason: stderr,
-            });
+                reason: format!("cosign verification failed: {}", stderr),
+            })
         }
         Err(e) => {
-            // cosign binary not found — allow unverified in development
-            if e.kind() == std::io::ErrorKind::NotFound {
-                return Ok(());
-            }
-            return Err(ContainerError::VerificationFailed {
+            Err(ContainerError::VerificationFailed {
                 image: reference.to_string(),
-                reason: format!("cosign execution failed: {}", e),
-            });
+                reason: format!("cosign execution failed (is cosign installed?): {}", e),
+            })
         }
     }
 }
@@ -293,18 +285,14 @@ async fn perform_basic_verify(reference: &str) -> Result<(), ContainerError> {
         Ok(out) if out.status.success() => Ok(()),
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-            if stderr.contains("not found") || stderr.contains("command not found") {
-                return Ok(()); // Dev mode
-            }
             Err(ContainerError::VerificationFailed {
                 image: reference.to_string(),
-                reason: stderr,
+                reason: format!("basic cosign verification failed: {}", stderr),
             })
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()), // cosign not installed
         Err(e) => Err(ContainerError::VerificationFailed {
             image: reference.to_string(),
-            reason: format!("cosign execution failed: {}", e),
+            reason: format!("cosign execution failed (is cosign installed?): {}", e),
         }),
     }
 }
