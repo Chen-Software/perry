@@ -2457,9 +2457,48 @@ fn lower_module_decl(
                             })
                             .unwrap_or_else(|| local.clone());
                         if is_native {
-                            // Register as native module function with the original method name
-                            // e.g., import { v4 as uuid } from 'uuid' -> uuid maps to uuid.v4
-                            ctx.register_native_module(local.clone(), source.clone(), Some(imported.clone()));
+                            // Map perry/container and perry/compose imports to their FFI symbols
+                            let ffi_name = match source.as_str() {
+                                "perry/container" => match imported.as_str() {
+                                    "run" => Some("js_container_run"),
+                                    "create" => Some("js_container_create"),
+                                    "start" => Some("js_container_start"),
+                                    "stop" => Some("js_container_stop"),
+                                    "remove" => Some("js_container_remove"),
+                                    "list" => Some("js_container_list"),
+                                    "inspect" => Some("js_container_inspect"),
+                                    "logs" => Some("js_container_logs"),
+                                    "exec" => Some("js_container_exec"),
+                                    "pullImage" => Some("js_container_pullImage"),
+                                    "listImages" => Some("js_container_listImages"),
+                                    "removeImage" => Some("js_container_removeImage"),
+                                    "getBackend" => Some("js_container_getBackend"),
+                                    "composeUp" => Some("js_container_composeUp"),
+                                    _ => None,
+                                },
+                                "perry/compose" => match imported.as_str() {
+                                    "up" => Some("js_compose_up"),
+                                    "down" => Some("js_compose_down"),
+                                    "ps" => Some("js_compose_ps"),
+                                    "logs" => Some("js_compose_logs"),
+                                    "exec" => Some("js_compose_exec"),
+                                    "config" => Some("js_compose_config"),
+                                    "start" => Some("js_compose_start"),
+                                    "stop" => Some("js_compose_stop"),
+                                    "restart" => Some("js_compose_restart"),
+                                    _ => None,
+                                },
+                                _ => None,
+                            };
+
+                            if let Some(ffi) = ffi_name {
+                                ctx.register_imported_func(local.clone(), ffi.to_string());
+                            } else {
+                                // Register as native module function with the original method name
+                                // e.g., import { v4 as uuid } from 'uuid' -> uuid maps to uuid.v4
+                                ctx.register_native_module(local.clone(), source.clone(), Some(imported.clone()));
+                            }
+
                             // Auto-register parentPort from worker_threads as a native instance
                             // (it's a singleton, not created via `new`)
                             if source == "worker_threads" && imported == "parentPort" {
@@ -4607,6 +4646,16 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
             } else if let Some(id) = ctx.lookup_func(&name) {
                 Ok(Expr::FuncRef(id))
             } else if let Some((module_name, method_name)) = ctx.lookup_native_module(&name) {
+                // Feature: perry-container | Layer: HIR | Req: 1.1, 11.2
+                // Special handling for container and compose named imports
+                if module_name == "perry/container" || module_name == "perry/compose" || module_name == "perry/container-compose" {
+                    if let Some(method) = method_name {
+                        return Ok(Expr::ExternFuncRef {
+                            module: module_name.to_string(),
+                            name: method.to_string(),
+                        });
+                    }
+                }
                 // Special handling for worker_threads named imports
                 if module_name == "worker_threads" {
                     if let Some(method) = method_name {
@@ -7910,14 +7959,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             Expr::ArrayToReversed { .. } | Expr::ArrayToSorted { .. } |
                                             Expr::ArrayToSpliced { .. } | Expr::ArrayWith { .. } |
                                             Expr::ArrayEntries(_) | Expr::ArrayKeys(_) | Expr::ArrayValues(_) |
-                                            Expr::ObjectKeys(_) | Expr::ObjectValues(_) | Expr::ObjectEntries(_) |
-                                            // `process.argv` is a `string[]`. Without this arm the
-                                            // fallthrough picked String.slice semantics — so
-                                            // `process.argv.slice(2)` returned a "string" whose
-                                            // length was the argv count and whose elements were
-                                            // NaN-box bits of string pointers read as doubles
-                                            // (closes #41).
-                                            Expr::ProcessArgv
+                                            Expr::ObjectKeys(_) | Expr::ObjectValues(_) | Expr::ObjectEntries(_)
                                         ) {
                                             let mut args_iter = args.into_iter();
                                             let start = args_iter.next().unwrap();
@@ -9163,15 +9205,10 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                 }
                 ast::MemberProp::Computed(computed) => {
                     let index = Box::new(lower_expr(ctx, &computed.expr)?);
-                    // Specialize for Uint8Array/Buffer variables → byte-level access.
-                    // Params declared `Buffer` (e.g. `function f(src: Buffer)`)
-                    // reach here with `Type::Named("Buffer")` — treat it as a
-                    // synonym for Uint8Array so `src[i]` uses the byte-read
-                    // path instead of the generic f64-element IndexGet, which
-                    // would return NaN-boxed pointer bits as a denormal f64.
+                    // Specialize for Uint8Array/Buffer variables → byte-level access
                     if let Expr::LocalGet(id) = &*object {
                         if let Some((_, _, ty)) = ctx.locals.iter().find(|(_, lid, _)| lid == id) {
-                            if matches!(ty, Type::Named(n) if n == "Uint8Array" || n == "Buffer") {
+                            if matches!(ty, Type::Named(n) if n == "Uint8Array") {
                                 return Ok(Expr::Uint8ArrayGet { array: object, index });
                             }
                         }
@@ -9457,12 +9494,10 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                         }
                         ast::MemberProp::Computed(computed) => {
                             let index = Box::new(lower_expr(ctx, &computed.expr)?);
-                            // Specialize for Uint8Array/Buffer variables → byte-level access.
-                            // See mirrored comment in IndexGet lowering: params
-                            // typed `Buffer` must route through the byte-write path.
+                            // Specialize for Uint8Array/Buffer variables → byte-level access
                             if let Expr::LocalGet(id) = &*object {
                                 if let Some((_, _, ty)) = ctx.locals.iter().find(|(_, lid, _)| lid == id) {
-                                    if matches!(ty, Type::Named(n) if n == "Uint8Array" || n == "Buffer") {
+                                    if matches!(ty, Type::Named(n) if n == "Uint8Array") {
                                         return Ok(Expr::Uint8ArraySet { array: object, index, value });
                                     }
                                 }
