@@ -98,6 +98,8 @@ pub const NATIVE_MODULES: &[&str] = &[
     "worker_threads",
     // Perry threading primitives (parallelMap, spawn)
     "perry/thread",
+    // Perry container module (OCI container management)
+    "perry/container",
     // SQLite
     "better-sqlite3",
 ];
