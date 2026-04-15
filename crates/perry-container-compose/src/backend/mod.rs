@@ -1,29 +1,112 @@
-//! Backend implementations for container operations.
+//! Container backend abstraction.
 //!
-//! Currently supports Apple Container (macOS/iOS) as the primary backend.
-//! Future: Podman backend for Linux and other platforms.
+//! Defines the `ContainerBackend` async trait, platform-specific
+//! implementations (Apple Container on macOS, Podman elsewhere), and
+//! the `get_backend()` platform selector.
 
 pub mod apple;
+#[cfg(not(target_os = "macos"))]
+pub mod podman;
 
 pub use apple::AppleContainerBackend;
+#[cfg(not(target_os = "macos"))]
+pub use podman::PodmanBackend;
 
-use crate::commands::ContainerStatus;
 use crate::error::Result;
+use crate::types::{
+    ComposeNetwork, ComposeVolume, ContainerHandle, ContainerInfo,
+    ContainerLogs, ContainerSpec, ImageInfo,
+};
 use async_trait::async_trait;
 use std::collections::HashMap;
 
-/// Information about a running (or stopped) container
-#[derive(Debug, Clone)]
-pub struct ContainerInfo {
-    pub id: String,
-    pub name: String,
-    pub image: String,
-    pub status: String,
-    pub ports: Vec<String>,
-    pub created: String,
+/// Abstraction over different container backends.
+///
+/// All async methods correspond to single CLI invocations under the hood.
+#[async_trait]
+pub trait ContainerBackend: Send + Sync {
+    /// Backend name for display (e.g. "apple-container", "podman")
+    fn name(&self) -> &'static str;
+
+    /// Check whether the backend binary is available on PATH.
+    async fn check_available(&self) -> Result<()>;
+
+    /// Run a container (create + start). Returns a handle.
+    async fn run(&self, spec: &ContainerSpec) -> Result<ContainerHandle>;
+
+    /// Create a container (without starting it).
+    async fn create(&self, spec: &ContainerSpec) -> Result<ContainerHandle>;
+
+    /// Start an existing stopped container.
+    async fn start(&self, id: &str) -> Result<()>;
+
+    /// Stop a running container.
+    async fn stop(&self, id: &str, timeout: Option<u32>) -> Result<()>;
+
+    /// Remove a container.
+    async fn remove(&self, id: &str, force: bool) -> Result<()>;
+
+    /// List all containers.
+    async fn list(&self, all: bool) -> Result<Vec<ContainerInfo>>;
+
+    /// Inspect a container.
+    async fn inspect(&self, id: &str) -> Result<ContainerInfo>;
+
+    /// Fetch logs from a container.
+    async fn logs(&self, id: &str, tail: Option<u32>) -> Result<ContainerLogs>;
+
+    /// Execute a command inside a running container.
+    async fn exec(
+        &self,
+        id: &str,
+        cmd: &[String],
+        env: Option<&HashMap<String, String>>,
+        workdir: Option<&str>,
+    ) -> Result<ContainerLogs>;
+
+    /// Pull an image.
+    async fn pull_image(&self, reference: &str) -> Result<()>;
+
+    /// List images.
+    async fn list_images(&self) -> Result<Vec<ImageInfo>>;
+
+    /// Remove an image.
+    async fn remove_image(&self, reference: &str, force: bool) -> Result<()>;
+
+    /// Create a network.
+    async fn create_network(&self, name: &str, config: &ComposeNetwork) -> Result<()>;
+
+    /// Remove a network (idempotent).
+    async fn remove_network(&self, name: &str) -> Result<()>;
+
+    /// Create a volume.
+    async fn create_volume(&self, name: &str, config: &ComposeVolume) -> Result<()>;
+
+    /// Remove a volume (idempotent).
+    async fn remove_volume(&self, name: &str) -> Result<()>;
 }
 
-/// Result of an exec call
+// ============ Legacy Backend trait (for backward compat with Orchestrator) ============
+
+/// Result of inspecting a container status
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContainerStatus {
+    Running,
+    Stopped,
+    NotFound,
+}
+
+impl ContainerStatus {
+    pub fn is_running(&self) -> bool {
+        matches!(self, ContainerStatus::Running)
+    }
+
+    pub fn exists(&self) -> bool {
+        !matches!(self, ContainerStatus::NotFound)
+    }
+}
+
+/// Result of running exec inside a container
 #[derive(Debug, Clone)]
 pub struct ExecResult {
     pub stdout: String,
@@ -31,13 +114,12 @@ pub struct ExecResult {
     pub exit_code: i32,
 }
 
-/// Abstraction over different container backends
+/// Legacy backend trait used by the Orchestrator (wraps ContainerBackend).
+/// Kept for backward compatibility with the CLI path.
 #[async_trait]
 pub trait Backend: Send + Sync {
-    /// Backend name for display purposes
     fn name(&self) -> &'static str;
 
-    /// Build an image
     async fn build(
         &self,
         context: &str,
@@ -48,7 +130,6 @@ pub trait Backend: Send + Sync {
         network: Option<&str>,
     ) -> Result<()>;
 
-    /// Run a container (create + start)
     async fn run(
         &self,
         image: &str,
@@ -61,25 +142,12 @@ pub trait Backend: Send + Sync {
         detach: bool,
     ) -> Result<()>;
 
-    /// Start an existing stopped container
     async fn start(&self, name: &str) -> Result<()>;
-
-    /// Stop a running container
     async fn stop(&self, name: &str) -> Result<()>;
-
-    /// Remove a container
     async fn remove(&self, name: &str, force: bool) -> Result<()>;
-
-    /// Inspect a container and return its status
     async fn inspect(&self, name: &str) -> Result<ContainerStatus>;
-
-    /// List all containers matching a label
     async fn list(&self, label_filter: Option<&str>) -> Result<Vec<ContainerInfo>>;
-
-    /// Fetch logs from a container
     async fn logs(&self, name: &str, tail: Option<u32>, follow: bool) -> Result<String>;
-
-    /// Execute a command inside a running container
     async fn exec(
         &self,
         name: &str,
@@ -89,10 +157,6 @@ pub trait Backend: Send + Sync {
         env: Option<&HashMap<String, String>>,
     ) -> Result<ExecResult>;
 
-    // ── Network operations ──
-
-    /// Create a network with optional driver and labels.
-    /// If the network is marked `external`, this should verify existence (or be a no-op).
     async fn create_network(
         &self,
         name: &str,
@@ -100,13 +164,8 @@ pub trait Backend: Send + Sync {
         labels: Option<&HashMap<String, String>>,
     ) -> Result<()>;
 
-    /// Remove a network. Ignores "not found" errors (idempotent teardown).
     async fn remove_network(&self, name: &str) -> Result<()>;
 
-    // ── Volume operations ──
-
-    /// Create a named volume with optional driver and labels.
-    /// If the volume is marked `external`, this should verify existence (or be a no-op).
     async fn create_volume(
         &self,
         name: &str,
@@ -114,25 +173,34 @@ pub trait Backend: Send + Sync {
         labels: Option<&HashMap<String, String>>,
     ) -> Result<()>;
 
-    /// Remove a named volume. Ignores "not found" errors (idempotent teardown).
     async fn remove_volume(&self, name: &str) -> Result<()>;
 }
 
 /// Select the best available backend for the current platform.
 ///
-/// macOS/iOS  → AppleContainerBackend  
-/// Other      → (future) PodmanBackend  
+/// macOS/iOS → AppleContainerBackend
+/// Other     → PodmanBackend (if available)
 pub fn get_backend() -> Result<Box<dyn Backend>> {
     #[cfg(target_os = "macos")]
     {
-        return Ok(Box::new(AppleContainerBackend::new()));
+        Ok(Box::new(AppleContainerBackend::new()))
     }
 
     #[cfg(not(target_os = "macos"))]
     {
-        Err(crate::error::BackendError::NotAvailable {
-            reason: "Only macOS (Apple Container) is supported at this time".to_string(),
-        }
-        .into())
+        Ok(Box::new(PodmanBackend::new()))
+    }
+}
+
+/// Get a `ContainerBackend` (new API) for the current platform.
+pub fn get_container_backend() -> Result<Box<dyn ContainerBackend>> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(Box::new(AppleContainerBackend::new()))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(Box::new(PodmanBackend::new()))
     }
 }
