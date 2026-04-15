@@ -4250,16 +4250,25 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
                 }
                 out
             };
+            // CRITICAL: iterate `non_entry_module_names` (topologically
+            // sorted above) rather than `ctx.native_modules` — the latter
+            // is a `BTreeMap<PathBuf, _>` and iterates in alphabetical
+            // path order, which silently reverses the dependency order
+            // for any project whose leaf modules sort after their
+            // dependents (e.g. `types/registry.ts` sorting after
+            // `connection.ts`). When that happens, a top-level
+            // `registerDefaultCodecs()` call in register-defaults.ts
+            // runs BEFORE types/registry.ts's init has set up the
+            // `REGISTRY_OIDS` global — the push-site writes to a stale
+            // (0.0-initialized) global while the read-site later loads
+            // from the real one. Symptom: registry appears empty to
+            // every later consumer even though primitives like
+            // `let registered = false` look shared (they only need
+            // storage, not init-order). Fixes GH #32.
             let non_entry_module_prefixes: Vec<String> = if is_entry {
-                ctx.native_modules
+                non_entry_module_names
                     .iter()
-                    .filter_map(|(p, m)| {
-                        if p == &entry_path {
-                            None
-                        } else {
-                            Some(sanitize_name(&m.name))
-                        }
-                    })
+                    .map(|name| sanitize_name(name))
                     .collect()
             } else {
                 Vec::new()

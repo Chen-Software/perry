@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.22
+**Current Version:** 0.5.23
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,11 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.144 and earlier), see CHANGELOG.md.
+
+### v0.5.23 — module init order + namespace import dispatch (closes #32)
+- **fix**: `non_entry_module_prefixes` in `crates/perry/src/commands/compile.rs` was iterating `ctx.native_modules` (a `BTreeMap<PathBuf, _>`) which produces alphabetical path order, silently discarding the topologically-sorted `non_entry_module_names` built ~700 lines earlier. Any project whose leaf modules sort AFTER their dependents (e.g. `types/registry.ts` > `connection.ts`) had its init sequence reversed — a top-level `registerDefaultCodecs()` call in `register-defaults.ts` would run BEFORE `types/registry.ts`'s init allocated the `REGISTRY_OIDS` array, so every push wrote to a stale (0.0-initialized) global while later readers loaded the correctly-initialized one. Symptom: module-level registries/plugin tables appeared empty to every consumer even though primitives (`let registered = false`) looked shared. Fix: iterate the already-sorted `non_entry_module_names` instead.
+- **fix**: `import * as O from './oids'; O.OID_INT2` in `crates/perry-codegen/src/expr.rs` was falling through the PropertyGet handler to the generic `js_object_get_field_by_name_f64(TAG_TRUE, "OID_INT2")` path because the ExternFuncRef-of-namespace case wasn't distinguished from ExternFuncRef-of-variable. The namespace binding `O` has no `perry_fn_<src>__O` getter (it's a namespace, not an exported value), so calling the getter path would link-fail; the codegen fell back to lowering `O` as the TAG_TRUE sentinel and did a field lookup on that, silently returning `undefined` for every namespaced import. Added a PropertyGet fast path: if `object` is `ExternFuncRef { name }` and `name` is in `ctx.namespace_imports`, resolve `property` through `import_function_prefixes` (already populated by the namespace-export walk in compile.rs) and emit a direct `perry_fn_<source_prefix>__<property>()` call. Second half of GH #32 — the registry duplication report was actually two separate bugs stacked together.
+- Regression test: `test-files/module-init-order/` (leaf registry + namespace import + top-level registerAll() call + main consumer). Without either fix, `count=0` and all lookups return `MISSING`; with both fixes, `count=3` and lookups resolve correctly.
 
 ### v0.5.22 — doc example URLs + compile output noise cleanup (refs #26)
 - **docs**: fetch/axios quickstart examples in `docs/src/stdlib/http.md` and `docs/native-libraries.md` swapped from `https://api.example.com/data` (IANA-reserved placeholder that never resolves) to `https://jsonplaceholder.typicode.com/posts/1` (public JSON test API) so copy-paste-and-run works for first-time users. In-widget scaffolding examples left alone — those are snippets inside larger user apps.

@@ -1988,6 +1988,30 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             if matches!(object.as_ref(), Expr::GlobalGet(_)) {
                 return Ok(double_literal(0.0));
             }
+            // Namespace-import member access: `import * as O from './oids';
+            // O.OID_INT2`. The HIR lowers `O` itself to `ExternFuncRef { name:
+            // "O" }` but `O` isn't a real exported value — it's the namespace
+            // binding, so there's no `perry_fn_<src>__O` getter to call. The
+            // CLI driver already registers every export of the source module
+            // into `import_function_prefixes` under its own name (compile.rs's
+            // namespace-import walk), so `O.OID_INT2` just needs to resolve
+            // `property` ("OID_INT2") through that map directly and call the
+            // same getter a `{ OID_INT2 } from './oids'` named import would
+            // have used. Without this, the PropertyGet falls through to the
+            // generic path below which lowers the ExternFuncRef "O" to
+            // `TAG_TRUE` (the sentinel for unresolved imports) and hands that
+            // to `js_object_get_field_by_name_f64` — every namespaced lookup
+            // silently returns `undefined`, which is the second half of GH #32
+            // (the registry duplication bug was the first).
+            if let Expr::ExternFuncRef { name, .. } = object.as_ref() {
+                if ctx.namespace_imports.contains(name) {
+                    if let Some(source_prefix) = ctx.import_function_prefixes.get(property).cloned() {
+                        let getter = format!("perry_fn_{}__{}", source_prefix, property);
+                        ctx.pending_declares.push((getter.clone(), DOUBLE, vec![]));
+                        return Ok(ctx.block().call(DOUBLE, &getter, &[]));
+                    }
+                }
+            }
             // Imported exported-variable access: `Key.DOWN`, `FILTER.X`.
             // ExternFuncRef used as a PropertyGet object means an
             // imported const — call the getter function to load the
