@@ -59,10 +59,16 @@ impl ComposeEngine {
         // 1. Create networks
         if let Some(networks) = &self.spec.networks {
             for (name, config) in networks {
-                if let Some(cfg) = config {
-                    self.backend.create_network(name, cfg).await?;
+                let res = if let Some(cfg) = config {
+                    self.backend.create_network(name, cfg).await
                 } else {
-                    self.backend.create_network(name, &Default::default()).await?;
+                    self.backend.create_network(name, &Default::default()).await
+                };
+                if let Err(e) = res {
+                    let msg = e.to_string().to_lowercase();
+                    if !msg.contains("already exists") {
+                        return Err(e);
+                    }
                 }
             }
         }
@@ -70,10 +76,16 @@ impl ComposeEngine {
         // 2. Create volumes
         if let Some(volumes) = &self.spec.volumes {
             for (name, config) in volumes {
-                if let Some(cfg) = config {
-                    self.backend.create_volume(name, cfg).await?;
+                let res = if let Some(cfg) = config {
+                    self.backend.create_volume(name, cfg).await
                 } else {
-                    self.backend.create_volume(name, &Default::default()).await?;
+                    self.backend.create_volume(name, &Default::default()).await
+                };
+                if let Err(e) = res {
+                    let msg = e.to_string().to_lowercase();
+                    if !msg.contains("already exists") {
+                        return Err(e);
+                    }
                 }
             }
         }

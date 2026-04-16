@@ -49,9 +49,9 @@ unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
 }
 
 /// Helper to create a JS string from a Rust string
-unsafe fn string_to_js(s: &str) -> *const StringHeader {
+unsafe fn string_to_js(s: &str) -> *mut StringHeader {
     let bytes = s.as_bytes();
-    perry_runtime::js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
+    perry_runtime::js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32) as *mut StringHeader
 }
 
 // ============ Container Lifecycle ============
@@ -300,14 +300,18 @@ pub unsafe extern "C" fn js_container_inspect(id_ptr: *const StringHeader) -> *m
 }
 
 /// Get the current backend name
-/// FFI: js_container_getBackend() -> *const StringHeader
+/// FFI: js_container_getBackend() -> *mut Promise
 #[no_mangle]
-pub unsafe extern "C" fn js_container_getBackend() -> *const StringHeader {
-    // Note: this is synchronous and might return "unknown" if not initialized
-    if let Some(b) = BACKEND.get() {
-        return string_to_js(b.backend_name());
-    }
-    string_to_js("unknown")
+pub unsafe extern "C" fn js_container_getBackend() -> *mut Promise {
+    let promise = js_promise_new();
+    crate::common::spawn_for_promise_deferred(promise as *mut u8, async move {
+        let backend = get_global_backend().await.map_err(|e| e.to_string())?;
+        Ok(backend.backend_name().to_string())
+    }, |s| unsafe {
+        let str_ptr = string_to_js(&s);
+        perry_runtime::JSValue::string_ptr(str_ptr).bits()
+    });
+    promise
 }
 
 /// Detect backend and return probed info

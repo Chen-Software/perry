@@ -32,7 +32,7 @@ async function main() {
   // Forgejo Production Stack Configuration
   // ──────────────────────────────────────────────────────────────
 
-  const FORGEJO_VERSION = '1.23-stable';
+  const FORGEJO_VERSION = '9';
   const postgresVersion = '16-alpine';
 
   // ──────────────────────────────────────────────────────────────

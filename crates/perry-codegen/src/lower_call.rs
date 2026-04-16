@@ -2356,13 +2356,13 @@ pub(crate) fn lower_native_method_call(
     // arms BELOW so they short-circuit before this table is consulted.
     //
     // Extending: add a row to PERRY_UI_TABLE matching the TS method name
-    if module == "perry/container" || module == "perry/container-compose" {
+    if module == "perry/container" || module == "perry/container-compose" || module == "perry/compose" {
         if let Some((_, ffi_symbol)) = PERRY_CONTAINER_TABLE.iter().chain(PERRY_CONTAINER_COMPOSE_TABLE.iter()).find(|(m, _)| *m == method) {
             return lower_perry_container_compose_call(ctx, ffi_symbol, None, args);
         }
     }
 
-    if module == "perry/container" || module == "perry/container-compose" {
+    if module == "perry/container" || module == "perry/container-compose" || module == "perry/compose" {
         let recv_val = lower_expr(ctx, object.unwrap())?;
         let blk = ctx.block();
         let handle = unbox_to_i64(blk, &recv_val);
