@@ -3930,6 +3930,7 @@ static PERRY_CONTAINER_TABLE: &[UiSig] = &[
     UiSig { method: "exec", runtime: "js_container_exec", args: &[UiArgKind::Str, UiArgKind::Str, UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Widget },
     UiSig { method: "pullImage", runtime: "js_container_pullImage", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
     UiSig { method: "listImages", runtime: "js_container_listImages", args: &[], ret: UiReturnKind::Widget },
+    UiSig { method: "imageExists", runtime: "js_container_imageExists", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
     UiSig { method: "removeImage", runtime: "js_container_removeImage", args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Widget },
     UiSig { method: "getBackend", runtime: "js_container_getBackend", args: &[], ret: UiReturnKind::Str },
     UiSig { method: "composeUp", runtime: "js_container_composeUp", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },

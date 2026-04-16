@@ -378,6 +378,17 @@ pub unsafe extern "C" fn js_container_exec(
 /// Pull a container image
 /// FFI: js_container_pullImage(reference: *const StringHeader) -> *mut Promise
 #[no_mangle]
+pub unsafe extern "C" fn js_container_imageExists(reference_ptr: *const StringHeader) -> *mut Promise {
+    let promise = js_promise_new();
+    let reference = match string_from_header(reference_ptr) { Some(s) => s, None => { crate::common::spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid reference".into()) }); return promise; } };
+    crate::common::spawn_for_promise(promise as *mut u8, async move {
+        let backend = match get_global_backend().await { Ok(b) => b, Err(e) => return Err::<u64, String>(e.to_string()) };
+        backend.image_exists(&reference).await.map(|exists| if exists { 1u64 } else { 0u64 }).map_err(|e| e.to_string())
+    });
+    promise
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn js_container_pullImage(reference_ptr: *const StringHeader) -> *mut Promise {
     let promise = js_promise_new();
 
@@ -463,6 +474,10 @@ pub unsafe extern "C" fn js_container_removeImage(reference_ptr: *const StringHe
 /// Bring up a Compose stack
 /// FFI: js_compose_up(spec_json: *const StringHeader) -> *mut Promise
 #[no_mangle]
+pub unsafe extern "C" fn js_container_composeUp(spec_ptr: *const perry_runtime::StringHeader) -> *mut Promise {
+    js_compose_up(spec_ptr)
+}
+
 pub unsafe extern "C" fn js_compose_up(spec_ptr: *const perry_runtime::StringHeader) -> *mut Promise {
     let promise = js_promise_new();
 
@@ -602,7 +617,6 @@ pub unsafe extern "C" fn js_compose_logs(
 
 /// Execute command in compose service
 /// FFI: js_compose_exec(handle_id: i64, service: *const StringHeader, cmd_json: *const StringHeader) -> *mut Promise
-#[no_mangle]
 #[no_mangle]
 pub unsafe extern "C" fn js_compose_config(spec_ptr: *const StringHeader) -> *mut Promise {
     let promise = js_promise_new();

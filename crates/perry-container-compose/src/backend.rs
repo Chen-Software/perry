@@ -38,6 +38,7 @@ pub trait ContainerBackend: Send + Sync {
     ) -> Result<ContainerLogs>;
     async fn pull_image(&self, reference: &str) -> Result<()>;
     async fn list_images(&self) -> Result<Vec<ImageInfo>>;
+    async fn image_exists(&self, reference: &str) -> Result<bool>;
     async fn remove_image(&self, reference: &str, force: bool) -> Result<()>;
     async fn create_network(&self, name: &str, config: &ComposeNetwork) -> Result<()>;
     async fn remove_network(&self, name: &str) -> Result<()>;
@@ -191,9 +192,36 @@ impl ContainerBackend for OciBackend {
         args.push(id.into());
         self.exec_cli(&args).await.map(|_| ())
     }
-    async fn list(&self, _all: bool) -> Result<Vec<ContainerInfo>> { Ok(vec![]) } // Stub
+    async fn list(&self, all: bool) -> Result<Vec<ContainerInfo>> {
+        let mut args = vec!["ps".into(), "--format".into(), "json".into()];
+        if all { args.push("-a".into()); }
+        let (stdout, _) = self.exec_cli(&args).await?;
+        let mut infos = Vec::new();
+        for line in stdout.lines() {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+                infos.push(ContainerInfo {
+                    id: val["ID"].as_str().unwrap_or_default().to_string(),
+                    name: val["Names"].as_str().unwrap_or_default().to_string(),
+                    image: val["Image"].as_str().unwrap_or_default().to_string(),
+                    status: val["Status"].as_str().unwrap_or_default().to_string(),
+                    ports: vec![val["Ports"].as_str().unwrap_or_default().to_string()],
+                    created: val["CreatedAt"].as_str().unwrap_or_default().to_string(),
+                });
+            }
+        }
+        Ok(infos)
+    }
     async fn inspect(&self, id: &str) -> Result<ContainerInfo> {
-        Ok(ContainerInfo { id: id.to_string(), name: "".into(), image: "".into(), status: "".into(), ports: vec![], created: "".into() })
+        let (stdout, _) = self.exec_cli(&["inspect".into(), "--format".into(), "{{json .}}".into(), id.into()]).await?;
+        let val: serde_json::Value = serde_json::from_str(&stdout).map_err(|e| ComposeError::BackendError { code: -1, message: format!("Failed to parse inspect output: {}", e) })?;
+        Ok(ContainerInfo {
+            id: val["Id"].as_str().unwrap_or_default().to_string(),
+            name: val["Name"].as_str().unwrap_or_default().trim_start_matches('/').to_string(),
+            image: val["Config"]["Image"].as_str().unwrap_or_default().to_string(),
+            status: val["State"]["Status"].as_str().unwrap_or_default().to_string(),
+            ports: vec![],
+            created: val["Created"].as_str().unwrap_or_default().to_string(),
+        })
     }
     async fn logs(&self, id: &str, tail: Option<u32>) -> Result<ContainerLogs> {
         let mut args = vec!["logs".into()];
@@ -211,7 +239,26 @@ impl ContainerBackend for OciBackend {
         Ok(ContainerLogs { stdout, stderr })
     }
     async fn pull_image(&self, reference: &str) -> Result<()> { self.exec_cli(&["pull".into(), reference.into()]).await.map(|_| ()) }
-    async fn list_images(&self) -> Result<Vec<ImageInfo>> { Ok(vec![]) }
+    async fn list_images(&self) -> Result<Vec<ImageInfo>> {
+        let (stdout, _) = self.exec_cli(&["images".into(), "--format".into(), "json".into()]).await?;
+        let mut infos = Vec::new();
+        for line in stdout.lines() {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+                infos.push(ImageInfo {
+                    id: val["ID"].as_str().unwrap_or_default().to_string(),
+                    repository: val["Repository"].as_str().unwrap_or_default().to_string(),
+                    tag: val["Tag"].as_str().unwrap_or_default().to_string(),
+                    size: 0, // Simplified
+                    created: val["CreatedAt"].as_str().unwrap_or_default().to_string(),
+                });
+            }
+        }
+        Ok(infos)
+    }
+    async fn image_exists(&self, reference: &str) -> Result<bool> {
+        let (stdout, _) = self.exec_cli(&["images".into(), "-q".into(), reference.into()]).await?;
+        Ok(!stdout.trim().is_empty())
+    }
     async fn remove_image(&self, reference: &str, force: bool) -> Result<()> {
         let mut args = vec!["rmi".into()];
         if force { args.push("-f".into()); }
