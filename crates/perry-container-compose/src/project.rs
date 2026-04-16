@@ -4,6 +4,7 @@ use crate::types::ComposeSpec;
 use crate::yaml;
 use std::path::PathBuf;
 
+#[derive(Debug)]
 pub struct ComposeProject {
     pub spec: ComposeSpec,
     pub project_name: String,

@@ -95,7 +95,7 @@ pub enum DependsOnCondition {
 }
 
 /// Per-dependency entry in the object form of depends_on
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeDependsOn {
     pub condition: Option<DependsOnCondition>,
     #[serde(default)]
@@ -125,9 +125,10 @@ impl DependsOnSpec {
 // ============ Volume ============
 
 /// Volume mount type (compose-spec §service.volumes[].type)
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum VolumeType {
+    #[default]
     Bind,
     Volume,
     Tmpfs,
@@ -137,7 +138,7 @@ pub enum VolumeType {
 }
 
 /// Long-form volume mount (compose-spec §service.volumes[])
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeServiceVolume {
     #[serde(rename = "type")]
     pub volume_type: VolumeType,
@@ -151,7 +152,7 @@ pub struct ComposeServiceVolume {
     pub image: Option<ComposeServiceVolumeImage>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeServiceVolumeBind {
     pub propagation: Option<String>,
     pub create_host_path: Option<bool>,
@@ -160,20 +161,20 @@ pub struct ComposeServiceVolumeBind {
     pub selinux: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeServiceVolumeOpts {
     pub labels: Option<ListOrDict>,
     pub nocopy: Option<bool>,
     pub subpath: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeServiceVolumeTmpfs {
     pub size: Option<serde_yaml::Value>,
     pub mode: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeServiceVolumeImage {
     pub subpath: Option<String>,
 }
@@ -207,7 +208,7 @@ impl VolumeEntry {
 // ============ Port ============
 
 /// Port mapping (long form, compose-spec §service.ports[])
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeServicePort {
     pub name: Option<String>,
     pub mode: Option<String>,
@@ -332,7 +333,7 @@ impl BuildSpec {
 
 // ============ Healthcheck ============
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeHealthcheck {
     pub test: serde_yaml::Value,
     pub interval: Option<String>,

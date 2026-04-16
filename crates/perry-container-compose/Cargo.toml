@@ -31,6 +31,7 @@ shellexpand = "3"
 [dev-dependencies]
 tokio = { workspace = true }
 proptest = "1"
+tempfile = "3"
 
 [features]
 default = []

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 52446eccf582279cba541679512efe9b31ff90570940bbb7be20de5856584c89 # shrinks to (template, parts) = ("a${_:-_}a", [("_", Some("_"))]), env = {}

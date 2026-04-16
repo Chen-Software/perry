@@ -82,7 +82,7 @@ pub use value::{js_nanbox_get_pointer, js_nanbox_pointer, js_nanbox_string, js_g
 pub use value::{js_set_handle_array_get, js_set_handle_array_length, js_set_handle_object_get_property, js_set_handle_to_string, js_set_handle_call_method, js_set_native_module_js_loader, js_set_new_from_handle_v8};
 pub use array::{js_array_push_f64};
 pub use object::js_object_set_field_by_name;
-pub use promise::{js_promise_run_microtasks, js_promise_state, js_is_promise, js_promise_value};
+pub use promise::{js_promise_run_microtasks, js_promise_state, js_is_promise, js_promise_value, js_promise_result};
 
 // Stdlib pump registration — allows perry-ui-macos pump timer to call
 // js_stdlib_process_pending without a hard link dependency on perry-stdlib.
