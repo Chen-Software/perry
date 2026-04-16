@@ -2319,6 +2319,18 @@ pub(crate) fn lower_native_method_call(
     // handler is a closure. The simple positional form is what mango
     // uses. The Object-config form (`Button(label, { onPress: cb })`)
     // is a followup.
+    if module == "perry/container" && object.is_none() {
+        if let Some(sig) = perry_container_table_lookup(method) {
+            return lower_perry_ui_table_call(ctx, sig, args);
+        }
+    }
+
+    if module == "perry/container-compose" && object.is_none() {
+        if let Some(sig) = perry_compose_table_lookup(method) {
+            return lower_perry_ui_table_call(ctx, sig, args);
+        }
+    }
+
     if module == "perry/ui" && method == "Button" && object.is_none() {
         let label_ptr = if let Some(label) = args.first() {
             get_raw_string_ptr(ctx, label)?
@@ -2592,9 +2604,13 @@ pub(crate) fn lower_native_method_call(
                     blk.call_void(sig.runtime, &ref_args);
                     Ok(double_literal(0.0))
                 }
-                UiReturnKind::Widget => {
+                UiReturnKind::Widget | UiReturnKind::Promise => {
                     let raw = blk.call(I64, sig.runtime, &ref_args);
                     Ok(crate::expr::nanbox_pointer_inline(blk, &raw))
+                }
+                UiReturnKind::Str => {
+                    let raw = blk.call(I64, sig.runtime, &ref_args);
+                    Ok(crate::expr::nanbox_string_inline(blk, &raw))
                 }
                 UiReturnKind::F64 => {
                     Ok(blk.call(DOUBLE, sig.runtime, &ref_args))
@@ -3414,6 +3430,10 @@ enum UiArgKind {
 enum UiReturnKind {
     /// Widget handle: NaN-box the i64 result with POINTER_TAG.
     Widget,
+    /// Promise handle: NaN-box the i64 result with POINTER_TAG.
+    Promise,
+    /// String pointer: NaN-box the i64 result with STRING_TAG.
+    Str,
     /// Raw f64: pass through unchanged. Used by `scrollviewGetOffset` etc.
     F64,
     /// Void return: emit `call void` and return the `0.0` sentinel f64.
@@ -3846,6 +3866,44 @@ const PERRY_UI_INSTANCE_TABLE: &[UiSig] = &[
     UiSig { method: "set", runtime: "perry_ui_state_set",
             args: &[UiArgKind::F64], ret: UiReturnKind::Void },
 ];
+
+static PERRY_CONTAINER_TABLE: &[UiSig] = &[
+    UiSig { method: "run", runtime: "js_container_run", args: &[NA_F64], ret: UiReturnKind::Promise },
+    UiSig { method: "create", runtime: "js_container_create", args: &[NA_F64], ret: UiReturnKind::Promise },
+    UiSig { method: "start", runtime: "js_container_start", args: &[NA_STR], ret: UiReturnKind::Promise },
+    UiSig { method: "stop", runtime: "js_container_stop", args: &[NA_STR, NA_JSV], ret: UiReturnKind::Promise },
+    UiSig { method: "remove", runtime: "js_container_remove", args: &[NA_STR, NA_JSV], ret: UiReturnKind::Promise },
+    UiSig { method: "list", runtime: "js_container_list", args: &[NA_JSV], ret: UiReturnKind::Promise },
+    UiSig { method: "inspect", runtime: "js_container_inspect", args: &[NA_STR], ret: UiReturnKind::Promise },
+    UiSig { method: "logs", runtime: "js_container_logs", args: &[NA_STR, NA_JSV], ret: UiReturnKind::Promise },
+    UiSig { method: "exec", runtime: "js_container_exec", args: &[NA_STR, NA_F64, NA_F64, NA_STR], ret: UiReturnKind::Promise },
+    UiSig { method: "pullImage", runtime: "js_container_pullImage", args: &[NA_STR], ret: UiReturnKind::Promise },
+    UiSig { method: "listImages", runtime: "js_container_listImages", args: &[], ret: UiReturnKind::Promise },
+    UiSig { method: "removeImage", runtime: "js_container_removeImage", args: &[NA_STR, NA_JSV], ret: UiReturnKind::Promise },
+    UiSig { method: "getBackend", runtime: "js_container_getBackend", args: &[], ret: UiReturnKind::Str },
+    UiSig { method: "detectBackend", runtime: "js_container_detectBackend", args: &[], ret: UiReturnKind::Promise },
+    UiSig { method: "composeUp", runtime: "js_container_composeUp", args: &[NA_F64], ret: UiReturnKind::Promise },
+];
+
+static PERRY_COMPOSE_TABLE: &[UiSig] = &[
+    UiSig { method: "up", runtime: "js_container_compose_up", args: &[NA_F64], ret: UiReturnKind::Promise },
+    UiSig { method: "down", runtime: "js_container_compose_down", args: &[NA_F64, NA_JSV], ret: UiReturnKind::Promise },
+    UiSig { method: "ps", runtime: "js_container_compose_ps", args: &[NA_F64], ret: UiReturnKind::Promise },
+    UiSig { method: "logs", runtime: "js_container_compose_logs", args: &[NA_F64, NA_STR, NA_JSV], ret: UiReturnKind::Promise },
+    UiSig { method: "exec", runtime: "js_container_compose_exec", args: &[NA_F64, NA_STR, NA_F64], ret: UiReturnKind::Promise },
+    UiSig { method: "config", runtime: "js_container_compose_config", args: &[NA_F64], ret: UiReturnKind::Promise },
+    UiSig { method: "start", runtime: "js_container_compose_start", args: &[NA_F64, NA_F64], ret: UiReturnKind::Promise },
+    UiSig { method: "stop", runtime: "js_container_compose_stop", args: &[NA_F64, NA_F64], ret: UiReturnKind::Promise },
+    UiSig { method: "restart", runtime: "js_container_compose_restart", args: &[NA_F64, NA_F64], ret: UiReturnKind::Promise },
+];
+
+fn perry_container_table_lookup(method: &str) -> Option<&'static UiSig> {
+    PERRY_CONTAINER_TABLE.iter().find(|s| s.method == method)
+}
+
+fn perry_compose_table_lookup(method: &str) -> Option<&'static UiSig> {
+    PERRY_COMPOSE_TABLE.iter().find(|s| s.method == method)
+}
 
 fn perry_ui_table_lookup(method: &str) -> Option<&'static UiSig> {
     PERRY_UI_TABLE.iter().find(|s| s.method == method)
