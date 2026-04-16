@@ -96,6 +96,7 @@ pub enum DependsOnCondition {
 
 /// Per-dependency entry in the object form of depends_on
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeDependsOn {
     pub condition: DependsOnCondition,
     #[serde(default)]
@@ -138,6 +139,7 @@ pub enum VolumeType {
 
 /// Long-form volume mount (compose-spec §service.volumes[])
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeServiceVolume {
     #[serde(rename = "type")]
     pub volume_type: VolumeType,
@@ -152,15 +154,16 @@ pub struct ComposeServiceVolume {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeServiceVolumeBind {
     pub propagation: Option<String>,
     pub create_host_path: Option<bool>,
-    #[serde(rename = "recursive")]
-    pub recursive_opt: Option<String>,
+    pub recursive: Option<String>,
     pub selinux: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeServiceVolumeOpts {
     pub labels: Option<ListOrDict>,
     pub nocopy: Option<bool>,
@@ -208,6 +211,7 @@ impl VolumeEntry {
 
 /// Port mapping (long form, compose-spec §service.ports[])
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeServicePort {
     pub name: Option<String>,
     pub mode: Option<String>,
@@ -249,6 +253,7 @@ impl PortSpec {
 
 /// Service network attachment config
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeServiceNetworkConfig {
     pub aliases: Option<Vec<String>>,
     pub ipv4_address: Option<String>,
@@ -284,6 +289,7 @@ pub enum BuildSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeServiceBuild {
     pub context: Option<String>,
     pub dockerfile: Option<String>,
@@ -333,6 +339,7 @@ impl BuildSpec {
 // ============ Healthcheck ============
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeHealthcheck {
     pub test: serde_yaml::Value,
     pub interval: Option<String>,
@@ -346,6 +353,7 @@ pub struct ComposeHealthcheck {
 // ============ Deployment ============
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeDeployment {
     pub mode: Option<String>,
     pub replicas: Option<u32>,
@@ -358,6 +366,7 @@ pub struct ComposeDeployment {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeDeploymentResources {
     pub limits: Option<ComposeResourceSpec>,
     pub reservations: Option<ComposeResourceSpec>,
@@ -381,6 +390,7 @@ pub struct ComposeLogging {
 // ============ Network ============
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeNetworkIpamConfig {
     pub subnet: Option<String>,
     pub ip_range: Option<String>,
@@ -397,6 +407,7 @@ pub struct ComposeNetworkIpam {
 
 /// Top-level network definition
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeNetwork {
     pub name: Option<String>,
     pub driver: Option<String>,
@@ -414,6 +425,7 @@ pub struct ComposeNetwork {
 
 /// Top-level volume definition
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeVolume {
     pub name: Option<String>,
     pub driver: Option<String>,
@@ -426,6 +438,7 @@ pub struct ComposeVolume {
 
 /// Top-level secret definition
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeSecret {
     pub name: Option<String>,
     pub environment: Option<String>,
@@ -441,6 +454,7 @@ pub struct ComposeSecret {
 
 /// Top-level config definition (compose-spec `config` object)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeConfig {
     pub name: Option<String>,
     pub content: Option<String>,
@@ -455,6 +469,7 @@ pub struct ComposeConfig {
 
 /// Full service definition (compose-spec §service)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeService {
     pub image: Option<String>,
     pub build: Option<BuildSpec>,
@@ -666,6 +681,7 @@ impl ComposeSpec {
 /// Opaque handle to a running compose stack.
 /// The stack ID is used to look up the live ComposeEngine in a global registry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeHandle {
     pub stack_id: u64,
     pub project_name: String,

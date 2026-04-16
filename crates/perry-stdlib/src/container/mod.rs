@@ -515,6 +515,12 @@ pub unsafe extern "C" fn js_container_compose_up(spec_ptr: *const perry_runtime:
     promise
 }
 
+/// Alias for js_container_compose_up (for perry/container import)
+#[no_mangle]
+pub unsafe extern "C" fn js_container_composeUp(spec_ptr: *const perry_runtime::StringHeader) -> *mut Promise {
+    js_container_compose_up(spec_ptr)
+}
+
 /// Stop and remove compose stack.
 /// FFI: js_container_compose_down(handle_id: i64, volumes: i32) -> *mut Promise
 #[no_mangle]
@@ -532,11 +538,10 @@ pub unsafe extern "C" fn js_container_compose_down(handle_id: i64, volumes: i32)
     };
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = match get_global_backend().await {
-            Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
+        let wrapper = match compose::get_engine_wrapper(handle.stack_id) {
+            Some(w) => w,
+            None => return Err::<u64, String>("Compose engine not found".to_string()),
         };
-        let wrapper = compose::ComposeWrapper::new(types::ComposeSpec::default(), backend);
         match wrapper.down(&handle, volumes != 0).await {
             Ok(()) => Ok(0u64),
             Err(e) => Err::<u64, String>(e.to_string()),
@@ -563,11 +568,10 @@ pub unsafe extern "C" fn js_container_compose_ps(handle_id: i64) -> *mut Promise
     };
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = match get_global_backend().await {
-            Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
+        let wrapper = match compose::get_engine_wrapper(handle.stack_id) {
+            Some(w) => w,
+            None => return Err::<u64, String>("Compose engine not found".to_string()),
         };
-        let wrapper = compose::ComposeWrapper::new(types::ComposeSpec::default(), backend);
         match wrapper.ps(&handle).await {
             Ok(containers) => {
                 let h = types::register_container_info_list(containers);
@@ -604,11 +608,10 @@ pub unsafe extern "C" fn js_container_compose_logs(
     let tail_opt = if tail >= 0 { Some(tail as u32) } else { None };
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = match get_global_backend().await {
-            Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
+        let wrapper = match compose::get_engine_wrapper(handle.stack_id) {
+            Some(w) => w,
+            None => return Err::<u64, String>("Compose engine not found".to_string()),
         };
-        let wrapper = compose::ComposeWrapper::new(types::ComposeSpec::default(), backend);
         match wrapper.logs(&handle, service.as_deref(), tail_opt).await {
             Ok(logs) => {
                 let h = types::register_container_logs(logs);
@@ -654,11 +657,10 @@ pub unsafe extern "C" fn js_container_compose_exec(
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
 
-        let backend = match get_global_backend().await {
-            Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
+        let wrapper = match compose::get_engine_wrapper(handle.stack_id) {
+            Some(w) => w,
+            None => return Err::<u64, String>("Compose engine not found".to_string()),
         };
-        let wrapper = compose::ComposeWrapper::new(types::ComposeSpec::default(), backend);
         match wrapper.exec(&handle, &service, &cmd).await {
             Ok(logs) => {
                 let h = types::register_container_logs(logs);
@@ -691,11 +693,10 @@ pub unsafe extern "C" fn js_container_compose_start(
     let services_json = string_from_header(services_ptr);
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         let services: Vec<String> = services_json.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-        let backend = match get_global_backend().await {
-            Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
+        let wrapper = match compose::get_engine_wrapper(handle.stack_id) {
+            Some(w) => w,
+            None => return Err::<u64, String>("Compose engine not found".to_string()),
         };
-        let wrapper = compose::ComposeWrapper::new(types::ComposeSpec::default(), backend);
         wrapper.start(&services).await.map(|_| 0u64).map_err(|e| e.to_string())
     });
     promise
@@ -721,11 +722,10 @@ pub unsafe extern "C" fn js_container_compose_stop(
     let services_json = string_from_header(services_ptr);
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         let services: Vec<String> = services_json.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-        let backend = match get_global_backend().await {
-            Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
+        let wrapper = match compose::get_engine_wrapper(handle.stack_id) {
+            Some(w) => w,
+            None => return Err::<u64, String>("Compose engine not found".to_string()),
         };
-        let wrapper = compose::ComposeWrapper::new(types::ComposeSpec::default(), backend);
         wrapper.stop(&services).await.map(|_| 0u64).map_err(|e| e.to_string())
     });
     promise
@@ -751,11 +751,10 @@ pub unsafe extern "C" fn js_container_compose_restart(
     let services_json = string_from_header(services_ptr);
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         let services: Vec<String> = services_json.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-        let backend = match get_global_backend().await {
-            Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
+        let wrapper = match compose::get_engine_wrapper(handle.stack_id) {
+            Some(w) => w,
+            None => return Err::<u64, String>("Compose engine not found".to_string()),
         };
-        let wrapper = compose::ComposeWrapper::new(types::ComposeSpec::default(), backend);
         wrapper.restart(&services).await.map(|_| 0u64).map_err(|e| e.to_string())
     });
     promise
