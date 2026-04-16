@@ -1,4 +1,3 @@
-use crate::error::Result;
 use md5::{Digest, Md5};
 
 pub fn service_container_name(service: &crate::types::ComposeService, service_name: &str) -> String {
@@ -26,4 +25,20 @@ pub struct ServiceState {
     pub id: String,
     pub name: String,
     pub running: bool,
+}
+
+impl ServiceState {
+    pub async fn exists(
+        backend: &dyn crate::backend::ContainerBackend,
+        name: &str,
+    ) -> bool {
+        backend.inspect(name).await.is_ok()
+    }
+
+    pub async fn is_running(
+        backend: &dyn crate::backend::ContainerBackend,
+        name: &str,
+    ) -> bool {
+        backend.inspect(name).await.map(|info| info.status == "running").unwrap_or(false)
+    }
 }

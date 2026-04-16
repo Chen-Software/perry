@@ -2513,6 +2513,17 @@ pub(crate) fn lower_native_method_call(
     // old Cranelift codegen's dispatch table but lost in the v0.5.0
     // LLVM cutover.
     if object.is_none() {
+        if module == "perry/container" {
+            if let Some(sig) = PERRY_CONTAINER_TABLE.iter().find(|s| s.method == method) {
+                return lower_native_module_dispatch(ctx, sig, None, args);
+            }
+        }
+        if module == "perry/container-compose" {
+            if let Some(sig) = PERRY_CONTAINER_COMPOSE_TABLE.iter().find(|s| s.method == method) {
+                return lower_native_module_dispatch(ctx, sig, None, args);
+            }
+        }
+
         if let Some(sig) = native_module_lookup(module, false, method, class_name) {
             return lower_native_module_dispatch(ctx, sig, None, args);
         }
@@ -3448,6 +3459,62 @@ struct UiSig {
 /// returns the zero-sentinel). That's the behavior the entire perry/ui
 /// surface had pre-v0.5.10 — adding a row here flips one method from
 /// "silent no-op" to "real call into libperry_ui_macos.a".
+/// Maps perry/container TypeScript function names to their FFI symbols.
+const PERRY_CONTAINER_TABLE: &[NativeModSig] = &[
+    NativeModSig { module: "perry/container", has_receiver: false, method: "run",
+        class_filter: None, runtime: "js_container_run", args: &[NA_STR], ret: NR_PTR },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "create",
+        class_filter: None, runtime: "js_container_create", args: &[NA_STR], ret: NR_PTR },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "start",
+        class_filter: None, runtime: "js_container_start", args: &[NA_STR], ret: NR_PTR },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "stop",
+        class_filter: None, runtime: "js_container_stop", args: &[NA_STR, NA_F64], ret: NR_PTR },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "remove",
+        class_filter: None, runtime: "js_container_remove", args: &[NA_STR, NA_F64], ret: NR_PTR },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "list",
+        class_filter: None, runtime: "js_container_list", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "inspect",
+        class_filter: None, runtime: "js_container_inspect", args: &[NA_STR], ret: NR_PTR },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "logs",
+        class_filter: None, runtime: "js_container_logs", args: &[NA_STR, NA_F64], ret: NR_PTR },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "exec",
+        class_filter: None, runtime: "js_container_exec", args: &[NA_STR, NA_STR], ret: NR_PTR },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "pullImage",
+        class_filter: None, runtime: "js_container_pullImage", args: &[NA_STR], ret: NR_PTR },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "listImages",
+        class_filter: None, runtime: "js_container_listImages", args: &[], ret: NR_PTR },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "removeImage",
+        class_filter: None, runtime: "js_container_removeImage", args: &[NA_STR, NA_F64], ret: NR_PTR },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "getBackend",
+        class_filter: None, runtime: "js_container_getBackend", args: &[], ret: NR_STR },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "composeUp",
+        class_filter: None, runtime: "js_container_composeUp", args: &[NA_STR], ret: NR_PTR },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "detectBackend",
+        class_filter: None, runtime: "js_container_detectBackend", args: &[], ret: NR_PTR },
+];
+
+/// Maps perry/container-compose TypeScript function names to their FFI symbols.
+const PERRY_CONTAINER_COMPOSE_TABLE: &[NativeModSig] = &[
+    NativeModSig { module: "perry/container-compose", has_receiver: false, method: "up",
+        class_filter: None, runtime: "js_container_compose_up", args: &[NA_STR], ret: NR_PTR },
+    NativeModSig { module: "perry/container-compose", has_receiver: false, method: "down",
+        class_filter: None, runtime: "js_container_compose_down", args: &[NA_JSV, NA_F64], ret: NR_PTR },
+    NativeModSig { module: "perry/container-compose", has_receiver: false, method: "ps",
+        class_filter: None, runtime: "js_container_compose_ps", args: &[NA_JSV], ret: NR_PTR },
+    NativeModSig { module: "perry/container-compose", has_receiver: false, method: "logs",
+        class_filter: None, runtime: "js_container_compose_logs", args: &[NA_JSV, NA_STR, NA_F64], ret: NR_PTR },
+    NativeModSig { module: "perry/container-compose", has_receiver: false, method: "exec",
+        class_filter: None, runtime: "js_container_compose_exec", args: &[NA_JSV, NA_STR, NA_STR], ret: NR_PTR },
+    NativeModSig { module: "perry/container-compose", has_receiver: false, method: "config",
+        class_filter: None, runtime: "js_container_compose_config", args: &[NA_JSV], ret: NR_PTR },
+    NativeModSig { module: "perry/container-compose", has_receiver: false, method: "start",
+        class_filter: None, runtime: "js_container_compose_start", args: &[NA_JSV, NA_STR], ret: NR_PTR },
+    NativeModSig { module: "perry/container-compose", has_receiver: false, method: "stop",
+        class_filter: None, runtime: "js_container_compose_stop", args: &[NA_JSV, NA_STR], ret: NR_PTR },
+    NativeModSig { module: "perry/container-compose", has_receiver: false, method: "restart",
+        class_filter: None, runtime: "js_container_compose_restart", args: &[NA_JSV, NA_STR], ret: NR_PTR },
+];
+
 const PERRY_UI_TABLE: &[UiSig] = &[
     // ---- Constructors (return widget handle) ----
     UiSig { method: "Divider", runtime: "perry_ui_divider_create",

@@ -2,9 +2,8 @@
 
 use super::types::{ContainerError, ContainerLogs, ContainerSpec};
 use super::verification;
-use super::get_global_backend;
+use crate::container::mod_priv::get_global_backend_instance;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 pub struct CapabilityGrants {
     pub network: bool,
@@ -29,11 +28,16 @@ pub async fn alloy_container_run_capability(
         env: grants.env.clone(),
         cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
         entrypoint: None,
-        ..Default::default()
     };
 
-    let backend = Arc::clone(get_global_backend().await?);
+    let backend = get_global_backend_instance();
     let handle = backend.run(&spec).await.map_err(|e| ContainerError::BackendError { code: -1, message: e.to_string() })?;
 
-    backend.logs(&handle.id, None).await.map_err(|e| ContainerError::BackendError { code: -1, message: e.to_string() })
+    let logs = backend.logs(&handle.id, None).await.map_err(|e| ContainerError::BackendError { code: -1, message: e.to_string() })?;
+
+    // Ensure cleanup
+    let _ = backend.stop(&handle.id, Some(0)).await;
+    let _ = backend.remove(&handle.id, true).await;
+
+    Ok(logs)
 }

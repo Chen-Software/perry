@@ -48,17 +48,17 @@ pub fn take_container_info_list(id: u64) -> Option<Vec<ContainerInfo>> {
 }
 
 /// Register a `ComposeEngine` and return an opaque integer handle.
-pub fn register_compose_engine(engine: perry_container_compose::ComposeEngine, stack_id: u64) -> u64 {
+pub fn register_compose_engine(engine: crate::container::compose::ComposeWrapper, stack_id: u64) -> u64 {
     handle::register_handle_with_id(engine, stack_id as Handle) as u64
 }
 
 /// Retrieve a `ComposeEngine` by handle id.
-pub fn get_compose_engine(id: u64) -> Option<&'static perry_container_compose::ComposeEngine> {
+pub fn get_compose_engine(id: u64) -> Option<&'static crate::container::compose::ComposeWrapper> {
     handle::get_handle(id as Handle)
 }
 
 /// Take (remove and return) the `ComposeEngine` from the registry.
-pub fn take_compose_engine(id: u64) -> Option<perry_container_compose::ComposeEngine> {
+pub fn take_compose_engine(id: u64) -> Option<crate::container::compose::ComposeWrapper> {
     handle::take_handle(id as Handle)
 }
 
@@ -104,87 +104,9 @@ pub fn drop_container_handle(id: u64) -> bool {
 
 // ============ Core Container Types ============
 
-/// Configuration for a single container.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContainerSpec {
-    /// Container image (required)
-    pub image: String,
-    /// Container name (optional)
-    pub name: Option<String>,
-    /// Port mappings e.g. "8080:80"
-    pub ports: Option<Vec<String>>,
-    /// Volume mounts e.g. "/host:/container:ro"
-    pub volumes: Option<Vec<String>>,
-    /// Environment variables
-    pub env: Option<HashMap<String, String>>,
-    /// Command override
-    pub cmd: Option<Vec<String>>,
-    /// Entrypoint override
-    pub entrypoint: Option<Vec<String>>,
-    /// Network to attach to
-    pub network: Option<String>,
-    /// Remove container on exit
-    pub rm: Option<bool>,
-}
-
-/// Opaque handle returned by `run()` / `create()`.
-#[derive(Debug, Clone)]
-pub struct ContainerHandle {
-    pub id: String,
-    pub name: Option<String>,
-}
-
-/// Metadata about a container instance.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContainerInfo {
-    pub id: String,
-    pub name: String,
-    pub image: String,
-    pub status: String,
-    pub ports: Vec<String>,
-    /// ISO 8601
-    pub created: String,
-}
-
-impl From<perry_container_compose::types::ContainerInfo> for ContainerInfo {
-    fn from(info: perry_container_compose::types::ContainerInfo) -> Self {
-        Self {
-            id: info.id,
-            name: info.name,
-            image: info.image,
-            status: info.status,
-            ports: info.ports,
-            created: info.created,
-        }
-    }
-}
-
-/// Stdout + stderr captured from a container operation.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ContainerLogs {
-    pub stdout: String,
-    pub stderr: String,
-}
-
-impl From<perry_container_compose::types::ContainerLogs> for ContainerLogs {
-    fn from(logs: perry_container_compose::types::ContainerLogs) -> Self {
-        Self {
-            stdout: logs.stdout,
-            stderr: logs.stderr,
-        }
-    }
-}
-
-/// Metadata about a locally-available OCI image.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ImageInfo {
-    pub id: String,
-    pub repository: String,
-    pub tag: String,
-    pub size: u64,
-    /// ISO 8601
-    pub created: String,
-}
+pub use perry_container_compose::types::{
+    ContainerHandle, ContainerInfo, ContainerLogs, ContainerSpec, ImageInfo,
+};
 
 // ============ Compose: ListOrDict ============
 
