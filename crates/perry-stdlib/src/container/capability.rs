@@ -35,5 +35,8 @@ pub async fn alloy_container_run_capability(
     let backend = Arc::clone(get_global_backend().await?);
     let handle = backend.run(&spec).await.map_err(|e| ContainerError::BackendError { code: -1, message: e.to_string() })?;
 
+    // Wait for the container to complete before collecting logs.
+    backend.wait(&handle.id).await.map_err(|e| ContainerError::BackendError { code: -1, message: e.to_string() })?;
+
     backend.logs(&handle.id, None).await.map_err(|e| ContainerError::BackendError { code: -1, message: e.to_string() })
 }

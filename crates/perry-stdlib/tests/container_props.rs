@@ -3,6 +3,7 @@
 use proptest::prelude::*;
 use serde_json::{json, Value};
 use perry_container_compose::indexmap::IndexMap;
+use perry_container_compose::types::DependsOnCondition;
 
 // ============ Property 2: ContainerSpec CLI argument round-trip ============
 // Feature: perry-container, Property 2: ContainerSpec CLI argument round-trip
@@ -137,11 +138,12 @@ proptest! {
             map.insert(key.clone(), val);
         }
 
+        let expected_len = map.len();
         let lod = perry_stdlib::container::ListOrDict::Dict(map);
         let result = lod.to_map();
 
-        // All keys should be preserved
-        prop_assert_eq!(result.len(), keys.len());
+        // All unique keys should be preserved
+        prop_assert_eq!(result.len(), expected_len);
         for key in &keys {
             prop_assert!(result.contains_key(key), "key {} should be in result", key);
         }
@@ -227,7 +229,7 @@ proptest! {
             map.insert(
                 name.clone(),
                 ComposeDependsOn {
-                    condition: None,
+                    condition: DependsOnCondition::ServiceStarted,
                     required: None,
                     restart: None,
                 },

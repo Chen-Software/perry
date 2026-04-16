@@ -98,6 +98,10 @@ impl ComposeEngine {
             order.iter().filter(|s| services.contains(s)).collect()
         };
 
+        let mut created_networks: Vec<String> = Vec::new();
+        let mut created_volumes: Vec<String> = Vec::new();
+        let mut started: Vec<String> = Vec::new();
+
         // 1. Create networks (skip external)
         if let Some(networks) = &self.spec.networks {
             for (net_name, net_config_opt) in networks {
@@ -109,13 +113,14 @@ impl ComposeEngine {
                 let resolved_name = net_config_full.name.as_deref().unwrap_or(net_name.as_str());
                 let net_config = NetworkConfig::from(&net_config_full);
                 tracing::info!("Creating network '{}'…", resolved_name);
-                self.backend
-                    .create_network(resolved_name, &net_config)
-                    .await
-                    .map_err(|e| ComposeError::ServiceStartupFailed {
+                if let Err(e) = self.backend.create_network(resolved_name, &net_config).await {
+                    self.rollback(&started, &created_networks, &created_volumes).await;
+                    return Err(ComposeError::ServiceStartupFailed {
                         service: format!("network/{}", net_name),
                         message: e.to_string(),
-                    })?;
+                    });
+                }
+                created_networks.push(resolved_name.to_string());
             }
         }
 
@@ -130,18 +135,18 @@ impl ComposeEngine {
                 let resolved_name = vol_config_full.name.as_deref().unwrap_or(vol_name.as_str());
                 let vol_config = VolumeConfig::from(&vol_config_full);
                 tracing::info!("Creating volume '{}'…", resolved_name);
-                self.backend
-                    .create_volume(resolved_name, &vol_config)
-                    .await
-                    .map_err(|e| ComposeError::ServiceStartupFailed {
+                if let Err(e) = self.backend.create_volume(resolved_name, &vol_config).await {
+                    self.rollback(&started, &created_networks, &created_volumes).await;
+                    return Err(ComposeError::ServiceStartupFailed {
                         service: format!("volume/{}", vol_name),
                         message: e.to_string(),
-                    })?;
+                    });
+                }
+                created_volumes.push(resolved_name.to_string());
             }
         }
 
         // 3. Start services in dependency order
-        let mut started: Vec<String> = Vec::new();
 
         for svc_name in target {
             let svc = self
@@ -191,10 +196,7 @@ impl ComposeEngine {
             if let Err(e) = res {
                 // ROLLBACK
                 tracing::error!("Service '{}' failed to start, rolling back...", svc_name);
-                for c_name in started.iter().rev() {
-                    let _ = self.backend.stop(c_name, None).await;
-                    let _ = self.backend.remove(c_name, true).await;
-                }
+                self.rollback(&started, &created_networks, &created_volumes).await;
                 return Err(ComposeError::ServiceStartupFailed {
                     service: svc_name.clone(),
                     message: e.to_string(),
@@ -427,6 +429,28 @@ impl ComposeEngine {
     pub async fn restart(&self, services: &[String]) -> Result<()> {
         self.stop(services).await?;
         self.start(services).await
+    }
+
+    /// Perform a best-effort rollback on failure.
+    async fn rollback(
+        &self,
+        started_containers: &[String],
+        created_networks: &[String],
+        created_volumes: &[String],
+    ) {
+        // 1. Stop and remove containers in reverse order
+        for c_name in started_containers.iter().rev() {
+            let _ = self.backend.stop(c_name, None).await;
+            let _ = self.backend.remove(c_name, true).await;
+        }
+        // 2. Remove created networks
+        for net_name in created_networks {
+            let _ = self.backend.remove_network(net_name).await;
+        }
+        // 3. Remove created volumes
+        for vol_name in created_volumes {
+            let _ = self.backend.remove_volume(vol_name).await;
+        }
     }
 }
 

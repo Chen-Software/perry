@@ -81,6 +81,7 @@ pub trait ContainerBackend: Send + Sync {
     async fn list(&self, all: bool) -> Result<Vec<ContainerInfo>>;
     async fn inspect(&self, id: &str) -> Result<ContainerInfo>;
     async fn logs(&self, id: &str, tail: Option<u32>) -> Result<ContainerLogs>;
+    async fn wait(&self, id: &str) -> Result<()>;
     async fn exec(
         &self,
         id: &str,
@@ -334,6 +335,10 @@ pub trait CliProtocol: Send + Sync {
         }
         args.push(id.into());
         args
+    }
+
+    fn wait_args(&self, id: &str) -> Vec<String> {
+        vec!["wait".into(), id.into()]
     }
 
     fn exec_args(
@@ -727,6 +732,11 @@ impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         })
+    }
+
+    async fn wait(&self, id: &str) -> Result<()> {
+        self.exec_ok(self.protocol.wait_args(id)).await?;
+        Ok(())
     }
 
     async fn exec(

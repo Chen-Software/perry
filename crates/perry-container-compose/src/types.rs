@@ -97,11 +97,16 @@ pub enum DependsOnCondition {
 /// Per-dependency entry in the object form of depends_on
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComposeDependsOn {
-    pub condition: Option<DependsOnCondition>,
+    #[serde(default = "default_depends_on_condition")]
+    pub condition: DependsOnCondition,
     #[serde(default)]
     pub required: Option<bool>,
     #[serde(default)]
     pub restart: Option<bool>,
+}
+
+fn default_depends_on_condition() -> DependsOnCondition {
+    DependsOnCondition::ServiceStarted
 }
 
 /// `depends_on` can be a list of service names or a map with conditions
@@ -441,7 +446,7 @@ pub struct ComposeSecret {
 
 /// Top-level config definition (compose-spec `config` object)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ComposeConfigObj {
+pub struct ComposeConfig {
     pub name: Option<String>,
     pub content: Option<String>,
     pub environment: Option<String>,
@@ -589,7 +594,7 @@ pub struct ComposeSpec {
     pub networks: Option<IndexMap<String, Option<ComposeNetwork>>>,
     pub volumes: Option<IndexMap<String, Option<ComposeVolume>>>,
     pub secrets: Option<IndexMap<String, Option<ComposeSecret>>>,
-    pub configs: Option<IndexMap<String, Option<ComposeConfigObj>>>,
+    pub configs: Option<IndexMap<String, Option<ComposeConfig>>>,
     pub include: Option<Vec<serde_yaml::Value>>,
     pub models: Option<IndexMap<String, serde_yaml::Value>>,
     #[serde(flatten)]
