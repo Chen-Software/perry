@@ -13,6 +13,7 @@ use std::cell::{Cell, RefCell};
 use std::ptr;
 use std::collections::HashMap;
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Overflow field storage for objects that exceed their pre-allocated inline slot count.
 /// Keyed by (obj_ptr as usize) -> Vec<JSValue bits> indexed by absolute field_index
@@ -158,13 +159,12 @@ thread_local! {
     /// skip the `.to_string()` allocation required to look up a descriptor
     /// that almost never exists.
     pub(crate) static PROPERTY_ATTRS_IN_USE: Cell<bool> = const { Cell::new(false) };
-    /// OR of the above two — checked by the single-load fast path in
-    /// `js_object_set_field_by_name`. Set alongside either individual
-    /// flag; never unset (same monotonic invariant as the parent
-    /// flags). One thread-local read instead of two on every dynamic
-    /// property write.
-    pub(crate) static ANY_DESCRIPTORS_IN_USE: Cell<bool> = const { Cell::new(false) };
 }
+
+/// Global monotonic flag: set once any accessor or property descriptor is
+/// installed.  Checked on every dynamic property write via a single
+/// `Relaxed` load (no TLS overhead, no fence on aarch64/x86).
+static GLOBAL_DESCRIPTORS_IN_USE: AtomicBool = AtomicBool::new(false);
 
 /// Look up the property descriptor for (obj, key). Returns None if no entry exists,
 /// in which case the JS default `{ writable: true, enumerable: true, configurable: true }` applies.
@@ -175,7 +175,7 @@ pub(crate) fn get_property_attrs(obj: usize, key: &str) -> Option<PropertyAttrs>
 /// Store a property descriptor for (obj, key).
 pub(crate) fn set_property_attrs(obj: usize, key: String, attrs: PropertyAttrs) {
     PROPERTY_ATTRS_IN_USE.with(|c| c.set(true));
-    ANY_DESCRIPTORS_IN_USE.with(|c| c.set(true));
+    GLOBAL_DESCRIPTORS_IN_USE.store(true, Ordering::Relaxed);
     PROPERTY_DESCRIPTORS.with(|m| { m.borrow_mut().insert((obj, key), attrs); });
 }
 
@@ -187,7 +187,7 @@ pub(crate) fn get_accessor_descriptor(obj: usize, key: &str) -> Option<AccessorD
 /// Store an accessor descriptor for (obj, key).
 pub(crate) fn set_accessor_descriptor(obj: usize, key: String, acc: AccessorDescriptor) {
     ACCESSORS_IN_USE.with(|c| c.set(true));
-    ANY_DESCRIPTORS_IN_USE.with(|c| c.set(true));
+    GLOBAL_DESCRIPTORS_IN_USE.store(true, Ordering::Relaxed);
     ACCESSOR_DESCRIPTORS.with(|m| { m.borrow_mut().insert((obj, key), acc); });
 }
 
@@ -403,12 +403,11 @@ struct TransitionEntry {
 
 const TRANSITION_CACHE_SIZE: usize = 16384;
 
-thread_local! {
-    static TRANSITION_CACHE: std::cell::UnsafeCell<[TransitionEntry; TRANSITION_CACHE_SIZE]> =
-        std::cell::UnsafeCell::new([TransitionEntry {
-            prev_keys: 0, key_hash: 0, next_keys: 0, slot_idx: 0,
-        }; TRANSITION_CACHE_SIZE]);
-}
+/// Main-thread transition cache — bypasses TLS overhead (user code is
+/// single-threaded). Worker threads spawned by `perry/thread` are
+/// short-lived and don't share objects, so they don't need transitions.
+static mut TRANSITION_CACHE_GLOBAL: [TransitionEntry; TRANSITION_CACHE_SIZE] =
+    [TransitionEntry { prev_keys: 0, key_hash: 0, next_keys: 0, slot_idx: 0 }; TRANSITION_CACHE_SIZE];
 
 /// FNV-1a content hash for a property-name string.
 #[inline(always)]
@@ -435,15 +434,13 @@ fn transition_cache_slot(prev_keys: usize, key_hash: u64) -> usize {
 #[inline(always)]
 fn transition_cache_lookup(prev_keys: usize, key: *const crate::StringHeader) -> Option<(usize, u32)> {
     let kh = key_content_hash(key);
-    TRANSITION_CACHE.with(|c| {
-        let slot = transition_cache_slot(prev_keys, kh);
-        let entry = unsafe { (*c.get())[slot] };
-        if entry.next_keys != 0 && entry.prev_keys == prev_keys && entry.key_hash == kh {
-            Some((entry.next_keys, entry.slot_idx))
-        } else {
-            None
-        }
-    })
+    let slot = transition_cache_slot(prev_keys, kh);
+    let entry = unsafe { TRANSITION_CACHE_GLOBAL[slot] };
+    if entry.next_keys != 0 && entry.prev_keys == prev_keys && entry.key_hash == kh {
+        Some((entry.next_keys, entry.slot_idx))
+    } else {
+        None
+    }
 }
 
 fn transition_cache_insert(prev_keys: usize, key: *const crate::StringHeader, next_keys: usize, slot_idx: u32) {
@@ -451,12 +448,10 @@ fn transition_cache_insert(prev_keys: usize, key: *const crate::StringHeader, ne
         return;
     }
     let kh = key_content_hash(key);
-    TRANSITION_CACHE.with(|c| {
-        let slot = transition_cache_slot(prev_keys, kh);
-        unsafe {
-            (*c.get())[slot] = TransitionEntry { prev_keys, key_hash: kh, next_keys, slot_idx };
-        }
-    });
+    let slot = transition_cache_slot(prev_keys, kh);
+    unsafe {
+        TRANSITION_CACHE_GLOBAL[slot] = TransitionEntry { prev_keys, key_hash: kh, next_keys, slot_idx };
+    }
     // Mark the target as shape-shared so any future extension on the
     // original owning object clones before mutating. Without this flag,
     // the first row's next append would extend `next_keys` in place
@@ -478,15 +473,14 @@ fn transition_cache_insert(prev_keys: usize, key: *const crate::StringHeader, ne
 /// cached target arrays that no live object currently holds directly,
 /// and the next cache-hit store would dereference freed memory.
 pub fn scan_transition_cache_roots(mark: &mut dyn FnMut(f64)) {
-    TRANSITION_CACHE.with(|c| {
-        let entries = unsafe { *c.get() };
-        for entry in entries.iter() {
+    unsafe {
+        for entry in TRANSITION_CACHE_GLOBAL.iter() {
             if entry.next_keys != 0 {
                 let jsval = JSValue::pointer(entry.next_keys as *const u8);
                 mark(f64::from_bits(jsval.bits()));
             }
         }
-    });
+    }
 }
 
 /// GC root scanner: mark all cached shape keys arrays so they're not freed.
@@ -2305,38 +2299,20 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
         let keys = (*obj).keys_array;
 
         // Validate keys_array is a real heap pointer or null.
-        // If the object is a non-Object type, keys at offset 16 may contain garbage.
         if !keys.is_null() {
             let keys_ptr = keys as usize;
             if (keys_ptr as u64) >> 48 != 0 || keys_ptr < 0x10000 {
-                // Invalid keys_array pointer — silently ignore to avoid crash
                 return;
             }
         }
 
-        // Capture the keys_array pointer as it stood on entry. This is the
-        // `prev_keys` half of the transition-cache key; any append done by
-        // the slow path below records `(prev_keys_usize, key) → (new_keys,
-        // slot_idx)` so subsequent callers hit the fast path here.
         let prev_keys_usize = keys as usize;
 
         // FAST PATH: shape-transition cache.
-        //
-        // `obj[name] = value` when the same `(obj.keys_array, key_ptr)` pair
-        // has been seen before — either on this object (UPDATE) or on a
-        // previous object that took the same shape path (APPEND sharing
-        // a cached target). The cache tells us directly which
-        // keys_array to transition to and which slot the field lives
-        // in, skipping both the linear scan and the clone-on-shared
-        // `js_array_push`.
-        //
-        // Skipped when accessors / per-property attrs / freeze / seal /
-        // no_extend semantics are in play — those paths need the full
-        // slow scan to consult the descriptor tables.
         if !key.is_null()
             && !is_frozen
             && !is_sealed_or_no_extend
-            && !ANY_DESCRIPTORS_IN_USE.with(|c| c.get())
+            && !GLOBAL_DESCRIPTORS_IN_USE.load(Ordering::Relaxed)
         {
             if let Some((next_keys, slot_idx)) = transition_cache_lookup(prev_keys_usize, key) {
                 // Defensive: strip a raw-null POINTER_TAG value the same
