@@ -13,11 +13,17 @@ pub struct ComposeWrapper {
 
 impl ComposeWrapper {
     pub fn new(spec: ComposeSpec, backend: Arc<dyn ContainerBackend>) -> Self {
-        let project_name = spec.name.clone().unwrap_or_else(|| "perry-stack".to_string());
+        let project_name = spec.name.clone()
+            .or_else(|| std::env::var("COMPOSE_PROJECT_NAME").ok())
+            .unwrap_or_else(|| "perry-stack".to_string());
 
         Self {
             engine: Arc::new(ComposeEngine::new(spec, project_name, backend)),
         }
+    }
+
+    pub fn from_engine(engine: Arc<ComposeEngine>) -> Self {
+        Self { engine }
     }
 
     pub async fn up(&self) -> Result<ComposeHandle, ContainerError> {

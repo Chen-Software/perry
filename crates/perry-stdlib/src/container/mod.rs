@@ -550,14 +550,23 @@ pub unsafe extern "C" fn js_compose_down(handle_id: i64, volumes: i32) -> *mut P
         }
     };
 
+    let engine = match perry_container_compose::ComposeEngine::get_engine(handle.stack_id) {
+        Some(e) => e,
+        None => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move {
+                Err::<u64, String>("Engine not found for stack".to_string())
+            });
+            return promise;
+        }
+    };
+
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = match get_global_backend().await {
-            Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
-        };
-        let wrapper = compose::ComposeWrapper::new(types::ComposeSpec::default(), backend);
+        let wrapper = compose::ComposeWrapper::from_engine(engine);
         match wrapper.down(&handle, volumes != 0).await {
-            Ok(()) => Ok(0u64),
+            Ok(()) => {
+                perry_container_compose::ComposeEngine::unregister(handle.stack_id);
+                Ok(0u64)
+            }
             Err(e) => Err::<u64, String>(e.to_string()),
         }
     });
@@ -581,12 +590,18 @@ pub unsafe extern "C" fn js_compose_ps(handle_id: i64) -> *mut Promise {
         }
     };
 
+    let engine = match perry_container_compose::ComposeEngine::get_engine(handle.stack_id) {
+        Some(e) => e,
+        None => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move {
+                Err::<u64, String>("Engine not found for stack".to_string())
+            });
+            return promise;
+        }
+    };
+
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = match get_global_backend().await {
-            Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
-        };
-        let wrapper = compose::ComposeWrapper::new(types::ComposeSpec::default(), backend);
+        let wrapper = compose::ComposeWrapper::from_engine(engine);
         match wrapper.ps(&handle).await {
             Ok(containers) => {
                 let h = types::register_container_info_list(containers);
@@ -622,12 +637,18 @@ pub unsafe extern "C" fn js_compose_logs(
     let service = unsafe { string_from_header(service_ptr) };
     let tail_opt = if tail >= 0 { Some(tail as u32) } else { None };
 
+    let engine = match perry_container_compose::ComposeEngine::get_engine(handle.stack_id) {
+        Some(e) => e,
+        None => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move {
+                Err::<u64, String>("Engine not found for stack".to_string())
+            });
+            return promise;
+        }
+    };
+
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = match get_global_backend().await {
-            Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
-        };
-        let wrapper = compose::ComposeWrapper::new(types::ComposeSpec::default(), backend);
+        let wrapper = compose::ComposeWrapper::from_engine(engine);
         match wrapper.logs(&handle, service.as_deref(), tail_opt).await {
             Ok(logs) => {
                 let h = types::register_container_logs(logs);
@@ -663,6 +684,16 @@ pub unsafe extern "C" fn js_compose_exec(
     let service_opt = unsafe { string_from_header(service_ptr) };
     let cmd_json = unsafe { string_from_header(cmd_json_ptr) };
 
+    let engine = match perry_container_compose::ComposeEngine::get_engine(handle.stack_id) {
+        Some(e) => e,
+        None => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move {
+                Err::<u64, String>("Engine not found for stack".to_string())
+            });
+            return promise;
+        }
+    };
+
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         let service = match service_opt {
             Some(s) => s,
@@ -673,11 +704,7 @@ pub unsafe extern "C" fn js_compose_exec(
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
 
-        let backend = match get_global_backend().await {
-            Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
-        };
-        let wrapper = compose::ComposeWrapper::new(types::ComposeSpec::default(), backend);
+        let wrapper = compose::ComposeWrapper::from_engine(engine);
         match wrapper.exec(&handle, &service, &cmd).await {
             Ok(logs) => {
                 let h = types::register_container_logs(logs);
@@ -711,16 +738,22 @@ pub unsafe extern "C" fn js_compose_start(
 
     let services_json = unsafe { string_from_header(services_json_ptr) };
 
+    let engine = match perry_container_compose::ComposeEngine::get_engine(handle.stack_id) {
+        Some(e) => e,
+        None => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move {
+                Err::<u64, String>("Engine not found for stack".to_string())
+            });
+            return promise;
+        }
+    };
+
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         let services: Vec<String> = services_json
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
 
-        let backend = match get_global_backend().await {
-            Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
-        };
-        let wrapper = compose::ComposeWrapper::new(types::ComposeSpec::default(), backend);
+        let wrapper = compose::ComposeWrapper::from_engine(engine);
         match wrapper.start(&handle, &services).await {
             Ok(()) => Ok(0u64),
             Err(e) => Err::<u64, String>(e.to_string()),
@@ -751,16 +784,22 @@ pub unsafe extern "C" fn js_compose_stop(
 
     let services_json = unsafe { string_from_header(services_json_ptr) };
 
+    let engine = match perry_container_compose::ComposeEngine::get_engine(handle.stack_id) {
+        Some(e) => e,
+        None => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move {
+                Err::<u64, String>("Engine not found for stack".to_string())
+            });
+            return promise;
+        }
+    };
+
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         let services: Vec<String> = services_json
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
 
-        let backend = match get_global_backend().await {
-            Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
-        };
-        let wrapper = compose::ComposeWrapper::new(types::ComposeSpec::default(), backend);
+        let wrapper = compose::ComposeWrapper::from_engine(engine);
         match wrapper.stop(&handle, &services).await {
             Ok(()) => Ok(0u64),
             Err(e) => Err::<u64, String>(e.to_string()),
@@ -791,16 +830,22 @@ pub unsafe extern "C" fn js_compose_restart(
 
     let services_json = unsafe { string_from_header(services_json_ptr) };
 
+    let engine = match perry_container_compose::ComposeEngine::get_engine(handle.stack_id) {
+        Some(e) => e,
+        None => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move {
+                Err::<u64, String>("Engine not found for stack".to_string())
+            });
+            return promise;
+        }
+    };
+
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         let services: Vec<String> = services_json
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
 
-        let backend = match get_global_backend().await {
-            Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
-        };
-        let wrapper = compose::ComposeWrapper::new(types::ComposeSpec::default(), backend);
+        let wrapper = compose::ComposeWrapper::from_engine(engine);
         match wrapper.restart(&handle, &services).await {
             Ok(()) => Ok(0u64),
             Err(e) => Err::<u64, String>(e.to_string()),

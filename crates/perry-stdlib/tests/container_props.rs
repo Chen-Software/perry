@@ -217,6 +217,8 @@ proptest! {
     fn prop_depends_on_entry_service_names(
         names in proptest::collection::vec("[a-z][a-z0-9_-]{1,10}", 1..=6),
     ) {
+        let names: std::collections::HashSet<String> = names.into_iter().collect();
+        let names: Vec<String> = names.into_iter().collect();
         use perry_container_compose::types::{DependsOnSpec, ComposeDependsOn};
 
         // List variant
