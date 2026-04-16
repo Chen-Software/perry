@@ -2,7 +2,7 @@
 
 use proptest::prelude::*;
 use serde_json::{json, Value};
-use perry_container_compose::indexmap::IndexMap;
+use indexmap::IndexMap;
 
 // ============ Property 2: ContainerSpec CLI argument round-trip ============
 // Feature: perry-container, Property 2: ContainerSpec CLI argument round-trip
@@ -120,7 +120,7 @@ proptest! {
 
     #[test]
     fn prop_list_or_dict_to_map_dict(
-        keys in proptest::collection::vec("[A-Z][A-Z0-9_]{1,8}", 1..=8),
+        keys in proptest::collection::btree_set("[A-Z][A-Z0-9_]{1,8}", 1..=8),
         int_val in 0i64..1000,
         bool_val in proptest::bool::ANY,
         str_val in "[a-z0-9_]{1,10}",
@@ -142,8 +142,8 @@ proptest! {
 
         // All keys should be preserved
         prop_assert_eq!(result.len(), keys.len());
-        for key in &keys {
-            prop_assert!(result.contains_key(key), "key {} should be in result", key);
+        for key in keys {
+            prop_assert!(result.contains_key(&key), "key {} should be in result", key);
         }
     }
 }

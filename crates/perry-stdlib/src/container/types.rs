@@ -2,6 +2,8 @@
 
 use perry_runtime::StringHeader;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use perry_container_compose::ComposeEngine;
 
 use crate::common::handle::{self, Handle};
 
@@ -42,15 +44,15 @@ pub fn take_container_info_list(id: u64) -> Option<Vec<ContainerInfo>> {
     handle::take_handle(id as Handle)
 }
 
-pub fn register_compose_handle(h: ComposeHandle) -> u64 {
-    handle::register_handle(h) as u64
+pub fn register_compose_engine(engine: Arc<ComposeEngine>) -> u64 {
+    handle::register_handle(engine) as u64
 }
 
-pub fn get_compose_handle(id: u64) -> Option<&'static ComposeHandle> {
+pub fn get_compose_engine(id: u64) -> Option<&'static Arc<ComposeEngine>> {
     handle::get_handle(id as Handle)
 }
 
-pub fn take_compose_handle(id: u64) -> Option<ComposeHandle> {
+pub fn take_compose_engine(id: u64) -> Option<Arc<ComposeEngine>> {
     handle::take_handle(id as Handle)
 }
 

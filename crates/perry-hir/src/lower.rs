@@ -2457,9 +2457,22 @@ fn lower_module_decl(
                             })
                             .unwrap_or_else(|| local.clone());
                         if is_native {
+                            // Map perry/container and perry/container-compose to their FFI names
+                            let ffi_name = if source == "perry/container" {
+                                Some(format!("js_container_{}", imported))
+                            } else if source == "perry/container-compose" {
+                                if imported == "composeUp" {
+                                    Some("js_container_composeUp".to_string())
+                                } else {
+                                    Some(format!("js_container_compose_{}", imported))
+                                }
+                            } else {
+                                Some(imported.clone())
+                            };
+
                             // Register as native module function with the original method name
                             // e.g., import { v4 as uuid } from 'uuid' -> uuid maps to uuid.v4
-                            ctx.register_native_module(local.clone(), source.clone(), Some(imported.clone()));
+                            ctx.register_native_module(local.clone(), source.clone(), ffi_name);
                             // Auto-register parentPort from worker_threads as a native instance
                             // (it's a singleton, not created via `new`)
                             if source == "worker_threads" && imported == "parentPort" {

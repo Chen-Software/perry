@@ -138,6 +138,7 @@ impl CliProtocol for DockerProtocol {
         for (k, v) in spec.env.as_ref().iter().flat_map(|m| m.iter()) { args.extend(["-e".into(), format!("{k}={v}")]); }
         if let Some(net) = &spec.network { args.extend(["--network".into(), net.clone()]); }
         if spec.rm.unwrap_or(false) { args.push("--rm".into()); }
+        if spec.read_only.unwrap_or(false) { args.push("--read-only".into()); }
         if let Some(ep) = &spec.entrypoint {
             args.push("--entrypoint".into());
             args.push(ep.join(" "));
@@ -154,6 +155,7 @@ impl CliProtocol for DockerProtocol {
         for vol in spec.volumes.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["-v".into(), vol.clone()]); }
         for (k, v) in spec.env.as_ref().iter().flat_map(|m| m.iter()) { args.extend(["-e".into(), format!("{k}={v}")]); }
         if let Some(net) = &spec.network { args.extend(["--network".into(), net.clone()]); }
+        if spec.read_only.unwrap_or(false) { args.push("--read-only".into()); }
         if let Some(ep) = &spec.entrypoint {
             args.push("--entrypoint".into());
             args.push(ep.join(" "));
@@ -308,6 +310,7 @@ impl CliProtocol for AppleContainerProtocol {
         let mut args = vec!["run".into()];
         if spec.rm.unwrap_or(false) { args.push("--rm".into()); }
         if let Some(name) = &spec.name { args.extend(["--name".into(), name.clone()]); }
+        if spec.read_only.unwrap_or(false) { args.push("--read-only".into()); }
         if let Some(network) = &spec.network { args.extend(["--network".into(), network.clone()]); }
         for port in spec.ports.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["-p".into(), port.clone()]); }
         for vol in spec.volumes.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["-v".into(), vol.clone()]); }

@@ -216,24 +216,25 @@ impl ComposeEngine {
 
     pub async fn logs(
         &self,
-        services: &[String],
+        service: Option<&str>,
         tail: Option<u32>,
-    ) -> Result<HashMap<String, String>> {
-        let mut all_logs = HashMap::new();
-        let target: Vec<&String> = if services.is_empty() {
-            self.spec.services.keys().collect()
-        } else {
-            services.iter().collect()
-        };
-
-        for svc_name in target {
-            let svc = self.spec.services.get(svc_name).unwrap();
+    ) -> Result<ContainerLogs> {
+        if let Some(svc_name) = service {
+            let svc = self.spec.services.get(svc_name).ok_or_else(|| ComposeError::NotFound(svc_name.into()))?;
             let container_name = service::service_container_name(svc, svc_name);
-            if let Ok(logs) = self.backend.logs(&container_name, tail).await {
-                all_logs.insert(svc_name.clone(), format!("STDOUT:\n{}\nSTDERR:\n{}", logs.stdout, logs.stderr));
+            self.backend.logs(&container_name, tail).await
+        } else {
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            for (svc_name, svc) in &self.spec.services {
+                let container_name = service::service_container_name(svc, svc_name);
+                if let Ok(logs) = self.backend.logs(&container_name, tail).await {
+                    stdout.push_str(&format!("--- {} ---\n{}", svc_name, logs.stdout));
+                    stderr.push_str(&format!("--- {} ---\n{}", svc_name, logs.stderr));
+                }
             }
+            Ok(ContainerLogs { stdout, stderr })
         }
-        Ok(all_logs)
     }
 
     pub async fn exec(
