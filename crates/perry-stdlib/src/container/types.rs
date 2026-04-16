@@ -2,7 +2,7 @@
 
 use perry_runtime::StringHeader;
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use dashmap::DashMap;
 use perry_container_compose::ComposeEngine;
@@ -65,6 +65,11 @@ pub fn register_compose_engine(engine: ComposeEngine) -> u64 {
 /// Borrow a `ComposeEngine` from the typed registry.
 pub fn with_compose_engine<R>(id: u64, f: impl FnOnce(&ComposeEngine) -> R) -> Option<R> {
     compose_handles().get(&id).map(|r| f(&*r))
+}
+
+/// Get an `Arc<ComposeEngine>` from the typed registry.
+pub fn get_compose_engine_arc(id: u64) -> Option<Arc<ComposeEngine>> {
+    compose_handles().get(&id).map(|r| Arc::new(r.clone()))
 }
 
 /// Remove and return a `ComposeEngine` from the typed registry.

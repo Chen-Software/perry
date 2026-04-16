@@ -14,6 +14,7 @@ static COMPOSE_ENGINES: once_cell::sync::Lazy<std::sync::Mutex<IndexMap<u64, Arc
 
 static NEXT_STACK_ID: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Clone)]
 pub struct ComposeEngine {
     pub spec: ComposeSpec,
     pub project_name: String,
@@ -143,6 +144,7 @@ impl ComposeEngine {
                 entrypoint: None,
                 network,
                 rm: None,
+                read_only: svc.read_only,
             };
 
             match self.backend.run(&container_spec).await {

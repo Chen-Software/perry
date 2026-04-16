@@ -29,7 +29,7 @@ struct CacheEntry {
 }
 
 /// Global verification cache, keyed by image digest.
-static VERIFICATION_CACHE: OnceLock<RwLock<HashMap<String, VerificationResult>>> = OnceLock::new();
+static VERIFICATION_CACHE: OnceLock<RwLock<HashMap<String, CacheEntry>>> = OnceLock::new();
 
 /// Chainguard signing identity for certificate validation.
 const CHAINGUARD_IDENTITY: &str =
