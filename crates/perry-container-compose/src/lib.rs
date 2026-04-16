@@ -11,8 +11,8 @@ pub mod config;
 #[cfg(feature = "ffi")]
 pub mod ffi;
 
-pub use error::{ComposeError, Result};
+pub use error::{ComposeError, Result, BackendProbeResult};
 pub use types::{ComposeSpec, ComposeService, ComposeHandle};
 pub use compose::ComposeEngine;
 pub use project::ComposeProject;
-pub use backend::{ContainerBackend, AppleContainerBackend, PodmanBackend};
+pub use backend::{ContainerBackend, OciBackend, BackendDriver, OciCommandBuilder, detect_backend};

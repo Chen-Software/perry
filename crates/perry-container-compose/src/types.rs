@@ -1,8 +1,6 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
-/// The compose-spec list_or_dict pattern.
-/// Used for environment, labels, extra_hosts, sysctls, etc.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ListOrDict {
@@ -10,7 +8,6 @@ pub enum ListOrDict {
     List(Vec<String>),
 }
 
-/// depends_on condition values (compose-spec §service.depends_on)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DependsOnCondition {
@@ -19,7 +16,6 @@ pub enum DependsOnCondition {
     ServiceCompletedSuccessfully,
 }
 
-/// Per-dependency entry in the object form of depends_on
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComposeDependsOn {
     pub condition: DependsOnCondition,
@@ -29,7 +25,6 @@ pub struct ComposeDependsOn {
     pub restart: Option<bool>,
 }
 
-/// depends_on can be a list of service names or a map with conditions
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum DependsOnSpec {
@@ -46,7 +41,6 @@ impl DependsOnSpec {
     }
 }
 
-/// Volume mount type (compose-spec §service.volumes[].type)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum VolumeType {
@@ -58,7 +52,6 @@ pub enum VolumeType {
     Image,
 }
 
-/// Long-form volume mount (compose-spec §service.volumes[])
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComposeServiceVolume {
     #[serde(rename = "type")]
@@ -90,7 +83,7 @@ pub struct ComposeServiceVolumeOpts {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComposeServiceVolumeTmpfs {
-    pub size: Option<serde_yaml::Value>,  // string or number
+    pub size: Option<serde_yaml::Value>,
     pub mode: Option<u32>,
 }
 
@@ -99,27 +92,24 @@ pub struct ComposeServiceVolumeImage {
     pub subpath: Option<String>,
 }
 
-/// Port mapping (long form, compose-spec §service.ports[])
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComposeServicePort {
     pub name: Option<String>,
     pub mode: Option<String>,
     pub host_ip: Option<String>,
-    pub target: serde_yaml::Value,      // integer or string
-    pub published: Option<serde_yaml::Value>, // string or integer
+    pub target: serde_yaml::Value,
+    pub published: Option<serde_yaml::Value>,
     pub protocol: Option<String>,
     pub app_protocol: Option<String>,
 }
 
-/// Port can be a short string/number or a long-form object
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum PortSpec {
-    Short(serde_yaml::Value),  // "8080:80" or 8080
+    Short(serde_yaml::Value),
     Long(ComposeServicePort),
 }
 
-/// Service network attachment config
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeServiceNetworkConfig {
     pub aliases: Option<Vec<String>>,
@@ -128,7 +118,6 @@ pub struct ComposeServiceNetworkConfig {
     pub priority: Option<i32>,
 }
 
-/// networks field on a service: list or map
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ServiceNetworks {
@@ -136,7 +125,6 @@ pub enum ServiceNetworks {
     Map(IndexMap<String, Option<ComposeServiceNetworkConfig>>),
 }
 
-/// Build configuration (string shorthand or full object)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum BuildSpec {
@@ -172,10 +160,9 @@ pub struct ComposeServiceBuild {
     pub entitlements: Option<Vec<String>>,
 }
 
-/// Healthcheck configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComposeHealthcheck {
-    pub test: serde_yaml::Value,  // string or string[]
+    pub test: serde_yaml::Value,
     pub interval: Option<String>,
     pub timeout: Option<String>,
     pub retries: Option<u32>,
@@ -184,7 +171,6 @@ pub struct ComposeHealthcheck {
     pub disable: Option<bool>,
 }
 
-/// Deployment configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeDeployment {
     pub mode: Option<String>,
@@ -210,14 +196,12 @@ pub struct ComposeResourceSpec {
     pub pids: Option<i64>,
 }
 
-/// Logging configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeLogging {
     pub driver: Option<String>,
     pub options: Option<IndexMap<String, serde_yaml::Value>>,
 }
 
-/// IPAM configuration for a network
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeNetworkIpam {
     pub driver: Option<String>,
@@ -233,7 +217,6 @@ pub struct ComposeNetworkIpamConfig {
     pub aux_addresses: Option<IndexMap<String, String>>,
 }
 
-/// Top-level network definition
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeNetwork {
     pub name: Option<String>,
@@ -248,7 +231,6 @@ pub struct ComposeNetwork {
     pub labels: Option<ListOrDict>,
 }
 
-/// Top-level volume definition
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeVolume {
     pub name: Option<String>,
@@ -258,7 +240,6 @@ pub struct ComposeVolume {
     pub labels: Option<ListOrDict>,
 }
 
-/// Top-level secret definition
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeSecret {
     pub name: Option<String>,
@@ -271,7 +252,6 @@ pub struct ComposeSecret {
     pub template_driver: Option<String>,
 }
 
-/// Top-level config definition
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeConfig {
     pub name: Option<String>,
@@ -283,17 +263,16 @@ pub struct ComposeConfig {
     pub template_driver: Option<String>,
 }
 
-/// Full service definition (compose-spec §service)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeService {
     pub image: Option<String>,
     pub build: Option<BuildSpec>,
-    pub command: Option<serde_yaml::Value>,      // string or string[]
-    pub entrypoint: Option<serde_yaml::Value>,   // string or string[]
+    pub command: Option<serde_yaml::Value>,
+    pub entrypoint: Option<serde_yaml::Value>,
     pub environment: Option<ListOrDict>,
-    pub env_file: Option<serde_yaml::Value>,     // string or string[]
+    pub env_file: Option<serde_yaml::Value>,
     pub ports: Option<Vec<PortSpec>>,
-    pub volumes: Option<Vec<serde_yaml::Value>>, // string or ComposeServiceVolume
+    pub volumes: Option<Vec<serde_yaml::Value>>,
     pub networks: Option<ServiceNetworks>,
     pub depends_on: Option<DependsOnSpec>,
     pub restart: Option<String>,
@@ -340,7 +319,6 @@ pub struct ComposeService {
     pub pre_stop: Option<Vec<serde_yaml::Value>>,
 }
 
-/// Root compose spec (compose-spec §root)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeSpec {
     pub name: Option<String>,
@@ -359,41 +337,27 @@ pub struct ComposeSpec {
 
 impl ComposeSpec {
     pub fn merge(&mut self, other: ComposeSpec) {
-        if other.name.is_some() {
-            self.name = other.name;
-        }
-        for (k, v) in other.services {
-            self.services.insert(k, v);
-        }
+        if other.name.is_some() { self.name = other.name; }
+        for (k, v) in other.services { self.services.insert(k, v); }
         if let Some(other_nets) = other.networks {
             let nets = self.networks.get_or_insert_with(IndexMap::new);
-            for (k, v) in other_nets {
-                nets.insert(k, v);
-            }
+            for (k, v) in other_nets { nets.insert(k, v); }
         }
         if let Some(other_vols) = other.volumes {
             let vols = self.volumes.get_or_insert_with(IndexMap::new);
-            for (k, v) in other_vols {
-                vols.insert(k, v);
-            }
+            for (k, v) in other_vols { vols.insert(k, v); }
         }
         if let Some(other_secrets) = other.secrets {
             let secrets = self.secrets.get_or_insert_with(IndexMap::new);
-            for (k, v) in other_secrets {
-                secrets.insert(k, v);
-            }
+            for (k, v) in other_secrets { secrets.insert(k, v); }
         }
         if let Some(other_configs) = other.configs {
             let configs = self.configs.get_or_insert_with(IndexMap::new);
-            for (k, v) in other_configs {
-                configs.insert(k, v);
-            }
+            for (k, v) in other_configs { configs.insert(k, v); }
         }
     }
 }
 
-/// Opaque handle to a running compose stack.
-/// The stack ID is used to look up the live ComposeEngine in a global registry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComposeHandle {
     pub stack_id: u64,

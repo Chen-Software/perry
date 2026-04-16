@@ -1,3 +1,12 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackendProbeResult {
+    pub name: String,
+    pub available: bool,
+    pub reason: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ComposeError {
     #[error("Dependency cycle detected in services: {services:?}")]
@@ -30,8 +39,11 @@ pub enum ComposeError {
     #[error("File not found: {path}")]
     FileNotFound { path: String },
 
-    #[error("Circular dependency detected: {cycle}")]
-    CircularDependency { cycle: String },
+    #[error("No container backend found. Probed: {probed:?}")]
+    NoBackendFound { probed: Vec<BackendProbeResult> },
+
+    #[error("Specified backend '{name}' is not available: {reason}")]
+    BackendNotAvailable { name: String, reason: String },
 }
 
 pub type Result<T> = std::result::Result<T, ComposeError>;
