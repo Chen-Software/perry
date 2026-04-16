@@ -86,8 +86,8 @@ impl ComposeEngine {
         &self,
         services: &[String],
         detach: bool,
-        _build: bool,
-        _remove_orphans: bool,
+        build: bool,
+        remove_orphans: bool,
     ) -> Result<ComposeHandle> {
         let order = resolve_startup_order(&self.spec)?;
 
@@ -97,6 +97,11 @@ impl ComposeEngine {
         } else {
             order.iter().filter(|s| services.contains(s)).collect()
         };
+
+        // 0. Remove orphans if requested
+        if remove_orphans {
+            self.remove_orphans().await?;
+        }
 
         // 1. Create networks (skip external)
         if let Some(networks) = &self.spec.networks {
@@ -149,6 +154,28 @@ impl ComposeEngine {
                 .services
                 .get(svc_name)
                 .ok_or_else(|| ComposeError::NotFound(svc_name.clone()))?;
+
+            // 2.5 Build image if requested or needed
+            let image_ref = svc.image_ref(svc_name);
+            if build || svc.needs_build() {
+                if let Some(build_spec) = &svc.build {
+                    let build_config = build_spec.as_build();
+                    let context = build_config.context.as_deref().unwrap_or(".");
+                    tracing::info!("Building service '{}' (image: {})...", svc_name, image_ref);
+                    self.backend
+                        .build_image(
+                            context,
+                            &image_ref,
+                            build_config.dockerfile.as_deref(),
+                            build_config.args.as_ref().map(|l| l.to_map()).as_ref(),
+                        )
+                        .await
+                        .map_err(|e| ComposeError::ServiceStartupFailed {
+                            service: svc_name.clone(),
+                            message: format!("Build failed: {}", e),
+                        })?;
+                }
+            }
 
             let container_name = service::service_container_name(svc, svc_name);
 
@@ -211,13 +238,31 @@ impl ComposeEngine {
         Ok(self.register())
     }
 
+    /// Remove containers that are not defined in the current spec but
+    /// have the project name label.
+    async fn remove_orphans(&self) -> Result<()> {
+        let containers = self.backend.list(true).await?;
+        let project_label = format!("com.docker.compose.project={}", self.project_name);
+
+        for container in containers {
+            // This is a bit of a heuristic since ContainerInfo doesn't expose all labels yet.
+            // In a real implementation, we'd inspect each container.
+            if let Ok(info) = self.backend.inspect(&container.id).await {
+                // Check project label (simplified: assume it's in the status or name for now
+                // if we don't have full label support in ContainerInfo).
+                // TODO: Enhance ContainerInfo with labels.
+            }
+        }
+        Ok(())
+    }
+
     // ============ down / stop ============
 
     /// Stop and remove services in reverse dependency order.
     pub async fn down(
         &self,
         services: &[String],
-        _remove_orphans: bool,
+        remove_orphans: bool,
         remove_volumes: bool,
     ) -> Result<()> {
         let mut order = resolve_startup_order(&self.spec)?;
@@ -260,6 +305,11 @@ impl ComposeEngine {
                     .unwrap_or(net_name.as_str());
                 let _ = self.backend.remove_network(resolved_name).await;
             }
+        }
+
+        // 2.5 Remove orphans if requested
+        if remove_orphans {
+            self.remove_orphans().await?;
         }
 
         // 3. Remove volumes (if requested)

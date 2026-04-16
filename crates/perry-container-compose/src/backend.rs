@@ -40,6 +40,14 @@ pub struct VolumeConfig {
     pub labels: HashMap<String, String>,
 }
 
+/// Security profile for sandboxed OCI containers.
+#[derive(Debug, Clone, Default)]
+pub struct SecurityProfile {
+    pub read_only_rootfs: bool,
+    pub seccomp_profile: Option<String>,
+    pub cap_drop: Vec<String>,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Conversions from compose-spec types to lean config types
 // ─────────────────────────────────────────────────────────────────────────────
@@ -95,6 +103,27 @@ pub trait ContainerBackend: Send + Sync {
     async fn remove_network(&self, name: &str) -> Result<()>;
     async fn create_volume(&self, name: &str, config: &VolumeConfig) -> Result<()>;
     async fn remove_volume(&self, name: &str) -> Result<()>;
+
+    async fn build_image(
+        &self,
+        context: &str,
+        tag: &str,
+        dockerfile: Option<&str>,
+        args: Option<&HashMap<String, String>>,
+    ) -> Result<()>;
+
+    async fn inspect_image(&self, reference: &str) -> Result<serde_json::Value>;
+    async fn manifest_inspect(&self, reference: &str) -> Result<serde_json::Value>;
+
+    /// Run with enhanced security constraints (seccomp, read-only fs).
+    async fn run_with_security(
+        &self,
+        spec: &ContainerSpec,
+        profile: &SecurityProfile,
+    ) -> Result<ContainerHandle>;
+
+    /// Wait for a container to exit and collect its logs.
+    async fn wait_and_logs(&self, id: &str) -> Result<ContainerLogs>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -422,6 +451,69 @@ pub trait CliProtocol: Send + Sync {
 
     fn remove_volume_args(&self, name: &str) -> Vec<String> {
         vec!["volume".into(), "rm".into(), name.into()]
+    }
+
+    fn build_args(
+        &self,
+        context: &str,
+        tag: &str,
+        dockerfile: Option<&str>,
+        args: Option<&HashMap<String, String>>,
+    ) -> Vec<String> {
+        let mut full_args = vec!["build".into(), "-t".into(), tag.into()];
+        if let Some(df) = dockerfile {
+            full_args.push("-f".into());
+            full_args.push(df.into());
+        }
+        if let Some(a) = args {
+            for (k, v) in a {
+                full_args.push("--build-arg".into());
+                full_args.push(format!("{}={}", k, v));
+            }
+        }
+        full_args.push(context.into());
+        full_args
+    }
+
+    fn inspect_image_args(&self, reference: &str) -> Vec<String> {
+        vec!["image".into(), "inspect".into(), reference.into()]
+    }
+
+    fn manifest_inspect_args(&self, reference: &str) -> Vec<String> {
+        vec!["manifest".into(), "inspect".into(), reference.into()]
+    }
+
+    fn run_with_security_args(
+        &self,
+        spec: &ContainerSpec,
+        profile: &SecurityProfile,
+    ) -> Vec<String> {
+        let mut args = self.run_args(spec);
+        // Find where the image name starts and insert security flags before it.
+        // run_args returns: ["run", flags..., image, cmd...]
+        let image_pos = args.iter().position(|s| s == &spec.image).unwrap_or(args.len());
+
+        let mut security_flags = Vec::new();
+        if profile.read_only_rootfs {
+            security_flags.push("--read-only".into());
+        }
+        if let Some(p) = &profile.seccomp_profile {
+            security_flags.push("--security-opt".into());
+            security_flags.push(format!("seccomp={}", p));
+        }
+        for cap in &profile.cap_drop {
+            security_flags.push("--cap-drop".into());
+            security_flags.push(cap.clone());
+        }
+
+        for (i, flag) in security_flags.into_iter().enumerate() {
+            args.insert(image_pos + i, flag);
+        }
+        args
+    }
+
+    fn wait_args(&self, id: &str) -> Vec<String> {
+        vec!["wait".into(), id.into()]
     }
 
     // ── Output parsers (Docker JSON defaults) ─────────────────────────────
@@ -788,6 +880,51 @@ impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
         self.exec_ok(self.protocol.create_volume_args(name, config))
             .await?;
         Ok(())
+    }
+
+    async fn run_with_security(
+        &self,
+        spec: &ContainerSpec,
+        profile: &SecurityProfile,
+    ) -> Result<ContainerHandle> {
+        let args = self.protocol.run_with_security_args(spec, profile);
+        let stdout = self.exec_ok(args).await?;
+        let id = self.protocol.parse_container_id(&stdout);
+        let name = spec.name.clone().or_else(|| Some(id.clone()));
+        Ok(ContainerHandle { id, name })
+    }
+
+    async fn wait_and_logs(&self, id: &str) -> Result<ContainerLogs> {
+        // Wait for exit
+        let _ = self.exec_ok(self.protocol.wait_args(id)).await?;
+        // Collect logs
+        self.logs(id, None).await
+    }
+
+    async fn build_image(
+        &self,
+        context: &str,
+        tag: &str,
+        dockerfile: Option<&str>,
+        args: Option<&HashMap<String, String>>,
+    ) -> Result<()> {
+        self.exec_ok(self.protocol.build_args(context, tag, dockerfile, args))
+            .await?;
+        Ok(())
+    }
+
+    async fn inspect_image(&self, reference: &str) -> Result<serde_json::Value> {
+        let stdout = self
+            .exec_ok(self.protocol.inspect_image_args(reference))
+            .await?;
+        serde_json::from_str(&stdout).map_err(ComposeError::JsonError)
+    }
+
+    async fn manifest_inspect(&self, reference: &str) -> Result<serde_json::Value> {
+        let stdout = self
+            .exec_ok(self.protocol.manifest_inspect_args(reference))
+            .await?;
+        serde_json::from_str(&stdout).map_err(ComposeError::JsonError)
     }
 
     async fn remove_volume(&self, name: &str) -> Result<()> {

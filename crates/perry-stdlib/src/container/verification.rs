@@ -5,8 +5,9 @@
 //! backend's inspect command for digest resolution.
 
 use super::types::ContainerError;
+use perry_container_compose::backend::ContainerBackend;
 use std::collections::HashMap;
-use std::sync::{RwLock, OnceLock};
+use std::sync::{RwLock, OnceLock, Arc};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 
@@ -91,8 +92,16 @@ fn get_cache() -> &'static RwLock<HashMap<String, VerificationResult>> {
 /// Never falls back to an unverified image — returns
 /// `ContainerError::VerificationFailed` on any failure.
 pub async fn verify_image(reference: &str) -> Result<String, ContainerError> {
+    let backend = super::get_global_backend().await?;
+    verify_image_with_backend(reference, backend).await
+}
+
+pub async fn verify_image_with_backend(
+    reference: &str,
+    backend: &Arc<dyn ContainerBackend>,
+) -> Result<String, ContainerError> {
     // 1. Resolve to a digest (cache key)
-    let digest = fetch_image_digest(reference).await?;
+    let digest = fetch_image_digest(reference, backend).await?;
 
     // 2. Check cache
     {
@@ -142,36 +151,38 @@ pub async fn verify_image(reference: &str) -> Result<String, ContainerError> {
 /// (e.g. `cgr.dev/chainguard/node:latest`) to a stable digest
 /// (e.g. `sha256:abc123...`).
 ///
-/// Falls back through multiple strategies:
-/// 1. `crane digest <reference>` (most reliable for registry lookups)
-/// 2. `docker inspect` (uses local image cache)
-/// 3. `docker manifest inspect` / `podman manifest inspect`
-/// 4. Returns the reference as-is if all strategies fail (development mode)
-pub async fn fetch_image_digest(reference: &str) -> Result<String, ContainerError> {
-    // Strategy 1: crane digest (most reliable)
-    if let Ok(output) = Command::new("crane")
-        .args(["digest", reference])
-        .output()
-        .await
-    {
-        if output.status.success() {
-            let digest = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !digest.is_empty() && digest.starts_with("sha256:") {
-                return Ok(digest);
+/// Falls back through multiple strategies using the provided backend.
+pub async fn fetch_image_digest(
+    reference: &str,
+    backend: &Arc<dyn ContainerBackend>,
+) -> Result<String, ContainerError> {
+    // Strategy 1: backend inspect (uses local image cache or pulls)
+    if let Ok(json) = backend.inspect_image(reference).await {
+        // Format of inspect is usually a list
+        let arr = json.as_array();
+        let item = arr.and_then(|v| v.first()).unwrap_or(&json);
+
+        if let Some(digests) = item.get("RepoDigests").and_then(|v| v.as_array()) {
+            if let Some(raw) = digests.first().and_then(|v| v.as_str()) {
+                if let Some(digest) = raw.split('@').nth(1) {
+                    if digest.starts_with("sha256:") {
+                        return Ok(digest.to_string());
+                    }
+                }
             }
         }
     }
 
-    // Strategy 2: docker inspect (uses local image cache or pulls)
-    if let Ok(output) = Command::new("docker")
-        .args(["inspect", "--format", "{{index .RepoDigests 0}}", reference])
-        .output()
-        .await
-    {
-        if output.status.success() {
-            let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            // Format: "repo@sha256:abc..." — extract the digest part
-            if let Some(digest) = raw.split('@').nth(1) {
+    // Strategy 2: manifest inspect
+    if let Ok(json) = backend.manifest_inspect(reference).await {
+        if let Some(digest) = json.get("digest").and_then(|d| d.as_str()) {
+            if digest.starts_with("sha256:") {
+                return Ok(digest.to_string());
+            }
+        }
+        // Multi-arch manifest might have list
+        if let Some(manifests) = json.get("manifests").and_then(|v| v.as_array()) {
+            if let Some(digest) = manifests.first().and_then(|m| m.get("digest")).and_then(|d| d.as_str()) {
                 if digest.starts_with("sha256:") {
                     return Ok(digest.to_string());
                 }
@@ -179,51 +190,10 @@ pub async fn fetch_image_digest(reference: &str) -> Result<String, ContainerErro
         }
     }
 
-    // Strategy 3: docker manifest inspect
-    if let Ok(output) = Command::new("docker")
-        .args(["manifest", "inspect", reference])
-        .output()
-        .await
-    {
-        if output.status.success() {
-            let json: serde_json::Value =
-                serde_json::from_slice(&output.stdout).unwrap_or_default();
-            if let Some(digest) = json.get("digest").and_then(|d| d.as_str()) {
-                if digest.starts_with("sha256:") {
-                    return Ok(digest.to_string());
-                }
-            }
-            if let Some(digest) = json
-                .get("manifest")
-                .and_then(|m| m.get("digest"))
-                .and_then(|d| d.as_str())
-            {
-                if digest.starts_with("sha256:") {
-                    return Ok(digest.to_string());
-                }
-            }
-        }
-    }
-
-    // Strategy 4: podman manifest inspect
-    if let Ok(output) = Command::new("podman")
-        .args(["manifest", "inspect", reference])
-        .output()
-        .await
-    {
-        if output.status.success() {
-            let json: serde_json::Value =
-                serde_json::from_slice(&output.stdout).unwrap_or_default();
-            if let Some(digest) = json.get("digest").and_then(|d| d.as_str()) {
-                if digest.starts_with("sha256:") {
-                    return Ok(digest.to_string());
-                }
-            }
-        }
-    }
-
-    // Fallback: use reference as-is (development mode)
-    Ok(reference.to_string())
+    Err(ContainerError::VerificationFailed {
+        image: reference.to_string(),
+        reason: "Failed to resolve image digest via backend".to_string(),
+    })
 }
 
 /// Run `cosign verify` with keyless Sigstore verification against Chainguard's identity.
@@ -261,20 +231,7 @@ pub async fn run_cosign_verify(reference: &str, digest: &str) -> VerificationRes
         Ok(out) if out.status.success() => VerificationResult::success(digest),
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-
-            // cosign not found — allow in development mode
-            if stderr.contains("not found")
-                || stderr.contains("command not found")
-                || stderr.contains("executable file not found")
-            {
-                return VerificationResult::success(digest);
-            }
-
             VerificationResult::failure(digest, stderr)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // cosign binary not installed — allow in development mode
-            VerificationResult::success(digest)
         }
         Err(e) => VerificationResult::failure(
             digest,
@@ -288,7 +245,8 @@ pub async fn verify_image_with_key(
     reference: &str,
     key_path: &str,
 ) -> Result<String, ContainerError> {
-    let digest = fetch_image_digest(reference).await?;
+    let backend = super::get_global_backend().await?;
+    let digest = fetch_image_digest(reference, backend).await?;
     let cache = get_cache();
 
     {
