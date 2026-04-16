@@ -2356,6 +2356,12 @@ pub(crate) fn lower_native_method_call(
     // arms BELOW so they short-circuit before this table is consulted.
     //
     // Extending: add a row to PERRY_UI_TABLE matching the TS method name
+    if module == "perry/container" || module == "perry/container-compose" {
+        if let Some((_, ffi_symbol)) = PERRY_CONTAINER_TABLE.iter().chain(PERRY_CONTAINER_COMPOSE_TABLE.iter()).find(|(m, _)| *m == method) {
+            return lower_perry_container_compose_call(ctx, ffi_symbol, None, args);
+        }
+    }
+
     // to the perry_ui_* runtime function and arg shape. Most setters
     // follow `(widget, …number args)` and most constructors return a
     // widget handle that gets NaN-boxed as POINTER on the way out.
@@ -3442,6 +3448,37 @@ struct UiSig {
 /// constructors + setters mango uses, plus the most common widgets from
 /// the cross-cutting "any perry/ui app" surface. Keep alphabetized by
 /// `method` for easy scanning.
+/// Maps perry/container TypeScript function names to their FFI symbols.
+const PERRY_CONTAINER_TABLE: &[(&str, &str)] = &[
+    ("run", "js_container_run"),
+    ("create", "js_container_create"),
+    ("start", "js_container_start"),
+    ("stop", "js_container_stop"),
+    ("remove", "js_container_remove"),
+    ("list", "js_container_list"),
+    ("inspect", "js_container_inspect"),
+    ("logs", "js_container_logs"),
+    ("exec", "js_container_exec"),
+    ("pullImage", "js_container_pullImage"),
+    ("listImages", "js_container_listImages"),
+    ("removeImage", "js_container_removeImage"),
+    ("getBackend", "js_container_getBackend"),
+    ("composeUp", "js_container_composeUp"),
+];
+
+/// Maps perry/container-compose TypeScript function names to their FFI symbols.
+const PERRY_CONTAINER_COMPOSE_TABLE: &[(&str, &str)] = &[
+    ("up", "js_container_compose_up"),
+    ("down", "js_container_compose_down"),
+    ("ps", "js_container_compose_ps"),
+    ("logs", "js_container_compose_logs"),
+    ("exec", "js_container_compose_exec"),
+    ("config", "js_container_compose_config"),
+    ("start", "js_container_compose_start"),
+    ("stop", "js_container_compose_stop"),
+    ("restart", "js_container_compose_restart"),
+];
+
 ///
 /// Entries NOT in this table fall through to the receiver-less early-out
 /// in `lower_native_method_call` (which lowers args for side effects and
@@ -4597,3 +4634,158 @@ fn native_module_lookup(module: &str, has_receiver: bool, method: &str, class_na
 /// For instance method calls, `recv_i64` should be Some(handle_i64_ssa).
 fn lower_native_module_dispatch(
     ctx: &mut FnCtx<'_>,
+    sig: &NativeModSig,
+    recv_i64: Option<&str>,
+    args: &[Expr],
+) -> Result<String> {
+    // Build the LLVM arg list: receiver handle (if any) + coerced args.
+    let mut llvm_args: Vec<(crate::types::LlvmType, String)> = Vec::new();
+    let mut arg_types: Vec<crate::types::LlvmType> = Vec::new();
+
+    // Receiver handle
+    if let Some(handle) = recv_i64 {
+        llvm_args.push((I64, handle.to_string()));
+        arg_types.push(I64);
+    }
+
+    // Coerce each arg per the sig's coercion rules.
+    // If more args are passed than the sig declares, pass extras as F64.
+    for (i, arg) in args.iter().enumerate() {
+        let kind = sig.args.get(i).copied().unwrap_or(NativeArgKind::F64);
+        let lowered = lower_expr(ctx, arg)?;
+        match kind {
+            NativeArgKind::F64 => {
+                llvm_args.push((DOUBLE, lowered));
+                arg_types.push(DOUBLE);
+            }
+            NativeArgKind::StrPtr => {
+                let blk = ctx.block();
+                let ptr = blk.call(I64, "js_get_string_pointer_unified", &[(DOUBLE, &lowered)]);
+                llvm_args.push((I64, ptr));
+                arg_types.push(I64);
+            }
+            NativeArgKind::PtrI64 => {
+                let blk = ctx.block();
+                let handle = unbox_to_i64(blk, &lowered);
+                llvm_args.push((I64, handle));
+                arg_types.push(I64);
+            }
+            NativeArgKind::JsvalI64 => {
+                // Bitcast the NaN-boxed f64 to i64 without unboxing —
+                // the callee will interpret the raw bits.
+                let blk = ctx.block();
+                let bits = blk.bitcast_double_to_i64(&lowered);
+                llvm_args.push((I64, bits));
+                arg_types.push(I64);
+            }
+        }
+    }
+    // If fewer args than sig expects, pad with undefined / 0.
+    for i in args.len()..sig.args.len() {
+        match sig.args[i] {
+            NativeArgKind::F64 => {
+                llvm_args.push((DOUBLE, double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED))));
+                arg_types.push(DOUBLE);
+            }
+            NativeArgKind::StrPtr | NativeArgKind::PtrI64 | NativeArgKind::JsvalI64 => {
+                llvm_args.push((I64, "0".to_string()));
+                arg_types.push(I64);
+            }
+        }
+    }
+
+    // Determine return type for the declare
+    let ret_type = match sig.ret {
+        NativeRetKind::Ptr | NativeRetKind::Str => I64,
+        NativeRetKind::F64 => DOUBLE,
+        NativeRetKind::I32Void => I32,
+        NativeRetKind::Void => crate::types::VOID,
+    };
+
+    ctx.pending_declares.push((sig.runtime.to_string(), ret_type, arg_types));
+
+    let arg_slices: Vec<(crate::types::LlvmType, &str)> =
+        llvm_args.iter().map(|(t, s)| (*t, s.as_str())).collect();
+
+    match sig.ret {
+        NativeRetKind::Ptr => {
+            let blk = ctx.block();
+            let raw = blk.call(I64, sig.runtime, &arg_slices);
+            Ok(nanbox_pointer_inline(blk, &raw))
+        }
+        NativeRetKind::Str => {
+            // Returned raw *mut StringHeader — NaN-box with STRING_TAG so
+            // downstream string ops (JSON.stringify, ===, .length) work.
+            // Null pointer (header value 0) is returned as TAG_NULL so
+            // `request.header('missing')` reads as `null` instead of a
+            // dangling string pointer.
+            let blk = ctx.block();
+            let raw = blk.call(I64, sig.runtime, &arg_slices);
+            let is_null = blk.icmp_eq(I64, &raw, "0");
+            let boxed = nanbox_string_inline(blk, &raw);
+            let null_val = double_literal(f64::from_bits(crate::nanbox::TAG_NULL));
+            Ok(blk.select(crate::types::I1, &is_null, DOUBLE, &null_val, &boxed))
+        }
+        NativeRetKind::F64 => {
+            Ok(ctx.block().call(DOUBLE, sig.runtime, &arg_slices))
+        }
+        NativeRetKind::I32Void => {
+            let _discard = ctx.block().call(I32, sig.runtime, &arg_slices);
+            Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
+        }
+        NativeRetKind::Void => {
+            ctx.block().call_void(sig.runtime, &arg_slices);
+            Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
+        }
+    }
+}
+
+fn lower_perry_container_compose_call(
+    ctx: &mut FnCtx<'_>,
+    symbol: &str,
+    handle_id: Option<String>,
+    args: &[Expr],
+) -> Result<String> {
+    let mut lowered: Vec<String> = Vec::with_capacity(args.len());
+    let mut arg_types: Vec<crate::types::LlvmType> = Vec::with_capacity(args.len() + 1);
+    let mut llvm_args: Vec<(crate::types::LlvmType, &str)> = Vec::with_capacity(args.len() + 1);
+
+    if let Some(ref h) = handle_id {
+        arg_types.push(I64);
+        llvm_args.push((I64, h.as_str()));
+    }
+
+    for a in args {
+        let val = lower_expr(ctx, a)?;
+        if is_string_expr(ctx, a) {
+            let blk = ctx.block();
+            let raw_ptr = blk.call(I64, "js_get_string_pointer_unified", &[(DOUBLE, &val)]);
+            lowered.push(raw_ptr);
+            arg_types.push(PTR);
+        } else if matches!(a, Expr::Integer(_) | Expr::Number(_)) || matches!(crate::type_analysis::static_type_of(ctx, a), Some(perry_types::Type::Number) | Some(perry_types::Type::Boolean)) {
+            let blk = ctx.block();
+            let i = blk.fptosi(DOUBLE, &val, I64);
+            lowered.push(i);
+            arg_types.push(I64);
+        } else {
+            let blk = ctx.block();
+            let zero_i = "0".to_string();
+            let json_str_box = blk.call(DOUBLE, "js_json_stringify", &[(DOUBLE, &val), (I32, &zero_i)]);
+            let bits = blk.bitcast_double_to_i64(&json_str_box);
+            let raw_ptr = blk.and(I64, &bits, crate::nanbox::POINTER_MASK_I64);
+            lowered.push(raw_ptr);
+            arg_types.push(PTR);
+        }
+    }
+
+    for (idx, v) in lowered.iter().enumerate() {
+        let t_idx = idx + (if handle_id.is_some() { 1 } else { 0 });
+        llvm_args.push((arg_types[t_idx], v.as_str()));
+    }
+
+    ctx.pending_declares.push((symbol.to_string(), PTR, arg_types));
+    let blk = ctx.block();
+    let promise_ptr = blk.call(PTR, symbol, &llvm_args);
+    let ptr_i64 = blk.ptrtoint(&promise_ptr, I64);
+    Ok(nanbox_pointer_inline(blk, &ptr_i64))
+}
