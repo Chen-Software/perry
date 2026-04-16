@@ -682,6 +682,7 @@ pub struct ContainerSpec {
     pub ports: Option<Vec<String>>,
     pub volumes: Option<Vec<String>>,
     pub env: Option<std::collections::HashMap<String, String>>,
+    pub labels: Option<std::collections::HashMap<String, String>>,
     pub cmd: Option<Vec<String>>,
     pub entrypoint: Option<Vec<String>>,
     pub network: Option<String>,
@@ -703,6 +704,7 @@ pub struct ContainerInfo {
     pub image: String,
     pub status: String,
     pub ports: Vec<String>,
+    pub labels: std::collections::HashMap<String, String>,
     pub created: String,
 }
 

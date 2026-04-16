@@ -12,6 +12,7 @@ use crate::types::{
 };
 use crate::backend::{NetworkConfig, VolumeConfig};
 use indexmap::IndexMap;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -193,12 +194,17 @@ impl ComposeEngine {
                 }
                 Err(_) => {
                     // Does not exist
+                    let mut labels = svc.labels.as_ref().map(|l| l.to_map()).unwrap_or_default();
+                    labels.insert("com.docker.compose.project".into(), self.project_name.clone());
+                    labels.insert("com.docker.compose.service".into(), svc_name.clone());
+
                     let spec = ContainerSpec {
                         image: svc.image_ref(svc_name),
                         name: Some(container_name.clone()),
                         ports: Some(svc.port_strings()),
                         volumes: Some(svc.volume_strings()),
                         env: Some(svc.resolved_env()),
+                        labels: Some(labels),
                         cmd: svc.command_list(),
                         rm: Some(false),
                         ..Default::default()
@@ -242,15 +248,20 @@ impl ComposeEngine {
     /// have the project name label.
     async fn remove_orphans(&self) -> Result<()> {
         let containers = self.backend.list(true).await?;
-        let project_label = format!("com.docker.compose.project={}", self.project_name);
 
         for container in containers {
-            // This is a bit of a heuristic since ContainerInfo doesn't expose all labels yet.
-            // In a real implementation, we'd inspect each container.
-            if let Ok(info) = self.backend.inspect(&container.id).await {
-                // Check project label (simplified: assume it's in the status or name for now
-                // if we don't have full label support in ContainerInfo).
-                // TODO: Enhance ContainerInfo with labels.
+            if let Some(project) = container.labels.get("com.docker.compose.project") {
+                if project == &self.project_name {
+                    if let Some(service) = container.labels.get("com.docker.compose.service") {
+                        if !self.spec.services.contains_key(service) {
+                            tracing::info!("Removing orphan container '{}' (service: {})...", container.name, service);
+                            if container.status.contains("running") {
+                                let _ = self.backend.stop(&container.id, None).await;
+                            }
+                            let _ = self.backend.remove(&container.id, true).await;
+                        }
+                    }
+                }
             }
         }
         Ok(())
@@ -350,6 +361,7 @@ impl ComposeEngine {
                         image: svc.image_ref(svc_name),
                         status: "not found".to_string(),
                         ports: svc.port_strings(),
+                        labels: HashMap::new(),
                         created: String::new(),
                     });
                 }

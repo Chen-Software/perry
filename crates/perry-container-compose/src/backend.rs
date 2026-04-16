@@ -142,12 +142,29 @@ struct DockerListEntry {
     status: String,
     #[serde(rename = "Ports", alias = "ports", default)]
     ports: serde_json::Value,
+    #[serde(rename = "Labels", alias = "labels", default)]
+    labels: serde_json::Value,
     #[serde(rename = "Created", alias = "created", default)]
     created: serde_json::Value,
 }
 
 impl DockerListEntry {
     fn into_container_info(self) -> ContainerInfo {
+        let labels = match self.labels {
+            serde_json::Value::Object(map) => map
+                .into_iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
+                .collect(),
+            serde_json::Value::String(s) if !s.is_empty() => s
+                .split(',')
+                .filter_map(|pair| {
+                    let mut parts = pair.splitn(2, '=');
+                    Some((parts.next()?.to_string(), parts.next()?.to_string()))
+                })
+                .collect(),
+            _ => HashMap::new(),
+        };
+
         let name = match &self.names {
             serde_json::Value::Array(arr) => arr
                 .first()
@@ -176,6 +193,7 @@ impl DockerListEntry {
             image: self.image,
             status: self.status,
             ports,
+            labels,
             created,
         }
     }
@@ -189,10 +207,18 @@ struct DockerInspectEntry {
     name: String,
     #[serde(rename = "Image", alias = "image", default)]
     image: String,
+    #[serde(rename = "Config", alias = "config")]
+    config: Option<DockerInspectConfig>,
     #[serde(rename = "State", alias = "state")]
     state: Option<DockerInspectState>,
     #[serde(rename = "Created", alias = "created", default)]
     created: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DockerInspectConfig {
+    #[serde(rename = "Labels", alias = "labels", default)]
+    labels: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -269,6 +295,14 @@ pub fn docker_run_flags(spec: &ContainerSpec, include_detach: bool) -> Vec<Strin
         pairs.sort_by_key(|(k, _)| k.as_str());
         for (k, v) in pairs {
             args.push("-e".into());
+            args.push(format!("{}={}", k, v));
+        }
+    }
+    if let Some(labels) = &spec.labels {
+        let mut pairs: Vec<(&String, &String)> = labels.iter().collect();
+        pairs.sort_by_key(|(k, _)| k.as_str());
+        for (k, v) in pairs {
+            args.push("--label".into());
             args.push(format!("{}={}", k, v));
         }
     }
@@ -559,6 +593,7 @@ pub trait CliProtocol: Send + Sync {
                 image: e.image,
                 status,
                 ports: vec![],
+                labels: e.config.map(|c| c.labels).unwrap_or_default(),
                 created: e.created,
             }
         })
@@ -1327,6 +1362,7 @@ mod tests {
                 m.insert("FOO".into(), "bar".into());
                 m
             }),
+            labels: None,
             cmd: Some(vec!["sh".into(), "-c".into(), "echo hi".into()]),
             entrypoint: None,
             network: Some("mynet".into()),
