@@ -104,6 +104,9 @@ pub trait ContainerBackend: Send + Sync {
     async fn create_volume(&self, name: &str, config: &VolumeConfig) -> Result<()>;
     async fn remove_volume(&self, name: &str) -> Result<()>;
 
+    async fn inspect_network(&self, name: &str) -> Result<serde_json::Value>;
+    async fn inspect_volume(&self, name: &str) -> Result<serde_json::Value>;
+
     async fn build_image(
         &self,
         context: &str,
@@ -485,6 +488,14 @@ pub trait CliProtocol: Send + Sync {
 
     fn remove_volume_args(&self, name: &str) -> Vec<String> {
         vec!["volume".into(), "rm".into(), name.into()]
+    }
+
+    fn inspect_network_args(&self, name: &str) -> Vec<String> {
+        vec!["network".into(), "inspect".into(), name.into()]
+    }
+
+    fn inspect_volume_args(&self, name: &str) -> Vec<String> {
+        vec!["volume".into(), "inspect".into(), name.into()]
     }
 
     fn build_args(
@@ -962,6 +973,20 @@ impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
         serde_json::from_str(&stdout).map_err(ComposeError::JsonError)
     }
 
+    async fn inspect_network(&self, name: &str) -> Result<serde_json::Value> {
+        let stdout = self
+            .exec_ok(self.protocol.inspect_network_args(name))
+            .await?;
+        serde_json::from_str(&stdout).map_err(ComposeError::JsonError)
+    }
+
+    async fn inspect_volume(&self, name: &str) -> Result<serde_json::Value> {
+        let stdout = self
+            .exec_ok(self.protocol.inspect_volume_args(name))
+            .await?;
+        serde_json::from_str(&stdout).map_err(ComposeError::JsonError)
+    }
+
     async fn remove_volume(&self, name: &str) -> Result<()> {
         let output = self
             .exec_raw(self.protocol.remove_volume_args(name))
@@ -1236,111 +1261,6 @@ pub async fn detect_backend() -> std::result::Result<Box<dyn ContainerBackend>, 
     }
 
     Err(ComposeError::NoBackendFound { probed })
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Legacy compatibility shims
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Legacy container status enum kept for backward compatibility with `compose.rs`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ContainerStatus {
-    Running,
-    Stopped,
-    NotFound,
-}
-
-impl ContainerStatus {
-    pub fn is_running(&self) -> bool {
-        matches!(self, ContainerStatus::Running)
-    }
-    pub fn exists(&self) -> bool {
-        !matches!(self, ContainerStatus::NotFound)
-    }
-}
-
-/// Legacy exec result kept for backward compatibility.
-#[derive(Debug, Clone)]
-pub struct ExecResult {
-    pub stdout: String,
-    pub stderr: String,
-    pub exit_code: i32,
-}
-
-/// Legacy `Backend` trait kept for backward compatibility with `compose.rs`.
-/// New code should use `ContainerBackend` + `CliBackend` instead.
-#[async_trait]
-pub trait Backend: Send + Sync {
-    fn name(&self) -> &'static str;
-
-    async fn build(
-        &self,
-        context: &str,
-        dockerfile: Option<&str>,
-        tag: &str,
-        args: Option<&HashMap<String, String>>,
-        target: Option<&str>,
-        network: Option<&str>,
-    ) -> Result<()>;
-
-    async fn run(
-        &self,
-        image: &str,
-        name: &str,
-        ports: Option<&[String]>,
-        env: Option<&HashMap<String, String>>,
-        volumes: Option<&[String]>,
-        labels: Option<&HashMap<String, String>>,
-        cmd: Option<&[String]>,
-        detach: bool,
-    ) -> Result<()>;
-
-    async fn start(&self, name: &str) -> Result<()>;
-    async fn stop(&self, name: &str) -> Result<()>;
-    async fn remove(&self, name: &str, force: bool) -> Result<()>;
-    async fn inspect(&self, name: &str) -> Result<ContainerStatus>;
-    async fn list(&self, label_filter: Option<&str>) -> Result<Vec<ContainerInfo>>;
-    async fn logs(&self, name: &str, tail: Option<u32>, follow: bool) -> Result<String>;
-    async fn exec(
-        &self,
-        name: &str,
-        cmd: &[String],
-        user: Option<&str>,
-        workdir: Option<&str>,
-        env: Option<&HashMap<String, String>>,
-    ) -> Result<ExecResult>;
-    async fn create_network(
-        &self,
-        name: &str,
-        driver: Option<&str>,
-        labels: Option<&HashMap<String, String>>,
-    ) -> Result<()>;
-    async fn remove_network(&self, name: &str) -> Result<()>;
-    async fn create_volume(
-        &self,
-        name: &str,
-        driver: Option<&str>,
-        labels: Option<&HashMap<String, String>>,
-    ) -> Result<()>;
-    async fn remove_volume(&self, name: &str) -> Result<()>;
-}
-
-/// Synchronous best-effort backend selector for legacy callers.
-/// Prefer `detect_backend().await` in async contexts.
-pub fn get_backend() -> Result<Box<dyn Backend>> {
-    Err(ComposeError::BackendNotAvailable {
-        name: "legacy".into(),
-        reason: "use detect_backend() instead".into(),
-    })
-}
-
-/// Synchronous best-effort `ContainerBackend` selector for legacy callers.
-/// Prefer `detect_backend().await` in async contexts.
-pub fn get_container_backend() -> Result<Box<dyn ContainerBackend>> {
-    Err(ComposeError::BackendNotAvailable {
-        name: "legacy".into(),
-        reason: "use detect_backend() instead".into(),
-    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

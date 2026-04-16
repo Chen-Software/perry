@@ -104,6 +104,9 @@ impl ComposeEngine {
             self.remove_orphans().await?;
         }
 
+        let mut created_networks: Vec<String> = Vec::new();
+        let mut created_volumes: Vec<String> = Vec::new();
+
         // 1. Create networks (skip external)
         if let Some(networks) = &self.spec.networks {
             for (net_name, net_config_opt) in networks {
@@ -114,14 +117,22 @@ impl ComposeEngine {
                 let net_config_spec = net_config_opt.as_ref().cloned().unwrap_or_default();
                 let net_config = NetworkConfig::from(&net_config_spec);
                 let resolved_name = net_config_spec.name.as_deref().unwrap_or(net_name.as_str());
-                tracing::info!("Creating network '{}'…", resolved_name);
-                self.backend
-                    .create_network(resolved_name, &net_config)
-                    .await
-                    .map_err(|e| ComposeError::ServiceStartupFailed {
-                        service: format!("network/{}", net_name),
-                        message: e.to_string(),
-                    })?;
+
+                // Check if already exists
+                if self.backend.inspect_network(resolved_name).await.is_err() {
+                    tracing::info!("Creating network '{}'…", resolved_name);
+                    if let Err(e) = self.backend.create_network(resolved_name, &net_config).await {
+                        // Rollback created networks
+                        for n in created_networks.iter().rev() {
+                            let _ = self.backend.remove_network(n).await;
+                        }
+                        return Err(ComposeError::ServiceStartupFailed {
+                            service: format!("network/{}", net_name),
+                            message: e.to_string(),
+                        });
+                    }
+                    created_networks.push(resolved_name.to_string());
+                }
             }
         }
 
@@ -135,14 +146,25 @@ impl ComposeEngine {
                 let vol_config_spec = vol_config_opt.as_ref().cloned().unwrap_or_default();
                 let vol_config = VolumeConfig::from(&vol_config_spec);
                 let resolved_name = vol_config_spec.name.as_deref().unwrap_or(vol_name.as_str());
-                tracing::info!("Creating volume '{}'…", resolved_name);
-                self.backend
-                    .create_volume(resolved_name, &vol_config)
-                    .await
-                    .map_err(|e| ComposeError::ServiceStartupFailed {
-                        service: format!("volume/{}", vol_name),
-                        message: e.to_string(),
-                    })?;
+
+                // Check if already exists
+                if self.backend.inspect_volume(resolved_name).await.is_err() {
+                    tracing::info!("Creating volume '{}'…", resolved_name);
+                    if let Err(e) = self.backend.create_volume(resolved_name, &vol_config).await {
+                        // Rollback created volumes and networks
+                        for v in created_volumes.iter().rev() {
+                            let _ = self.backend.remove_volume(v).await;
+                        }
+                        for n in created_networks.iter().rev() {
+                            let _ = self.backend.remove_network(n).await;
+                        }
+                        return Err(ComposeError::ServiceStartupFailed {
+                            service: format!("volume/{}", vol_name),
+                            message: e.to_string(),
+                        });
+                    }
+                    created_volumes.push(resolved_name.to_string());
+                }
             }
         }
 
@@ -227,6 +249,13 @@ impl ComposeEngine {
                 for c_name in started.iter().rev() {
                     let _ = self.backend.stop(c_name, None).await;
                     let _ = self.backend.remove(c_name, true).await;
+                }
+                // Rollback created volumes and networks
+                for v in created_volumes.iter().rev() {
+                    let _ = self.backend.remove_volume(v).await;
+                }
+                for n in created_networks.iter().rev() {
+                    let _ = self.backend.remove_network(n).await;
                 }
                 return Err(ComposeError::ServiceStartupFailed {
                     service: svc_name.clone(),
