@@ -143,6 +143,7 @@ impl ComposeEngine {
                 entrypoint: None,
                 network,
                 rm: None,
+                read_only: svc.read_only,
             };
 
             match self.backend.run(&container_spec).await {
@@ -233,7 +234,7 @@ impl ComposeEngine {
                     stderr.push_str(&format!("--- {} ---\n{}", svc_name, logs.stderr));
                 }
             }
-            Ok(ContainerLogs { stdout, stderr })
+            Ok(ContainerLogs { stdout, stderr, exit_code: 0 })
         }
     }
 

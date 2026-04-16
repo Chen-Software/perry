@@ -57,12 +57,13 @@ unsafe fn string_to_js(s: &str) -> *const StringHeader {
 // ============ Container Lifecycle ============
 
 /// Run a container from the given spec
-/// FFI: js_container_run(spec_json: *const StringHeader) -> *mut Promise
+/// FFI: js_container_run(spec_val: f64) -> *mut Promise
 #[no_mangle]
-pub unsafe extern "C" fn js_container_run(spec_ptr: *const StringHeader) -> *mut Promise {
+pub unsafe extern "C" fn js_container_run(spec_val: f64) -> *mut Promise {
     let promise = js_promise_new();
+    let spec_json_ptr = perry_runtime::js_json_stringify(spec_val, 1);
 
-    let spec = match types::parse_container_spec(spec_ptr) {
+    let spec = match types::parse_container_spec(spec_json_ptr) {
         Ok(s) => s,
         Err(e) => {
             crate::common::spawn_for_promise(promise as *mut u8, async move {
@@ -90,12 +91,13 @@ pub unsafe extern "C" fn js_container_run(spec_ptr: *const StringHeader) -> *mut
 }
 
 /// Create a container from the given spec without starting it
-/// FFI: js_container_create(spec_json: *const StringHeader) -> *mut Promise
+/// FFI: js_container_create(spec_val: f64) -> *mut Promise
 #[no_mangle]
-pub unsafe extern "C" fn js_container_create(spec_ptr: *const StringHeader) -> *mut Promise {
+pub unsafe extern "C" fn js_container_create(spec_val: f64) -> *mut Promise {
     let promise = js_promise_new();
+    let spec_json_ptr = perry_runtime::js_json_stringify(spec_val, 1);
 
-    let spec = match types::parse_container_spec(spec_ptr) {
+    let spec = match types::parse_container_spec(spec_json_ptr) {
         Ok(s) => s,
         Err(e) => {
             crate::common::spawn_for_promise(promise as *mut u8, async move {
@@ -219,18 +221,19 @@ pub unsafe extern "C" fn js_container_remove(id_ptr: *const StringHeader, force:
 pub unsafe extern "C" fn js_container_list(all: f64) -> *mut Promise {
     let promise = js_promise_new();
 
-    crate::common::spawn_for_promise(promise as *mut u8, async move {
+    crate::common::spawn_for_promise_deferred(promise as *mut u8, async move {
         let backend = match get_global_backend().await {
             Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
+            Err(e) => return Err(e.to_string()),
         };
         match backend.list(all != 0.0).await {
-            Ok(containers) => {
-                let handle_id = types::register_container_info_list(containers);
-                Ok(handle_id as u64)
-            }
-            Err(e) => Err::<u64, String>(e.to_string()),
+            Ok(containers) => Ok(serde_json::to_string(&containers).unwrap()),
+            Err(e) => Err(e.to_string()),
         }
+    }, |json| {
+        let str_ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
+        let jsv = perry_runtime::js_json_parse(str_ptr);
+        jsv.bits()
     });
 
     promise
@@ -252,18 +255,19 @@ pub unsafe extern "C" fn js_container_inspect(id_ptr: *const StringHeader) -> *m
         }
     };
 
-    crate::common::spawn_for_promise(promise as *mut u8, async move {
+    crate::common::spawn_for_promise_deferred(promise as *mut u8, async move {
         let backend = match get_global_backend().await {
             Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
+            Err(e) => return Err(e.to_string()),
         };
         match backend.inspect(&id).await {
-            Ok(info) => {
-                let handle_id = types::register_container_info(info);
-                Ok(handle_id as u64)
-            }
-            Err(e) => Err::<u64, String>(e.to_string()),
+            Ok(info) => Ok(serde_json::to_string(&info).unwrap()),
+            Err(e) => Err(e.to_string()),
         }
+    }, |json| {
+        let str_ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
+        let jsv = perry_runtime::js_json_parse(str_ptr);
+        jsv.bits()
     });
 
     promise
@@ -328,18 +332,19 @@ pub unsafe extern "C" fn js_container_logs(id_ptr: *const StringHeader, tail: f6
 
     let tail_opt = if tail >= 0.0 { Some(tail as u32) } else { None };
 
-    crate::common::spawn_for_promise(promise as *mut u8, async move {
+    crate::common::spawn_for_promise_deferred(promise as *mut u8, async move {
         let backend = match get_global_backend().await {
             Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
+            Err(e) => return Err(e.to_string()),
         };
         match backend.logs(&id, tail_opt).await {
-            Ok(logs) => {
-                let handle_id = types::register_container_logs(logs);
-                Ok(handle_id as u64)
-            }
-            Err(e) => Err::<u64, String>(e.to_string()),
+            Ok(logs) => Ok(serde_json::to_string(&logs).unwrap()),
+            Err(e) => Err(e.to_string()),
         }
+    }, |json| {
+        let str_ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
+        let jsv = perry_runtime::js_json_parse(str_ptr);
+        jsv.bits()
     });
 
     promise
@@ -370,7 +375,7 @@ pub unsafe extern "C" fn js_container_exec(
     let env_json = string_from_header(env_json_ptr);
     let workdir = string_from_header(workdir_ptr);
 
-    crate::common::spawn_for_promise(promise as *mut u8, async move {
+    crate::common::spawn_for_promise_deferred(promise as *mut u8, async move {
         let cmd: Vec<String> = cmd_json
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
@@ -380,15 +385,16 @@ pub unsafe extern "C" fn js_container_exec(
 
         let backend = match get_global_backend().await {
             Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
+            Err(e) => return Err(e.to_string()),
         };
         match backend.exec(&id, &cmd, env.as_ref(), workdir.as_deref()).await {
-            Ok(logs) => {
-                let handle_id = types::register_container_logs(logs);
-                Ok(handle_id as u64)
-            }
-            Err(e) => Err::<u64, String>(e.to_string()),
+            Ok(logs) => Ok(serde_json::to_string(&logs).unwrap()),
+            Err(e) => Err(e.to_string()),
         }
+    }, |json| {
+        let str_ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
+        let jsv = perry_runtime::js_json_parse(str_ptr);
+        jsv.bits()
     });
 
     promise
@@ -481,13 +487,37 @@ pub unsafe extern "C" fn js_container_removeImage(reference_ptr: *const StringHe
 
 // ============ Compose Functions ============
 
-/// Bring up a Compose stack
-/// FFI: js_container_composeUp(spec_json: *const StringHeader) -> *mut Promise
-#[no_mangle]
-pub unsafe extern "C" fn js_container_composeUp(spec_ptr: *const perry_runtime::StringHeader) -> *mut Promise {
-    let promise = js_promise_new();
+/// Helper to extract a string array from a NaN-boxed JSValue
+unsafe fn jsvalue_to_string_array(val: f64) -> Vec<String> {
+    let jsv = perry_runtime::JSValue::from_bits(val.to_bits());
+    if jsv.is_pointer() {
+        let arr_ptr = jsv.as_pointer::<perry_runtime::ArrayHeader>();
+        if (arr_ptr as usize) < 0x10000 { return Vec::new(); }
+        let len = perry_runtime::js_array_length(arr_ptr);
+        let mut result = Vec::with_capacity(len as usize);
+        for i in 0..len {
+            let item = perry_runtime::js_array_get_f64(arr_ptr, i);
+            let item_jsv = perry_runtime::JSValue::from_bits(item.to_bits());
+            if item_jsv.is_string() {
+                if let Some(s) = string_from_header(item_jsv.as_string_ptr()) {
+                    result.push(s);
+                }
+            }
+        }
+        result
+    } else {
+        Vec::new()
+    }
+}
 
-    let spec = match types::parse_compose_spec(spec_ptr) {
+/// Bring up a Compose stack
+/// FFI: js_container_composeUp(spec_val: f64) -> *mut Promise
+#[no_mangle]
+pub unsafe extern "C" fn js_container_composeUp(spec_val: f64) -> *mut Promise {
+    let promise = js_promise_new();
+    let spec_json_ptr = perry_runtime::js_json_stringify(spec_val, 1);
+
+    let spec = match types::parse_compose_spec(spec_json_ptr) {
         Ok(s) => s,
         Err(e) => {
             crate::common::spawn_for_promise(promise as *mut u8, async move {
@@ -514,10 +544,65 @@ pub unsafe extern "C" fn js_container_composeUp(spec_ptr: *const perry_runtime::
     promise
 }
 
+/// Helper to extract a boolean field from a JS object
+unsafe fn get_object_field_bool(obj_ptr: *const perry_runtime::ObjectHeader, key: &str) -> bool {
+    let key_ptr = perry_runtime::js_string_from_bytes(key.as_ptr(), key.len() as u32);
+    let val = perry_runtime::js_object_get_field_by_name_f64(obj_ptr, key_ptr);
+    perry_runtime::js_is_truthy(val) != 0
+}
+
+/// Helper to extract a string field from a JS object
+unsafe fn get_object_field_string(obj_ptr: *const perry_runtime::ObjectHeader, key: &str) -> Option<String> {
+    let key_ptr = perry_runtime::js_string_from_bytes(key.as_ptr(), key.len() as u32);
+    let val = perry_runtime::js_object_get_field_by_name_f64(obj_ptr, key_ptr);
+    let jsv = perry_runtime::JSValue::from_bits(val.to_bits());
+    if jsv.is_string() {
+        string_from_header(jsv.as_string_ptr())
+    } else {
+        None
+    }
+}
+
+/// Helper to extract a u32 field from a JS object
+unsafe fn get_object_field_u32(obj_ptr: *const perry_runtime::ObjectHeader, key: &str) -> Option<u32> {
+    let key_ptr = perry_runtime::js_string_from_bytes(key.as_ptr(), key.len() as u32);
+    let val = perry_runtime::js_object_get_field_by_name_f64(obj_ptr, key_ptr);
+    let jsv = perry_runtime::JSValue::from_bits(val.to_bits());
+    if jsv.is_number() {
+        Some(jsv.as_number() as u32)
+    } else {
+        None
+    }
+}
+
+/// Helper to extract a string array from a JS object field
+unsafe fn get_object_field_string_array(obj_ptr: *const perry_runtime::ObjectHeader, key: &str) -> Vec<String> {
+    let key_ptr = perry_runtime::js_string_from_bytes(key.as_ptr(), key.len() as u32);
+    let val = perry_runtime::js_object_get_field_by_name_f64(obj_ptr, key_ptr);
+    let jsv = perry_runtime::JSValue::from_bits(val.to_bits());
+    if jsv.is_pointer() {
+        let arr_ptr = jsv.as_pointer::<perry_runtime::ArrayHeader>();
+        let len = perry_runtime::js_array_length(arr_ptr);
+        let mut result = Vec::new();
+        for i in 0..len {
+            let item = perry_runtime::js_array_get_f64(arr_ptr, i);
+            let item_jsv = perry_runtime::JSValue::from_bits(item.to_bits());
+            if item_jsv.is_string() {
+                if let Some(s) = string_from_header(item_jsv.as_string_ptr()) {
+                    result.push(s);
+                }
+            }
+        }
+        result
+    } else {
+        Vec::new()
+    }
+}
+
 /// Stop and remove compose stack.
-/// FFI: js_container_compose_down(handle_id: f64, volumes: f64) -> *mut Promise
+/// FFI: js_container_compose_down(handle_id: i64, options: f64) -> *mut Promise
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_down(handle_id: f64, volumes: f64) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_down(handle_id: i64, options: f64) -> *mut Promise {
     let promise = js_promise_new();
 
     let engine = match types::take_compose_engine(handle_id as u64) {
@@ -530,8 +615,18 @@ pub unsafe extern "C" fn js_container_compose_down(handle_id: f64, volumes: f64)
         }
     };
 
+    let opt_jsv = perry_runtime::JSValue::from_bits(options.to_bits());
+    let (volumes, services) = if opt_jsv.is_pointer() {
+        let opt_ptr = opt_jsv.as_pointer::<perry_runtime::ObjectHeader>();
+        let v = get_object_field_bool(opt_ptr, "volumes");
+        let s = get_object_field_string_array(opt_ptr, "services");
+        (v, s)
+    } else {
+        (false, Vec::new())
+    };
+
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        match engine.down(&[], false, volumes != 0.0).await {
+        match engine.down(&services, false, volumes).await {
             Ok(()) => Ok(0u64),
             Err(e) => Err::<u64, String>(e.to_string()),
         }
@@ -541,9 +636,9 @@ pub unsafe extern "C" fn js_container_compose_down(handle_id: f64, volumes: f64)
 }
 
 /// Get container info for compose stack
-/// FFI: js_container_compose_ps(handle_id: f64) -> *mut Promise
+/// FFI: js_container_compose_ps(handle_id: i64, options: f64) -> *mut Promise
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_ps(handle_id: f64) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_ps(handle_id: i64, _options: f64) -> *mut Promise {
     let promise = js_promise_new();
 
     let engine = match types::get_compose_engine(handle_id as u64) {
@@ -556,26 +651,26 @@ pub unsafe extern "C" fn js_container_compose_ps(handle_id: f64) -> *mut Promise
         }
     };
 
-    crate::common::spawn_for_promise(promise as *mut u8, async move {
+    crate::common::spawn_for_promise_deferred(promise as *mut u8, async move {
         match engine.ps().await {
-            Ok(containers) => {
-                let h = types::register_container_info_list(containers);
-                Ok(h as u64)
-            }
-            Err(e) => Err::<u64, String>(e.to_string()),
+            Ok(containers) => Ok(serde_json::to_string(&containers).unwrap()),
+            Err(e) => Err(e.to_string()),
         }
+    }, |json| {
+        let str_ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
+        let jsv = perry_runtime::js_json_parse(str_ptr);
+        jsv.bits()
     });
 
     promise
 }
 
 /// Get logs from compose stack
-/// FFI: js_container_compose_logs(handle_id: f64, service: *const StringHeader, tail: f64) -> *mut Promise
+/// FFI: js_container_compose_logs(handle_id: i64, options: f64) -> *mut Promise
 #[no_mangle]
 pub unsafe extern "C" fn js_container_compose_logs(
-    handle_id: f64,
-    service_ptr: *const StringHeader,
-    tail: f64,
+    handle_id: i64,
+    options: f64,
 ) -> *mut Promise {
     let promise = js_promise_new();
 
@@ -589,29 +684,37 @@ pub unsafe extern "C" fn js_container_compose_logs(
         }
     };
 
-    let service = unsafe { string_from_header(service_ptr) };
-    let tail_opt = if tail >= 0.0 { Some(tail as u32) } else { None };
+    let opt_jsv = perry_runtime::JSValue::from_bits(options.to_bits());
+    let (service, tail) = if opt_jsv.is_pointer() {
+        let opt_ptr = opt_jsv.as_pointer::<perry_runtime::ObjectHeader>();
+        let s = get_object_field_string(opt_ptr, "service");
+        let t = get_object_field_u32(opt_ptr, "tail");
+        (s, t)
+    } else {
+        (None, None)
+    };
 
-    crate::common::spawn_for_promise(promise as *mut u8, async move {
-        match engine.logs(service.as_deref(), tail_opt).await {
-            Ok(logs) => {
-                let h = types::register_container_logs(logs);
-                Ok(h as u64)
-            }
-            Err(e) => Err::<u64, String>(e.to_string()),
+    crate::common::spawn_for_promise_deferred(promise as *mut u8, async move {
+        match engine.logs(service.as_deref(), tail).await {
+            Ok(logs) => Ok(serde_json::to_string(&logs).unwrap()),
+            Err(e) => Err(e.to_string()),
         }
+    }, |json| {
+        let str_ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
+        let jsv = perry_runtime::js_json_parse(str_ptr);
+        jsv.bits()
     });
 
     promise
 }
 
 /// Execute command in compose service
-/// FFI: js_container_compose_exec(handle_id: f64, service: *const StringHeader, cmd_json: *const StringHeader) -> *mut Promise
+/// FFI: js_container_compose_exec(handle_id: i64, service: *const StringHeader, cmd_val: f64) -> *mut Promise
 #[no_mangle]
 pub unsafe extern "C" fn js_container_compose_exec(
-    handle_id: f64,
+    handle_id: i64,
     service_ptr: *const StringHeader,
-    cmd_json_ptr: *const StringHeader,
+    cmd_val: f64,
 ) -> *mut Promise {
     let promise = js_promise_new();
 
@@ -626,36 +729,33 @@ pub unsafe extern "C" fn js_container_compose_exec(
     };
 
     let service_opt = unsafe { string_from_header(service_ptr) };
-    let cmd_json = unsafe { string_from_header(cmd_json_ptr) };
+    let cmd = jsvalue_to_string_array(cmd_val);
 
-    crate::common::spawn_for_promise(promise as *mut u8, async move {
+    crate::common::spawn_for_promise_deferred(promise as *mut u8, async move {
         let service = match service_opt {
             Some(s) => s,
-            None => return Err::<u64, String>("Invalid service name".to_string()),
+            None => return Err("Invalid service name".to_string()),
         };
 
-        let cmd: Vec<String> = cmd_json
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
-
         match engine.exec(&service, &cmd, None, None).await {
-            Ok(logs) => {
-                let h = types::register_container_logs(logs);
-                Ok(h as u64)
-            }
-            Err(e) => Err::<u64, String>(e.to_string()),
+            Ok(logs) => Ok(serde_json::to_string(&logs).unwrap()),
+            Err(e) => Err(e.to_string()),
         }
+    }, |json| {
+        let str_ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
+        let jsv = perry_runtime::js_json_parse(str_ptr);
+        jsv.bits()
     });
 
     promise
 }
 
 /// Start compose services
-/// FFI: js_container_compose_start(handle_id: f64, services_json: *const StringHeader) -> *mut Promise
+/// FFI: js_container_compose_start(handle_id: i64, options: f64) -> *mut Promise
 #[no_mangle]
 pub unsafe extern "C" fn js_container_compose_start(
-    handle_id: f64,
-    services_json_ptr: *const StringHeader,
+    handle_id: i64,
+    options: f64,
 ) -> *mut Promise {
     let promise = js_promise_new();
     let engine = match types::get_compose_engine(handle_id as u64) {
@@ -667,11 +767,16 @@ pub unsafe extern "C" fn js_container_compose_start(
             return promise;
         }
     };
-    let services_json = unsafe { string_from_header(services_json_ptr) };
+
+    let opt_jsv = perry_runtime::JSValue::from_bits(options.to_bits());
+    let services = if opt_jsv.is_pointer() {
+        let opt_ptr = opt_jsv.as_pointer::<perry_runtime::ObjectHeader>();
+        get_object_field_string_array(opt_ptr, "services")
+    } else {
+        Vec::new()
+    };
+
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let services: Vec<String> = services_json
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
         match engine.start(&services).await {
             Ok(()) => Ok(0u64),
             Err(e) => Err::<u64, String>(e.to_string()),
@@ -681,11 +786,11 @@ pub unsafe extern "C" fn js_container_compose_start(
 }
 
 /// Stop compose services
-/// FFI: js_container_compose_stop(handle_id: f64, services_json: *const StringHeader) -> *mut Promise
+/// FFI: js_container_compose_stop(handle_id: i64, options: f64) -> *mut Promise
 #[no_mangle]
 pub unsafe extern "C" fn js_container_compose_stop(
-    handle_id: f64,
-    services_json_ptr: *const StringHeader,
+    handle_id: i64,
+    options: f64,
 ) -> *mut Promise {
     let promise = js_promise_new();
     let engine = match types::get_compose_engine(handle_id as u64) {
@@ -697,11 +802,16 @@ pub unsafe extern "C" fn js_container_compose_stop(
             return promise;
         }
     };
-    let services_json = unsafe { string_from_header(services_json_ptr) };
+
+    let opt_jsv = perry_runtime::JSValue::from_bits(options.to_bits());
+    let services = if opt_jsv.is_pointer() {
+        let opt_ptr = opt_jsv.as_pointer::<perry_runtime::ObjectHeader>();
+        get_object_field_string_array(opt_ptr, "services")
+    } else {
+        Vec::new()
+    };
+
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let services: Vec<String> = services_json
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
         match engine.stop(&services).await {
             Ok(()) => Ok(0u64),
             Err(e) => Err::<u64, String>(e.to_string()),
@@ -711,11 +821,11 @@ pub unsafe extern "C" fn js_container_compose_stop(
 }
 
 /// Restart compose services
-/// FFI: js_container_compose_restart(handle_id: f64, services_json: *const StringHeader) -> *mut Promise
+/// FFI: js_container_compose_restart(handle_id: i64, options: f64) -> *mut Promise
 #[no_mangle]
 pub unsafe extern "C" fn js_container_compose_restart(
-    handle_id: f64,
-    services_json_ptr: *const StringHeader,
+    handle_id: i64,
+    options: f64,
 ) -> *mut Promise {
     let promise = js_promise_new();
     let engine = match types::get_compose_engine(handle_id as u64) {
@@ -727,11 +837,16 @@ pub unsafe extern "C" fn js_container_compose_restart(
             return promise;
         }
     };
-    let services_json = unsafe { string_from_header(services_json_ptr) };
+
+    let opt_jsv = perry_runtime::JSValue::from_bits(options.to_bits());
+    let services = if opt_jsv.is_pointer() {
+        let opt_ptr = opt_jsv.as_pointer::<perry_runtime::ObjectHeader>();
+        get_object_field_string_array(opt_ptr, "services")
+    } else {
+        Vec::new()
+    };
+
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let services: Vec<String> = services_json
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
         match engine.restart(&services).await {
             Ok(()) => Ok(0u64),
             Err(e) => Err::<u64, String>(e.to_string()),
@@ -741,9 +856,9 @@ pub unsafe extern "C" fn js_container_compose_restart(
 }
 
 /// Get compose configuration
-/// FFI: js_container_compose_config(handle_id: f64) -> *mut Promise
+/// FFI: js_container_compose_config(handle_id: i64, options: f64) -> *mut Promise
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_config(handle_id: f64) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_config(handle_id: i64, _options: f64) -> *mut Promise {
     let promise = js_promise_new();
     let engine = match types::get_compose_engine(handle_id as u64) {
         Some(h) => Arc::clone(h),

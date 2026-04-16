@@ -375,6 +375,7 @@ proptest! {
         let logs = ContainerLogs {
             stdout: stdout.clone(),
             stderr: stderr.clone(),
+            exit_code: 0,
         };
         let lh = perry_stdlib::container::types::register_container_logs(logs);
         let taken_logs: Option<ContainerLogs> =

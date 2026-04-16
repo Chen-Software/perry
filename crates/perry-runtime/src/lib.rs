@@ -83,6 +83,9 @@ pub use value::{js_set_handle_array_get, js_set_handle_array_length, js_set_hand
 pub use array::{js_array_push_f64};
 pub use object::js_object_set_field_by_name;
 pub use promise::{js_promise_run_microtasks, js_promise_state, js_is_promise, js_promise_value};
+pub use json::{js_json_parse, js_json_stringify};
+pub use value::{js_is_truthy};
+pub use array::{js_array_get_f64};
 
 // Stdlib pump registration — allows perry-ui-macos pump timer to call
 // js_stdlib_process_pending without a hard link dependency on perry-stdlib.

@@ -522,13 +522,23 @@ impl ContainerBackend for CliBackend {
     async fn logs(&self, id: &str, tail: Option<u32>) -> Result<ContainerLogs> {
         let args = self.protocol.logs_args(id, tail);
         let (stdout, stderr) = self.exec_raw(&args).await?;
-        Ok(ContainerLogs { stdout, stderr })
+        Ok(ContainerLogs { stdout, stderr, exit_code: 0 })
     }
 
     async fn exec(&self, id: &str, cmd: &[String], env: Option<&HashMap<String, String>>, workdir: Option<&str>) -> Result<ContainerLogs> {
         let args = self.protocol.exec_args(id, cmd, env, workdir);
-        let (stdout, stderr) = self.exec_raw(&args).await?;
-        Ok(ContainerLogs { stdout, stderr })
+
+        let output = Command::new(&self.bin)
+            .args(&args)
+            .output()
+            .await
+            .map_err(ComposeError::IoError)?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let exit_code = output.status.code().unwrap_or(-1);
+
+        Ok(ContainerLogs { stdout, stderr, exit_code })
     }
 
     async fn pull_image(&self, reference: &str) -> Result<()> {

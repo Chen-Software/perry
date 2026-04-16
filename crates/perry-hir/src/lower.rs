@@ -2473,6 +2473,12 @@ fn lower_module_decl(
                             // Register as native module function with the original method name
                             // e.g., import { v4 as uuid } from 'uuid' -> uuid maps to uuid.v4
                             ctx.register_native_module(local.clone(), source.clone(), ffi_name);
+
+                            // Register composeUp as a factory for perry/container-compose instances
+                            if (source == "perry/container" || source == "perry/container-compose") && imported == "composeUp" {
+                                ctx.register_native_instance(local.clone(), "perry/container-compose".to_string(), "ComposeHandle".to_string());
+                            }
+
                             // Auto-register parentPort from worker_threads as a native instance
                             // (it's a singleton, not created via `new`)
                             if source == "worker_threads" && imported == "parentPort" {
@@ -2694,7 +2700,8 @@ fn lower_module_decl(
                                             if module_name == "perry/ui" {
                                                 match method_name {
                                                     "State" | "Sheet" | "Toolbar" | "Window" | "LazyVStack"
-                                                    | "NavigationStack" | "Picker" | "Table" | "TabBar" => {
+                                                    | "NavigationStack" | "Picker" | "Table" | "TabBar"
+                                                    | "composeUp" => {
                                                         ctx.register_native_instance(name.clone(), module_name.to_string(), method_name.to_string());
                                                     }
                                                     _ => {}

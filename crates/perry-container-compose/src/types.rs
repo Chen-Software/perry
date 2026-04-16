@@ -712,6 +712,8 @@ pub struct ContainerInfo {
 pub struct ContainerLogs {
     pub stdout: String,
     pub stderr: String,
+    #[serde(rename = "exitCode", default)]
+    pub exit_code: i32,
 }
 
 /// Information about a container image.
