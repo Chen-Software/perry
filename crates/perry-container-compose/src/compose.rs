@@ -63,11 +63,14 @@ impl ComposeEngine {
         // 1. Create networks
         if let Some(networks) = &self.spec.networks {
             for (name, config) in networks {
-                let res = if let Some(cfg) = config {
-                    self.backend.create_network(name, cfg).await
-                } else {
-                    self.backend.create_network(name, &Default::default()).await
-                };
+                let network_config = config.as_ref().map(|c| crate::backend::NetworkConfig {
+                    driver: c.driver.clone(),
+                    labels: c.labels.as_ref().map(|l| l.to_map()).unwrap_or_default(),
+                    internal: c.internal.unwrap_or(false),
+                    enable_ipv6: c.enable_ipv6.unwrap_or(false),
+                }).unwrap_or_default();
+
+                let res = self.backend.create_network(name, &network_config).await;
                 if let Err(e) = res {
                     let msg = e.to_string().to_lowercase();
                     if msg.contains("already exists") {
@@ -83,11 +86,12 @@ impl ComposeEngine {
         // 2. Create volumes
         if let Some(volumes) = &self.spec.volumes {
             for (name, config) in volumes {
-                let res = if let Some(cfg) = config {
-                    self.backend.create_volume(name, cfg).await
-                } else {
-                    self.backend.create_volume(name, &Default::default()).await
-                };
+                let volume_config = config.as_ref().map(|c| crate::backend::VolumeConfig {
+                    driver: c.driver.clone(),
+                    labels: c.labels.as_ref().map(|l| l.to_map()).unwrap_or_default(),
+                }).unwrap_or_default();
+
+                let res = self.backend.create_volume(name, &volume_config).await;
                 if let Err(e) = res {
                     let msg = e.to_string().to_lowercase();
                     if msg.contains("already exists") {

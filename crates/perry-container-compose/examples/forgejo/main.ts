@@ -14,6 +14,8 @@
  * - Health checks and restart policies
  * - Environment variable interpolation
  * - Proper port mapping with firewall considerations
+ *
+ * Run: npx tsx crates/perry-container-compose/examples/forgejo/main.ts
  */
 
 import { composeUp, getBackend, pullImage } from 'perry/container';
@@ -30,7 +32,7 @@ async function main() {
   // Forgejo Production Stack Configuration
   // ──────────────────────────────────────────────────────────────
 
-  const FORGEJO_VERSION = '9';
+  const FORGEJO_VERSION = '9'; // Using major version 9
   const forgejoImage = `codeberg.org/forgejo/forgejo:${FORGEJO_VERSION}`;
   const postgresVersion = '16-alpine';
   const postgresImage = `postgres:${postgresVersion}`;
@@ -63,6 +65,12 @@ async function main() {
         volumes: ['forgejo-pgdata:/var/lib/postgresql/data'],
         ports: ['5432:5432'],
         networks: ['forgejo-network'],
+        healthcheck: {
+          test: ['CMD-SHELL', 'pg_isready -U ${FORGEJO_DB_USER:-forgejo} -d ${FORGEJO_DB_NAME:-forgejo}'],
+          interval: '10s',
+          timeout: '5s',
+          retries: 5,
+        },
       },
       forgejo: {
         image: forgejoImage,
@@ -91,6 +99,13 @@ async function main() {
         ],
         ports: ['3000:3000', '2222:22'],
         networks: ['forgejo-network'],
+        healthcheck: {
+          test: ['CMD', 'curl', '-f', 'http://localhost:3000/'],
+          interval: '30s',
+          timeout: '10s',
+          retries: 3,
+          startPeriod: '1m',
+        },
       },
     },
     networks: {
