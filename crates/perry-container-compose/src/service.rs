@@ -1,19 +1,28 @@
-use crate::error::Result;
 use md5::{Digest, Md5};
+use rand::Rng;
+use crate::error::Result;
+use crate::types::ContainerInfo;
+use crate::backend::ContainerBackend;
 
-pub fn service_container_name(service: &crate::types::ComposeService, service_name: &str) -> String {
-    if let Some(name) = service.container_name.as_ref() {
-        return name.clone();
-    }
+pub struct ServiceState {
+    pub container_id: Option<String>,
+    pub name: String,
+    pub is_running: bool,
+}
 
-    let image = service.image.as_deref().unwrap_or("unknown");
+pub fn generate_name(image: &str, service_name: &str) -> String {
+    // MD5 hash of the image name for a stable prefix
     let mut hasher = Md5::new();
     hasher.update(image.as_bytes());
-    let hash = hex::encode(hasher.finalize());
-    let short_hash = &hash[..8];
+    let hash = hasher.finalize();
+    let hash_str = hex::encode(hash);
+    let short_hash = &hash_str[..8];
 
-    let random_suffix: u32 = rand::random();
+    // Random suffix for uniqueness across multiple instances of the same image
+    let mut rng = rand::thread_rng();
+    let random_suffix: u32 = rng.gen();
 
+    // Sanitize service name: replace non-alphanumeric (except hyphen) with underscore
     let safe_name: String = service_name
         .chars()
         .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
@@ -22,8 +31,17 @@ pub fn service_container_name(service: &crate::types::ComposeService, service_na
     format!("{}-{}-{:08x}", safe_name, short_hash, random_suffix)
 }
 
-pub struct ServiceState {
-    pub id: String,
-    pub name: String,
-    pub running: bool,
+pub async fn exists(backend: &dyn ContainerBackend, name: &str) -> Result<bool> {
+    let containers = backend.list(true).await?;
+    Ok(containers.iter().any(|c| c.name == name))
+}
+
+pub async fn is_running(backend: &dyn ContainerBackend, name: &str) -> Result<bool> {
+    let containers = backend.list(false).await?;
+    Ok(containers.iter().any(|c| c.name == name))
+}
+
+pub async fn get_container(backend: &dyn ContainerBackend, name: &str) -> Result<Option<ContainerInfo>> {
+    let containers = backend.list(true).await?;
+    Ok(containers.into_iter().find(|c| c.name == name))
 }

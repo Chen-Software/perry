@@ -1,11 +1,8 @@
-//! Error types for perry-container-compose.
-//!
-//! Defines the canonical `ComposeError` enum and FFI error mapping.
-
-use thiserror::Error;
 use crate::backend::BackendProbeResult;
+use thiserror::Error;
 
-/// Top-level crate error
+pub type Result<T, E = ComposeError> = std::result::Result<T, E>;
+
 #[derive(Debug, Error)]
 pub enum ComposeError {
     #[error("Dependency cycle detected in services: {services:?}")]
@@ -45,18 +42,7 @@ pub enum ComposeError {
     BackendNotAvailable { name: String, reason: String },
 }
 
-impl ComposeError {
-    pub fn validation(msg: impl Into<String>) -> Self {
-        ComposeError::ValidationError {
-            message: msg.into(),
-        }
-    }
-}
-
-pub type Result<T> = std::result::Result<T, ComposeError>;
-
-/// Convert a `ComposeError` to a JSON string `{ "message": "...", "code": N }`
-/// suitable for passing across the FFI boundary.
+/// Convert a `ComposeError` to a JSON error object that TypeScript can deserialize.
 pub fn compose_error_to_js(e: &ComposeError) -> String {
     let code = match e {
         ComposeError::NotFound(_) => 404,
@@ -66,41 +52,13 @@ pub fn compose_error_to_js(e: &ComposeError) -> String {
         ComposeError::VerificationFailed { .. } => 403,
         ComposeError::NoBackendFound { .. } => 503,
         ComposeError::BackendNotAvailable { .. } => 503,
+        ComposeError::FileNotFound { .. } => 404,
         _ => 500,
     };
+
     serde_json::json!({
         "message": e.to_string(),
         "code": code
     })
     .to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_error_codes() {
-        let err = ComposeError::NotFound("foo".into());
-        assert_eq!(compose_error_to_js(&err).contains("\"code\":404"), true);
-
-        let err = ComposeError::DependencyCycle {
-            services: vec!["a".into()],
-        };
-        assert_eq!(compose_error_to_js(&err).contains("\"code\":422"), true);
-
-        let err = ComposeError::ValidationError {
-            message: "bad".into(),
-        };
-        assert_eq!(compose_error_to_js(&err).contains("\"code\":400"), true);
-
-        let err = ComposeError::VerificationFailed {
-            image: "img".into(),
-            reason: "fail".into(),
-        };
-        assert_eq!(compose_error_to_js(&err).contains("\"code\":403"), true);
-
-        let err = ComposeError::ParseError(serde_yaml::from_str::<serde_yaml::Value>("bad: [1,2").unwrap_err());
-        assert_eq!(compose_error_to_js(&err).contains("\"code\":500"), true);
-    }
 }

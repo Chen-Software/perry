@@ -97,7 +97,7 @@ pub enum DependsOnCondition {
 /// Per-dependency entry in the object form of depends_on
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComposeDependsOn {
-    pub condition: Option<DependsOnCondition>,
+    pub condition: DependsOnCondition,
     #[serde(default)]
     pub required: Option<bool>,
     #[serde(default)]
@@ -155,8 +155,7 @@ pub struct ComposeServiceVolume {
 pub struct ComposeServiceVolumeBind {
     pub propagation: Option<String>,
     pub create_host_path: Option<bool>,
-    #[serde(rename = "recursive")]
-    pub recursive_opt: Option<String>,
+    pub recursive: Option<String>,
     pub selinux: Option<String>,
 }
 
@@ -169,7 +168,7 @@ pub struct ComposeServiceVolumeOpts {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComposeServiceVolumeTmpfs {
-    pub size: Option<serde_yaml::Value>,
+    pub size: Option<serde_yaml::Value>, // string or number
     pub mode: Option<u32>,
 }
 
@@ -212,8 +211,8 @@ pub struct ComposeServicePort {
     pub name: Option<String>,
     pub mode: Option<String>,
     pub host_ip: Option<String>,
-    pub target: serde_yaml::Value,
-    pub published: Option<serde_yaml::Value>,
+    pub target: serde_yaml::Value, // integer or string
+    pub published: Option<serde_yaml::Value>, // string or integer
     pub protocol: Option<String>,
     pub app_protocol: Option<String>,
 }
@@ -222,7 +221,7 @@ pub struct ComposeServicePort {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum PortSpec {
-    Short(serde_yaml::Value),
+    Short(serde_yaml::Value), // "8080:80" or 8080
     Long(ComposeServicePort),
 }
 
@@ -334,7 +333,7 @@ impl BuildSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComposeHealthcheck {
-    pub test: serde_yaml::Value,
+    pub test: serde_yaml::Value, // string or string[]
     pub interval: Option<String>,
     pub timeout: Option<String>,
     pub retries: Option<u32>,
@@ -441,7 +440,7 @@ pub struct ComposeSecret {
 
 /// Top-level config definition (compose-spec `config` object)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ComposeConfigObj {
+pub struct ComposeConfig {
     pub name: Option<String>,
     pub content: Option<String>,
     pub environment: Option<String>,
@@ -458,12 +457,12 @@ pub struct ComposeConfigObj {
 pub struct ComposeService {
     pub image: Option<String>,
     pub build: Option<BuildSpec>,
-    pub command: Option<serde_yaml::Value>,
-    pub entrypoint: Option<serde_yaml::Value>,
+    pub command: Option<serde_yaml::Value>, // string or string[]
+    pub entrypoint: Option<serde_yaml::Value>, // string or string[]
     pub environment: Option<ListOrDict>,
-    pub env_file: Option<serde_yaml::Value>,
+    pub env_file: Option<serde_yaml::Value>, // string or string[]
     pub ports: Option<Vec<PortSpec>>,
-    pub volumes: Option<Vec<serde_yaml::Value>>,
+    pub volumes: Option<Vec<serde_yaml::Value>>, // string or ComposeServiceVolume
     pub networks: Option<ServiceNetworks>,
     pub depends_on: Option<DependsOnSpec>,
     pub restart: Option<String>,
@@ -589,7 +588,7 @@ pub struct ComposeSpec {
     pub networks: Option<IndexMap<String, Option<ComposeNetwork>>>,
     pub volumes: Option<IndexMap<String, Option<ComposeVolume>>>,
     pub secrets: Option<IndexMap<String, Option<ComposeSecret>>>,
-    pub configs: Option<IndexMap<String, Option<ComposeConfigObj>>>,
+    pub configs: Option<IndexMap<String, Option<ComposeConfig>>>,
     pub include: Option<Vec<serde_yaml::Value>>,
     pub models: Option<IndexMap<String, serde_yaml::Value>>,
     #[serde(flatten)]
@@ -686,6 +685,12 @@ pub struct ContainerSpec {
     pub entrypoint: Option<Vec<String>>,
     pub network: Option<String>,
     pub rm: Option<bool>,
+    pub read_only: Option<bool>,
+    pub security_opt: Option<Vec<String>>,
+    pub cap_add: Option<Vec<String>>,
+    pub cap_drop: Option<Vec<String>>,
+    pub workdir: Option<String>,
+    pub user: Option<String>,
 }
 
 /// Handle returned after creating/running a container.
@@ -720,5 +725,6 @@ pub struct ImageInfo {
     pub repository: String,
     pub tag: String,
     pub size: u64,
+    pub _size: String,
     pub created: String,
 }

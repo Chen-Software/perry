@@ -12,7 +12,7 @@ use perry_container_compose::error::compose_error_to_js;
 use perry_container_compose::types::{
     ComposeService, ComposeSpec, ContainerSpec, DependsOnCondition, DependsOnSpec, VolumeType,
 };
-use perry_container_compose::yaml::interpolate;
+use perry_container_compose::yaml::interpolate_yaml as interpolate;
 use proptest::prelude::*;
 use std::collections::HashMap;
 

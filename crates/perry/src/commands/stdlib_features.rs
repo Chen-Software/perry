@@ -72,6 +72,9 @@ pub fn module_to_features(module: &str) -> &'static [&'static str] {
         // ── Validation (validator.js) ─────────────────────────────────
         "validator" => &["validation"],
 
+        // ── Containers (OCI / Compose) ────────────────────────────────
+        "perry/container" | "perry/compose" | "perry/container-compose" => &["container"],
+
         // ── IDs (uuid / nanoid) ───────────────────────────────────────
         "uuid" | "nanoid" => &["ids"],
 

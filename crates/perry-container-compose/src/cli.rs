@@ -1,190 +1,184 @@
-use crate::compose::ComposeEngine;
-use crate::error::{ComposeError, Result};
-use crate::project::ComposeProject;
-use crate::config::ProjectConfig;
-use clap::{Args, Parser, Subcommand};
-use std::collections::HashMap;
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use crate::error::Result;
+use crate::config::ProjectConfig;
+use crate::project::ComposeProject;
+use crate::compose::ComposeEngine;
+use crate::backend::detect_backend;
 use std::sync::Arc;
 
-#[derive(Parser, Debug)]
-#[command(name = "perry-compose", version, about = "Docker Compose-like CLI for container backends")]
+#[derive(Parser)]
+#[command(name = "perry-compose")]
+#[command(version = "1.0")]
+#[command(about = "Docker Compose-like experience for Apple Container / Podman")]
 pub struct Cli {
-    #[arg(short = 'f', long = "file", value_name = "FILE", global = true)]
-    pub files: Vec<PathBuf>,
+    /// Compose file(s)
+    #[arg(short, long, global = true)]
+    pub file: Vec<PathBuf>,
 
-    #[arg(short = 'p', long = "project-name", global = true)]
+    /// Project name
+    #[arg(short, long, global = true)]
     pub project_name: Option<String>,
 
-    #[arg(long = "env-file", value_name = "FILE", global = true)]
-    pub env_files: Vec<PathBuf>,
+    /// Environment file(s)
+    #[arg(long, global = true)]
+    pub env_file: Vec<PathBuf>,
 
     #[command(subcommand)]
     pub command: Commands,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand)]
 pub enum Commands {
     /// Start services
-    Up(UpArgs),
+    Up {
+        /// Run in background
+        #[arg(short, long)]
+        detach: bool,
+
+        /// Rebuild images before starting
+        #[arg(long)]
+        build: bool,
+
+        /// Remove containers for undefined services
+        #[arg(long)]
+        remove_orphans: bool,
+
+        /// Services to start
+        services: Vec<String>,
+    },
     /// Stop and remove services
-    Down(DownArgs),
-    /// Start existing stopped services
-    Start(ServiceArgs),
-    /// Stop running services
-    Stop(ServiceArgs),
-    /// Restart services
-    Restart(ServiceArgs),
+    Down {
+        /// Remove named volumes
+        #[arg(short, long)]
+        volumes: bool,
+
+        /// Remove containers for undefined services
+        #[arg(long)]
+        remove_orphans: bool,
+    },
     /// List service status
-    Ps(PsArgs),
+    Ps {
+        /// Show all containers (including stopped)
+        #[arg(short, long)]
+        all: bool,
+
+        /// Filter by service name
+        services: Vec<String>,
+    },
     /// View output from containers
-    Logs(LogsArgs),
+    Logs {
+        /// Stream logs
+        #[arg(short, long)]
+        follow: bool,
+
+        /// Last N lines
+        #[arg(long)]
+        tail: Option<u32>,
+
+        /// Show timestamps
+        #[arg(short, long)]
+        timestamps: bool,
+
+        /// Services to show logs for
+        services: Vec<String>,
+    },
     /// Execute a command in a running service
-    Exec(ExecArgs),
-    /// Validate and view the Compose configuration
-    Config(ConfigArgs),
+    Exec {
+        /// Service name
+        service: String,
+
+        /// Command to run
+        cmd: Vec<String>,
+
+        /// Environment variables
+        #[arg(short, long)]
+        env: Vec<String>,
+
+        /// Working directory
+        #[arg(short, long)]
+        workdir: Option<String>,
+
+        /// User context
+        #[arg(short, long)]
+        user: Option<String>,
+    },
+    /// Validate and print resolved configuration
+    Config {
+        /// Output format: yaml or json
+        #[arg(long, default_value = "yaml")]
+        format: String,
+
+        /// Resolve image digests
+        #[arg(long)]
+        resolve_image_digests: bool,
+    },
+    /// Start existing stopped services
+    Start {
+        services: Vec<String>,
+    },
+    /// Stop running services
+    Stop {
+        services: Vec<String>,
+    },
+    /// Restart services
+    Restart {
+        services: Vec<String>,
+    },
 }
 
-#[derive(Args, Debug)]
-pub struct UpArgs {
-    #[arg(short = 'd', long = "detach")]
-    pub detach: bool,
-    #[arg(long = "build")]
-    pub build: bool,
-    #[arg(long = "remove-orphans")]
-    pub remove_orphans: bool,
-    pub services: Vec<String>,
-}
-
-#[derive(Args, Debug)]
-pub struct DownArgs {
-    #[arg(short = 'v', long = "volumes")]
-    pub volumes: bool,
-    #[arg(long = "remove-orphans")]
-    pub remove_orphans: bool,
-    pub services: Vec<String>,
-}
-
-#[derive(Args, Debug)]
-pub struct ServiceArgs {
-    pub services: Vec<String>,
-}
-
-#[derive(Args, Debug)]
-pub struct PsArgs {
-    #[arg(short = 'a', long = "all")]
-    pub all: bool,
-    pub services: Vec<String>,
-}
-
-#[derive(Args, Debug)]
-pub struct LogsArgs {
-    #[arg(short = 'f', long = "follow")]
-    pub follow: bool,
-    #[arg(long = "tail")]
-    pub tail: Option<u32>,
-    #[arg(short = 't', long = "timestamps")]
-    pub timestamps: bool,
-    pub services: Vec<String>,
-}
-
-#[derive(Args, Debug)]
-pub struct ExecArgs {
-    pub service: String,
-    #[arg(trailing_var_arg = true)]
-    pub cmd: Vec<String>,
-    #[arg(short = 'u', long = "user")]
-    pub user: Option<String>,
-    #[arg(short = 'w', long = "workdir")]
-    pub workdir: Option<String>,
-    #[arg(short = 'e', long = "env")]
-    pub env: Vec<String>,
-}
-
-#[derive(Args, Debug)]
-pub struct ConfigArgs {
-    #[arg(long = "format", default_value = "yaml")]
-    pub format: String,
-    #[arg(long = "resolve-image-digests")]
-    pub resolve: bool,
-}
-
-pub async fn run(cli: Cli) -> Result<()> {
-    let config = ProjectConfig::new(
-        cli.files.clone(),
-        cli.project_name.clone(),
-        cli.env_files.clone(),
-    );
-
+pub async fn run_cli() -> Result<()> {
+    let cli = Cli::parse();
+    let project_dir = std::env::current_dir()?;
+    let config = ProjectConfig::new(cli.file, cli.project_name, cli.env_file, project_dir);
     let project = ComposeProject::load(&config)?;
 
-    let backend = crate::backend::detect_backend().await
-        .map_err(|probed| ComposeError::NoBackendFound { probed })?;
-    let backend = Arc::new(backend);
-
-    let engine = ComposeEngine::new(project.spec.clone(), project.project_name.clone(), backend);
+    let backend = detect_backend().await.map_err(|_| crate::error::ComposeError::NotFound("no backend found".into()))?;
+    let engine = Arc::new(ComposeEngine::new(project.spec, project.project_name, Arc::new(backend)));
 
     match cli.command {
-        Commands::Up(args) => {
-            engine.up(&args.services, args.detach, args.build, args.remove_orphans).await?;
+        Commands::Up { detach, build, remove_orphans, services } => {
+            engine.up(&services, detach, build, remove_orphans).await?;
         }
-        Commands::Down(args) => {
-            engine.down(&args.services, args.remove_orphans, args.volumes).await?;
+        Commands::Down { volumes, remove_orphans } => {
+            engine.down(volumes, remove_orphans).await?;
         }
-        Commands::Start(args) => {
-            engine.start(&args.services).await?;
-        }
-        Commands::Stop(args) => {
-            engine.stop(&args.services).await?;
-        }
-        Commands::Restart(args) => {
-            engine.restart(&args.services).await?;
-        }
-        Commands::Ps(_args) => {
+        Commands::Ps { services, .. } => {
             let infos = engine.ps().await?;
-            print_ps_table(&infos);
-        }
-        Commands::Logs(args) => {
-            let logs_map = engine.logs(&args.services, args.tail).await?;
-            let mut names: Vec<&String> = logs_map.keys().collect();
-            names.sort();
-            for name in names {
-                let log = &logs_map[name];
-                for line in log.lines() {
-                    println!("{:<12} | {}", name, line);
+            for info in infos {
+                if services.is_empty() || services.contains(&info.name) {
+                    println!("{:<20} {:<20} {:<20} {:<20}", info.name, info.image, info.status, info.id);
                 }
             }
         }
-        Commands::Exec(args) => {
-            let mut env_map = HashMap::new();
-            for e in args.env {
-                if let Some((k, v)) = e.split_once('=') {
-                    env_map.insert(k.to_string(), v.to_string());
-                }
-            }
-            let env = if env_map.is_empty() { None } else { Some(env_map) };
-            let logs = engine.exec(&args.service, &args.cmd, env.as_ref(), args.workdir.as_deref()).await?;
+        Commands::Logs { services, tail, .. } => {
+            let s_name = if services.is_empty() { None } else { Some(services[0].as_str()) };
+            let logs = engine.logs(s_name, tail).await?;
+            println!("{}", logs.stdout);
+            eprintln!("{}", logs.stderr);
+        }
+        Commands::Exec { service, cmd, .. } => {
+            let logs = engine.exec(&service, &cmd).await?;
             print!("{}", logs.stdout);
             eprint!("{}", logs.stderr);
         }
-        Commands::Config(args) => {
-            let yaml = engine.config()?;
-            if args.format == "json" {
-                let value: serde_yaml::Value = serde_yaml::from_str(&yaml)?;
-                println!("{}", serde_json::to_string_pretty(&value)?);
+        Commands::Config { format, .. } => {
+            if format == "json" {
+                println!("{}", serde_json::to_string_pretty(&engine.spec)?);
             } else {
-                println!("{}", yaml);
+                println!("{}", engine.spec.to_yaml()?);
             }
+        }
+        Commands::Start { services } => {
+            engine.start(&services).await?;
+        }
+        Commands::Stop { services } => {
+            engine.stop(&services).await?;
+        }
+        Commands::Restart { services } => {
+            engine.restart(&services).await?;
         }
     }
 
     Ok(())
-}
-
-fn print_ps_table(infos: &[crate::types::ContainerInfo]) {
-    println!("{:<24}  {:<12}  {:<36}", "SERVICE", "STATUS", "CONTAINER");
-    println!("{}", "-".repeat(76));
-    for info in infos {
-        println!("{:<24}  {:<12}  {:<36}", info.name, info.status, info.id);
-    }
 }

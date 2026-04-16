@@ -3,6 +3,7 @@
 use proptest::prelude::*;
 use serde_json::{json, Value};
 use perry_container_compose::indexmap::IndexMap;
+use perry_container_compose::types::{ComposeDependsOn, DependsOnSpec, DependsOnCondition};
 
 // ============ Property 2: ContainerSpec CLI argument round-trip ============
 // Feature: perry-container, Property 2: ContainerSpec CLI argument round-trip
@@ -57,6 +58,59 @@ proptest! {
 // ============ Property 10: Image verification cache idempotence ============
 // Feature: perry-container, Property 10: Image verification cache idempotence
 // Validates: Requirements 15.7
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(50))]
+
+    #[test]
+    fn prop_image_verification_cache_idempotence(
+        digest in "sha256:[a-f0-9]{64}",
+        reason in "[a-z A-Z0-9_]{1,100}"
+    ) {
+        use perry_stdlib::container::verification::{clear_verification_cache, VERIFICATION_CACHE, VerificationResult};
+        use std::sync::RwLock;
+        use std::collections::HashMap;
+
+        // Initialize if needed
+        let _ = VERIFICATION_CACHE.set(RwLock::new(HashMap::new()));
+
+        clear_verification_cache();
+        let cache = VERIFICATION_CACHE.get().unwrap();
+
+        // 1. Insert success result
+        {
+            let mut wr = cache.write().unwrap();
+            wr.insert(digest.clone(), VerificationResult::success(&digest));
+        }
+
+        // 2. Read back
+        {
+            let rd = cache.read().unwrap();
+            let entry = rd.get(&digest).unwrap();
+            prop_assert!(entry.verified);
+            prop_assert_eq!(&entry.digest, &digest);
+        }
+
+        // 3. Clear and insert failure
+        clear_verification_cache();
+        {
+            let mut wr = cache.write().unwrap();
+            wr.insert(digest.clone(), VerificationResult::failure(&digest, &reason));
+        }
+
+        // 4. Read back
+        {
+            let rd = cache.read().unwrap();
+            let entry = rd.get(&digest).unwrap();
+            prop_assert!(!entry.verified);
+            prop_assert_eq!(entry.reason.as_deref(), Some(reason.as_str()));
+        }
+    }
+}
+
+// ============ Property 11: Error propagation preserves code and message ============
+// Feature: perry-container, Property 11: Error propagation preserves code and message
+// Validates: Requirements 2.6, 12.2
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(50))]
@@ -120,11 +174,13 @@ proptest! {
 
     #[test]
     fn prop_list_or_dict_to_map_dict(
-        keys in proptest::collection::vec("[A-Z][A-Z0-9_]{1,8}", 1..=8),
+        keys_vec in proptest::collection::vec("[A-Z][A-Z0-9_]{1,8}", 1..=8),
         int_val in 0i64..1000,
         bool_val in proptest::bool::ANY,
         str_val in "[a-z0-9_]{1,10}",
     ) {
+        use std::collections::HashSet;
+        let keys: HashSet<String> = keys_vec.into_iter().collect();
         let mut map = IndexMap::new();
         // Mix different value types across keys
         for (i, key) in keys.iter().enumerate() {
@@ -227,7 +283,7 @@ proptest! {
             map.insert(
                 name.clone(),
                 ComposeDependsOn {
-                    condition: None,
+                    condition: DependsOnCondition::ServiceStarted,
                     required: None,
                     restart: None,
                 },

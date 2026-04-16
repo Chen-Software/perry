@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 87169414b9f0eae3f8e06e61502a770c33145eb13518b3a79bdd5a9d46b1e6cc # shrinks to digest = "sha256:a0a0000a00a0aaa0000a0000000a0a00a0aaaaaaa0a00aa0aa0aa0aa00aa0000", reason = "a"
+cc ef52fa5b1aed6e4e2c2d745534a19526f65f878cdcd1cdd99e67d9ae3a2f56e1 # shrinks to keys = ["P_", "P_"], int_val = 0, bool_val = false, str_val = "a"
