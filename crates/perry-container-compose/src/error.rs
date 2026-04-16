@@ -104,6 +104,6 @@ mod tests {
         assert_eq!(compose_error_to_js(&err).contains("\"code\":403"), true);
 
         let err = ComposeError::ParseError(serde_yaml::from_str::<serde_yaml::Value>("bad: [1,2").unwrap_err());
-        assert_eq!(compose_error_to_js(&err).contains("\"code\":500"), true);
+        assert_eq!(compose_error_to_js(&err).contains("\"code\":400"), true);
     }
 }
