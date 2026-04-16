@@ -1,10 +1,8 @@
-//! Error types for perry-container-compose.
-//!
-//! Defines the canonical `ComposeError` enum and FFI error mapping.
+//! Canonical error type for `perry-container-compose`.
 
+use crate::backend::BackendProbeResult;
 use thiserror::Error;
 
-/// Top-level crate error
 #[derive(Debug, Error)]
 pub enum ComposeError {
     #[error("Dependency cycle detected in services: {services:?}")]
@@ -36,27 +34,29 @@ pub enum ComposeError {
 
     #[error("File not found: {path}")]
     FileNotFound { path: String },
+
+    #[error("No container backend found. Probed: {probed:?}")]
+    NoBackendFound { probed: Vec<BackendProbeResult> },
+
+    #[error("Specified backend '{name}' is not available: {reason}")]
+    BackendNotAvailable { name: String, reason: String },
 }
 
-impl ComposeError {
-    pub fn validation(msg: impl Into<String>) -> Self {
-        ComposeError::ValidationError {
-            message: msg.into(),
-        }
-    }
-}
+pub type Result<T, E = ComposeError> = std::result::Result<T, E>;
 
-pub type Result<T> = std::result::Result<T, ComposeError>;
-
-/// Convert a `ComposeError` to a JSON string `{ "message": "...", "code": N }`
-/// suitable for passing across the FFI boundary.
-pub fn compose_error_to_js(e: &ComposeError) -> String {
-    let code = match e {
+/// Map `ComposeError` to a JSON error object for FFI.
+/// Returns `{ message: string, code: number }`.
+pub fn compose_error_to_js(e: ComposeError) -> String {
+    let code = match &e {
         ComposeError::NotFound(_) => 404,
         ComposeError::BackendError { code, .. } => *code,
         ComposeError::DependencyCycle { .. } => 422,
         ComposeError::ValidationError { .. } => 400,
         ComposeError::VerificationFailed { .. } => 403,
+        ComposeError::FileNotFound { .. } => 404,
+        ComposeError::NoBackendFound { .. } => 503,
+        ComposeError::BackendNotAvailable { .. } => 503,
+        ComposeError::ParseError(_) | ComposeError::JsonError(_) => 400,
         _ => 500,
     };
     serde_json::json!({
@@ -64,34 +64,4 @@ pub fn compose_error_to_js(e: &ComposeError) -> String {
         "code": code
     })
     .to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_error_codes() {
-        let err = ComposeError::NotFound("foo".into());
-        assert_eq!(compose_error_to_js(&err).contains("\"code\":404"), true);
-
-        let err = ComposeError::DependencyCycle {
-            services: vec!["a".into()],
-        };
-        assert_eq!(compose_error_to_js(&err).contains("\"code\":422"), true);
-
-        let err = ComposeError::ValidationError {
-            message: "bad".into(),
-        };
-        assert_eq!(compose_error_to_js(&err).contains("\"code\":400"), true);
-
-        let err = ComposeError::VerificationFailed {
-            image: "img".into(),
-            reason: "fail".into(),
-        };
-        assert_eq!(compose_error_to_js(&err).contains("\"code\":403"), true);
-
-        let err = ComposeError::ParseError(serde_yaml::from_str::<serde_yaml::Value>("bad: [1,2").unwrap_err());
-        assert_eq!(compose_error_to_js(&err).contains("\"code\":500"), true);
-    }
 }

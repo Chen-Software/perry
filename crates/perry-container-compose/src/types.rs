@@ -7,20 +7,9 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
-/// Convert a `serde_yaml::Value` to a string representation.
-fn yaml_value_to_str(v: &serde_yaml::Value) -> String {
-    match v {
-        serde_yaml::Value::String(s) => s.clone(),
-        serde_yaml::Value::Number(n) => n.to_string(),
-        serde_yaml::Value::Bool(b) => b.to_string(),
-        serde_yaml::Value::Null => String::new(),
-        _ => format!("{}", serde_yaml::to_string(v).unwrap_or_default()).trim().to_owned(),
-    }
-}
-
 // ============ ListOrDict ============
 
-/// compose-spec `list_or_dict` pattern.
+/// The compose-spec list_or_dict pattern.
 /// Used for environment, labels, extra_hosts, sysctls, etc.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -30,8 +19,6 @@ pub enum ListOrDict {
 }
 
 impl ListOrDict {
-    /// Convert to a flat `HashMap<String, String>`.
-    /// Dict values are stringified; List entries are split on `=`.
     pub fn to_map(&self) -> std::collections::HashMap<String, String> {
         match self {
             ListOrDict::Dict(map) => map
@@ -43,10 +30,7 @@ impl ListOrDict {
                         Some(serde_yaml::Value::Bool(b)) => b.to_string(),
                         Some(serde_yaml::Value::Null) | None => String::new(),
                         Some(other) => {
-                            match other {
-                                serde_yaml::Value::String(s) => s.clone(),
-                                _ => serde_yaml::to_string(other).unwrap_or_else(|_| "{}".to_string()),
-                            }
+                            serde_yaml::to_string(other).unwrap_or_else(|_| "{}".to_string())
                         }
                     };
                     (k.clone(), val)
@@ -65,27 +49,9 @@ impl ListOrDict {
     }
 }
 
-// ============ StringOrList ============
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum StringOrList {
-    String(String),
-    List(Vec<String>),
-}
-
-impl StringOrList {
-    pub fn to_list(&self) -> Vec<String> {
-        match self {
-            StringOrList::String(s) => vec![s.clone()],
-            StringOrList::List(l) => l.clone(),
-        }
-    }
-}
-
 // ============ DependsOn ============
 
-/// `depends_on` condition values (compose-spec §service.depends_on)
+/// depends_on condition values (compose-spec §service.depends_on)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DependsOnCondition {
@@ -97,14 +63,14 @@ pub enum DependsOnCondition {
 /// Per-dependency entry in the object form of depends_on
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComposeDependsOn {
-    pub condition: Option<DependsOnCondition>,
+    pub condition: DependsOnCondition,
     #[serde(default)]
     pub required: Option<bool>,
     #[serde(default)]
     pub restart: Option<bool>,
 }
 
-/// `depends_on` can be a list of service names or a map with conditions
+/// depends_on can be a list of service names or a map with conditions
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum DependsOnSpec {
@@ -113,7 +79,6 @@ pub enum DependsOnSpec {
 }
 
 impl DependsOnSpec {
-    /// Return all dependency service names.
     pub fn service_names(&self) -> Vec<String> {
         match self {
             DependsOnSpec::List(names) => names.clone(),
@@ -155,8 +120,7 @@ pub struct ComposeServiceVolume {
 pub struct ComposeServiceVolumeBind {
     pub propagation: Option<String>,
     pub create_host_path: Option<bool>,
-    #[serde(rename = "recursive")]
-    pub recursive_opt: Option<String>,
+    pub recursive: Option<String>,
     pub selinux: Option<String>,
 }
 
@@ -169,39 +133,13 @@ pub struct ComposeServiceVolumeOpts {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComposeServiceVolumeTmpfs {
-    pub size: Option<serde_yaml::Value>,
+    pub size: Option<serde_yaml::Value>, // string or number
     pub mode: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComposeServiceVolumeImage {
     pub subpath: Option<String>,
-}
-
-/// Short or long volume form
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum VolumeEntry {
-    Short(String),
-    Long(ComposeServiceVolume),
-}
-
-impl VolumeEntry {
-    /// Convert to "source:target[:ro]" string form for backend CLI args.
-    pub fn to_string_form(&self) -> String {
-        match self {
-            VolumeEntry::Short(s) => s.clone(),
-            VolumeEntry::Long(v) => {
-                let src = v.source.as_deref().unwrap_or("");
-                let tgt = v.target.as_deref().unwrap_or("");
-                if v.read_only.unwrap_or(false) {
-                    format!("{}:{}:ro", src, tgt)
-                } else {
-                    format!("{}:{}", src, tgt)
-                }
-            }
-        }
-    }
 }
 
 // ============ Port ============
@@ -212,8 +150,8 @@ pub struct ComposeServicePort {
     pub name: Option<String>,
     pub mode: Option<String>,
     pub host_ip: Option<String>,
-    pub target: serde_yaml::Value,
-    pub published: Option<serde_yaml::Value>,
+    pub target: serde_yaml::Value,            // integer or string
+    pub published: Option<serde_yaml::Value>, // string or integer
     pub protocol: Option<String>,
     pub app_protocol: Option<String>,
 }
@@ -222,27 +160,8 @@ pub struct ComposeServicePort {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum PortSpec {
-    Short(serde_yaml::Value),
+    Short(serde_yaml::Value), // "8080:80" or 8080
     Long(ComposeServicePort),
-}
-
-impl PortSpec {
-    /// Convert to "host:container" string form for backend CLI args.
-    pub fn to_string_form(&self) -> String {
-        match self {
-            PortSpec::Short(v) => yaml_value_to_str(v),
-            PortSpec::Long(p) => {
-                let container = yaml_value_to_str(&p.target);
-                match &p.published {
-                    Some(pub_) => {
-                        let host = yaml_value_to_str(pub_);
-                        format!("{}:{}", host, container)
-                    }
-                    None => container,
-                }
-            }
-        }
-    }
 }
 
 // ============ Networks on service ============
@@ -256,21 +175,12 @@ pub struct ComposeServiceNetworkConfig {
     pub priority: Option<i32>,
 }
 
-/// `networks` field on a service: list or map
+/// networks field on a service: list or map
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ServiceNetworks {
     List(Vec<String>),
     Map(IndexMap<String, Option<ComposeServiceNetworkConfig>>),
-}
-
-impl ServiceNetworks {
-    pub fn names(&self) -> Vec<String> {
-        match self {
-            ServiceNetworks::List(v) => v.clone(),
-            ServiceNetworks::Map(m) => m.keys().cloned().collect(),
-        }
-    }
 }
 
 // ============ Build ============
@@ -311,30 +221,11 @@ pub struct ComposeServiceBuild {
     pub entitlements: Option<Vec<String>>,
 }
 
-impl BuildSpec {
-    pub fn context(&self) -> Option<&str> {
-        match self {
-            BuildSpec::Context(s) => Some(s.as_str()),
-            BuildSpec::Config(b) => b.context.as_deref(),
-        }
-    }
-
-    pub fn as_build(&self) -> ComposeServiceBuild {
-        match self {
-            BuildSpec::Context(ctx) => ComposeServiceBuild {
-                context: Some(ctx.clone()),
-                ..Default::default()
-            },
-            BuildSpec::Config(b) => b.clone(),
-        }
-    }
-}
-
 // ============ Healthcheck ============
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComposeHealthcheck {
-    pub test: serde_yaml::Value,
+    pub test: serde_yaml::Value, // string or string[]
     pub interval: Option<String>,
     pub timeout: Option<String>,
     pub retries: Option<u32>,
@@ -439,9 +330,9 @@ pub struct ComposeSecret {
 
 // ============ Config ============
 
-/// Top-level config definition (compose-spec `config` object)
+/// Top-level config definition
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ComposeConfigObj {
+pub struct ComposeConfig {
     pub name: Option<String>,
     pub content: Option<String>,
     pub environment: Option<String>,
@@ -458,12 +349,12 @@ pub struct ComposeConfigObj {
 pub struct ComposeService {
     pub image: Option<String>,
     pub build: Option<BuildSpec>,
-    pub command: Option<serde_yaml::Value>,
-    pub entrypoint: Option<serde_yaml::Value>,
+    pub command: Option<serde_yaml::Value>,    // string or string[]
+    pub entrypoint: Option<serde_yaml::Value>, // string or string[]
     pub environment: Option<ListOrDict>,
-    pub env_file: Option<serde_yaml::Value>,
+    pub env_file: Option<serde_yaml::Value>, // string or string[]
     pub ports: Option<Vec<PortSpec>>,
-    pub volumes: Option<Vec<serde_yaml::Value>>,
+    pub volumes: Option<Vec<serde_yaml::Value>>, // string or ComposeServiceVolume
     pub networks: Option<ServiceNetworks>,
     pub depends_on: Option<DependsOnSpec>,
     pub restart: Option<String>,
@@ -510,73 +401,6 @@ pub struct ComposeService {
     pub pre_stop: Option<Vec<serde_yaml::Value>>,
 }
 
-impl ComposeService {
-    /// Whether the service needs to build an image before running.
-    pub fn needs_build(&self) -> bool {
-        self.build.is_some() && self.image.is_none()
-    }
-
-    /// Return the image tag to use for this service.
-    pub fn image_ref(&self, service_name: &str) -> String {
-        if let Some(image) = &self.image {
-            return image.clone();
-        }
-        format!("{}-image", service_name)
-    }
-
-    /// Get resolved environment as a flat map.
-    pub fn resolved_env(&self) -> std::collections::HashMap<String, String> {
-        self.environment
-            .as_ref()
-            .map(|e| e.to_map())
-            .unwrap_or_default()
-    }
-
-    /// Get port strings in "host:container" form.
-    pub fn port_strings(&self) -> Vec<String> {
-        self.ports
-            .as_deref()
-            .unwrap_or(&[])
-            .iter()
-            .map(|p| p.to_string_form())
-            .collect()
-    }
-
-    /// Get volume mount strings.
-    pub fn volume_strings(&self) -> Vec<String> {
-        self.volumes
-            .as_deref()
-            .unwrap_or(&[])
-            .iter()
-            .filter_map(|v| {
-                // Try to parse as VolumeEntry (short or long)
-                if let Ok(short) = serde_yaml::from_value::<VolumeEntry>(v.clone()) {
-                    return Some(short.to_string_form());
-                }
-                // Fallback: string representation
-                Some(yaml_value_to_str(v))
-            })
-            .collect()
-    }
-
-    /// Get the explicit container_name, if set.
-    pub fn explicit_name(&self) -> Option<&str> {
-        self.container_name.as_deref()
-    }
-
-    /// Get command as a list of strings.
-    pub fn command_list(&self) -> Option<Vec<String>> {
-        self.command.as_ref().map(|c| match c {
-            serde_yaml::Value::String(s) => vec![s.clone()],
-            serde_yaml::Value::Sequence(arr) => arr
-                .iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect(),
-            _ => vec![],
-        })
-    }
-}
-
 // ============ ComposeSpec ============
 
 /// Root compose spec (compose-spec §root)
@@ -589,7 +413,7 @@ pub struct ComposeSpec {
     pub networks: Option<IndexMap<String, Option<ComposeNetwork>>>,
     pub volumes: Option<IndexMap<String, Option<ComposeVolume>>>,
     pub secrets: Option<IndexMap<String, Option<ComposeSecret>>>,
-    pub configs: Option<IndexMap<String, Option<ComposeConfigObj>>>,
+    pub configs: Option<IndexMap<String, Option<ComposeConfig>>>,
     pub include: Option<Vec<serde_yaml::Value>>,
     pub models: Option<IndexMap<String, serde_yaml::Value>>,
     #[serde(flatten)]
@@ -597,67 +421,9 @@ pub struct ComposeSpec {
 }
 
 impl ComposeSpec {
-    /// Parse from a YAML string.
-    pub fn parse_str(yaml: &str) -> Result<Self, crate::error::ComposeError> {
-        serde_yaml::from_str(yaml).map_err(crate::error::ComposeError::ParseError)
-    }
-
-    /// Parse from raw YAML bytes.
-    pub fn parse(yaml: &[u8]) -> Result<Self, crate::error::ComposeError> {
-        serde_yaml::from_slice(yaml).map_err(crate::error::ComposeError::ParseError)
-    }
-
-    /// Serialize to YAML.
+    /// Serialize to YAML string.
     pub fn to_yaml(&self) -> Result<String, crate::error::ComposeError> {
-        serde_yaml::to_string(self)
-            .map_err(|e| crate::error::ComposeError::ParseError(e))
-    }
-
-    /// Merge another ComposeSpec into this one (last-writer-wins for all maps).
-    pub fn merge(&mut self, other: ComposeSpec) {
-        for (name, service) in other.services {
-            self.services.insert(name, service);
-        }
-
-        if let Some(nets) = other.networks {
-            let existing = self.networks.get_or_insert_with(IndexMap::new);
-            for (name, net) in nets {
-                existing.insert(name, net);
-            }
-        }
-
-        if let Some(vols) = other.volumes {
-            let existing = self.volumes.get_or_insert_with(IndexMap::new);
-            for (name, vol) in vols {
-                existing.insert(name, vol);
-            }
-        }
-
-        if let Some(secs) = other.secrets {
-            let existing = self.secrets.get_or_insert_with(IndexMap::new);
-            for (name, sec) in secs {
-                existing.insert(name, sec);
-            }
-        }
-
-        if let Some(cfgs) = other.configs {
-            let existing = self.configs.get_or_insert_with(IndexMap::new);
-            for (name, cfg) in cfgs {
-                existing.insert(name, cfg);
-            }
-        }
-
-        if other.name.is_some() {
-            self.name = other.name;
-        }
-        if other.version.is_some() {
-            self.version = other.version;
-        }
-
-        // Merge extensions
-        for (k, v) in other.extensions {
-            self.extensions.insert(k, v);
-        }
+        serde_yaml::to_string(self).map_err(crate::error::ComposeError::ParseError)
     }
 }
 

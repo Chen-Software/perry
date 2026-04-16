@@ -42,10 +42,10 @@ proptest! {
         let spec_str = serde_json::to_string(&spec).unwrap();
         let reparsed: Value = serde_json::from_str(&spec_str).unwrap();
 
-        prop_assert_eq!(reparsed["image"], spec["image"]);
+        prop_assert_eq!(&reparsed["image"], &spec["image"]);
 
         if name.is_some() {
-            prop_assert_eq!(reparsed["name"], spec["name"]);
+            prop_assert_eq!(&reparsed["name"], &spec["name"]);
         }
 
         // Ports array length preserved
@@ -82,7 +82,7 @@ proptest! {
         let json_str = serde_json::to_string(&error_json).unwrap();
         let reparsed: Value = serde_json::from_str(&json_str).unwrap();
 
-        prop_assert_eq!(reparsed["code"], json!(code));
+        prop_assert_eq!(&reparsed["code"], &json!(code));
         prop_assert!(
             reparsed["message"].as_str().unwrap_or("").contains(&msg),
             "message should contain original msg"
@@ -114,7 +114,7 @@ proptest! {
         let json_str = serde_json::to_string(&error_json).unwrap();
         let reparsed: Value = serde_json::from_str(&json_str).unwrap();
 
-        prop_assert_eq!(reparsed["code"], json!(expected_code));
+        prop_assert_eq!(&reparsed["code"], &json!(expected_code));
         prop_assert!(reparsed["message"].is_string());
     }
 }

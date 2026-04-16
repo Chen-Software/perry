@@ -4211,8 +4211,10 @@ dependencies = [
  "anyhow",
  "async-trait",
  "clap",
+ "dashmap 5.5.3",
  "dotenvy",
  "hex",
+ "home",
  "indexmap",
  "md-5",
  "once_cell",
@@ -4226,6 +4228,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "which 6.0.3",
 ]
 
 [[package]]
