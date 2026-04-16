@@ -2686,6 +2686,10 @@ fn lower_module_decl(
                                                     }
                                                     _ => {}
                                                 }
+                                            } else if module_name == "perry/container" && method_name == "composeUp" {
+                                                ctx.register_native_instance(name.clone(), "perry/compose".to_string(), "ComposeHandle".to_string());
+                                            } else if module_name == "perry/compose" && method_name == "up" {
+                                                ctx.register_native_instance(name.clone(), "perry/compose".to_string(), "ComposeHandle".to_string());
                                             }
                                         }
                                     }
@@ -2708,6 +2712,8 @@ fn lower_module_decl(
                                                             ("pg", "connect") => Some("Client"),
                                                             ("http" | "https", "request" | "get") => Some("ClientRequest"),
                                                             ("axios", "get" | "post" | "put" | "delete" | "patch" | "request") => Some("Response"),
+                                                            ("perry/container", "composeUp") => Some("ComposeHandle"),
+                                                            ("perry/compose", "up") => Some("ComposeHandle"),
                                                             _ => None,
                                                         };
                                                         if let Some(class_name) = class_name {

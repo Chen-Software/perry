@@ -46,23 +46,23 @@ pub fn take_compose_handle(id: u64) -> Option<ComposeEngine> {
     COMPOSE_HANDLES.get_or_init(DashMap::new).remove(&id).map(|(_, e)| e)
 }
 
-// FFI Helpers
+// FFI Helpers - returning JSON strings for now as it's easier than manual object construction
 pub fn register_container_info_list(list: Vec<ContainerInfo>) -> u64 {
-    let _ = list;
-    0
+    let json = serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string());
+    unsafe { perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32) as usize as u64 }
 }
 
 pub fn register_container_info(info: ContainerInfo) -> u64 {
-    let _ = info;
-    0
+    let json = serde_json::to_string(&info).unwrap_or_else(|_| "{}".to_string());
+    unsafe { perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32) as usize as u64 }
 }
 
 pub fn register_container_logs(logs: ContainerLogs) -> u64 {
-    let _ = logs;
-    0
+    let json = serde_json::to_string(&logs).unwrap_or_else(|_| "{\"stdout\":\"\",\"stderr\":\"\"}".to_string());
+    unsafe { perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32) as usize as u64 }
 }
 
 pub fn register_image_info_list(list: Vec<ImageInfo>) -> u64 {
-    let _ = list;
-    0
+    let json = serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string());
+    unsafe { perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32) as usize as u64 }
 }

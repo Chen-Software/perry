@@ -6,9 +6,12 @@ pub mod compose;
 pub mod types;
 pub mod verification;
 
-use perry_runtime::{js_promise_new, Promise, StringHeader};
+use perry_runtime::{js_promise_new, Promise, StringHeader, js_string_from_bytes};
 use std::sync::{Arc, OnceLock, Mutex};
+use std::collections::HashMap;
 use backend::{detect_backend, ContainerBackend};
+use crate::common::spawn_for_promise;
+use types::*;
 
 static BACKEND: OnceLock<Arc<dyn ContainerBackend>> = OnceLock::new();
 static BACKEND_INIT_MUTEX: Mutex<()> = Mutex::new(());
@@ -43,21 +46,34 @@ unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
     Some(String::from_utf8_lossy(bytes).to_string())
 }
 
+// =============================================================================
+// perry/container FFI
+// =============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn js_container_getBackend() -> *const StringHeader {
+    let name = match get_global_backend_instance() {
+        Ok(b) => b.backend_name().to_string(),
+        Err(_) => "none".to_string(),
+    };
+    js_string_from_bytes(name.as_ptr(), name.len() as u32)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn js_container_run(spec_json_ptr: *const StringHeader) -> *mut Promise {
     let promise = js_promise_new();
     let spec_json = match string_from_header(spec_json_ptr) {
         Some(s) => s,
         None => {
-            crate::common::spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid JSON".to_string()) });
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid JSON".to_string()) });
             return promise;
         }
     };
 
-    let spec: types::ContainerSpec = match serde_json::from_str(&spec_json) {
+    let spec: ContainerSpec = match serde_json::from_str(&spec_json) {
         Ok(s) => s,
         Err(e) => {
-            crate::common::spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>(e.to_string()) });
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>(e.to_string()) });
             return promise;
         }
     };
@@ -65,14 +81,14 @@ pub unsafe extern "C" fn js_container_run(spec_json_ptr: *const StringHeader) ->
     let backend = match get_global_backend_instance() {
         Ok(b) => b,
         Err(e) => {
-            crate::common::spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>(e) });
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>(e) });
             return promise;
         }
     };
 
-    crate::common::spawn_for_promise(promise as *mut u8, async move {
+    spawn_for_promise(promise as *mut u8, async move {
         match backend.run(&spec).await {
-            Ok(handle) => Ok(types::register_container_handle(handle)),
+            Ok(handle) => Ok(register_container_handle(handle)),
             Err(e) => Err::<u64, String>(e.to_string()),
         }
     });
@@ -81,20 +97,20 @@ pub unsafe extern "C" fn js_container_run(spec_json_ptr: *const StringHeader) ->
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_up(spec_json_ptr: *const StringHeader) -> *mut Promise {
+pub unsafe extern "C" fn js_container_create(spec_json_ptr: *const StringHeader) -> *mut Promise {
     let promise = js_promise_new();
     let spec_json = match string_from_header(spec_json_ptr) {
         Some(s) => s,
         None => {
-            crate::common::spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid JSON".to_string()) });
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid JSON".to_string()) });
             return promise;
         }
     };
 
-    let spec: types::ComposeSpec = match serde_json::from_str(&spec_json) {
+    let spec: ContainerSpec = match serde_json::from_str(&spec_json) {
         Ok(s) => s,
         Err(e) => {
-            crate::common::spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>(e.to_string()) });
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>(e.to_string()) });
             return promise;
         }
     };
@@ -102,17 +118,623 @@ pub unsafe extern "C" fn js_container_compose_up(spec_json_ptr: *const StringHea
     let backend = match get_global_backend_instance() {
         Ok(b) => b,
         Err(e) => {
-            crate::common::spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>(e) });
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>(e) });
             return promise;
         }
     };
 
-    crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let engine = perry_container_compose::ComposeEngine::new(spec, "default".into(), backend);
-        match engine.up(&[], true, false, false).await {
-            Ok(_handle) => Ok(types::register_compose_handle(engine)),
+    spawn_for_promise(promise as *mut u8, async move {
+        match backend.create(&spec).await {
+            Ok(handle) => Ok(register_container_handle(handle)),
             Err(e) => Err::<u64, String>(e.to_string()),
         }
+    });
+
+    promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_container_start(id_ptr: *const StringHeader) -> *mut Promise {
+    let promise = js_promise_new();
+    let id = match string_from_header(id_ptr) {
+        Some(s) => s,
+        None => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid ID".to_string()) });
+            return promise;
+        }
+    };
+
+    let backend = match get_global_backend_instance() {
+        Ok(b) => b,
+        Err(e) => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>(e) });
+            return promise;
+        }
+    };
+
+    spawn_for_promise(promise as *mut u8, async move {
+        match backend.start(&id).await {
+            Ok(_) => Ok(0u64),
+            Err(e) => Err::<u64, String>(e.to_string()),
+        }
+    });
+
+    promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_container_stop(id_ptr: *const StringHeader, timeout: i32) -> *mut Promise {
+    let promise = js_promise_new();
+    let id = match string_from_header(id_ptr) {
+        Some(s) => s,
+        None => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid ID".to_string()) });
+            return promise;
+        }
+    };
+    let timeout_opt = if timeout >= 0 { Some(timeout as u32) } else { None };
+
+    let backend = match get_global_backend_instance() {
+        Ok(b) => b,
+        Err(e) => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>(e) });
+            return promise;
+        }
+    };
+
+    spawn_for_promise(promise as *mut u8, async move {
+        match backend.stop(&id, timeout_opt).await {
+            Ok(_) => Ok(0u64),
+            Err(e) => Err::<u64, String>(e.to_string()),
+        }
+    });
+
+    promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_container_remove(id_ptr: *const StringHeader, force: i32) -> *mut Promise {
+    let promise = js_promise_new();
+    let id = match string_from_header(id_ptr) {
+        Some(s) => s,
+        None => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid ID".to_string()) });
+            return promise;
+        }
+    };
+    let force_bool = force != 0;
+
+    let backend = match get_global_backend_instance() {
+        Ok(b) => b,
+        Err(e) => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>(e) });
+            return promise;
+        }
+    };
+
+    spawn_for_promise(promise as *mut u8, async move {
+        match backend.remove(&id, force_bool).await {
+            Ok(_) => Ok(0u64),
+            Err(e) => Err::<u64, String>(e.to_string()),
+        }
+    });
+
+    promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_container_list(all: i32) -> *mut Promise {
+    let promise = js_promise_new();
+    let all_bool = all != 0;
+
+    let backend = match get_global_backend_instance() {
+        Ok(b) => b,
+        Err(e) => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>(e) });
+            return promise;
+        }
+    };
+
+    spawn_for_promise(promise as *mut u8, async move {
+        match backend.list(all_bool).await {
+            Ok(list) => Ok(register_container_info_list(list)),
+            Err(e) => Err::<u64, String>(e.to_string()),
+        }
+    });
+
+    promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_container_inspect(id_ptr: *const StringHeader) -> *mut Promise {
+    let promise = js_promise_new();
+    let id = match string_from_header(id_ptr) {
+        Some(s) => s,
+        None => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid ID".to_string()) });
+            return promise;
+        }
+    };
+
+    let backend = match get_global_backend_instance() {
+        Ok(b) => b,
+        Err(e) => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>(e) });
+            return promise;
+        }
+    };
+
+    spawn_for_promise(promise as *mut u8, async move {
+        match backend.inspect(&id).await {
+            Ok(info) => Ok(register_container_info(info)),
+            Err(e) => Err::<u64, String>(e.to_string()),
+        }
+    });
+
+    promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_container_logs(id_ptr: *const StringHeader, tail: i32) -> *mut Promise {
+    let promise = js_promise_new();
+    let id = match string_from_header(id_ptr) {
+        Some(s) => s,
+        None => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid ID".to_string()) });
+            return promise;
+        }
+    };
+    let tail_opt = if tail >= 0 { Some(tail as u32) } else { None };
+
+    let backend = match get_global_backend_instance() {
+        Ok(b) => b,
+        Err(e) => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>(e) });
+            return promise;
+        }
+    };
+
+    spawn_for_promise(promise as *mut u8, async move {
+        match backend.logs(&id, tail_opt).await {
+            Ok(logs) => Ok(register_container_logs(logs)),
+            Err(e) => Err::<u64, String>(e.to_string()),
+        }
+    });
+
+    promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_container_exec(
+    id_ptr: *const StringHeader,
+    cmd_json_ptr: *const StringHeader,
+    env_json_ptr: *const StringHeader,
+    workdir_ptr: *const StringHeader,
+) -> *mut Promise {
+    let promise = js_promise_new();
+    let id = match string_from_header(id_ptr) {
+        Some(s) => s,
+        None => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid ID".to_string()) });
+            return promise;
+        }
+    };
+    let cmd_json = match string_from_header(cmd_json_ptr) {
+        Some(s) => s,
+        None => "[]".to_string(),
+    };
+    let cmd: Vec<String> = serde_json::from_str(&cmd_json).unwrap_or_default();
+
+    let env_json = string_from_header(env_json_ptr);
+    let env: Option<HashMap<String, String>> = env_json.and_then(|s| serde_json::from_str(&s).ok());
+
+    let workdir = string_from_header(workdir_ptr);
+
+    let backend = match get_global_backend_instance() {
+        Ok(b) => b,
+        Err(e) => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>(e) });
+            return promise;
+        }
+    };
+
+    spawn_for_promise(promise as *mut u8, async move {
+        match backend.exec(&id, &cmd, env.as_ref(), workdir.as_deref()).await {
+            Ok(logs) => Ok(register_container_logs(logs)),
+            Err(e) => Err::<u64, String>(e.to_string()),
+        }
+    });
+
+    promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_container_pullImage(ref_ptr: *const StringHeader) -> *mut Promise {
+    let promise = js_promise_new();
+    let reference = match string_from_header(ref_ptr) {
+        Some(s) => s,
+        None => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid string".to_string()) });
+            return promise;
+        }
+    };
+
+    let backend = match get_global_backend_instance() {
+        Ok(b) => b,
+        Err(e) => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>(e) });
+            return promise;
+        }
+    };
+
+    spawn_for_promise(promise as *mut u8, async move {
+        match backend.pull_image(&reference).await {
+            Ok(_) => Ok(0u64),
+            Err(e) => Err::<u64, String>(e.to_string()),
+        }
+    });
+
+    promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_container_listImages() -> *mut Promise {
+    let promise = js_promise_new();
+    let backend = match get_global_backend_instance() {
+        Ok(b) => b,
+        Err(e) => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>(e) });
+            return promise;
+        }
+    };
+
+    spawn_for_promise(promise as *mut u8, async move {
+        match backend.list_images().await {
+            Ok(list) => Ok(register_image_info_list(list)),
+            Err(e) => Err::<u64, String>(e.to_string()),
+        }
+    });
+
+    promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_container_removeImage(ref_ptr: *const StringHeader, force: i32) -> *mut Promise {
+    let promise = js_promise_new();
+    let reference = match string_from_header(ref_ptr) {
+        Some(s) => s,
+        None => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid string".to_string()) });
+            return promise;
+        }
+    };
+    let force_bool = force != 0;
+
+    let backend = match get_global_backend_instance() {
+        Ok(b) => b,
+        Err(e) => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>(e) });
+            return promise;
+        }
+    };
+
+    spawn_for_promise(promise as *mut u8, async move {
+        match backend.remove_image(&reference, force_bool).await {
+            Ok(_) => Ok(0u64),
+            Err(e) => Err::<u64, String>(e.to_string()),
+        }
+    });
+
+    promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_container_composeUp(spec_json_ptr: *const StringHeader) -> *mut Promise {
+    let promise = js_promise_new();
+    let spec_json = match string_from_header(spec_json_ptr) {
+        Some(s) => s,
+        None => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid JSON".to_string()) });
+            return promise;
+        }
+    };
+
+    let spec: ComposeSpec = match serde_json::from_str(&spec_json) {
+        Ok(s) => s,
+        Err(e) => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>(e.to_string()) });
+            return promise;
+        }
+    };
+
+    let backend = match get_global_backend_instance() {
+        Ok(b) => b,
+        Err(e) => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>(e) });
+            return promise;
+        }
+    };
+
+    spawn_for_promise(promise as *mut u8, async move {
+        let engine = perry_container_compose::ComposeEngine::new(spec, "default".into(), backend);
+        match engine.up(&[], true, false, false).await {
+            Ok(_handle) => Ok(register_compose_handle(engine)),
+            Err(e) => Err::<u64, String>(e.to_string()),
+        }
+    });
+
+    promise
+}
+
+// =============================================================================
+// perry/compose FFI
+// =============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_up(spec_json_ptr: *const StringHeader) -> *mut Promise {
+    js_container_composeUp(spec_json_ptr)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_down(handle_id: u64, volumes: i32) -> *mut Promise {
+    let promise = js_promise_new();
+    let volumes_bool = volumes != 0;
+
+    let engine = match take_compose_handle(handle_id) {
+        Some(e) => e,
+        None => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid handle".to_string()) });
+            return promise;
+        }
+    };
+
+    spawn_for_promise(promise as *mut u8, async move {
+        match engine.down(volumes_bool, false).await {
+            Ok(_) => Ok(0u64),
+            Err(e) => Err::<u64, String>(e.to_string()),
+        }
+    });
+
+    promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_ps(handle_id: u64) -> *mut Promise {
+    let promise = js_promise_new();
+    let engine_ref = match get_compose_handle(handle_id) {
+        Some(e) => e,
+        None => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid handle".to_string()) });
+            return promise;
+        }
+    };
+
+    let backend = Arc::clone(&engine_ref.backend);
+    let containers: Vec<(String, String)> = engine_ref.containers.iter().map(|r| (r.key().clone(), r.value().clone())).collect();
+    drop(engine_ref);
+
+    spawn_for_promise(promise as *mut u8, async move {
+        let mut results = Vec::new();
+        for (_svc, id) in containers {
+            if let Ok(info) = backend.inspect(&id).await {
+                results.push(info);
+            }
+        }
+        Ok(register_container_info_list(results))
+    });
+
+    promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_logs(handle_id: u64, service_ptr: *const StringHeader, tail: i32) -> *mut Promise {
+    let promise = js_promise_new();
+    let service = string_from_header(service_ptr);
+    let tail_opt = if tail >= 0 { Some(tail as u32) } else { None };
+
+    let engine_ref = match get_compose_handle(handle_id) {
+        Some(e) => e,
+        None => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid handle".to_string()) });
+            return promise;
+        }
+    };
+
+    let backend = Arc::clone(&engine_ref.backend);
+    let container_id = service.as_ref().and_then(|s| engine_ref.containers.get(s).map(|r| r.value().clone()));
+    drop(engine_ref);
+
+    spawn_for_promise(promise as *mut u8, async move {
+        if let Some(id) = container_id {
+            match backend.logs(&id, tail_opt).await {
+                Ok(logs) => Ok(register_container_logs(logs)),
+                Err(e) => Err::<u64, String>(e.to_string()),
+            }
+        } else {
+            Err::<u64, String>("Service not found or no service specified".to_string())
+        }
+    });
+
+    promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_exec(
+    handle_id: u64,
+    service_ptr: *const StringHeader,
+    cmd_json_ptr: *const StringHeader,
+) -> *mut Promise {
+    let promise = js_promise_new();
+    let service = match string_from_header(service_ptr) {
+        Some(s) => s,
+        None => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid service name".to_string()) });
+            return promise;
+        }
+    };
+    let cmd_json = match string_from_header(cmd_json_ptr) {
+        Some(s) => s,
+        None => "[]".to_string(),
+    };
+    let cmd: Vec<String> = serde_json::from_str(&cmd_json).unwrap_or_default();
+
+    let engine_ref = match get_compose_handle(handle_id) {
+        Some(e) => e,
+        None => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid handle".to_string()) });
+            return promise;
+        }
+    };
+
+    let backend = Arc::clone(&engine_ref.backend);
+    let container_id = engine_ref.containers.get(&service).map(|r| r.value().clone());
+    drop(engine_ref);
+
+    spawn_for_promise(promise as *mut u8, async move {
+        if let Some(id) = container_id {
+            match backend.exec(&id, &cmd, None, None).await {
+                Ok(logs) => Ok(register_container_logs(logs)),
+                Err(e) => Err::<u64, String>(e.to_string()),
+            }
+        } else {
+            Err::<u64, String>(format!("Service '{}' not found", service))
+        }
+    });
+
+    promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_config(spec_json_ptr: *const StringHeader) -> *mut Promise {
+    let promise = js_promise_new();
+    let spec_json = match string_from_header(spec_json_ptr) {
+        Some(s) => s,
+        None => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid JSON".to_string()) });
+            return promise;
+        }
+    };
+
+    // For config, we just return the spec back as a JSON string for now, validated.
+    let spec: ComposeSpec = match serde_json::from_str(&spec_json) {
+        Ok(s) => s,
+        Err(e) => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>(e.to_string()) });
+            return promise;
+        }
+    };
+
+    spawn_for_promise(promise as *mut u8, async move {
+        let validated_json = serde_json::to_string(&spec).unwrap_or_default();
+        Ok(js_string_from_bytes(validated_json.as_ptr(), validated_json.len() as u32) as usize as u64)
+    });
+
+    promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_start(handle_id: u64, services_json_ptr: *const StringHeader) -> *mut Promise {
+    let promise = js_promise_new();
+    let services_json = match string_from_header(services_json_ptr) {
+        Some(s) => s,
+        None => "[]".to_string(),
+    };
+    let services: Vec<String> = serde_json::from_str(&services_json).unwrap_or_default();
+
+    let engine_ref = match get_compose_handle(handle_id) {
+        Some(e) => e,
+        None => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid handle".to_string()) });
+            return promise;
+        }
+    };
+
+    // In a real implementation we would call engine.start(&services)
+    // For now we delegate to the backend for each service
+    let backend = Arc::clone(&engine_ref.backend);
+    let container_ids: Vec<String> = if services.is_empty() {
+        engine_ref.containers.iter().map(|r| r.value().clone()).collect()
+    } else {
+        services.iter().filter_map(|s| engine_ref.containers.get(s).map(|r| r.value().clone())).collect()
+    };
+    drop(engine_ref);
+
+    spawn_for_promise(promise as *mut u8, async move {
+        for id in container_ids {
+            backend.start(&id).await.ok();
+        }
+        Ok(0u64)
+    });
+
+    promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_stop(handle_id: u64, services_json_ptr: *const StringHeader) -> *mut Promise {
+    let promise = js_promise_new();
+    let services_json = match string_from_header(services_json_ptr) {
+        Some(s) => s,
+        None => "[]".to_string(),
+    };
+    let services: Vec<String> = serde_json::from_str(&services_json).unwrap_or_default();
+
+    let engine_ref = match get_compose_handle(handle_id) {
+        Some(e) => e,
+        None => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid handle".to_string()) });
+            return promise;
+        }
+    };
+
+    let backend = Arc::clone(&engine_ref.backend);
+    let container_ids: Vec<String> = if services.is_empty() {
+        engine_ref.containers.iter().map(|r| r.value().clone()).collect()
+    } else {
+        services.iter().filter_map(|s| engine_ref.containers.get(s).map(|r| r.value().clone())).collect()
+    };
+    drop(engine_ref);
+
+    spawn_for_promise(promise as *mut u8, async move {
+        for id in container_ids {
+            backend.stop(&id, None).await.ok();
+        }
+        Ok(0u64)
+    });
+
+    promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_restart(handle_id: u64, services_json_ptr: *const StringHeader) -> *mut Promise {
+    let promise = js_promise_new();
+    let services_json = match string_from_header(services_json_ptr) {
+        Some(s) => s,
+        None => "[]".to_string(),
+    };
+    let services: Vec<String> = serde_json::from_str(&services_json).unwrap_or_default();
+
+    let engine_ref = match get_compose_handle(handle_id) {
+        Some(e) => e,
+        None => {
+            spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid handle".to_string()) });
+            return promise;
+        }
+    };
+
+    let backend = Arc::clone(&engine_ref.backend);
+    let container_ids: Vec<String> = if services.is_empty() {
+        engine_ref.containers.iter().map(|r| r.value().clone()).collect()
+    } else {
+        services.iter().filter_map(|s| engine_ref.containers.get(s).map(|r| r.value().clone())).collect()
+    };
+    drop(engine_ref);
+
+    spawn_for_promise(promise as *mut u8, async move {
+        for id in container_ids {
+            backend.stop(&id, None).await.ok();
+            backend.start(&id).await.ok();
+        }
+        Ok(0u64)
     });
 
     promise

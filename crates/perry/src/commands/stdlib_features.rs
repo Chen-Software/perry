@@ -75,6 +75,9 @@ pub fn module_to_features(module: &str) -> &'static [&'static str] {
         // ── IDs (uuid / nanoid) ───────────────────────────────────────
         "uuid" | "nanoid" => &["ids"],
 
+        // ── Containers (Apple Container / Podman) ─────────────────────
+        "perry/container" | "perry/container-compose" | "perry/compose" => &["container"],
+
         // Slugify is in the always-on stdlib core (no optional dep).
         "slugify" => &[],
         // dotenv has no optional dep.
