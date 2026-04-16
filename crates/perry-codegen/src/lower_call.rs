@@ -2362,6 +2362,15 @@ pub(crate) fn lower_native_method_call(
         }
     }
 
+    if module == "perry/container" || module == "perry/container-compose" {
+        let recv_val = lower_expr(ctx, object.unwrap())?;
+        let blk = ctx.block();
+        let handle = unbox_to_i64(blk, &recv_val);
+        if let Some((_, ffi_symbol)) = PERRY_CONTAINER_TABLE.iter().chain(PERRY_CONTAINER_COMPOSE_TABLE.iter()).find(|(m, _)| *m == method) {
+            return lower_perry_container_compose_call(ctx, ffi_symbol, Some(handle), args);
+        }
+    }
+
     // to the perry_ui_* runtime function and arg shape. Most setters
     // follow `(widget, …number args)` and most constructors return a
     // widget handle that gets NaN-boxed as POINTER on the way out.
