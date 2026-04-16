@@ -72,10 +72,13 @@ pub fn compose_error_to_js(e: &ComposeError) -> String {
         ComposeError::BackendError { code, .. } => *code,
         ComposeError::DependencyCycle { .. } => 422,
         ComposeError::ValidationError { .. } => 400,
+        ComposeError::ParseError(_) => 400,
+        ComposeError::JsonError(_) => 400,
         ComposeError::VerificationFailed { .. } => 403,
         ComposeError::NoBackendFound { .. } => 503,
         ComposeError::BackendNotAvailable { .. } => 503,
-        _ => 500,
+        ComposeError::ServiceStartupFailed { .. } => 500,
+        ComposeError::IoError(_) => 500,
     };
     serde_json::json!({
         "message": e.to_string(),
@@ -110,7 +113,7 @@ mod tests {
         assert_eq!(compose_error_to_js(&err).contains("\"code\":403"), true);
 
         let err = ComposeError::ParseError(serde_yaml::from_str::<serde_yaml::Value>("bad: [1,2").unwrap_err());
-        assert_eq!(compose_error_to_js(&err).contains("\"code\":500"), true);
+        assert_eq!(compose_error_to_js(&err).contains("\"code\":400"), true);
 
         let err = ComposeError::NoBackendFound {
             probed: vec![BackendProbeResult {

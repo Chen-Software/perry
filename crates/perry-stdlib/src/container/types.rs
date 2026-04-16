@@ -54,6 +54,18 @@ pub fn take_compose_handle(id: u64) -> Option<ComposeHandle> {
     handle::take_handle(id as Handle)
 }
 
+pub fn register_compose_wrapper(w: crate::container::compose::ComposeWrapper) -> u64 {
+    handle::register_handle(w) as u64
+}
+
+pub fn get_compose_wrapper(id: u64) -> Option<&'static crate::container::compose::ComposeWrapper> {
+    handle::get_handle(id as Handle)
+}
+
+pub fn take_compose_wrapper(id: u64) -> Option<crate::container::compose::ComposeWrapper> {
+    handle::take_handle(id as Handle)
+}
+
 pub fn register_container_logs(logs: ContainerLogs) -> u64 {
     handle::register_handle(logs) as u64
 }
@@ -207,6 +219,25 @@ unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
 pub fn parse_container_spec(spec_ptr: *const StringHeader) -> Result<ContainerSpec, String> {
     let json = unsafe { string_from_header(spec_ptr) }.ok_or("Invalid spec pointer")?;
     serde_json::from_str(&json).map_err(|e| e.to_string())
+}
+
+/// Convert a `ContainerError` to a JSON error string for TS.
+pub fn compose_error_to_json(e: ContainerError) -> String {
+    let code = match &e {
+        ContainerError::NotFound(_) => 404,
+        ContainerError::BackendError { code, .. } => *code,
+        ContainerError::DependencyCycle { .. } => 422,
+        ContainerError::InvalidConfig(_) => 400,
+        ContainerError::VerificationFailed { .. } => 403,
+        ContainerError::NoBackendFound { .. } => 503,
+        ContainerError::BackendNotAvailable { .. } => 503,
+        _ => 500,
+    };
+    serde_json::json!({
+        "message": e.to_string(),
+        "code": code
+    })
+    .to_string()
 }
 
 /// Parse `ComposeSpec` from a JSON StringHeader pointer.

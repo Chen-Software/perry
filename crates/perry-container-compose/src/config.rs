@@ -152,6 +152,11 @@ pub fn find_default_compose_file(dir: &Path) -> Result<Vec<PathBuf>> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::Mutex;
+
+    // Use a global lock for tests that manipulate environment variables to avoid race conditions
+    // when running tests in parallel (req 9.3, 9.4).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn make_temp_dir(suffix: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("perry-config-test-{suffix}"));
@@ -170,6 +175,7 @@ mod tests {
 
     #[test]
     fn test_project_name_env_var_fallback() {
+        let _lock = ENV_LOCK.lock().unwrap();
         let dir = make_temp_dir("env-fallback");
         // Temporarily set the env var; restore afterwards.
         std::env::set_var("COMPOSE_PROJECT_NAME", "env-project");
@@ -180,6 +186,7 @@ mod tests {
 
     #[test]
     fn test_project_name_dir_fallback() {
+        let _lock = ENV_LOCK.lock().unwrap();
         // Ensure env var is not set for this test.
         std::env::remove_var("COMPOSE_PROJECT_NAME");
         let dir = make_temp_dir("dir-fallback");
@@ -189,6 +196,7 @@ mod tests {
 
     #[test]
     fn test_project_name_empty_cli_falls_through_to_env() {
+        let _lock = ENV_LOCK.lock().unwrap();
         let dir = make_temp_dir("empty-cli");
         std::env::set_var("COMPOSE_PROJECT_NAME", "from-env");
         let name = resolve_project_name(Some(""), &dir);

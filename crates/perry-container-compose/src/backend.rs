@@ -317,29 +317,112 @@ pub fn docker_run_flags(spec: &ContainerSpec, include_detach: bool) -> Vec<Strin
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4.2  CliProtocol trait with Docker-compatible defaults
+// 4.2  BackendDriver enum
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Translates abstract container operations into CLI arguments for a specific
-/// runtime family, and parses the CLI's JSON output back into typed structs.
-///
-/// Every method has a Docker-compatible default. Only `protocol_name()` is
-/// required. New protocols override only what differs.
-pub trait CliProtocol: Send + Sync {
-    /// Human-readable protocol name (e.g. `"docker-compatible"`, `"apple/container"`).
-    fn protocol_name(&self) -> &str;
+/// Identifies the detected container runtime and its resolved CLI binary path.
+#[derive(Debug, Clone)]
+pub enum BackendDriver {
+    AppleContainer { bin: PathBuf },
+    Podman { bin: PathBuf },
+    OrbStack { bin: PathBuf },
+    Colima { bin: PathBuf },
+    RancherDesktop { bin: PathBuf }, // uses nerdctl
+    Lima { bin: PathBuf, instance: String }, // uses limactl
+    Nerdctl { bin: PathBuf },
+    Docker { bin: PathBuf },
+}
 
-    /// Optional prefix inserted before every subcommand.
-    /// `LimaProtocol` returns `Some(["shell", "<instance>", "nerdctl"])`.
-    fn subcommand_prefix(&self) -> Option<Vec<String>> {
-        None
+impl BackendDriver {
+    /// Returns the human-readable name used in getBackend() and PERRY_CONTAINER_BACKEND.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::AppleContainer { .. } => "apple/container",
+            Self::Podman { .. } => "podman",
+            Self::OrbStack { .. } => "orbstack",
+            Self::Colima { .. } => "colima",
+            Self::RancherDesktop { .. } => "rancher-desktop",
+            Self::Lima { .. } => "lima",
+            Self::Nerdctl { .. } => "nerdctl",
+            Self::Docker { .. } => "docker",
+        }
     }
 
-    // ── Argument builders (Docker-compatible defaults) ─────────────────────
+    /// Returns the resolved CLI binary path.
+    pub fn bin(&self) -> &PathBuf {
+        match self {
+            Self::AppleContainer { bin }
+            | Self::Podman { bin }
+            | Self::OrbStack { bin }
+            | Self::Colima { bin }
+            | Self::RancherDesktop { bin }
+            | Self::Lima { bin, .. }
+            | Self::Nerdctl { bin }
+            | Self::Docker { bin } => bin,
+        }
+    }
 
-    fn run_args(&self, spec: &ContainerSpec) -> Vec<String> {
-        let mut args = vec!["run".into()];
-        args.extend(docker_run_flags(spec, true));
+    /// Returns true if this driver accepts Docker-compatible CLI flags.
+    /// All drivers except AppleContainer and Lima use Docker-compatible syntax.
+    pub fn is_docker_compatible(&self) -> bool {
+        !matches!(self, Self::AppleContainer { .. } | Self::Lima { .. })
+    }
+
+    /// Optional prefix inserted before every subcommand.
+    pub fn subcommand_prefix(&self) -> Option<Vec<String>> {
+        match self {
+            Self::Lima { instance, .. } => Some(vec![
+                "shell".into(),
+                instance.clone(),
+                "nerdctl".into(),
+            ]),
+            _ => None,
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4.2  OciCommandBuilder struct
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Translates abstract container operations into CLI arguments for the active BackendDriver.
+pub struct OciCommandBuilder;
+
+impl OciCommandBuilder {
+    pub fn run_args(driver: &BackendDriver, spec: &ContainerSpec) -> Vec<String> {
+        match driver {
+            BackendDriver::AppleContainer { .. } => Self::apple_run_args(spec),
+            BackendDriver::Lima { .. } => Self::docker_run_args(spec, true),
+            _ if driver.is_docker_compatible() => Self::docker_run_args(spec, true),
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn create_args(driver: &BackendDriver, spec: &ContainerSpec) -> Vec<String> {
+        match driver {
+            _ if driver.is_docker_compatible() || matches!(driver, BackendDriver::Lima { .. }) => {
+                Self::docker_run_args(spec, false)
+            }
+            _ => {
+                // Default to docker-like but without detach
+                let mut args = vec!["create".into()];
+                args.extend(docker_run_flags(spec, false));
+                args.push(spec.image.clone());
+                if let Some(cmd) = &spec.cmd {
+                    args.extend(cmd.iter().cloned());
+                }
+                args
+            }
+        }
+    }
+
+    pub fn docker_run_args(spec: &ContainerSpec, detach: bool) -> Vec<String> {
+        let mut args = if detach {
+            vec!["run".into()]
+        } else {
+            vec!["create".into()]
+        };
+        args.extend(docker_run_flags(spec, detach));
         args.push(spec.image.clone());
         if let Some(cmd) = &spec.cmd {
             args.extend(cmd.iter().cloned());
@@ -347,8 +430,8 @@ pub trait CliProtocol: Send + Sync {
         args
     }
 
-    fn create_args(&self, spec: &ContainerSpec) -> Vec<String> {
-        let mut args = vec!["create".into()];
+    pub fn apple_run_args(spec: &ContainerSpec) -> Vec<String> {
+        let mut args = vec!["run".into()];
         args.extend(docker_run_flags(spec, false));
         args.push(spec.image.clone());
         if let Some(cmd) = &spec.cmd {
@@ -357,11 +440,11 @@ pub trait CliProtocol: Send + Sync {
         args
     }
 
-    fn start_args(&self, id: &str) -> Vec<String> {
+    pub fn start_args(_driver: &BackendDriver, id: &str) -> Vec<String> {
         vec!["start".into(), id.into()]
     }
 
-    fn stop_args(&self, id: &str, timeout: Option<u32>) -> Vec<String> {
+    pub fn stop_args(_driver: &BackendDriver, id: &str, timeout: Option<u32>) -> Vec<String> {
         let mut args = vec!["stop".into()];
         if let Some(t) = timeout {
             args.push("-t".into());
@@ -371,7 +454,7 @@ pub trait CliProtocol: Send + Sync {
         args
     }
 
-    fn remove_args(&self, id: &str, force: bool) -> Vec<String> {
+    pub fn remove_args(_driver: &BackendDriver, id: &str, force: bool) -> Vec<String> {
         let mut args = vec!["rm".into()];
         if force {
             args.push("-f".into());
@@ -380,7 +463,7 @@ pub trait CliProtocol: Send + Sync {
         args
     }
 
-    fn list_args(&self, all: bool) -> Vec<String> {
+    pub fn list_args(_driver: &BackendDriver, all: bool) -> Vec<String> {
         let mut args = vec!["ps".into(), "--format".into(), "json".into()];
         if all {
             args.push("--all".into());
@@ -388,11 +471,11 @@ pub trait CliProtocol: Send + Sync {
         args
     }
 
-    fn inspect_args(&self, id: &str) -> Vec<String> {
+    pub fn inspect_args(_driver: &BackendDriver, id: &str) -> Vec<String> {
         vec!["inspect".into(), "--format".into(), "json".into(), id.into()]
     }
 
-    fn logs_args(&self, id: &str, tail: Option<u32>) -> Vec<String> {
+    pub fn logs_args(_driver: &BackendDriver, id: &str, tail: Option<u32>) -> Vec<String> {
         let mut args = vec!["logs".into()];
         if let Some(t) = tail {
             args.push("--tail".into());
@@ -402,8 +485,8 @@ pub trait CliProtocol: Send + Sync {
         args
     }
 
-    fn exec_args(
-        &self,
+    pub fn exec_args(
+        _driver: &BackendDriver,
         id: &str,
         cmd: &[String],
         env: Option<&HashMap<String, String>>,
@@ -427,15 +510,15 @@ pub trait CliProtocol: Send + Sync {
         args
     }
 
-    fn pull_image_args(&self, reference: &str) -> Vec<String> {
+    pub fn pull_image_args(_driver: &BackendDriver, reference: &str) -> Vec<String> {
         vec!["pull".into(), reference.into()]
     }
 
-    fn list_images_args(&self) -> Vec<String> {
+    pub fn list_images_args(_driver: &BackendDriver) -> Vec<String> {
         vec!["images".into(), "--format".into(), "json".into()]
     }
 
-    fn remove_image_args(&self, reference: &str, force: bool) -> Vec<String> {
+    pub fn remove_image_args(_driver: &BackendDriver, reference: &str, force: bool) -> Vec<String> {
         let mut args = vec!["rmi".into()];
         if force {
             args.push("-f".into());
@@ -444,7 +527,7 @@ pub trait CliProtocol: Send + Sync {
         args
     }
 
-    fn create_network_args(&self, name: &str, config: &NetworkConfig) -> Vec<String> {
+    pub fn create_network_args(_driver: &BackendDriver, name: &str, config: &NetworkConfig) -> Vec<String> {
         let mut args = vec!["network".into(), "create".into()];
         if let Some(d) = &config.driver {
             args.push("--driver".into());
@@ -466,11 +549,11 @@ pub trait CliProtocol: Send + Sync {
         args
     }
 
-    fn remove_network_args(&self, name: &str) -> Vec<String> {
+    pub fn remove_network_args(_driver: &BackendDriver, name: &str) -> Vec<String> {
         vec!["network".into(), "rm".into(), name.into()]
     }
 
-    fn create_volume_args(&self, name: &str, config: &VolumeConfig) -> Vec<String> {
+    pub fn create_volume_args(_driver: &BackendDriver, name: &str, config: &VolumeConfig) -> Vec<String> {
         let mut args = vec!["volume".into(), "create".into()];
         if let Some(d) = &config.driver {
             args.push("--driver".into());
@@ -486,20 +569,20 @@ pub trait CliProtocol: Send + Sync {
         args
     }
 
-    fn remove_volume_args(&self, name: &str) -> Vec<String> {
+    pub fn remove_volume_args(_driver: &BackendDriver, name: &str) -> Vec<String> {
         vec!["volume".into(), "rm".into(), name.into()]
     }
 
-    fn inspect_network_args(&self, name: &str) -> Vec<String> {
+    pub fn inspect_network_args(_driver: &BackendDriver, name: &str) -> Vec<String> {
         vec!["network".into(), "inspect".into(), name.into()]
     }
 
-    fn inspect_volume_args(&self, name: &str) -> Vec<String> {
+    pub fn inspect_volume_args(_driver: &BackendDriver, name: &str) -> Vec<String> {
         vec!["volume".into(), "inspect".into(), name.into()]
     }
 
-    fn build_args(
-        &self,
+    pub fn build_args(
+        _driver: &BackendDriver,
         context: &str,
         tag: &str,
         dockerfile: Option<&str>,
@@ -520,22 +603,20 @@ pub trait CliProtocol: Send + Sync {
         full_args
     }
 
-    fn inspect_image_args(&self, reference: &str) -> Vec<String> {
+    pub fn inspect_image_args(_driver: &BackendDriver, reference: &str) -> Vec<String> {
         vec!["image".into(), "inspect".into(), reference.into()]
     }
 
-    fn manifest_inspect_args(&self, reference: &str) -> Vec<String> {
+    pub fn manifest_inspect_args(_driver: &BackendDriver, reference: &str) -> Vec<String> {
         vec!["manifest".into(), "inspect".into(), reference.into()]
     }
 
-    fn run_with_security_args(
-        &self,
+    pub fn run_with_security_args(
+        driver: &BackendDriver,
         spec: &ContainerSpec,
         profile: &SecurityProfile,
     ) -> Vec<String> {
-        let mut args = self.run_args(spec);
-        // Find where the image name starts and insert security flags before it.
-        // run_args returns: ["run", flags..., image, cmd...]
+        let mut args = Self::run_args(driver, spec);
         let image_pos = args.iter().position(|s| s == &spec.image).unwrap_or(args.len());
 
         let mut security_flags = Vec::new();
@@ -557,13 +638,13 @@ pub trait CliProtocol: Send + Sync {
         args
     }
 
-    fn wait_args(&self, id: &str) -> Vec<String> {
+    pub fn wait_args(_driver: &BackendDriver, id: &str) -> Vec<String> {
         vec!["wait".into(), id.into()]
     }
 
     // ── Output parsers (Docker JSON defaults) ─────────────────────────────
 
-    fn parse_list_output(&self, stdout: &str) -> Vec<ContainerInfo> {
+    pub fn parse_list_output(stdout: &str) -> Vec<ContainerInfo> {
         let trimmed = stdout.trim();
         if trimmed.starts_with('[') {
             serde_json::from_str::<Vec<DockerListEntry>>(trimmed)
@@ -581,7 +662,7 @@ pub trait CliProtocol: Send + Sync {
         }
     }
 
-    fn parse_inspect_output(&self, id: &str, stdout: &str) -> Option<ContainerInfo> {
+    pub fn parse_inspect_output(id: &str, stdout: &str) -> Option<ContainerInfo> {
         let trimmed = stdout.trim();
         let entry: Option<DockerInspectEntry> = if trimmed.starts_with('[') {
             serde_json::from_str::<Vec<DockerInspectEntry>>(trimmed)
@@ -610,7 +691,7 @@ pub trait CliProtocol: Send + Sync {
         })
     }
 
-    fn parse_list_images_output(&self, stdout: &str) -> Vec<ImageInfo> {
+    pub fn parse_list_images_output(stdout: &str) -> Vec<ImageInfo> {
         let trimmed = stdout.trim();
         let entries: Vec<DockerImageEntry> = if trimmed.starts_with('[') {
             serde_json::from_str(trimmed).unwrap_or_default()
@@ -633,110 +714,30 @@ pub trait CliProtocol: Send + Sync {
             .collect()
     }
 
-    fn parse_container_id(&self, stdout: &str) -> String {
+    pub fn parse_container_id(stdout: &str) -> String {
         stdout.trim().to_string()
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4.3  DockerProtocol
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// `CliProtocol` for Docker-compatible runtimes: docker, podman, nerdctl,
-/// orbstack, colima. All methods use the trait defaults.
-pub struct DockerProtocol;
-
-impl CliProtocol for DockerProtocol {
-    fn protocol_name(&self) -> &str {
-        "docker-compatible"
-    }
-    // All other methods inherit Docker-compatible defaults from the trait.
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 4.4  AppleContainerProtocol
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// `CliProtocol` for the `apple/container` CLI on macOS/iOS.
-///
-/// The only difference from Docker: `run` does not support `--detach`.
-pub struct AppleContainerProtocol;
-
-impl CliProtocol for AppleContainerProtocol {
-    fn protocol_name(&self) -> &str {
-        "apple/container"
-    }
-
-    /// `apple/container run` does not accept `--detach`; omit it.
-    fn run_args(&self, spec: &ContainerSpec) -> Vec<String> {
-        let mut args = vec!["run".into()];
-        args.extend(docker_run_flags(spec, false));
-        args.push(spec.image.clone());
-        if let Some(cmd) = &spec.cmd {
-            args.extend(cmd.iter().cloned());
-        }
-        args
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 4.5  LimaProtocol
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// `CliProtocol` for Lima. Wraps every command with `limactl shell <instance> nerdctl`.
-pub struct LimaProtocol {
-    pub instance: String,
-}
-
-impl LimaProtocol {
-    pub fn new(instance: impl Into<String>) -> Self {
-        LimaProtocol {
-            instance: instance.into(),
-        }
-    }
-}
-
-impl CliProtocol for LimaProtocol {
-    fn protocol_name(&self) -> &str {
-        "lima"
-    }
-
-    fn subcommand_prefix(&self) -> Option<Vec<String>> {
-        Some(vec![
-            "shell".into(),
-            self.instance.clone(),
-            "nerdctl".into(),
-        ])
-    }
-    // All other methods inherit Docker-compatible defaults from the trait.
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 4.6  Generic CliBackend<P>
+// 4.6  OciBackend struct
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Concrete `ContainerBackend` that executes CLI commands via
-/// `tokio::process::Command`. Generic over `P: CliProtocol` — zero vtable
-/// overhead, monomorphised at compile time.
-pub struct CliBackend<P: CliProtocol> {
-    pub bin: PathBuf,
-    pub protocol: P,
+/// `tokio::process::Command`.
+pub struct OciBackend {
+    pub driver: BackendDriver,
 }
 
-/// Type aliases for the common backends.
-pub type DockerBackend = CliBackend<DockerProtocol>;
-pub type AppleBackend = CliBackend<AppleContainerProtocol>;
-pub type LimaBackend = CliBackend<LimaProtocol>;
-
-impl<P: CliProtocol> CliBackend<P> {
-    pub fn new(bin: PathBuf, protocol: P) -> Self {
-        CliBackend { bin, protocol }
+impl OciBackend {
+    pub fn new(driver: BackendDriver) -> Self {
+        OciBackend { driver }
     }
 
     /// Build the full argument list, prepending the protocol's subcommand
     /// prefix (e.g. `["shell", "default", "nerdctl"]` for Lima) when present.
     pub fn full_args(&self, subcommand_args: Vec<String>) -> Vec<String> {
-        match self.protocol.subcommand_prefix() {
+        match self.driver.subcommand_prefix() {
             Some(prefix) => {
                 let mut full = prefix;
                 full.extend(subcommand_args);
@@ -749,7 +750,7 @@ impl<P: CliProtocol> CliBackend<P> {
     /// Execute the binary with the given arguments and return the raw output.
     async fn exec_raw(&self, args: Vec<String>) -> Result<std::process::Output> {
         let full = self.full_args(args);
-        let output = Command::new(&self.bin)
+        let output = Command::new(self.driver.bin())
             .args(&full)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -775,16 +776,13 @@ impl<P: CliProtocol> CliBackend<P> {
 }
 
 #[async_trait]
-impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
-    fn backend_name(&self) -> &str {
-        self.bin
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
+impl ContainerBackend for OciBackend {
+    fn backend_name(&self) -> &'static str {
+        self.driver.name()
     }
 
     async fn check_available(&self) -> Result<()> {
-        let output = Command::new(&self.bin)
+        let output = Command::new(self.driver.bin())
             .arg("--version")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -806,43 +804,43 @@ impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
     }
 
     async fn run(&self, spec: &ContainerSpec) -> Result<ContainerHandle> {
-        let args = self.protocol.run_args(spec);
+        let args = OciCommandBuilder::run_args(&self.driver, spec);
         let stdout = self.exec_ok(args).await?;
-        let id = self.protocol.parse_container_id(&stdout);
+        let id = OciCommandBuilder::parse_container_id(&stdout);
         let name = spec.name.clone().or_else(|| Some(id.clone()));
         Ok(ContainerHandle { id, name })
     }
 
     async fn create(&self, spec: &ContainerSpec) -> Result<ContainerHandle> {
-        let args = self.protocol.create_args(spec);
+        let args = OciCommandBuilder::create_args(&self.driver, spec);
         let stdout = self.exec_ok(args).await?;
-        let id = self.protocol.parse_container_id(&stdout);
+        let id = OciCommandBuilder::parse_container_id(&stdout);
         let name = spec.name.clone().or_else(|| Some(id.clone()));
         Ok(ContainerHandle { id, name })
     }
 
     async fn start(&self, id: &str) -> Result<()> {
-        self.exec_ok(self.protocol.start_args(id)).await?;
+        self.exec_ok(OciCommandBuilder::start_args(&self.driver, id)).await?;
         Ok(())
     }
 
     async fn stop(&self, id: &str, timeout: Option<u32>) -> Result<()> {
-        self.exec_ok(self.protocol.stop_args(id, timeout)).await?;
+        self.exec_ok(OciCommandBuilder::stop_args(&self.driver, id, timeout)).await?;
         Ok(())
     }
 
     async fn remove(&self, id: &str, force: bool) -> Result<()> {
-        self.exec_ok(self.protocol.remove_args(id, force)).await?;
+        self.exec_ok(OciCommandBuilder::remove_args(&self.driver, id, force)).await?;
         Ok(())
     }
 
     async fn list(&self, all: bool) -> Result<Vec<ContainerInfo>> {
-        let stdout = self.exec_ok(self.protocol.list_args(all)).await?;
-        Ok(self.protocol.parse_list_output(&stdout))
+        let stdout = self.exec_ok(OciCommandBuilder::list_args(&self.driver, all)).await?;
+        Ok(OciCommandBuilder::parse_list_output(&stdout))
     }
 
     async fn inspect(&self, id: &str) -> Result<ContainerInfo> {
-        let output = self.exec_raw(self.protocol.inspect_args(id)).await?;
+        let output = self.exec_raw(OciCommandBuilder::inspect_args(&self.driver, id)).await?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             if is_not_found(&stderr) {
@@ -854,13 +852,12 @@ impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
             });
         }
         let stdout = String::from_utf8_lossy(&output.stdout);
-        self.protocol
-            .parse_inspect_output(id, &stdout)
+        OciCommandBuilder::parse_inspect_output(id, &stdout)
             .ok_or_else(|| ComposeError::NotFound(id.to_string()))
     }
 
     async fn logs(&self, id: &str, tail: Option<u32>) -> Result<ContainerLogs> {
-        let output = self.exec_raw(self.protocol.logs_args(id, tail)).await?;
+        let output = self.exec_raw(OciCommandBuilder::logs_args(&self.driver, id, tail)).await?;
         Ok(ContainerLogs {
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
@@ -875,7 +872,7 @@ impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
         workdir: Option<&str>,
     ) -> Result<ContainerLogs> {
         let output = self
-            .exec_raw(self.protocol.exec_args(id, cmd, env, workdir))
+            .exec_raw(OciCommandBuilder::exec_args(&self.driver, id, cmd, env, workdir))
             .await?;
         Ok(ContainerLogs {
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),
@@ -884,30 +881,30 @@ impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
     }
 
     async fn pull_image(&self, reference: &str) -> Result<()> {
-        self.exec_ok(self.protocol.pull_image_args(reference)).await?;
+        self.exec_ok(OciCommandBuilder::pull_image_args(&self.driver, reference)).await?;
         Ok(())
     }
 
     async fn list_images(&self) -> Result<Vec<ImageInfo>> {
-        let stdout = self.exec_ok(self.protocol.list_images_args()).await?;
-        Ok(self.protocol.parse_list_images_output(&stdout))
+        let stdout = self.exec_ok(OciCommandBuilder::list_images_args(&self.driver)).await?;
+        Ok(OciCommandBuilder::parse_list_images_output(&stdout))
     }
 
     async fn remove_image(&self, reference: &str, force: bool) -> Result<()> {
-        self.exec_ok(self.protocol.remove_image_args(reference, force))
+        self.exec_ok(OciCommandBuilder::remove_image_args(&self.driver, reference, force))
             .await?;
         Ok(())
     }
 
     async fn create_network(&self, name: &str, config: &NetworkConfig) -> Result<()> {
-        self.exec_ok(self.protocol.create_network_args(name, config))
+        self.exec_ok(OciCommandBuilder::create_network_args(&self.driver, name, config))
             .await?;
         Ok(())
     }
 
     async fn remove_network(&self, name: &str) -> Result<()> {
         let output = self
-            .exec_raw(self.protocol.remove_network_args(name))
+            .exec_raw(OciCommandBuilder::remove_network_args(&self.driver, name))
             .await?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -923,7 +920,7 @@ impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
     }
 
     async fn create_volume(&self, name: &str, config: &VolumeConfig) -> Result<()> {
-        self.exec_ok(self.protocol.create_volume_args(name, config))
+        self.exec_ok(OciCommandBuilder::create_volume_args(&self.driver, name, config))
             .await?;
         Ok(())
     }
@@ -933,16 +930,16 @@ impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
         spec: &ContainerSpec,
         profile: &SecurityProfile,
     ) -> Result<ContainerHandle> {
-        let args = self.protocol.run_with_security_args(spec, profile);
+        let args = OciCommandBuilder::run_with_security_args(&self.driver, spec, profile);
         let stdout = self.exec_ok(args).await?;
-        let id = self.protocol.parse_container_id(&stdout);
+        let id = OciCommandBuilder::parse_container_id(&stdout);
         let name = spec.name.clone().or_else(|| Some(id.clone()));
         Ok(ContainerHandle { id, name })
     }
 
     async fn wait_and_logs(&self, id: &str) -> Result<ContainerLogs> {
         // Wait for exit
-        let _ = self.exec_ok(self.protocol.wait_args(id)).await?;
+        let _ = self.exec_ok(OciCommandBuilder::wait_args(&self.driver, id)).await?;
         // Collect logs
         self.logs(id, None).await
     }
@@ -954,42 +951,42 @@ impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
         dockerfile: Option<&str>,
         args: Option<&HashMap<String, String>>,
     ) -> Result<()> {
-        self.exec_ok(self.protocol.build_args(context, tag, dockerfile, args))
+        self.exec_ok(OciCommandBuilder::build_args(&self.driver, context, tag, dockerfile, args))
             .await?;
         Ok(())
     }
 
     async fn inspect_image(&self, reference: &str) -> Result<serde_json::Value> {
         let stdout = self
-            .exec_ok(self.protocol.inspect_image_args(reference))
+            .exec_ok(OciCommandBuilder::inspect_image_args(&self.driver, reference))
             .await?;
         serde_json::from_str(&stdout).map_err(ComposeError::JsonError)
     }
 
     async fn manifest_inspect(&self, reference: &str) -> Result<serde_json::Value> {
         let stdout = self
-            .exec_ok(self.protocol.manifest_inspect_args(reference))
+            .exec_ok(OciCommandBuilder::manifest_inspect_args(&self.driver, reference))
             .await?;
         serde_json::from_str(&stdout).map_err(ComposeError::JsonError)
     }
 
     async fn inspect_network(&self, name: &str) -> Result<serde_json::Value> {
         let stdout = self
-            .exec_ok(self.protocol.inspect_network_args(name))
+            .exec_ok(OciCommandBuilder::inspect_network_args(&self.driver, name))
             .await?;
         serde_json::from_str(&stdout).map_err(ComposeError::JsonError)
     }
 
     async fn inspect_volume(&self, name: &str) -> Result<serde_json::Value> {
         let stdout = self
-            .exec_ok(self.protocol.inspect_volume_args(name))
+            .exec_ok(OciCommandBuilder::inspect_volume_args(&self.driver, name))
             .await?;
         serde_json::from_str(&stdout).map_err(ComposeError::JsonError)
     }
 
     async fn remove_volume(&self, name: &str) -> Result<()> {
         let output = self
-            .exec_raw(self.protocol.remove_volume_args(name))
+            .exec_raw(OciCommandBuilder::remove_volume_args(&self.driver, name))
             .await?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1069,7 +1066,7 @@ pub async fn probe_candidate(
             probe_run(bin.to_str().unwrap_or("container"), &["--version"])
                 .await
                 .map_err(|e| format!("apple/container --version failed: {}", e))?;
-            Ok(Box::new(CliBackend::new(bin, AppleContainerProtocol)))
+            Ok(Box::new(OciBackend::new(BackendDriver::AppleContainer { bin })))
         }
 
         // ── orbstack ─────────────────────────────────────────────────────
@@ -1092,7 +1089,7 @@ pub async fn probe_candidate(
                 let bin = which::which("docker")
                     .or_else(|_| which::which("orb"))
                     .map_err(|_| "orbstack: neither docker nor orb found".to_string())?;
-                Ok(Box::new(CliBackend::new(bin, DockerProtocol)))
+                Ok(Box::new(OciBackend::new(BackendDriver::OrbStack { bin })))
             } else {
                 Err("orbstack: neither `orb --version` succeeded nor socket found".into())
             }
@@ -1110,7 +1107,7 @@ pub async fn probe_candidate(
             }
             let docker_bin = which::which("docker")
                 .map_err(|_| "docker CLI not found (needed for colima)".to_string())?;
-            Ok(Box::new(CliBackend::new(docker_bin, DockerProtocol)))
+            Ok(Box::new(OciBackend::new(BackendDriver::Colima { bin: docker_bin })))
         }
 
         // ── rancher-desktop ──────────────────────────────────────────────
@@ -1125,7 +1122,7 @@ pub async fn probe_candidate(
             )
             .exists();
             if sock {
-                Ok(Box::new(CliBackend::new(bin, DockerProtocol)))
+                Ok(Box::new(OciBackend::new(BackendDriver::RancherDesktop { bin })))
             } else {
                 Err("rancher-desktop: nerdctl found but containerd socket missing".into())
             }
@@ -1158,7 +1155,7 @@ pub async fn probe_candidate(
                 }
             }
 
-            Ok(Box::new(CliBackend::new(bin, DockerProtocol)))
+            Ok(Box::new(OciBackend::new(BackendDriver::Podman { bin })))
         }
 
         // ── lima ─────────────────────────────────────────────────────────
@@ -1179,7 +1176,7 @@ pub async fn probe_candidate(
                 })
                 .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(String::from))
                 .ok_or_else(|| "limactl: no running Lima instance found".to_string())?;
-            Ok(Box::new(CliBackend::new(bin, LimaProtocol::new(instance))))
+            Ok(Box::new(OciBackend::new(BackendDriver::Lima { bin, instance })))
         }
 
         // ── nerdctl (standalone) ─────────────────────────────────────────
@@ -1189,7 +1186,7 @@ pub async fn probe_candidate(
             probe_run(bin.to_str().unwrap_or("nerdctl"), &["--version"])
                 .await
                 .map_err(|e| format!("nerdctl --version failed: {}", e))?;
-            Ok(Box::new(CliBackend::new(bin, DockerProtocol)))
+            Ok(Box::new(OciBackend::new(BackendDriver::Nerdctl { bin })))
         }
 
         // ── docker ───────────────────────────────────────────────────────
@@ -1199,7 +1196,7 @@ pub async fn probe_candidate(
             probe_run(bin.to_str().unwrap_or("docker"), &["--version"])
                 .await
                 .map_err(|e| format!("docker --version failed: {}", e))?;
-            Ok(Box::new(CliBackend::new(bin, DockerProtocol)))
+            Ok(Box::new(OciBackend::new(BackendDriver::Docker { bin })))
         }
 
         other => Err(format!("unknown runtime '{}'", other)),
@@ -1290,13 +1287,13 @@ mod tests {
         }
     }
 
-    // ── DockerProtocol ────────────────────────────────────────────────────
+    // ── OciCommandBuilder ─────────────────────────────────────────────────
 
     #[test]
     fn docker_run_args_contains_expected_flags() {
-        let p = DockerProtocol;
+        let drv = BackendDriver::Docker { bin: "docker".into() };
         let spec = dummy_spec(Some("mycontainer"));
-        let args = p.run_args(&spec);
+        let args = OciCommandBuilder::run_args(&drv, &spec);
         assert!(args.contains(&"run".into()));
         assert!(args.contains(&"--rm".into()));
         assert!(args.contains(&"--detach".into()));
@@ -1315,37 +1312,36 @@ mod tests {
 
     #[test]
     fn docker_stop_args_with_timeout() {
-        let p = DockerProtocol;
-        let args = p.stop_args("abc123", Some(10));
+        let drv = BackendDriver::Docker { bin: "docker".into() };
+        let args = OciCommandBuilder::stop_args(&drv, "abc123", Some(10));
         assert_eq!(args, vec!["stop", "-t", "10", "abc123"]);
     }
 
     #[test]
     fn docker_stop_args_no_timeout() {
-        let p = DockerProtocol;
-        let args = p.stop_args("abc123", None);
+        let drv = BackendDriver::Docker { bin: "docker".into() };
+        let args = OciCommandBuilder::stop_args(&drv, "abc123", None);
         assert_eq!(args, vec!["stop", "abc123"]);
     }
 
     #[test]
     fn docker_remove_args_force() {
-        let p = DockerProtocol;
-        assert_eq!(p.remove_args("c1", true), vec!["rm", "-f", "c1"]);
-        assert_eq!(p.remove_args("c1", false), vec!["rm", "c1"]);
+        let drv = BackendDriver::Docker { bin: "docker".into() };
+        assert_eq!(OciCommandBuilder::remove_args(&drv, "c1", true), vec!["rm", "-f", "c1"]);
+        assert_eq!(OciCommandBuilder::remove_args(&drv, "c1", false), vec!["rm", "c1"]);
     }
 
     #[test]
     fn docker_list_args() {
-        let p = DockerProtocol;
-        assert!(p.list_args(true).contains(&"--all".into()));
-        assert!(!p.list_args(false).contains(&"--all".into()));
+        let drv = BackendDriver::Docker { bin: "docker".into() };
+        assert!(OciCommandBuilder::list_args(&drv, true).contains(&"--all".into()));
+        assert!(!OciCommandBuilder::list_args(&drv, false).contains(&"--all".into()));
     }
 
     #[test]
     fn docker_parse_list_output_array() {
-        let p = DockerProtocol;
         let json = r#"[{"ID":"abc","Names":["/myapp"],"Image":"nginx","Status":"running","Ports":["80/tcp"],"Created":"2024-01-01"}]"#;
-        let infos = p.parse_list_output(json);
+        let infos = OciCommandBuilder::parse_list_output(json);
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].id, "abc");
         assert_eq!(infos[0].name, "myapp");
@@ -1353,26 +1349,23 @@ mod tests {
 
     #[test]
     fn docker_parse_list_output_ndjson() {
-        let p = DockerProtocol;
         let json = "{\"ID\":\"abc\",\"Names\":[\"/myapp\"],\"Image\":\"nginx\",\"Status\":\"running\",\"Ports\":[],\"Created\":\"2024-01-01\"}\n{\"ID\":\"def\",\"Names\":[\"/other\"],\"Image\":\"redis\",\"Status\":\"stopped\",\"Ports\":[],\"Created\":\"2024-01-02\"}";
-        let infos = p.parse_list_output(json);
+        let infos = OciCommandBuilder::parse_list_output(json);
         assert_eq!(infos.len(), 2);
     }
 
     #[test]
     fn docker_parse_inspect_output() {
-        let p = DockerProtocol;
         let json = r#"[{"Id":"abc123","Name":"/myapp","Image":"nginx","State":{"Running":true,"Status":"running"},"Created":"2024-01-01"}]"#;
-        let info = p.parse_inspect_output("abc123", json).unwrap();
+        let info = OciCommandBuilder::parse_inspect_output("abc123", json).unwrap();
         assert_eq!(info.status, "running");
         assert_eq!(info.name, "myapp");
     }
 
     #[test]
     fn docker_parse_images_output() {
-        let p = DockerProtocol;
         let json = r#"[{"ID":"sha256:abc","Repository":"nginx","Tag":"latest","Size":50000000,"Created":"2024-01-01"}]"#;
-        let images = p.parse_list_images_output(json);
+        let images = OciCommandBuilder::parse_list_images_output(json);
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].repository, "nginx");
         assert_eq!(images[0].size, 50_000_000);
@@ -1382,7 +1375,7 @@ mod tests {
 
     #[test]
     fn create_network_args_with_config() {
-        let p = DockerProtocol;
+        let drv = BackendDriver::Docker { bin: "docker".into() };
         let mut labels = HashMap::new();
         labels.insert("env".into(), "prod".into());
         let config = NetworkConfig {
@@ -1391,7 +1384,7 @@ mod tests {
             internal: true,
             enable_ipv6: false,
         };
-        let args = p.create_network_args("mynet", &config);
+        let args = OciCommandBuilder::create_network_args(&drv, "mynet", &config);
         assert!(args.contains(&"network".into()));
         assert!(args.contains(&"create".into()));
         assert!(args.contains(&"--driver".into()));
@@ -1405,12 +1398,12 @@ mod tests {
 
     #[test]
     fn create_volume_args_with_config() {
-        let p = DockerProtocol;
+        let drv = BackendDriver::Docker { bin: "docker".into() };
         let config = VolumeConfig {
             driver: Some("local".into()),
             labels: HashMap::new(),
         };
-        let args = p.create_volume_args("myvol", &config);
+        let args = OciCommandBuilder::create_volume_args(&drv, "myvol", &config);
         assert!(args.contains(&"volume".into()));
         assert!(args.contains(&"create".into()));
         assert!(args.contains(&"--driver".into()));
@@ -1446,78 +1439,6 @@ mod tests {
         assert_eq!(vc.labels.get("tier"), Some(&"data".into()));
     }
 
-    // ── AppleContainerProtocol ────────────────────────────────────────────
-
-    #[test]
-    fn apple_run_args_no_detach() {
-        let p = AppleContainerProtocol;
-        let spec = dummy_spec(Some("mycontainer"));
-        let args = p.run_args(&spec);
-        assert!(!args.contains(&"--detach".into()));
-        assert!(args.contains(&"--rm".into()));
-        assert!(args.contains(&"--name".into()));
-    }
-
-    #[test]
-    fn apple_protocol_name() {
-        let p = AppleContainerProtocol;
-        assert_eq!(p.protocol_name(), "apple/container");
-    }
-
-    // ── LimaProtocol ─────────────────────────────────────────────────────
-
-    #[test]
-    fn lima_subcommand_prefix() {
-        let p = LimaProtocol::new("default");
-        let prefix = p.subcommand_prefix().unwrap();
-        assert_eq!(prefix, vec!["shell", "default", "nerdctl"]);
-    }
-
-    #[test]
-    fn lima_run_args_delegates_to_docker_defaults() {
-        let lima = LimaProtocol::new("default");
-        let docker = DockerProtocol;
-        let spec = dummy_spec(None);
-        assert_eq!(lima.run_args(&spec), docker.run_args(&spec));
-    }
-
-    #[test]
-    fn lima_protocol_name() {
-        let p = LimaProtocol::new("myvm");
-        assert_eq!(p.protocol_name(), "lima");
-    }
-
-    // ── CliBackend<P> full_args ───────────────────────────────────────────
-
-    #[test]
-    fn cli_backend_full_args_no_prefix() {
-        let backend = CliBackend::new(PathBuf::from("docker"), DockerProtocol);
-        let result = backend.full_args(vec!["ps".into(), "--all".into()]);
-        assert_eq!(result, vec!["ps", "--all"]);
-    }
-
-    #[test]
-    fn cli_backend_full_args_with_lima_prefix() {
-        let backend = CliBackend::new(PathBuf::from("limactl"), LimaProtocol::new("default"));
-        let result = backend.full_args(vec!["ps".into(), "--all".into()]);
-        assert_eq!(result, vec!["shell", "default", "nerdctl", "ps", "--all"]);
-    }
-
-    #[test]
-    fn backend_name_from_path() {
-        let backend = CliBackend::new(PathBuf::from("/usr/bin/podman"), DockerProtocol);
-        assert_eq!(backend.backend_name(), "podman");
-    }
-
-    // ── Type aliases ──────────────────────────────────────────────────────
-
-    #[test]
-    fn type_aliases_compile() {
-        let _: DockerBackend = CliBackend::new(PathBuf::from("docker"), DockerProtocol);
-        let _: AppleBackend = CliBackend::new(PathBuf::from("container"), AppleContainerProtocol);
-        let _: LimaBackend =
-            CliBackend::new(PathBuf::from("limactl"), LimaProtocol::new("default"));
-    }
 
     // ── BackendProbeResult serialization ─────────────────────────────────
 
