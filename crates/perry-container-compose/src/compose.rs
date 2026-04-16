@@ -3,7 +3,7 @@
 //! Provides `ComposeEngine::up()`, `down()`, `ps()`, `logs()`, `exec()`, etc.
 //! Uses Kahn's algorithm for dependency resolution.
 
-use crate::backend::{Backend, ContainerBackend, ContainerStatus};
+use crate::backend::ContainerBackend;
 use crate::error::{ComposeError, Result};
 use crate::service;
 use crate::types::{
@@ -88,8 +88,8 @@ impl ComposeEngine {
     pub async fn up(
         &self,
         services: &[String],
-        detach: bool,
-        build: bool,
+        _detach: bool,
+        _build: bool,
         _remove_orphans: bool,
     ) -> Result<ComposeHandle> {
         let order = resolve_startup_order(&self.spec)?;
@@ -105,50 +105,74 @@ impl ComposeEngine {
         let mut created_volumes = Vec::new();
         let mut started = Vec::new();
 
-        // 1. Create networks (skip external)
+        // 1. Create networks (skip external or pre-existing)
         if let Some(networks) = &self.spec.networks {
             for (net_name, net_config_opt) in networks {
-                let external = net_config_opt.as_ref().map_or(false, |c| c.external.unwrap_or(false));
+                let external = net_config_opt
+                    .as_ref()
+                    .map_or(false, |c| c.external.unwrap_or(false));
                 if external {
                     continue;
                 }
-                let resolved_name = net_config_opt.as_ref()
+                let resolved_name = net_config_opt
+                    .as_ref()
                     .and_then(|c| c.name.as_deref())
                     .unwrap_or(net_name.as_str());
+
                 tracing::info!("Creating network '{}'…", resolved_name);
-                if let Err(e) = self.backend
-                    .create_network(resolved_name, net_config_opt.as_ref().unwrap_or(&crate::types::ComposeNetwork::default()))
-                    .await {
-                        self.rollback(&started, &created_networks, &created_volumes).await;
-                        return Err(ComposeError::ServiceStartupFailed {
-                            service: format!("network/{}", net_name),
-                            message: e.to_string(),
-                        });
-                    }
+                if let Err(e) = self
+                    .backend
+                    .create_network(
+                        resolved_name,
+                        net_config_opt
+                            .as_ref()
+                            .unwrap_or(&crate::types::ComposeNetwork::default()),
+                    )
+                    .await
+                {
+                    self.rollback(&started, &created_networks, &created_volumes)
+                        .await;
+                    return Err(ComposeError::ServiceStartupFailed {
+                        service: format!("network/{}", net_name),
+                        message: e.to_string(),
+                    });
+                }
                 created_networks.push(resolved_name.to_string());
             }
         }
 
-        // 2. Create volumes (skip external)
+        // 2. Create volumes (skip external or pre-existing)
         if let Some(volumes) = &self.spec.volumes {
             for (vol_name, vol_config_opt) in volumes {
-                let external = vol_config_opt.as_ref().map_or(false, |c| c.external.unwrap_or(false));
+                let external = vol_config_opt
+                    .as_ref()
+                    .map_or(false, |c| c.external.unwrap_or(false));
                 if external {
                     continue;
                 }
-                let resolved_name = vol_config_opt.as_ref()
+                let resolved_name = vol_config_opt
+                    .as_ref()
                     .and_then(|c| c.name.as_deref())
                     .unwrap_or(vol_name.as_str());
+
                 tracing::info!("Creating volume '{}'…", resolved_name);
-                if let Err(e) = self.backend
-                    .create_volume(resolved_name, vol_config_opt.as_ref().unwrap_or(&crate::types::ComposeVolume::default()))
-                    .await {
-                        self.rollback(&started, &created_networks, &created_volumes).await;
-                        return Err(ComposeError::ServiceStartupFailed {
-                            service: format!("volume/{}", vol_name),
-                            message: e.to_string(),
-                        });
-                    }
+                if let Err(e) = self
+                    .backend
+                    .create_volume(
+                        resolved_name,
+                        vol_config_opt
+                            .as_ref()
+                            .unwrap_or(&crate::types::ComposeVolume::default()),
+                    )
+                    .await
+                {
+                    self.rollback(&started, &created_networks, &created_volumes)
+                        .await;
+                    return Err(ComposeError::ServiceStartupFailed {
+                        service: format!("volume/{}", vol_name),
+                        message: e.to_string(),
+                    });
+                }
                 created_volumes.push(resolved_name.to_string());
             }
         }
@@ -434,6 +458,28 @@ impl ComposeEngine {
     pub async fn restart(&self, services: &[String]) -> Result<()> {
         self.stop(services).await?;
         self.start(services).await
+    }
+
+    /// Pull service images.
+    pub async fn pull(&self, services: &[String]) -> Result<()> {
+        let target: Vec<String> = if services.is_empty() {
+            self.spec.services.keys().cloned().collect()
+        } else {
+            services.to_vec()
+        };
+
+        for svc_name in target {
+            let svc = self
+                .spec
+                .services
+                .get(&svc_name)
+                .ok_or_else(|| ComposeError::NotFound(svc_name.clone()))?;
+            let image = svc.image_ref(&svc_name);
+            tracing::info!("Pulling image '{}' for service '{}'…", image, svc_name);
+            self.backend.pull_image(&image).await?;
+        }
+
+        Ok(())
     }
 
     /// Best-effort rollback on failure.

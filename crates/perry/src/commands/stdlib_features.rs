@@ -70,7 +70,7 @@ pub fn module_to_features(module: &str) -> &'static [&'static str] {
         "cron" | "node-cron" => &["scheduler"],
 
         // ── Container (Apple Container / Podman) ──────────────────────
-        "perry/container" | "perry/container-compose" => &["container"],
+        "perry/container" | "perry/compose" => &["container"],
 
         // ── Validation (validator.js) ─────────────────────────────────
         "validator" => &["validation"],

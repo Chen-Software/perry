@@ -127,7 +127,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         cli.env_files.clone(),
     );
     let project = ComposeProject::load(&config)?;
-    let backend = std::sync::Arc::from(crate::backend::get_container_backend()?);
+    let backend = std::sync::Arc::from(crate::backend::detect_backend().await?);
     let engine = ComposeEngine::new(project.spec.clone(), project.project_name.clone(), backend);
 
     match cli.command {

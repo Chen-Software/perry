@@ -10,6 +10,7 @@ use crate::common::async_bridge::{queue_promise_resolution, spawn};
 use crate::common::handle::{get_handle, register_handle};
 use perry_container_compose::backend::{detect_backend, ContainerBackend};
 use perry_container_compose::compose::ComposeEngine;
+use perry_container_compose::error::{compose_error_to_js, ComposeError};
 use perry_container_compose::types::{
     ComposeHandle as InternalComposeHandle, ComposeSpec as InternalComposeSpec,
     ContainerSpec as InternalContainerSpec,
@@ -24,7 +25,7 @@ pub async fn get_global_backend() -> Arc<dyn ContainerBackend> {
     if let Some(b) = BACKEND.get() {
         return Arc::clone(b);
     }
-    let b = Arc::from(
+    let b: Arc<dyn ContainerBackend> = Arc::new(
         detect_backend()
             .await
             .expect("Failed to detect container backend"),
@@ -47,6 +48,22 @@ unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
     std::str::from_utf8(bytes).ok().map(|s| s.to_string())
 }
 
+fn resolve_error(promise_ptr: usize, e: &ComposeError) {
+    let json = compose_error_to_js(e);
+    let err_str = unsafe { js_string_from_bytes(json.as_ptr(), json.len() as u32) };
+    queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
+}
+
+fn resolve_msg_error(promise_ptr: usize, msg: &str) {
+    let json = serde_json::json!({
+        "message": msg,
+        "code": 500
+    })
+    .to_string();
+    let err_str = unsafe { js_string_from_bytes(json.as_ptr(), json.len() as u32) };
+    queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn js_container_getBackend() -> *mut StringHeader {
     if let Some(backend) = get_global_backend_sync() {
@@ -63,7 +80,7 @@ pub unsafe extern "C" fn js_container_run(spec_json_ptr: *const StringHeader) ->
     let json = match string_from_header(spec_json_ptr) {
         Some(s) => s,
         None => {
-            queue_promise_resolution(promise_ptr, false, JSValue::undefined().bits());
+            resolve_msg_error(promise_ptr, "Invalid spec JSON pointer");
             return promise;
         }
     };
@@ -72,9 +89,7 @@ pub unsafe extern "C" fn js_container_run(spec_json_ptr: *const StringHeader) ->
         let spec: InternalContainerSpec = match serde_json::from_str(&json) {
             Ok(s) => s,
             Err(e) => {
-                let err_msg = format!("Invalid ContainerSpec: {}", e);
-                let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
+                resolve_msg_error(promise_ptr, &format!("Invalid ContainerSpec JSON: {}", e));
                 return;
             }
         };
@@ -85,11 +100,7 @@ pub unsafe extern "C" fn js_container_run(spec_json_ptr: *const StringHeader) ->
                 let h = register_handle(handle);
                 queue_promise_resolution(promise_ptr, true, (h as f64).to_bits());
             }
-            Err(e) => {
-                let err_msg = e.to_string();
-                let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
-            }
+            Err(e) => resolve_error(promise_ptr, &e),
         }
     });
 
@@ -103,7 +114,7 @@ pub unsafe extern "C" fn js_container_create(spec_json_ptr: *const StringHeader)
     let json = match string_from_header(spec_json_ptr) {
         Some(s) => s,
         None => {
-            queue_promise_resolution(promise_ptr, false, JSValue::undefined().bits());
+            resolve_msg_error(promise_ptr, "Invalid spec JSON pointer");
             return promise;
         }
     };
@@ -112,9 +123,7 @@ pub unsafe extern "C" fn js_container_create(spec_json_ptr: *const StringHeader)
         let spec: InternalContainerSpec = match serde_json::from_str(&json) {
             Ok(s) => s,
             Err(e) => {
-                let err_msg = format!("Invalid ContainerSpec: {}", e);
-                let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
+                resolve_msg_error(promise_ptr, &format!("Invalid ContainerSpec JSON: {}", e));
                 return;
             }
         };
@@ -125,11 +134,7 @@ pub unsafe extern "C" fn js_container_create(spec_json_ptr: *const StringHeader)
                 let h = register_handle(handle);
                 queue_promise_resolution(promise_ptr, true, (h as f64).to_bits());
             }
-            Err(e) => {
-                let err_msg = e.to_string();
-                let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
-            }
+            Err(e) => resolve_error(promise_ptr, &e),
         }
     });
 
@@ -143,7 +148,7 @@ pub unsafe extern "C" fn js_container_start(id_ptr: *const StringHeader) -> *mut
     let id = match string_from_header(id_ptr) {
         Some(s) => s,
         None => {
-            queue_promise_resolution(promise_ptr, false, JSValue::undefined().bits());
+            resolve_msg_error(promise_ptr, "Invalid container ID pointer");
             return promise;
         }
     };
@@ -151,11 +156,7 @@ pub unsafe extern "C" fn js_container_start(id_ptr: *const StringHeader) -> *mut
         let backend = get_global_backend().await;
         match backend.start(&id).await {
             Ok(_) => queue_promise_resolution(promise_ptr, true, JSValue::undefined().bits()),
-            Err(e) => {
-                let err_str =
-                    js_string_from_bytes(e.to_string().as_ptr(), e.to_string().len() as u32);
-                queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
-            }
+            Err(e) => resolve_error(promise_ptr, &e),
         }
     });
     promise
@@ -171,7 +172,7 @@ pub unsafe extern "C" fn js_container_stop(
     let id = match string_from_header(id_ptr) {
         Some(s) => s,
         None => {
-            queue_promise_resolution(promise_ptr, false, JSValue::undefined().bits());
+            resolve_msg_error(promise_ptr, "Invalid container ID pointer");
             return promise;
         }
     };
@@ -184,11 +185,7 @@ pub unsafe extern "C" fn js_container_stop(
         let backend = get_global_backend().await;
         match backend.stop(&id, t).await {
             Ok(_) => queue_promise_resolution(promise_ptr, true, JSValue::undefined().bits()),
-            Err(e) => {
-                let err_str =
-                    js_string_from_bytes(e.to_string().as_ptr(), e.to_string().len() as u32);
-                queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
-            }
+            Err(e) => resolve_error(promise_ptr, &e),
         }
     });
     promise
@@ -204,7 +201,7 @@ pub unsafe extern "C" fn js_container_remove(
     let id = match string_from_header(id_ptr) {
         Some(s) => s,
         None => {
-            queue_promise_resolution(promise_ptr, false, JSValue::undefined().bits());
+            resolve_msg_error(promise_ptr, "Invalid container ID pointer");
             return promise;
         }
     };
@@ -213,11 +210,7 @@ pub unsafe extern "C" fn js_container_remove(
         let backend = get_global_backend().await;
         match backend.remove(&id, f).await {
             Ok(_) => queue_promise_resolution(promise_ptr, true, JSValue::undefined().bits()),
-            Err(e) => {
-                let err_str =
-                    js_string_from_bytes(e.to_string().as_ptr(), e.to_string().len() as u32);
-                queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
-            }
+            Err(e) => resolve_error(promise_ptr, &e),
         }
     });
     promise
@@ -236,11 +229,7 @@ pub unsafe extern "C" fn js_container_list(all: i32) -> *mut Promise {
                 let s = js_string_from_bytes(json.as_ptr(), json.len() as u32);
                 queue_promise_resolution(promise_ptr, true, JSValue::string_ptr(s).bits());
             }
-            Err(e) => {
-                let err_str =
-                    js_string_from_bytes(e.to_string().as_ptr(), e.to_string().len() as u32);
-                queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
-            }
+            Err(e) => resolve_error(promise_ptr, &e),
         }
     });
     promise
@@ -253,7 +242,7 @@ pub unsafe extern "C" fn js_container_inspect(id_ptr: *const StringHeader) -> *m
     let id = match string_from_header(id_ptr) {
         Some(s) => s,
         None => {
-            queue_promise_resolution(promise_ptr, false, JSValue::undefined().bits());
+            resolve_msg_error(promise_ptr, "Invalid container ID pointer");
             return promise;
         }
     };
@@ -265,11 +254,7 @@ pub unsafe extern "C" fn js_container_inspect(id_ptr: *const StringHeader) -> *m
                 let s = js_string_from_bytes(json.as_ptr(), json.len() as u32);
                 queue_promise_resolution(promise_ptr, true, JSValue::string_ptr(s).bits());
             }
-            Err(e) => {
-                let err_str =
-                    js_string_from_bytes(e.to_string().as_ptr(), e.to_string().len() as u32);
-                queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
-            }
+            Err(e) => resolve_error(promise_ptr, &e),
         }
     });
     promise
@@ -282,7 +267,7 @@ pub unsafe extern "C" fn js_container_logs(id_ptr: *const StringHeader, tail: i3
     let id = match string_from_header(id_ptr) {
         Some(s) => s,
         None => {
-            queue_promise_resolution(promise_ptr, false, JSValue::undefined().bits());
+            resolve_msg_error(promise_ptr, "Invalid container ID pointer");
             return promise;
         }
     };
@@ -295,11 +280,7 @@ pub unsafe extern "C" fn js_container_logs(id_ptr: *const StringHeader, tail: i3
                 let s = js_string_from_bytes(json.as_ptr(), json.len() as u32);
                 queue_promise_resolution(promise_ptr, true, JSValue::string_ptr(s).bits());
             }
-            Err(e) => {
-                let err_str =
-                    js_string_from_bytes(e.to_string().as_ptr(), e.to_string().len() as u32);
-                queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
-            }
+            Err(e) => resolve_error(promise_ptr, &e),
         }
     });
     promise
@@ -317,7 +298,7 @@ pub unsafe extern "C" fn js_container_exec(
     let id = match string_from_header(id_ptr) {
         Some(s) => s,
         None => {
-            queue_promise_resolution(promise_ptr, false, JSValue::undefined().bits());
+            resolve_msg_error(promise_ptr, "Invalid container ID pointer");
             return promise;
         }
     };
@@ -339,11 +320,7 @@ pub unsafe extern "C" fn js_container_exec(
                 let s = js_string_from_bytes(json.as_ptr(), json.len() as u32);
                 queue_promise_resolution(promise_ptr, true, JSValue::string_ptr(s).bits());
             }
-            Err(e) => {
-                let err_str =
-                    js_string_from_bytes(e.to_string().as_ptr(), e.to_string().len() as u32);
-                queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
-            }
+            Err(e) => resolve_error(promise_ptr, &e),
         }
     });
     promise
@@ -356,7 +333,7 @@ pub unsafe extern "C" fn js_container_pullImage(ref_ptr: *const StringHeader) ->
     let reference = match string_from_header(ref_ptr) {
         Some(s) => s,
         None => {
-            queue_promise_resolution(promise_ptr, false, JSValue::undefined().bits());
+            resolve_msg_error(promise_ptr, "Invalid image reference pointer");
             return promise;
         }
     };
@@ -364,11 +341,7 @@ pub unsafe extern "C" fn js_container_pullImage(ref_ptr: *const StringHeader) ->
         let backend = get_global_backend().await;
         match backend.pull_image(&reference).await {
             Ok(_) => queue_promise_resolution(promise_ptr, true, JSValue::undefined().bits()),
-            Err(e) => {
-                let err_str =
-                    js_string_from_bytes(e.to_string().as_ptr(), e.to_string().len() as u32);
-                queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
-            }
+            Err(e) => resolve_error(promise_ptr, &e),
         }
     });
     promise
@@ -386,11 +359,55 @@ pub unsafe extern "C" fn js_container_listImages() -> *mut Promise {
                 let s = js_string_from_bytes(json.as_ptr(), json.len() as u32);
                 queue_promise_resolution(promise_ptr, true, JSValue::string_ptr(s).bits());
             }
-            Err(e) => {
-                let err_str =
-                    js_string_from_bytes(e.to_string().as_ptr(), e.to_string().len() as u32);
-                queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
+            Err(e) => resolve_error(promise_ptr, &e),
+        }
+    });
+    promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_container_imageExists(ref_ptr: *const StringHeader) -> *mut Promise {
+    let promise = js_promise_new();
+    let promise_ptr = promise as usize;
+    let reference = match string_from_header(ref_ptr) {
+        Some(s) => s,
+        None => {
+            resolve_msg_error(promise_ptr, "Invalid image reference pointer");
+            return promise;
+        }
+    };
+    spawn(async move {
+        let backend = get_global_backend().await;
+        match backend.image_exists(&reference).await {
+            Ok(exists) => {
+                queue_promise_resolution(promise_ptr, true, JSValue::bool(exists).bits());
             }
+            Err(e) => resolve_error(promise_ptr, &e),
+        }
+    });
+    promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_container_inspectImage(ref_ptr: *const StringHeader) -> *mut Promise {
+    let promise = js_promise_new();
+    let promise_ptr = promise as usize;
+    let reference = match string_from_header(ref_ptr) {
+        Some(s) => s,
+        None => {
+            resolve_msg_error(promise_ptr, "Invalid image reference pointer");
+            return promise;
+        }
+    };
+    spawn(async move {
+        let backend = get_global_backend().await;
+        match backend.inspect_image(&reference).await {
+            Ok(info) => {
+                let json = serde_json::to_string(&info).unwrap_or_default();
+                let s = js_string_from_bytes(json.as_ptr(), json.len() as u32);
+                queue_promise_resolution(promise_ptr, true, JSValue::string_ptr(s).bits());
+            }
+            Err(e) => resolve_error(promise_ptr, &e),
         }
     });
     promise
@@ -406,7 +423,7 @@ pub unsafe extern "C" fn js_container_removeImage(
     let reference = match string_from_header(ref_ptr) {
         Some(s) => s,
         None => {
-            queue_promise_resolution(promise_ptr, false, JSValue::undefined().bits());
+            resolve_msg_error(promise_ptr, "Invalid image reference pointer");
             return promise;
         }
     };
@@ -415,24 +432,20 @@ pub unsafe extern "C" fn js_container_removeImage(
         let backend = get_global_backend().await;
         match backend.remove_image(&reference, f).await {
             Ok(_) => queue_promise_resolution(promise_ptr, true, JSValue::undefined().bits()),
-            Err(e) => {
-                let err_str =
-                    js_string_from_bytes(e.to_string().as_ptr(), e.to_string().len() as u32);
-                queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
-            }
+            Err(e) => resolve_error(promise_ptr, &e),
         }
     });
     promise
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_composeUp(spec_json_ptr: *const StringHeader) -> *mut Promise {
+pub unsafe extern "C" fn js_compose_up(spec_json_ptr: *const StringHeader) -> *mut Promise {
     let promise = js_promise_new();
     let promise_ptr = promise as usize;
     let json = match string_from_header(spec_json_ptr) {
         Some(s) => s,
         None => {
-            queue_promise_resolution(promise_ptr, false, JSValue::undefined().bits());
+            resolve_msg_error(promise_ptr, "Invalid spec JSON pointer");
             return promise;
         }
     };
@@ -441,22 +454,18 @@ pub unsafe extern "C" fn js_container_composeUp(spec_json_ptr: *const StringHead
         let spec: InternalComposeSpec = match serde_json::from_str(&json) {
             Ok(s) => s,
             Err(e) => {
-                let err_msg = format!("Invalid ComposeSpec: {}", e);
-                let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
+                resolve_msg_error(promise_ptr, &format!("Invalid ComposeSpec JSON: {}", e));
                 return;
             }
         };
 
         match compose::compose_up(spec).await {
-            Ok((engine, handle)) => {
+            Ok((engine, _handle)) => {
                 let h = register_handle(engine);
                 queue_promise_resolution(promise_ptr, true, (h as f64).to_bits());
             }
             Err(e) => {
-                let err_msg = e.to_string();
-                let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
+                resolve_msg_error(promise_ptr, &e.to_string());
             }
         }
     });
@@ -465,12 +474,7 @@ pub unsafe extern "C" fn js_container_composeUp(spec_json_ptr: *const StringHead
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_up(spec_json_ptr: *const StringHeader) -> *mut Promise {
-    js_container_composeUp(spec_json_ptr)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn js_container_compose_down(handle_id: f64, volumes: i32) -> *mut Promise {
+pub unsafe extern "C" fn js_compose_down(handle_id: f64, volumes: i32) -> *mut Promise {
     let promise = js_promise_new();
     let promise_ptr = promise as usize;
     let h = handle_id as i64;
@@ -479,21 +483,17 @@ pub unsafe extern "C" fn js_container_compose_down(handle_id: f64, volumes: i32)
         if let Some(engine) = get_handle::<ComposeEngine>(h) {
             match engine.down(&[], v, false).await {
                 Ok(_) => queue_promise_resolution(promise_ptr, true, JSValue::undefined().bits()),
-                Err(e) => {
-                    let err_str =
-                        js_string_from_bytes(e.to_string().as_ptr(), e.to_string().len() as u32);
-                    queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
-                }
+                Err(e) => resolve_error(promise_ptr, &e),
             }
         } else {
-            queue_promise_resolution(promise_ptr, false, JSValue::undefined().bits());
+            resolve_msg_error(promise_ptr, "Invalid compose handle");
         }
     });
     promise
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_ps(handle_id: f64) -> *mut Promise {
+pub unsafe extern "C" fn js_compose_ps(handle_id: f64) -> *mut Promise {
     let promise = js_promise_new();
     let promise_ptr = promise as usize;
     let h = handle_id as i64;
@@ -505,21 +505,17 @@ pub unsafe extern "C" fn js_container_compose_ps(handle_id: f64) -> *mut Promise
                     let s = js_string_from_bytes(json.as_ptr(), json.len() as u32);
                     queue_promise_resolution(promise_ptr, true, JSValue::string_ptr(s).bits());
                 }
-                Err(e) => {
-                    let err_str =
-                        js_string_from_bytes(e.to_string().as_ptr(), e.to_string().len() as u32);
-                    queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
-                }
+                Err(e) => resolve_error(promise_ptr, &e),
             }
         } else {
-            queue_promise_resolution(promise_ptr, false, JSValue::undefined().bits());
+            resolve_msg_error(promise_ptr, "Invalid compose handle");
         }
     });
     promise
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_logs(
+pub unsafe extern "C" fn js_compose_logs(
     handle_id: f64,
     service_ptr: *const StringHeader,
     tail: i32,
@@ -541,21 +537,17 @@ pub unsafe extern "C" fn js_container_compose_logs(
                     let s = js_string_from_bytes(json.as_ptr(), json.len() as u32);
                     queue_promise_resolution(promise_ptr, true, JSValue::string_ptr(s).bits());
                 }
-                Err(e) => {
-                    let err_str =
-                        js_string_from_bytes(e.to_string().as_ptr(), e.to_string().len() as u32);
-                    queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
-                }
+                Err(e) => resolve_error(promise_ptr, &e),
             }
         } else {
-            queue_promise_resolution(promise_ptr, false, JSValue::undefined().bits());
+            resolve_msg_error(promise_ptr, "Invalid compose handle");
         }
     });
     promise
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_exec(
+pub unsafe extern "C" fn js_compose_exec(
     handle_id: f64,
     service_ptr: *const StringHeader,
     cmd_json_ptr: *const StringHeader,
@@ -566,7 +558,7 @@ pub unsafe extern "C" fn js_container_compose_exec(
     let service = match string_from_header(service_ptr) {
         Some(s) => s,
         None => {
-            queue_promise_resolution(promise_ptr, false, JSValue::undefined().bits());
+            resolve_msg_error(promise_ptr, "Invalid service name pointer");
             return promise;
         }
     };
@@ -583,21 +575,17 @@ pub unsafe extern "C" fn js_container_compose_exec(
                     let s = js_string_from_bytes(json.as_ptr(), json.len() as u32);
                     queue_promise_resolution(promise_ptr, true, JSValue::string_ptr(s).bits());
                 }
-                Err(e) => {
-                    let err_str =
-                        js_string_from_bytes(e.to_string().as_ptr(), e.to_string().len() as u32);
-                    queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
-                }
+                Err(e) => resolve_error(promise_ptr, &e),
             }
         } else {
-            queue_promise_resolution(promise_ptr, false, JSValue::undefined().bits());
+            resolve_msg_error(promise_ptr, "Invalid compose handle");
         }
     });
     promise
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_config(
+pub unsafe extern "C" fn js_compose_config(
     spec_json_ptr: *const StringHeader,
 ) -> *mut Promise {
     let promise = js_promise_new();
@@ -605,7 +593,7 @@ pub unsafe extern "C" fn js_container_compose_config(
     let json = match string_from_header(spec_json_ptr) {
         Some(s) => s,
         None => {
-            queue_promise_resolution(promise_ptr, false, JSValue::undefined().bits());
+            resolve_msg_error(promise_ptr, "Invalid spec JSON pointer");
             return promise;
         }
     };
@@ -613,18 +601,14 @@ pub unsafe extern "C" fn js_container_compose_config(
         let spec: InternalComposeSpec = match serde_json::from_str(&json) {
             Ok(s) => s,
             Err(e) => {
-                let err_msg = format!("Invalid ComposeSpec: {}", e);
-                let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
+                resolve_msg_error(promise_ptr, &format!("Invalid ComposeSpec JSON: {}", e));
                 return;
             }
         };
         let yaml = match spec.to_yaml() {
             Ok(y) => y,
             Err(e) => {
-                let err_str =
-                    js_string_from_bytes(e.to_string().as_ptr(), e.to_string().len() as u32);
-                queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
+                resolve_error(promise_ptr, &e);
                 return;
             }
         };
@@ -635,7 +619,7 @@ pub unsafe extern "C" fn js_container_compose_config(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_start(
+pub unsafe extern "C" fn js_compose_start(
     handle_id: f64,
     services_json_ptr: *const StringHeader,
 ) -> *mut Promise {
@@ -650,21 +634,17 @@ pub unsafe extern "C" fn js_container_compose_start(
         if let Some(engine) = get_handle::<ComposeEngine>(h) {
             match engine.start(&services).await {
                 Ok(_) => queue_promise_resolution(promise_ptr, true, JSValue::undefined().bits()),
-                Err(e) => {
-                    let err_str =
-                        js_string_from_bytes(e.to_string().as_ptr(), e.to_string().len() as u32);
-                    queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
-                }
+                Err(e) => resolve_error(promise_ptr, &e),
             }
         } else {
-            queue_promise_resolution(promise_ptr, false, JSValue::undefined().bits());
+            resolve_msg_error(promise_ptr, "Invalid compose handle");
         }
     });
     promise
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_stop(
+pub unsafe extern "C" fn js_compose_stop(
     handle_id: f64,
     services_json_ptr: *const StringHeader,
 ) -> *mut Promise {
@@ -679,21 +659,42 @@ pub unsafe extern "C" fn js_container_compose_stop(
         if let Some(engine) = get_handle::<ComposeEngine>(h) {
             match engine.stop(&services).await {
                 Ok(_) => queue_promise_resolution(promise_ptr, true, JSValue::undefined().bits()),
-                Err(e) => {
-                    let err_str =
-                        js_string_from_bytes(e.to_string().as_ptr(), e.to_string().len() as u32);
-                    queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
-                }
+                Err(e) => resolve_error(promise_ptr, &e),
             }
         } else {
-            queue_promise_resolution(promise_ptr, false, JSValue::undefined().bits());
+            resolve_msg_error(promise_ptr, "Invalid compose handle");
         }
     });
     promise
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_restart(
+pub unsafe extern "C" fn js_compose_pull(
+    handle_id: f64,
+    services_json_ptr: *const StringHeader,
+) -> *mut Promise {
+    let promise = js_promise_new();
+    let promise_ptr = promise as usize;
+    let h = handle_id as i64;
+    let services_json = string_from_header(services_json_ptr);
+    spawn(async move {
+        let services: Vec<String> = services_json
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        if let Some(engine) = get_handle::<ComposeEngine>(h) {
+            match engine.pull(&services).await {
+                Ok(_) => queue_promise_resolution(promise_ptr, true, JSValue::undefined().bits()),
+                Err(e) => resolve_error(promise_ptr, &e),
+            }
+        } else {
+            resolve_msg_error(promise_ptr, "Invalid compose handle");
+        }
+    });
+    promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_restart(
     handle_id: f64,
     services_json_ptr: *const StringHeader,
 ) -> *mut Promise {
@@ -708,14 +709,10 @@ pub unsafe extern "C" fn js_container_compose_restart(
         if let Some(engine) = get_handle::<ComposeEngine>(h) {
             match engine.restart(&services).await {
                 Ok(_) => queue_promise_resolution(promise_ptr, true, JSValue::undefined().bits()),
-                Err(e) => {
-                    let err_str =
-                        js_string_from_bytes(e.to_string().as_ptr(), e.to_string().len() as u32);
-                    queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
-                }
+                Err(e) => resolve_error(promise_ptr, &e),
             }
         } else {
-            queue_promise_resolution(promise_ptr, false, JSValue::undefined().bits());
+            resolve_msg_error(promise_ptr, "Invalid compose handle");
         }
     });
     promise
@@ -738,17 +735,7 @@ pub unsafe extern "C" fn js_container_detectBackend() -> *mut Promise {
                 let s = js_string_from_bytes(json.as_ptr(), json.len() as u32);
                 queue_promise_resolution(promise_ptr, true, JSValue::string_ptr(s).bits());
             }
-            Err(e) => {
-                if let perry_container_compose::error::ComposeError::NoBackendFound { probed } = e {
-                    let json = serde_json::to_string(&probed).unwrap_or_default();
-                    let s = js_string_from_bytes(json.as_ptr(), json.len() as u32);
-                    queue_promise_resolution(promise_ptr, true, JSValue::string_ptr(s).bits());
-                } else {
-                    let err_str =
-                        js_string_from_bytes(e.to_string().as_ptr(), e.to_string().len() as u32);
-                    queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
-                }
-            }
+            Err(e) => resolve_error(promise_ptr, &e),
         }
     });
     promise

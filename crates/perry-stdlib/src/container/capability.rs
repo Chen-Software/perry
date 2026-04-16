@@ -78,18 +78,20 @@ pub async fn run_capability(
     command: &str,
     config: &CapabilityConfig,
 ) -> Result<CapabilityResult, ContainerError> {
-    // 1. Resolve image
-    let image = config
+    // 1. Resolve and verify image
+    let image_ref = config
         .image
         .clone()
         .unwrap_or_else(verification::get_default_base_image);
 
-    // 2. Optional image verification
-    if config.verify_image {
-        verification::verify_image(&image).await?;
-    }
+    let image = if config.verify_image {
+        let digest = verification::verify_image(&image_ref).await?;
+        format!("{}@{}", image_ref, digest)
+    } else {
+        image_ref
+    };
 
-    // 3. Build container spec
+    // 2. Build container spec
     let container_name = format!(
         "perry-cap-{}",
         md5_hex(command).get(..12).unwrap_or("unknown")

@@ -100,7 +100,7 @@ pub const NATIVE_MODULES: &[&str] = &[
     "perry/thread",
     // Perry container module (OCI container management)
     "perry/container",
-    "perry/container-compose",
+    "perry/compose",
     // SQLite
     "better-sqlite3",
 ];

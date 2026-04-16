@@ -4211,6 +4211,8 @@ dependencies = [
  "anyhow",
  "async-trait",
  "clap",
+ "dashmap 5.5.3",
+ "dirs 5.0.1",
  "dotenvy",
  "hex",
  "indexmap",
