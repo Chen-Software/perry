@@ -544,6 +544,13 @@ pub unsafe extern "C" fn js_container_composeUp(spec_val: f64) -> *mut Promise {
     promise
 }
 
+/// Bring up a Compose stack (alias for up)
+/// FFI: js_container_compose_up(spec_val: f64) -> *mut Promise
+#[no_mangle]
+pub unsafe extern "C" fn js_container_compose_up(spec_val: f64) -> *mut Promise {
+    js_container_composeUp(spec_val)
+}
+
 /// Helper to extract a boolean field from a JS object
 unsafe fn get_object_field_bool(obj_ptr: *const perry_runtime::ObjectHeader, key: &str) -> bool {
     let key_ptr = perry_runtime::js_string_from_bytes(key.as_ptr(), key.len() as u32);
