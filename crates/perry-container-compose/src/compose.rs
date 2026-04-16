@@ -59,22 +59,30 @@ impl ComposeEngine {
         // 1. Create networks
         if let Some(networks) = &self.spec.networks {
             for (name, config) in networks {
+                let mut backend_cfg = crate::backend::NetworkConfig::default();
                 if let Some(cfg) = config {
-                    self.backend.create_network(name, cfg).await?;
-                } else {
-                    self.backend.create_network(name, &Default::default()).await?;
+                    backend_cfg.driver = cfg.driver.clone();
+                    backend_cfg.internal = cfg.internal.unwrap_or(false);
+                    backend_cfg.enable_ipv6 = cfg.enable_ipv6.unwrap_or(false);
+                    if let Some(lbls) = &cfg.labels {
+                        backend_cfg.labels = lbls.to_map();
+                    }
                 }
+                self.backend.create_network(name, &backend_cfg).await?;
             }
         }
 
         // 2. Create volumes
         if let Some(volumes) = &self.spec.volumes {
             for (name, config) in volumes {
+                let mut backend_cfg = crate::backend::VolumeConfig::default();
                 if let Some(cfg) = config {
-                    self.backend.create_volume(name, cfg).await?;
-                } else {
-                    self.backend.create_volume(name, &Default::default()).await?;
+                    backend_cfg.driver = cfg.driver.clone();
+                    if let Some(lbls) = &cfg.labels {
+                        backend_cfg.labels = lbls.to_map();
+                    }
                 }
+                self.backend.create_volume(name, &backend_cfg).await?;
             }
         }
 

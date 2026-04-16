@@ -1,0 +1,12 @@
+{
+  "name": "forgejo-example",
+  "version": "1.0.0",
+  "dependencies": {
+    "perry": "link:../../.."
+  },
+  "perry": {
+    "packageAliases": {
+      "perry/container": "perry/container"
+    }
+  }
+}
