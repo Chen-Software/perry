@@ -127,7 +127,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         cli.env_files.clone(),
     );
     let project = ComposeProject::load(&config)?;
-    let backend = std::sync::Arc::from(crate::backend::get_backend()?);
+    let backend = std::sync::Arc::from(crate::backend::get_container_backend()?);
     let engine = ComposeEngine::new(project.spec.clone(), project.project_name.clone(), backend);
 
     match cli.command {
@@ -139,7 +139,7 @@ pub async fn run(cli: Cli) -> Result<()> {
 
         Commands::Down(args) => {
             engine
-                .down(&args.services, args.remove_orphans, args.volumes)
+                .down(&args.services, args.volumes, args.remove_orphans)
                 .await?;
         }
 
@@ -203,28 +203,21 @@ pub async fn run(cli: Cli) -> Result<()> {
                     .exec(
                         &container_name,
                         &cmd,
-                        args.user.as_deref(),
-                        args.workdir.as_deref(),
                         if env.is_empty() {
                             None
                         } else {
                             Some(&env)
                         },
+                        args.workdir.as_deref(),
                     )
                     .await?;
 
                 print!("{}", result.stdout);
                 eprint!("{}", result.stderr);
-                if result.exit_code != 0 {
-                    std::process::exit(result.exit_code);
-                }
             } else {
                 let result = engine.exec(&args.service, &cmd).await?;
                 print!("{}", result.stdout);
                 eprint!("{}", result.stderr);
-                if result.exit_code != 0 {
-                    std::process::exit(result.exit_code);
-                }
             }
         }
 

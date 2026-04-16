@@ -149,6 +149,23 @@ pub unsafe extern "C" fn js_sqlite_exec(db_handle: Handle, sql_ptr: *const Strin
     0
 }
 
+/// db.transaction(cb) -> Function
+///
+/// Create a function that, when called, executes the callback inside a
+/// transaction.
+#[no_mangle]
+pub unsafe extern "C" fn js_sqlite_transaction(db_handle: Handle, fn_ptr: f64) -> f64 {
+    use perry_runtime::closure::js_closure_alloc;
+
+    // Allocate a wrapper closure that captures the database handle and
+    // the user's callback function.
+    let wrapper = js_closure_alloc(sqlite_tx_wrapper as *const u8, 2);
+    perry_runtime::closure::js_closure_set_capture_f64(wrapper, 0, db_handle as f64);
+    perry_runtime::closure::js_closure_set_capture_ptr(wrapper, 1, fn_ptr.to_bits() as i64);
+
+    f64::from_bits(JSValue::object_ptr(wrapper as *mut u8).bits())
+}
+
 /// db.prepare(sql) -> Statement
 ///
 /// Create a prepared statement.
@@ -429,22 +446,6 @@ unsafe extern "C" fn sqlite_tx_wrapper(
     result
 }
 
-/// db.transaction(fn) -> wrapping closure
-///
-/// Returns a closure that wraps fn in BEGIN/COMMIT.
-#[no_mangle]
-pub unsafe extern "C" fn js_sqlite_transaction(
-    db_handle: Handle,
-    closure_ptr: i64,
-) -> *mut perry_runtime::ClosureHeader {
-    use perry_runtime::closure::{js_closure_alloc, js_closure_set_capture_f64, js_closure_set_capture_ptr};
-
-    let wrapper = js_closure_alloc(sqlite_tx_wrapper as *const u8, 2);
-    js_closure_set_capture_f64(wrapper, 0, db_handle as f64);
-    js_closure_set_capture_ptr(wrapper, 1, closure_ptr);
-
-    wrapper
-}
 
 /// Begin a transaction.
 #[no_mangle]
