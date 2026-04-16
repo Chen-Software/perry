@@ -2018,24 +2018,15 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
             return JSValue::undefined();
         }
 
-        // Extra safety: detect ASCII-like pointer values (e.g., 0x656e6f6c63 = "clone")
-        // that indicate a string value leaked into the keys_array pointer field.
-        // Valid ARM64 heap pointers from mmap on macOS have top_byte (bits 32-39) < 0x20.
-        // NOTE: This heuristic is macOS-specific. On Linux/Android, mmap can return
-        // pointers with top_byte in the printable ASCII range (0x20-0x7E), so we skip
-        // this check on non-macOS platforms.
-        #[cfg(target_os = "macos")]
-        {
-            let top_byte = (keys_ptr >> 32) as u8;
-            let byte4 = ((keys_ptr >> 24) & 0xFF) as u8;
-            if top_byte >= 0x20 && top_byte <= 0x7E && byte4 >= 0x20 && byte4 <= 0x7E {
-                eprintln!(
-                    "[PERRY WARN] js_object_get_field_by_name: ASCII-like keys_ptr=0x{:x} obj={:p} class_id={} — corrupted keys_array (heap overflow?)",
-                    keys_ptr, obj, (*obj).class_id
-                );
-                return JSValue::undefined();
-            }
-        }
+        // Issue #62 phase B: the previous "ASCII-like pointer value" heuristic
+        // assumed macOS mmap always returns arena pointers with `top_byte < 0x20`.
+        // That stopped holding once strings started arena-allocating (more blocks,
+        // mimalloc mapping into higher ranges): valid 0x000_04355_a033_* pointers
+        // triggered false positives, the heuristic returned `undefined`, and tests
+        // like `Object.defineProperty` flapped. The GcHeader `obj_type ==
+        // GC_TYPE_ARRAY` check immediately below is a real content-level validation
+        // (can't be faked by an address in any range) and fully supersedes this
+        // address-sniffing heuristic.
 
         // Cross-platform safety: validate keys_array has a valid GcHeader.
         // If the keys_array pointer is corrupt (e.g., due to a stale reference after GC,
@@ -3384,17 +3375,11 @@ pub unsafe extern "C" fn js_native_call_method(
                 let null_obj_ptr = &NULL_OBJECT_BYTES as *const NullObjectBytes as *mut u8;
                 return f64::from_bits(JSValue::pointer(null_obj_ptr).bits());
             }
-            // Detect ASCII-like pointer values (corrupted keys_array) — macOS only
-            // On Linux/Android, valid mmap pointers can have bytes 32-39 in ASCII range
-            #[cfg(target_os = "macos")]
-            {
-                let top_byte = (keys_ptr >> 32) as u8;
-                let byte4 = ((keys_ptr >> 24) & 0xFF) as u8;
-                if top_byte >= 0x20 && top_byte <= 0x7E && byte4 >= 0x20 && byte4 <= 0x7E {
-                    let null_obj_ptr = &NULL_OBJECT_BYTES as *const NullObjectBytes as *mut u8;
-                    return f64::from_bits(JSValue::pointer(null_obj_ptr).bits());
-                }
-            }
+            // Issue #62 phase B: removed macOS "ASCII-like pointer" heuristic —
+            // mimalloc + arena strings produce valid heap pointers with bytes
+            // 32-39 in the 0x20-0x7E range, causing false positives. The call
+            // into `js_object_get_field_by_name` below performs its own
+            // GcHeader-based validation.
 
             // Search for the method in the object's fields
             let key_count = crate::array::js_array_length(keys) as usize;

@@ -95,6 +95,21 @@ fn byte_offset_to_utf16_index(s: &str, byte_off: usize) -> usize {
     s[..byte_off].encode_utf16().count()
 }
 
+/// Allocate `total_size` bytes for a string (StringHeader + payload) from the
+/// thread-local arena bump allocator. Issue #62 phase B: strings in tight
+/// allocation loops (`"item_" + i`, `i.toString()`, template literals) were
+/// the dominant `gc_malloc` caller. `gc_malloc` costs ~30-40ns even with
+/// mimalloc (per-thread free list + GcHeader init + MALLOC_STATE tracking).
+/// The arena is a pointer bump (~10-15ns with sync) and needs no tracking —
+/// strings are discovered by walking arena blocks linearly, same as objects
+/// and arrays. Block-persistence keeps interned/long-lived strings alive
+/// for as long as any other arena object in the same block is reachable;
+/// truly dead blocks reset to offset=0 in O(1).
+#[inline]
+fn string_arena_alloc(total_size: usize) -> *mut u8 {
+    crate::arena::arena_alloc_gc(total_size, 8, crate::gc::GC_TYPE_STRING)
+}
+
 /// Create a string from raw bytes
 /// Returns a pointer to StringHeader
 #[no_mangle]
@@ -107,7 +122,7 @@ pub extern "C" fn js_string_from_bytes(data: *const u8, len: u32) -> *mut String
 #[inline]
 fn js_string_from_ascii_bytes(data: *const u8, len: u32) -> *mut StringHeader {
     let total_size = std::mem::size_of::<StringHeader>() + len as usize;
-    let raw = crate::gc::gc_malloc(total_size, crate::gc::GC_TYPE_STRING);
+    let raw = string_arena_alloc(total_size);
     let ptr = raw as *mut StringHeader;
     unsafe {
         (*ptr).utf16_len = len; // ASCII: utf16_len == byte_len
@@ -128,7 +143,7 @@ pub extern "C" fn js_string_from_bytes_with_capacity(data: *const u8, len: u32, 
     let capacity = capacity.max(len); // Ensure capacity >= len
     let total_size = std::mem::size_of::<StringHeader>() + capacity as usize;
 
-    let raw = crate::gc::gc_malloc(total_size, crate::gc::GC_TYPE_STRING);
+    let raw = string_arena_alloc(total_size);
     let ptr = raw as *mut StringHeader;
 
     unsafe {
@@ -320,7 +335,7 @@ pub extern "C" fn js_string_concat(a: *const StringHeader, b: *const StringHeade
 
     let total_size = std::mem::size_of::<StringHeader>() + total_blen as usize;
 
-    let raw = crate::gc::gc_malloc(total_size, crate::gc::GC_TYPE_STRING);
+    let raw = string_arena_alloc(total_size);
     let ptr = raw as *mut StringHeader;
 
     unsafe {
@@ -409,7 +424,7 @@ pub extern "C" fn js_string_concat_value(
         // Single allocation for prefix + number string
         let total_blen = prefix_blen as usize + num_len;
         let total_size = std::mem::size_of::<StringHeader>() + total_blen;
-        let raw = crate::gc::gc_malloc(total_size, crate::gc::GC_TYPE_STRING);
+        let raw = string_arena_alloc(total_size);
         let ptr = raw as *mut StringHeader;
 
         unsafe {
@@ -485,7 +500,7 @@ pub extern "C" fn js_value_concat_string(
 
         let total_blen = num_len + suffix_blen as usize;
         let total_size = std::mem::size_of::<StringHeader>() + total_blen;
-        let raw = crate::gc::gc_malloc(total_size, crate::gc::GC_TYPE_STRING);
+        let raw = string_arena_alloc(total_size);
         let ptr = raw as *mut StringHeader;
 
         unsafe {
