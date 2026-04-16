@@ -123,6 +123,172 @@ pub unsafe extern "C" fn js_container_create(spec_ptr: *const StringHeader) -> *
 }
 
 /// Start a previously created container
+#[no_mangle]
+pub unsafe extern "C" fn js_container_handle_start(handle_id: f64) -> *mut Promise {
+    let promise = js_promise_new();
+
+    crate::common::spawn_for_promise(promise as *mut u8, async move {
+        let backend = match get_global_backend().await {
+            Ok(b) => Arc::clone(b),
+            Err(e) => return Err::<u64, String>(e.to_string()),
+        };
+        let handle = types::get_container_handle(handle_id as u64)
+            .and_then(|h| crate::common::handle::get_handle::<ContainerHandle>(h))
+            .ok_or_else(|| "Invalid container handle".to_string())?;
+
+        match backend.start(&handle.id).await {
+            Ok(()) => Ok(0u64),
+            Err(e) => Err::<u64, String>(e.to_string()),
+        }
+    });
+
+    promise
+}
+
+/// Stop a running container
+#[no_mangle]
+pub unsafe extern "C" fn js_container_handle_stop(handle_id: f64, timeout: f64) -> *mut Promise {
+    let promise = js_promise_new();
+
+    crate::common::spawn_for_promise(promise as *mut u8, async move {
+        let timeout_opt = if timeout < 0.0 { None } else { Some(timeout as u32) };
+        let backend = match get_global_backend().await {
+            Ok(b) => Arc::clone(b),
+            Err(e) => return Err::<u64, String>(e.to_string()),
+        };
+        let handle = types::get_container_handle(handle_id as u64)
+            .and_then(|h| crate::common::handle::get_handle::<ContainerHandle>(h))
+            .ok_or_else(|| "Invalid container handle".to_string())?;
+
+        match backend.stop(&handle.id, timeout_opt).await {
+            Ok(()) => Ok(0u64),
+            Err(e) => Err::<u64, String>(e.to_string()),
+        }
+    });
+
+    promise
+}
+
+/// Remove a container
+#[no_mangle]
+pub unsafe extern "C" fn js_container_handle_remove(handle_id: f64, force: f64) -> *mut Promise {
+    let promise = js_promise_new();
+
+    crate::common::spawn_for_promise(promise as *mut u8, async move {
+        let backend = match get_global_backend().await {
+            Ok(b) => Arc::clone(b),
+            Err(e) => return Err::<u64, String>(e.to_string()),
+        };
+        let handle = types::get_container_handle(handle_id as u64)
+            .and_then(|h| crate::common::handle::get_handle::<ContainerHandle>(h))
+            .ok_or_else(|| "Invalid container handle".to_string())?;
+
+        match backend.remove(&handle.id, force != 0.0).await {
+            Ok(()) => Ok(0u64),
+            Err(e) => Err::<u64, String>(e.to_string()),
+        }
+    });
+
+    promise
+}
+
+/// Inspect a container
+#[no_mangle]
+pub unsafe extern "C" fn js_container_handle_inspect(handle_id: f64) -> *mut Promise {
+    let promise = js_promise_new();
+
+    crate::common::spawn_for_promise(promise as *mut u8, async move {
+        let backend = match get_global_backend().await {
+            Ok(b) => Arc::clone(b),
+            Err(e) => return Err::<u64, String>(e.to_string()),
+        };
+        let handle = types::get_container_handle(handle_id as u64)
+            .and_then(|h| crate::common::handle::get_handle::<ContainerHandle>(h))
+            .ok_or_else(|| "Invalid container handle".to_string())?;
+
+        match backend.inspect(&handle.id).await {
+            Ok(info) => {
+                let handle_id = types::register_container_info(info);
+                Ok(handle_id as u64)
+            }
+            Err(e) => Err::<u64, String>(e.to_string()),
+        }
+    });
+
+    promise
+}
+
+/// Get logs from a container
+#[no_mangle]
+pub unsafe extern "C" fn js_container_handle_logs(handle_id: f64, tail: f64) -> *mut Promise {
+    let promise = js_promise_new();
+
+    let tail_opt = if tail >= 0.0 { Some(tail as u32) } else { None };
+
+    crate::common::spawn_for_promise(promise as *mut u8, async move {
+        let backend = match get_global_backend().await {
+            Ok(b) => Arc::clone(b),
+            Err(e) => return Err::<u64, String>(e.to_string()),
+        };
+        let handle = types::get_container_handle(handle_id as u64)
+            .and_then(|h| crate::common::handle::get_handle::<ContainerHandle>(h))
+            .ok_or_else(|| "Invalid container handle".to_string())?;
+
+        match backend.logs(&handle.id, tail_opt).await {
+            Ok(logs) => {
+                let handle_id = types::register_container_logs(logs);
+                Ok(handle_id as u64)
+            }
+            Err(e) => Err::<u64, String>(e.to_string()),
+        }
+    });
+
+    promise
+}
+
+/// Execute a command in a container
+#[no_mangle]
+pub unsafe extern "C" fn js_container_handle_exec(
+    handle_id: f64,
+    cmd_json_ptr: *const StringHeader,
+    env_json_ptr: *const StringHeader,
+    workdir_ptr: *const StringHeader,
+) -> *mut Promise {
+    let promise = js_promise_new();
+
+    let cmd_json = string_from_header(cmd_json_ptr);
+    let env_json = string_from_header(env_json_ptr);
+    let workdir = string_from_header(workdir_ptr);
+
+    crate::common::spawn_for_promise(promise as *mut u8, async move {
+        let cmd: Vec<String> = cmd_json
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+
+        let env: Option<HashMap<String, String>> = env_json
+            .and_then(|s| serde_json::from_str(&s).ok());
+
+        let backend = match get_global_backend().await {
+            Ok(b) => Arc::clone(b),
+            Err(e) => return Err::<u64, String>(e.to_string()),
+        };
+        let handle = types::get_container_handle(handle_id as u64)
+            .and_then(|h| crate::common::handle::get_handle::<ContainerHandle>(h))
+            .ok_or_else(|| "Invalid container handle".to_string())?;
+
+        match backend.exec(&handle.id, &cmd, env.as_ref(), workdir.as_deref()).await {
+            Ok(logs) => {
+                let handle_id = types::register_container_logs(logs);
+                Ok(handle_id as u64)
+            }
+            Err(e) => Err::<u64, String>(e.to_string()),
+        }
+    });
+
+    promise
+}
+
+/// Start a previously created container
 /// FFI: js_container_start(id: *const StringHeader) -> *mut Promise
 #[no_mangle]
 pub unsafe extern "C" fn js_container_start(id_ptr: *const StringHeader) -> *mut Promise {

@@ -2686,6 +2686,14 @@ fn lower_module_decl(
                                                     }
                                                     _ => {}
                                                 }
+                                            } else if module_name == "perry/container" {
+                                                if method_name == "run" || method_name == "create" || method_name == "composeUp" {
+                                                    ctx.register_native_instance(name.clone(), module_name.to_string(), "ContainerHandle".to_string());
+                                                }
+                                            } else if module_name == "perry/container-compose" {
+                                                if method_name == "up" {
+                                                    ctx.register_native_instance(name.clone(), module_name.to_string(), "ComposeHandle".to_string());
+                                                }
                                             }
                                         }
                                     }
