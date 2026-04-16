@@ -11,16 +11,18 @@
 use proptest::prelude::*;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use indexmap::IndexMap;
+use perry_stdlib::container::{ListOrDict, DependsOnSpec, ComposeDependsOn, DependsOnCondition};
 
 // ============ Property 2: ContainerSpec CLI argument round-trip ============
 // Feature: perry-container, Property 2: ContainerSpec CLI argument round-trip
 // Validates: Requirements 12.5
 
-/// Build a ContainerSpec as a serde_json::Value and verify
-/// that all fields survive serialization → deserialization.
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
 
+    /// Build a ContainerSpec as a serde_json::Value and verify
+    /// that all fields survive serialization → deserialization.
     #[test]
     fn prop_container_spec_json_round_trip(
         image in "[a-z][a-z0-9_-]{1,30}(:[a-z0-9._-]+)?",
@@ -126,8 +128,6 @@ proptest! {
 // Validates: ListOrDict::Dict correctly converts all value types to strings.
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(100))]
-
     #[test]
     fn prop_list_or_dict_to_map_dict(
         keys in proptest::collection::vec("[A-Z][A-Z0-9_]{1,8}", 1..=8),
@@ -147,7 +147,14 @@ proptest! {
             map.insert(key.clone(), val);
         }
 
-        let lod = perry_stdlib::container::ListOrDict::Dict(map);
+        let map: IndexMap<String, Option<serde_yaml::Value>> = map.into_iter().map(|(k, v)| {
+            let v_opt = v.map(|jv| {
+                let s = serde_json::to_string(&jv).unwrap();
+                serde_yaml::from_str(&s).unwrap()
+            });
+            (k, v_opt)
+        }).collect();
+        let lod = ListOrDict::Dict(map);
         let result = lod.to_map();
 
         // All keys should be preserved
@@ -162,8 +169,6 @@ proptest! {
 // Validates: ListOrDict::List("KEY=VAL") correctly parses entries.
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(100))]
-
     #[test]
     fn prop_list_or_dict_to_map_list(
         entries in proptest::collection::vec("[A-Z][A-Z0-9_]{1,8}=[a-z0-9_]{0,10}", 1..=8),
@@ -219,32 +224,30 @@ proptest! {
 // Validates: Both List and Map variants produce the same set of service names.
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(100))]
-
     #[test]
-    fn prop_depends_on_entry_service_names(
+    fn prop_depends_on_spec_service_names(
         names in proptest::collection::vec("[a-z][a-z0-9_-]{1,10}", 1..=6),
     ) {
         // List variant
-        let list_entry = perry_stdlib::container::ComposeDependsOnEntry::List(names.clone());
+        let list_entry = DependsOnSpec::List(names.clone());
         let list_names = list_entry.service_names();
 
         // Map variant (same keys)
-        let mut map = HashMap::new();
+        let mut map = IndexMap::new();
         for name in &names {
             map.insert(
                 name.clone(),
-                perry_stdlib::container::ComposeDependsOn {
-                    condition: "service_started".to_string(),
+                ComposeDependsOn {
+                    condition: Some(DependsOnCondition::ServiceStarted),
                     required: None,
                     restart: None,
                 },
             );
         }
-        let map_entry = perry_stdlib::container::ComposeDependsOnEntry::Map(map);
+        let map_entry = DependsOnSpec::Map(map);
         let map_names = map_entry.service_names();
 
-        // Both should yield the same service names (order may differ for Map)
+        // Both should yield the same service names
         prop_assert_eq!(list_names.len(), map_names.len());
         for name in &list_names {
             prop_assert!(map_names.contains(name), "map should contain {}", name);
@@ -307,8 +310,6 @@ proptest! {
 // Validates: The typed ComposeSpec struct survives JSON round-trip.
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(100))]
-
     #[test]
     fn prop_typed_compose_spec_json_round_trip(
         name in proptest::option::of("[a-z][a-z0-9_-]{1,20}"),
@@ -342,8 +343,6 @@ proptest! {
 // Validates: Registering and retrieving handles preserves the value and type.
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(100))]
-
     #[test]
     fn prop_handle_registry_type_safety(
         ids in proptest::collection::vec("[a-f0-9]{12}", 1..=3),
@@ -382,6 +381,7 @@ proptest! {
         let logs = ContainerLogs {
             stdout: stdout.clone(),
             stderr: stderr.clone(),
+            exit_code: 0,
         };
         let lh = perry_stdlib::container::types::register_container_logs(logs);
         let taken_logs: Option<ContainerLogs> =
@@ -397,8 +397,6 @@ proptest! {
 // Validates: ComposeNetwork preserves all fields through serialization.
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(100))]
-
     #[test]
     fn prop_compose_network_json_round_trip(
         name in proptest::option::of("[a-z][a-z0-9_-]{1,20}"),

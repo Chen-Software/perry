@@ -4,7 +4,7 @@
 
 use crate::error::{ComposeError, Result};
 use crate::types::{
-    ComposeNetwork, ComposeVolume, ContainerHandle, ContainerInfo, ContainerLogs, ContainerSpec,
+    ContainerHandle, ContainerInfo, ContainerLogs, ContainerSpec,
     ImageInfo,
 };
 use async_trait::async_trait;
@@ -24,6 +24,33 @@ pub use crate::error::BackendProbeResult;
 // ─────────────────────────────────────────────────────────────────────────────
 // 4.1  ContainerBackend trait
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// Minimal network creation config — driver and labels only.
+/// The compose layer converts ComposeNetwork → NetworkConfig before calling the backend.
+#[derive(Debug, Clone, Default)]
+pub struct NetworkConfig {
+    pub driver: Option<String>,
+    pub labels: HashMap<String, String>,
+    pub internal: bool,
+    pub enable_ipv6: bool,
+}
+
+/// Minimal volume creation config — driver and labels only.
+#[derive(Debug, Clone, Default)]
+pub struct VolumeConfig {
+    pub driver: Option<String>,
+    pub labels: HashMap<String, String>,
+}
+
+/// Build configuration for a service.
+#[derive(Debug, Clone, Default)]
+pub struct BuildConfig {
+    pub context: String,
+    pub dockerfile: Option<String>,
+    pub args: HashMap<String, String>,
+    pub target: Option<String>,
+    pub network: Option<String>,
+}
 
 /// Runtime-agnostic async interface for container operations.
 #[async_trait]
@@ -77,13 +104,16 @@ pub trait ContainerBackend: Send + Sync {
     async fn remove_image(&self, reference: &str, force: bool) -> Result<()>;
 
     /// Create a network.
-    async fn create_network(&self, name: &str, config: &ComposeNetwork) -> Result<()>;
+    async fn create_network(&self, name: &str, config: &NetworkConfig) -> Result<()>;
 
     /// Remove a network (idempotent — not-found is silently ignored).
     async fn remove_network(&self, name: &str) -> Result<()>;
 
     /// Create a named volume.
-    async fn create_volume(&self, name: &str, config: &ComposeVolume) -> Result<()>;
+    async fn create_volume(&self, name: &str, config: &VolumeConfig) -> Result<()>;
+
+    /// Build an image.
+    async fn build(&self, config: &BuildConfig, tag: &str) -> Result<()>;
 
     /// Remove a named volume (idempotent — not-found is silently ignored).
     async fn remove_volume(&self, name: &str) -> Result<()>;
@@ -127,10 +157,11 @@ pub trait CliProtocol: Send + Sync {
     fn pull_image_args(&self, reference: &str) -> Vec<String>;
     fn list_images_args(&self) -> Vec<String>;
     fn remove_image_args(&self, reference: &str, force: bool) -> Vec<String>;
-    fn create_network_args(&self, name: &str, config: &ComposeNetwork) -> Vec<String>;
+    fn create_network_args(&self, name: &str, config: &NetworkConfig) -> Vec<String>;
     fn remove_network_args(&self, name: &str) -> Vec<String>;
-    fn create_volume_args(&self, name: &str, config: &ComposeVolume) -> Vec<String>;
+    fn create_volume_args(&self, name: &str, config: &VolumeConfig) -> Vec<String>;
     fn remove_volume_args(&self, name: &str) -> Vec<String>;
+    fn build_args(&self, config: &BuildConfig, tag: &str) -> Vec<String>;
 
     // ── Output parsers ─────────────────────────────────────────────────────
 
@@ -416,19 +447,23 @@ impl CliProtocol for DockerProtocol {
         args
     }
 
-    fn create_network_args(&self, name: &str, config: &ComposeNetwork) -> Vec<String> {
+    fn create_network_args(&self, name: &str, config: &NetworkConfig) -> Vec<String> {
         let mut args = vec!["network".into(), "create".into()];
         if let Some(d) = &config.driver {
             args.push("--driver".into());
             args.push(d.clone());
         }
-        if let Some(lbls) = &config.labels {
-            let mut pairs: Vec<(String, String)> = lbls.to_map().into_iter().collect();
-            pairs.sort_by_key(|(k, _)| k.clone());
-            for (k, v) in pairs {
-                args.push("--label".into());
-                args.push(format!("{}={}", k, v));
-            }
+        let mut pairs: Vec<(&String, &String)> = config.labels.iter().collect();
+        pairs.sort_by_key(|(k, _)| k.as_str());
+        for (k, v) in pairs {
+            args.push("--label".into());
+            args.push(format!("{}={}", k, v));
+        }
+        if config.internal {
+            args.push("--internal".into());
+        }
+        if config.enable_ipv6 {
+            args.push("--ipv6".into());
         }
         args.push(name.into());
         args
@@ -438,19 +473,17 @@ impl CliProtocol for DockerProtocol {
         vec!["network".into(), "rm".into(), name.into()]
     }
 
-    fn create_volume_args(&self, name: &str, config: &ComposeVolume) -> Vec<String> {
+    fn create_volume_args(&self, name: &str, config: &VolumeConfig) -> Vec<String> {
         let mut args = vec!["volume".into(), "create".into()];
         if let Some(d) = &config.driver {
             args.push("--driver".into());
             args.push(d.clone());
         }
-        if let Some(lbls) = &config.labels {
-            let mut pairs: Vec<(String, String)> = lbls.to_map().into_iter().collect();
-            pairs.sort_by_key(|(k, _)| k.clone());
-            for (k, v) in pairs {
-                args.push("--label".into());
-                args.push(format!("{}={}", k, v));
-            }
+        let mut pairs: Vec<(&String, &String)> = config.labels.iter().collect();
+        pairs.sort_by_key(|(k, _)| k.as_str());
+        for (k, v) in pairs {
+            args.push("--label".into());
+            args.push(format!("{}={}", k, v));
         }
         args.push(name.into());
         args
@@ -458,6 +491,30 @@ impl CliProtocol for DockerProtocol {
 
     fn remove_volume_args(&self, name: &str) -> Vec<String> {
         vec!["volume".into(), "rm".into(), name.into()]
+    }
+
+    fn build_args(&self, config: &BuildConfig, tag: &str) -> Vec<String> {
+        let mut args = vec!["build".into(), "-t".into(), tag.into()];
+        if let Some(df) = &config.dockerfile {
+            args.push("-f".into());
+            args.push(df.clone());
+        }
+        if let Some(net) = &config.network {
+            args.push("--network".into());
+            args.push(net.clone());
+        }
+        if let Some(target) = &config.target {
+            args.push("--target".into());
+            args.push(target.clone());
+        }
+        let mut pairs: Vec<(&String, &String)> = config.args.iter().collect();
+        pairs.sort_by_key(|(k, _)| k.as_str());
+        for (k, v) in pairs {
+            args.push("--build-arg".into());
+            args.push(format!("{}={}", k, v));
+        }
+        args.push(config.context.clone());
+        args
     }
 
     fn parse_list_output(&self, stdout: &str) -> Vec<ContainerInfo> {
@@ -636,17 +693,20 @@ impl CliProtocol for AppleContainerProtocol {
     fn remove_image_args(&self, reference: &str, force: bool) -> Vec<String> {
         DockerProtocol.remove_image_args(reference, force)
     }
-    fn create_network_args(&self, name: &str, config: &ComposeNetwork) -> Vec<String> {
+    fn create_network_args(&self, name: &str, config: &NetworkConfig) -> Vec<String> {
         DockerProtocol.create_network_args(name, config)
     }
     fn remove_network_args(&self, name: &str) -> Vec<String> {
         DockerProtocol.remove_network_args(name)
     }
-    fn create_volume_args(&self, name: &str, config: &ComposeVolume) -> Vec<String> {
+    fn create_volume_args(&self, name: &str, config: &VolumeConfig) -> Vec<String> {
         DockerProtocol.create_volume_args(name, config)
     }
     fn remove_volume_args(&self, name: &str) -> Vec<String> {
         DockerProtocol.remove_volume_args(name)
+    }
+    fn build_args(&self, config: &BuildConfig, tag: &str) -> Vec<String> {
+        DockerProtocol.build_args(config, tag)
     }
 
     fn parse_list_output(&self, stdout: &str) -> Vec<ContainerInfo> {
@@ -742,17 +802,20 @@ impl CliProtocol for LimaProtocol {
     fn remove_image_args(&self, reference: &str, force: bool) -> Vec<String> {
         DockerProtocol.remove_image_args(reference, force)
     }
-    fn create_network_args(&self, name: &str, config: &ComposeNetwork) -> Vec<String> {
+    fn create_network_args(&self, name: &str, config: &NetworkConfig) -> Vec<String> {
         DockerProtocol.create_network_args(name, config)
     }
     fn remove_network_args(&self, name: &str) -> Vec<String> {
         DockerProtocol.remove_network_args(name)
     }
-    fn create_volume_args(&self, name: &str, config: &ComposeVolume) -> Vec<String> {
+    fn create_volume_args(&self, name: &str, config: &VolumeConfig) -> Vec<String> {
         DockerProtocol.create_volume_args(name, config)
     }
     fn remove_volume_args(&self, name: &str) -> Vec<String> {
         DockerProtocol.remove_volume_args(name)
+    }
+    fn build_args(&self, config: &BuildConfig, tag: &str) -> Vec<String> {
+        DockerProtocol.build_args(config, tag)
     }
     fn parse_list_output(&self, stdout: &str) -> Vec<ContainerInfo> {
         DockerProtocol.parse_list_output(stdout)
@@ -778,6 +841,11 @@ pub struct CliBackend {
     pub bin: PathBuf,
     pub protocol: Box<dyn CliProtocol>,
 }
+
+// Ergonomic type aliases
+pub type DockerBackend = CliBackend;
+pub type AppleBackend = CliBackend;
+pub type LimaBackend = CliBackend;
 
 impl CliBackend {
     pub fn new(bin: PathBuf, protocol: Box<dyn CliProtocol>) -> Self {
@@ -921,6 +989,7 @@ impl ContainerBackend for CliBackend {
         Ok(ContainerLogs {
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            exit_code: output.status.code().unwrap_or(0),
         })
     }
 
@@ -936,6 +1005,7 @@ impl ContainerBackend for CliBackend {
         Ok(ContainerLogs {
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            exit_code: output.status.code().unwrap_or(0),
         })
     }
 
@@ -957,7 +1027,7 @@ impl ContainerBackend for CliBackend {
         Ok(())
     }
 
-    async fn create_network(&self, name: &str, config: &ComposeNetwork) -> Result<()> {
+    async fn create_network(&self, name: &str, config: &NetworkConfig) -> Result<()> {
         let args = self.protocol.create_network_args(name, config);
         self.exec_ok(args).await?;
         Ok(())
@@ -979,8 +1049,14 @@ impl ContainerBackend for CliBackend {
         Ok(())
     }
 
-    async fn create_volume(&self, name: &str, config: &ComposeVolume) -> Result<()> {
+    async fn create_volume(&self, name: &str, config: &VolumeConfig) -> Result<()> {
         let args = self.protocol.create_volume_args(name, config);
+        self.exec_ok(args).await?;
+        Ok(())
+    }
+
+    async fn build(&self, config: &BuildConfig, tag: &str) -> Result<()> {
+        let args = self.protocol.build_args(config, tag);
         self.exec_ok(args).await?;
         Ok(())
     }
@@ -1201,17 +1277,19 @@ pub async fn probe_candidate(name: &str) -> std::result::Result<CliBackend, Stri
 /// 2. Otherwise, probe `platform_candidates()` in order and return the first
 ///    available one.
 /// 3. If no candidate is available, returns `Err(NoBackendFound { probed })`.
-pub async fn detect_backend() -> std::result::Result<CliBackend, ComposeError> {
+pub async fn detect_backend() -> std::result::Result<Box<dyn ContainerBackend>, ComposeError> {
     // ── Override via env var ──────────────────────────────────────────────
     if let Ok(override_name) = std::env::var("PERRY_CONTAINER_BACKEND") {
         let name = override_name.trim().to_string();
         debug!("PERRY_CONTAINER_BACKEND={}, probing directly", name);
-        return probe_candidate(&name).await.map_err(|reason| {
-            ComposeError::BackendNotAvailable {
-                name: name.clone(),
-                reason,
-            }
-        });
+        return probe_candidate(&name).await
+            .map(|b| Box::new(b) as Box<dyn ContainerBackend>)
+            .map_err(|reason| {
+                ComposeError::BackendNotAvailable {
+                    name: name.clone(),
+                    reason,
+                }
+            });
     }
 
     // ── Platform probe sequence ───────────────────────────────────────────
@@ -1222,13 +1300,7 @@ pub async fn detect_backend() -> std::result::Result<CliBackend, ComposeError> {
         match probe_candidate(candidate).await {
             Ok(backend) => {
                 debug!("selected container backend: {}", candidate);
-                probed.push(BackendProbeResult {
-                    name: candidate.to_string(),
-                    available: true,
-                    reason: String::new(),
-                });
-                // Log remaining candidates as not-probed (skipped)
-                return Ok(backend);
+                return Ok(Box::new(backend));
             }
             Err(reason) => {
                 debug!("backend '{}' not available: {}", candidate, reason);
@@ -1529,5 +1601,28 @@ mod tests {
         let r2: BackendProbeResult = serde_json::from_str(&json).unwrap();
         assert_eq!(r2.name, "podman");
         assert!(!r2.available);
+    }
+
+    #[test]
+    fn test_network_config_args() {
+        let mut labels = HashMap::new();
+        labels.insert("foo".into(), "bar".into());
+        let config = NetworkConfig {
+            driver: Some("bridge".into()),
+            labels,
+            internal: true,
+            enable_ipv6: true,
+        };
+        let p = DockerProtocol;
+        let args = p.create_network_args("mynet", &config);
+        assert!(args.contains(&"network".into()));
+        assert!(args.contains(&"create".into()));
+        assert!(args.contains(&"--driver".into()));
+        assert!(args.contains(&"bridge".into()));
+        assert!(args.contains(&"--label".into()));
+        assert!(args.contains(&"foo=bar".into()));
+        assert!(args.contains(&"--internal".into()));
+        assert!(args.contains(&"--ipv6".into()));
+        assert!(args.contains(&"mynet".into()));
     }
 }
