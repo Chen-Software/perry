@@ -296,6 +296,21 @@ impl ComposeEngine {
         Ok(())
     }
 
+    /// Find a container for a service by project and service labels.
+    async fn find_container_for_service(&self, svc_name: &str) -> Result<Option<ContainerInfo>> {
+        let containers = self.backend.list(true).await?;
+        for c in containers {
+            let p = c.labels.get("com.docker.compose.project");
+            let s = c.labels.get("com.docker.compose.service");
+            if p.map(|v| v == &self.project_name).unwrap_or(false)
+                && s.map(|v| v == svc_name).unwrap_or(false)
+            {
+                return Ok(Some(c));
+            }
+        }
+        Ok(None)
+    }
+
     // ============ down / stop ============
 
     /// Stop and remove services in reverse dependency order.
@@ -316,20 +331,16 @@ impl ComposeEngine {
 
         // 1. Stop and remove containers
         for svc_name in target {
-            let svc = self
-                .spec
-                .services
-                .get(svc_name)
-                .ok_or_else(|| ComposeError::NotFound(svc_name.clone()))?;
+            let container_info = self.find_container_for_service(svc_name).await?;
 
-            let container_name = service::service_container_name(svc, svc_name);
-            let info_res = self.backend.inspect(&container_name).await;
-
-            if let Ok(info) = info_res {
-                if info.status == "running" {
-                    self.backend.stop(&container_name, None).await?;
+            if let Some(info) = container_info {
+                tracing::info!("Stopping and removing container '{}'...", info.name);
+                if info.status.contains("running") || info.status.contains("Up") {
+                    let _ = self.backend.stop(&info.id, None).await;
                 }
-                self.backend.remove(&container_name, true).await?;
+                self.backend.remove(&info.id, true).await?;
+            } else {
+                tracing::warn!("No container found for service '{}', skipping", svc_name);
             }
         }
 
@@ -378,15 +389,14 @@ impl ComposeEngine {
         let mut results = Vec::new();
 
         for (svc_name, svc) in &self.spec.services {
-            let container_name = service::service_container_name(svc, svc_name);
-            let info_res = self.backend.inspect(&container_name).await;
+            let container_info = self.find_container_for_service(svc_name).await?;
 
-            match info_res {
-                Ok(info) => results.push(info),
-                Err(_) => {
+            match container_info {
+                Some(info) => results.push(info),
+                None => {
                     results.push(ContainerInfo {
-                        id: container_name.clone(),
-                        name: container_name,
+                        id: "".into(),
+                        name: "".into(),
                         image: svc.image_ref(svc_name),
                         status: "not found".to_string(),
                         ports: svc.port_strings(),
@@ -419,16 +429,13 @@ impl ComposeEngine {
         };
 
         for svc_name in service_names {
-            let svc = self
-                .spec
-                .services
-                .get(&svc_name)
-                .ok_or_else(|| ComposeError::NotFound(svc_name.clone()))?;
-
-            let container_name = service::service_container_name(svc, &svc_name);
-            let logs = self.backend.logs(&container_name, tail).await?;
-            stdout.push_str(&format!("--- {} ---\n{}", svc_name, logs.stdout));
-            stderr.push_str(&format!("--- {} ---\n{}", svc_name, logs.stderr));
+            if let Some(info) = self.find_container_for_service(&svc_name).await? {
+                let logs = self.backend.logs(&info.id, tail).await?;
+                stdout.push_str(&format!("--- {} ---\n{}", svc_name, logs.stdout));
+                stderr.push_str(&format!("--- {} ---\n{}", svc_name, logs.stderr));
+            } else {
+                stdout.push_str(&format!("--- {} ---\n(not found)\n", svc_name));
+            }
         }
 
         Ok(ContainerLogs { stdout, stderr })
@@ -442,24 +449,18 @@ impl ComposeEngine {
         service: &str,
         cmd: &[String],
     ) -> Result<ContainerLogs> {
-        let svc = self
-            .spec
-            .services
-            .get(service)
-            .ok_or_else(|| ComposeError::NotFound(service.to_owned()))?;
+        let info = self.find_container_for_service(service).await?
+            .ok_or_else(|| ComposeError::NotFound(service.to_string()))?;
 
-        let container_name = service::service_container_name(svc, service);
-        let info = self.backend.inspect(&container_name).await?;
-
-        if info.status != "running" {
+        if !info.status.contains("running") {
             return Err(ComposeError::ServiceStartupFailed {
                 service: service.to_owned(),
-                message: format!("container '{}' is not running", container_name),
+                message: format!("container '{}' is not running", info.name),
             });
         }
 
         self.backend
-            .exec(&container_name, cmd, None, None)
+            .exec(&info.id, cmd, None, None)
             .await
     }
 
@@ -481,13 +482,11 @@ impl ComposeEngine {
         };
 
         for svc_name in target {
-            let svc = self
-                .spec
-                .services
-                .get(&svc_name)
-                .ok_or_else(|| ComposeError::NotFound(svc_name.clone()))?;
-            let container_name = service::service_container_name(svc, &svc_name);
-            self.backend.start(&container_name).await?;
+            if let Some(info) = self.find_container_for_service(&svc_name).await? {
+                self.backend.start(&info.id).await?;
+            } else {
+                return Err(ComposeError::NotFound(svc_name));
+            }
         }
 
         Ok(())
@@ -502,13 +501,11 @@ impl ComposeEngine {
         };
 
         for svc_name in target {
-            let svc = self
-                .spec
-                .services
-                .get(&svc_name)
-                .ok_or_else(|| ComposeError::NotFound(svc_name.clone()))?;
-            let container_name = service::service_container_name(svc, &svc_name);
-            self.backend.stop(&container_name, None).await?;
+            if let Some(info) = self.find_container_for_service(&svc_name).await? {
+                self.backend.stop(&info.id, None).await?;
+            } else {
+                return Err(ComposeError::NotFound(svc_name));
+            }
         }
 
         Ok(())

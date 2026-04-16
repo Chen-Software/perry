@@ -140,8 +140,9 @@ proptest! {
         let lod = perry_stdlib::container::ListOrDict::Dict(map);
         let result = lod.to_map();
 
-        // All keys should be preserved
-        prop_assert_eq!(result.len(), keys.len());
+        // All unique keys should be preserved
+        let unique_keys: std::collections::HashSet<_> = keys.iter().collect();
+        prop_assert_eq!(result.len(), unique_keys.len());
         for key in &keys {
             prop_assert!(result.contains_key(key), "key {} should be in result", key);
         }
@@ -215,7 +216,7 @@ proptest! {
     fn prop_depends_on_entry_service_names(
         names in proptest::collection::vec("[a-z][a-z0-9_-]{1,10}", 1..=6),
     ) {
-        use perry_container_compose::types::{DependsOnSpec, ComposeDependsOn};
+        use perry_container_compose::types::{DependsOnSpec, ComposeDependsOn, DependsOnCondition};
 
         // List variant
         let list_entry = DependsOnSpec::List(names.clone());
@@ -227,7 +228,7 @@ proptest! {
             map.insert(
                 name.clone(),
                 ComposeDependsOn {
-                    condition: None,
+                    condition: DependsOnCondition::ServiceStarted,
                     required: None,
                     restart: None,
                 },
@@ -356,6 +357,7 @@ proptest! {
                 image: img.clone(),
                 status: "running".to_string(),
                 ports: vec![],
+                labels: std::collections::HashMap::new(),
                 created: "2025-01-01T00:00:00Z".to_string(),
             })
             .collect();
