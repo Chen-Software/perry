@@ -101,6 +101,7 @@ impl ComposeEngine {
         };
 
         // 1. Create networks (skip external)
+        let mut created_networks = Vec::new();
         if let Some(networks) = &self.spec.networks {
             for (net_name, net_config_opt) in networks {
                 let external = net_config_opt
@@ -114,19 +115,27 @@ impl ComposeEngine {
                     .and_then(|c| c.name.as_deref())
                     .unwrap_or(net_name.as_str());
 
-                let config = net_config_opt.clone().unwrap_or_default();
+                let spec_config = net_config_opt.clone().unwrap_or_default();
+                let config = crate::backend::NetworkConfig {
+                    driver: spec_config.driver,
+                    labels: spec_config.labels.map(|l| l.to_map()).unwrap_or_default(),
+                    internal: spec_config.internal.unwrap_or(false),
+                    enable_ipv6: spec_config.enable_ipv6.unwrap_or(false),
+                };
                 tracing::info!("Creating network '{}'…", resolved_name);
-                self.backend
-                    .create_network(resolved_name, &config)
-                    .await
-                    .map_err(|e| ComposeError::ServiceStartupFailed {
+                if let Err(e) = self.backend.create_network(resolved_name, &config).await {
+                    self.rollback(&[], &created_networks, &[]).await;
+                    return Err(ComposeError::ServiceStartupFailed {
                         service: format!("network/{}", net_name),
                         message: e.to_string(),
-                    })?;
+                    });
+                }
+                created_networks.push(resolved_name.to_string());
             }
         }
 
         // 2. Create volumes (skip external)
+        let mut created_volumes = Vec::new();
         if let Some(volumes) = &self.spec.volumes {
             for (vol_name, vol_config_opt) in volumes {
                 let external = vol_config_opt
@@ -140,15 +149,20 @@ impl ComposeEngine {
                     .and_then(|c| c.name.as_deref())
                     .unwrap_or(vol_name.as_str());
 
-                let config = vol_config_opt.clone().unwrap_or_default();
+                let spec_config = vol_config_opt.clone().unwrap_or_default();
+                let config = crate::backend::VolumeConfig {
+                    driver: spec_config.driver,
+                    labels: spec_config.labels.map(|l| l.to_map()).unwrap_or_default(),
+                };
                 tracing::info!("Creating volume '{}'…", resolved_name);
-                self.backend
-                    .create_volume(resolved_name, &config)
-                    .await
-                    .map_err(|e| ComposeError::ServiceStartupFailed {
+                if let Err(e) = self.backend.create_volume(resolved_name, &config).await {
+                    self.rollback(&[], &created_networks, &created_volumes).await;
+                    return Err(ComposeError::ServiceStartupFailed {
                         service: format!("volume/{}", vol_name),
                         message: e.to_string(),
-                    })?;
+                    });
+                }
+                created_volumes.push(resolved_name.to_string());
             }
         }
 
@@ -165,18 +179,12 @@ impl ComposeEngine {
             let container_name = service::service_container_name(svc, svc_name);
             let inspect_result = self.backend.inspect(&container_name).await;
 
-            match inspect_result {
-                Ok(info) if info.status == "running" => {
-                    // Already running
-                }
+            let res = match inspect_result {
+                Ok(info) if info.status == "running" => Ok(()),
                 Ok(info) if info.status != "not found" => {
-                    self.backend.start(&container_name).await.map_err(|e| {
-                        ComposeError::ServiceStartupFailed {
-                            service: svc_name.clone(),
-                            message: e.to_string(),
-                        }
-                    })?;
-                    started.push(container_name.clone());
+                    self.backend.start(&container_name).await.map(|_| {
+                        started.push(container_name.clone());
+                    })
                 }
                 _ => {
                     // Build if needed
@@ -187,7 +195,8 @@ impl ComposeEngine {
                         let build_args: Option<HashMap<String, String>> =
                             build_config.args.as_ref().map(|a| a.to_map());
                         tracing::info!("Building image '{}'…", tag);
-                        self.backend
+                        if let Err(e) = self
+                            .backend
                             .build(
                                 context,
                                 build_config.dockerfile.as_deref(),
@@ -197,49 +206,23 @@ impl ComposeEngine {
                                 build_config.network.as_deref(),
                             )
                             .await
-                            .map_err(|e| ComposeError::ServiceStartupFailed {
-                                service: svc_name.clone(),
-                                message: e.to_string(),
-                            })?;
-                    }
-
-                    let image = svc.image_ref(svc_name);
-                    let env = svc.resolved_env();
-                    let ports = svc.port_strings();
-                    let vols = svc.volume_strings();
-
-                    // Add project labels
-                    let mut all_labels: HashMap<String, String> = svc
-                        .labels
-                        .as_ref()
-                        .map(|l| l.to_map())
-                        .unwrap_or_default();
-                    all_labels.insert("perry.compose.project".into(), self.project_name.clone());
-                    all_labels.insert("perry.compose.service".into(), svc_name.clone());
-
-                    let cmd = svc.command_list();
-
-                    let spec = ContainerSpec {
-                        image: image.clone(),
-                        name: Some(container_name.clone()),
-                        ports: Some(ports),
-                        volumes: Some(vols),
-                        env: Some(env),
-                        cmd,
-                        rm: Some(false),
-                        read_only: svc.read_only,
-                        ..Default::default()
-                    };
-
-                    self.backend.run(&spec).await.map_err(|e| {
-                        ComposeError::ServiceStartupFailed {
-                            service: svc_name.clone(),
-                            message: e.to_string(),
+                        {
+                            Err(e)
+                        } else {
+                            self.run_service(svc, svc_name, &container_name, &mut started).await
                         }
-                    })?;
-
-                    started.push(container_name.clone());
+                    } else {
+                        self.run_service(svc, svc_name, &container_name, &mut started).await
+                    }
                 }
+            };
+
+            if let Err(e) = res {
+                self.rollback(&started, &created_networks, &created_volumes).await;
+                return Err(ComposeError::ServiceStartupFailed {
+                    service: svc_name.clone(),
+                    message: e.to_string(),
+                });
             }
         }
 
@@ -248,6 +231,56 @@ impl ComposeEngine {
 
         // Register and return handle
         Ok(self.register())
+    }
+
+    async fn run_service(&self, svc: &crate::types::ComposeService, svc_name: &str, container_name: &str, started: &mut Vec<String>) -> Result<()> {
+        let image = svc.image_ref(svc_name);
+        let env = svc.resolved_env();
+        let ports = svc.port_strings();
+        let vols = svc.volume_strings();
+
+        let mut all_labels: HashMap<String, String> = svc
+            .labels
+            .as_ref()
+            .map(|l| l.to_map())
+            .unwrap_or_default();
+        all_labels.insert("perry.compose.project".into(), self.project_name.clone());
+        all_labels.insert("perry.compose.service".into(), svc_name.to_string());
+
+        let cmd = svc.command_list();
+
+        let spec = ContainerSpec {
+            image: image.clone(),
+            name: Some(container_name.to_string()),
+            ports: Some(ports),
+            volumes: Some(vols),
+            env: Some(env),
+            cmd,
+            rm: Some(false),
+            read_only: svc.read_only,
+            ..Default::default()
+        };
+
+        self.backend.run(&spec).await.map(|_| {
+            started.push(container_name.to_string());
+        })
+    }
+
+    async fn rollback(&self, started: &[String], networks: &[String], volumes: &[String]) {
+        tracing::info!("Rolling back partial startup…");
+        // Stop and remove containers in reverse order
+        for container_name in started.iter().rev() {
+            let _ = self.backend.stop(container_name, None).await;
+            let _ = self.backend.remove(container_name, true).await;
+        }
+        // Remove networks
+        for net_name in networks {
+            let _ = self.backend.remove_network(net_name).await;
+        }
+        // Remove volumes
+        for vol_name in volumes {
+            let _ = self.backend.remove_volume(vol_name).await;
+        }
     }
 
     // ============ down / stop ============
