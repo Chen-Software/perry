@@ -3472,7 +3472,7 @@ const PERRY_CONTAINER_TABLE: &[(&str, &str)] = &[
     ("listImages", "js_container_listImages"),
     ("removeImage", "js_container_removeImage"),
     ("getBackend", "js_container_getBackend"),
-    ("composeUp", "js_container_composeUp"),
+    ("composeUp", "js_container_compose_up"),
 ];
 
 /// Maps perry/container-compose TypeScript function names to their FFI symbols.
@@ -4769,7 +4769,8 @@ fn lower_perry_container_compose_call(
         if is_string_expr(ctx, a) {
             let blk = ctx.block();
             let raw_ptr = blk.call(I64, "js_get_string_pointer_unified", &[(DOUBLE, &val)]);
-            lowered.push(raw_ptr);
+            let casted = blk.inttoptr(I64, &raw_ptr);
+            lowered.push(casted);
             arg_types.push(PTR);
         } else if matches!(a, Expr::Integer(_) | Expr::Number(_)) || matches!(crate::type_analysis::static_type_of(ctx, a), Some(perry_types::Type::Number) | Some(perry_types::Type::Boolean)) {
             let blk = ctx.block();
@@ -4781,7 +4782,8 @@ fn lower_perry_container_compose_call(
             let zero_i = "0".to_string();
             let json_str_box = blk.call(DOUBLE, "js_json_stringify", &[(DOUBLE, &val), (I32, &zero_i)]);
             let bits = blk.bitcast_double_to_i64(&json_str_box);
-            let raw_ptr = blk.and(I64, &bits, crate::nanbox::POINTER_MASK_I64);
+            let raw_i64 = blk.and(I64, &bits, crate::nanbox::POINTER_MASK_I64);
+            let raw_ptr = blk.inttoptr(I64, &raw_i64);
             lowered.push(raw_ptr);
             arg_types.push(PTR);
         }
