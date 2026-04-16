@@ -278,6 +278,78 @@ pub unsafe extern "C" fn js_container_verifyImage(reference_ptr: *const StringHe
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn js_container_pullImage(reference_ptr: *const StringHeader) -> *mut Promise {
+    let promise = js_promise_new();
+    let reference = match string_from_header(reference_ptr) {
+        Some(s) => s,
+        None => {
+            crate::common::spawn_for_promise(promise as *mut u8, async { Err("Missing image reference".to_string()) });
+            return promise;
+        }
+    };
+    let backend = match get_global_backend() {
+        Ok(b) => b,
+        Err(e) => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move { Err(e) });
+            return promise;
+        }
+    };
+    crate::common::spawn_for_promise(promise as *mut u8, async move {
+        match backend.pull_image(&reference).await {
+            Ok(()) => Ok(0),
+            Err(e) => Err(e.to_string()),
+        }
+    });
+    promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_container_listImages() -> *mut Promise {
+    let promise = js_promise_new();
+    let backend = match get_global_backend() {
+        Ok(b) => b,
+        Err(e) => {
+            crate::common::spawn_for_promise_deferred(promise as *mut u8, async move { Err::<Vec<perry_container_compose::types::ImageInfo>, _>(e) }, |_| 0);
+            return promise;
+        }
+    };
+    crate::common::spawn_for_promise_deferred(promise as *mut u8, async move {
+        backend.list_images().await.map_err(|e| e.to_string())
+    }, |images| {
+        let json = serde_json::to_string(&images).unwrap();
+        let ptr = js_string_from_bytes(json.as_ptr(), json.len() as u32);
+        JSValue::string_ptr(ptr).bits()
+    });
+    promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_container_removeImage(reference_ptr: *const StringHeader, force: i32) -> *mut Promise {
+    let promise = js_promise_new();
+    let reference = match string_from_header(reference_ptr) {
+        Some(s) => s,
+        None => {
+            crate::common::spawn_for_promise(promise as *mut u8, async { Err("Missing image reference".to_string()) });
+            return promise;
+        }
+    };
+    let backend = match get_global_backend() {
+        Ok(b) => b,
+        Err(e) => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move { Err(e) });
+            return promise;
+        }
+    };
+    crate::common::spawn_for_promise(promise as *mut u8, async move {
+        match backend.remove_image(&reference, force != 0).await {
+            Ok(()) => Ok(0),
+            Err(e) => Err(e.to_string()),
+        }
+    });
+    promise
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn js_container_runCapability(command_ptr: *const StringHeader) -> *mut Promise {
     let promise = js_promise_new();
     let command = match string_from_header(command_ptr) {
@@ -320,6 +392,19 @@ pub unsafe extern "C" fn js_container_getBackend() -> *const StringHeader {
         Err(_) => "none".to_string(),
     };
     perry_runtime::js_string_from_bytes(name.as_ptr(), name.len() as u32)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_container_detectBackend() -> *mut Promise {
+    let promise = js_promise_new();
+    crate::common::spawn_for_promise_deferred(promise as *mut u8, async move {
+        perry_container_compose::backend::detect_backend_info().await.map_err(|e| e.to_string())
+    }, |info| {
+        let json = serde_json::to_string(&info).unwrap();
+        let ptr = js_string_from_bytes(json.as_ptr(), json.len() as u32);
+        JSValue::string_ptr(ptr).bits()
+    });
+    promise
 }
 
 #[no_mangle]

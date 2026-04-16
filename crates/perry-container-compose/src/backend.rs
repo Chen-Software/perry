@@ -370,8 +370,15 @@ impl<P: CliProtocol> ContainerBackend for CliBackend<P> {
 }
 
 pub async fn detect_backend() -> Result<Box<dyn ContainerBackend>> {
+    let mut probed = Vec::new();
     if let Ok(name) = std::env::var("PERRY_CONTAINER_BACKEND") {
-        return probe_candidate(&name).await.map_err(|reason| ComposeError::BackendNotAvailable { name, reason: reason.to_string() });
+        match probe_candidate(&name).await {
+            Ok(b) => return Ok(b),
+            Err(reason) => {
+                probed.push(BackendProbeResult { name: name.clone(), available: false, reason: reason.to_string() });
+                return Err(ComposeError::NoBackendFound { probed });
+            }
+        }
     }
 
     let candidates = if cfg!(target_os = "macos") {
@@ -380,7 +387,6 @@ pub async fn detect_backend() -> Result<Box<dyn ContainerBackend>> {
         vec!["podman", "nerdctl", "docker"]
     };
 
-    let mut probed = Vec::new();
     for name in candidates {
         match tokio::time::timeout(Duration::from_secs(2), probe_candidate(name)).await {
             Ok(Ok(b)) => return Ok(b),
@@ -389,6 +395,24 @@ pub async fn detect_backend() -> Result<Box<dyn ContainerBackend>> {
         }
     }
     Err(ComposeError::NoBackendFound { probed })
+}
+
+pub async fn detect_backend_info() -> Result<Vec<BackendProbeResult>> {
+    let candidates = if cfg!(target_os = "macos") {
+        vec!["apple/container", "orbstack", "colima", "rancher-desktop", "podman", "lima", "docker"]
+    } else {
+        vec!["podman", "nerdctl", "docker"]
+    };
+
+    let mut results = Vec::new();
+    for name in candidates {
+        match tokio::time::timeout(Duration::from_secs(2), probe_candidate(name)).await {
+            Ok(Ok(_)) => results.push(BackendProbeResult { name: name.to_string(), available: true, reason: String::new() }),
+            Ok(Err(reason)) => results.push(BackendProbeResult { name: name.to_string(), available: false, reason: reason.to_string() }),
+            Err(_) => results.push(BackendProbeResult { name: name.to_string(), available: false, reason: "timeout".into() }),
+        }
+    }
+    Ok(results)
 }
 
 async fn probe_candidate(name: &str) -> Result<Box<dyn ContainerBackend>> {
