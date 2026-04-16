@@ -139,6 +139,9 @@ impl CliProtocol for DockerProtocol {
         if let Some(net) = &spec.network { args.extend(["--network".into(), net.clone()]); }
         if spec.rm.unwrap_or(false) { args.push("--rm".into()); }
         if spec.read_only.unwrap_or(false) { args.push("--read-only".into()); }
+        for cap in spec.cap_add.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["--cap-add".into(), cap.clone()]); }
+        for cap in spec.cap_drop.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["--cap-drop".into(), cap.clone()]); }
+        for opt in spec.security_opt.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["--security-opt".into(), opt.clone()]); }
         if let Some(ep) = &spec.entrypoint {
             args.push("--entrypoint".into());
             args.push(ep.join(" "));
@@ -156,6 +159,9 @@ impl CliProtocol for DockerProtocol {
         for (k, v) in spec.env.as_ref().iter().flat_map(|m| m.iter()) { args.extend(["-e".into(), format!("{k}={v}")]); }
         if let Some(net) = &spec.network { args.extend(["--network".into(), net.clone()]); }
         if spec.read_only.unwrap_or(false) { args.push("--read-only".into()); }
+        for cap in spec.cap_add.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["--cap-add".into(), cap.clone()]); }
+        for cap in spec.cap_drop.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["--cap-drop".into(), cap.clone()]); }
+        for opt in spec.security_opt.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["--security-opt".into(), opt.clone()]); }
         if let Some(ep) = &spec.entrypoint {
             args.push("--entrypoint".into());
             args.push(ep.join(" "));
@@ -312,6 +318,9 @@ impl CliProtocol for AppleContainerProtocol {
         if let Some(name) = &spec.name { args.extend(["--name".into(), name.clone()]); }
         if spec.read_only.unwrap_or(false) { args.push("--read-only".into()); }
         if let Some(network) = &spec.network { args.extend(["--network".into(), network.clone()]); }
+        for cap in spec.cap_add.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["--cap-add".into(), cap.clone()]); }
+        for cap in spec.cap_drop.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["--cap-drop".into(), cap.clone()]); }
+        for opt in spec.security_opt.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["--security-opt".into(), opt.clone()]); }
         for port in spec.ports.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["-p".into(), port.clone()]); }
         for vol in spec.volumes.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["-v".into(), vol.clone()]); }
         for (k, v) in spec.env.as_ref().iter().flat_map(|m| m.iter()) { args.extend(["-e".into(), format!("{k}={v}")]); }

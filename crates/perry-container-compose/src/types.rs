@@ -687,6 +687,9 @@ pub struct ContainerSpec {
     pub network: Option<String>,
     pub rm: Option<bool>,
     pub read_only: Option<bool>,
+    pub cap_add: Option<Vec<String>>,
+    pub cap_drop: Option<Vec<String>>,
+    pub security_opt: Option<Vec<String>>,
 }
 
 /// Handle returned after creating/running a container.

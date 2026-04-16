@@ -169,6 +169,9 @@ impl ComposeEngine {
                 network,
                 rm: None,
                 read_only: svc.read_only,
+                cap_add: svc.cap_add.clone(),
+                cap_drop: svc.cap_drop.clone(),
+                security_opt: svc.security_opt.clone(),
             };
 
             match self.backend.run(&container_spec).await {

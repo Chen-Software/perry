@@ -27,6 +27,8 @@ pub async fn alloy_container_run_capability(
         network: if grants.network { None } else { Some("none".to_string()) },
         rm: Some(true),
         read_only: Some(true),
+        cap_drop: Some(vec!["ALL".to_string()]),
+        security_opt: Some(vec!["no-new-privileges".to_string()]),
         env: grants.env.clone(),
         cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
         entrypoint: None,
