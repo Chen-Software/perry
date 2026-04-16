@@ -414,9 +414,21 @@ impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
     }
 
     async fn run_with_security(&self, spec: &ContainerSpec, _profile: &SecurityProfile) -> Result<ContainerHandle> {
-        // In this implementation, run_with_security is just a pass-through to run.
-        // Production implementation would add --security-opt, --cap-drop, etc.
-        self.run(spec).await
+        // Enforce base security constraints for capability-based runs
+        let mut security_spec = spec.clone();
+
+        // Capability containers must ALWAYS be removed on exit
+        security_spec.rm = Some(true);
+
+        // If not explicitly set, default to no network
+        if security_spec.network.is_none() {
+            security_spec.network = Some("none".to_string());
+        }
+
+        let args = self.protocol.run_args(&security_spec);
+        let (stdout, _) = self.exec_raw(args).await?;
+        let id = self.protocol.parse_container_id(&stdout)?;
+        Ok(ContainerHandle { id, name: security_spec.name.clone() })
     }
 
     async fn create(&self, spec: &ContainerSpec) -> Result<ContainerHandle> {

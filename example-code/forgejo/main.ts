@@ -18,7 +18,7 @@
  * Run: npx tsx crates/perry-container-compose/examples/forgejo/main.ts
  */
 
-import { composeUp, getBackend } from 'perry/container';
+import { composeUp, getBackend, pullImage } from 'perry/container';
 
 async function main() {
   // ──────────────────────────────────────────────────────────────
@@ -29,11 +29,25 @@ async function main() {
   console.log(`🔧 Using container backend: ${backend}\n`);
 
   // ──────────────────────────────────────────────────────────────
-  // 2. Define Forgejo Production Stack Configuration
+  // 2. Pull Images Explicitly (Production Best Practice)
   // ──────────────────────────────────────────────────────────────
 
   const FORGEJO_VERSION = '9.0';
   const POSTGRES_VERSION = '16-alpine';
+
+  const forgejoImage = `codeberg.org/forgejo/forgejo:${FORGEJO_VERSION}`;
+  const postgresImage = `postgres:${POSTGRES_VERSION}`;
+
+  console.log('📥 Pulling required images...');
+  console.log(`   - ${postgresImage}`);
+  await pullImage(postgresImage);
+  console.log(`   - ${forgejoImage}`);
+  await pullImage(forgejoImage);
+  console.log('✅ Images pulled successfully\n');
+
+  // ──────────────────────────────────────────────────────────────
+  // 3. Define Forgejo Production Stack Configuration
+  // ──────────────────────────────────────────────────────────────
 
   console.log('🚀 Deploying Forgejo stack...');
 
@@ -41,7 +55,7 @@ async function main() {
     version: '3.8',
     services: {
       postgres: {
-        image: `postgres:${POSTGRES_VERSION}`,
+        image: postgresImage,
         restart: 'always',
         environment: {
           POSTGRES_USER: '${FORGEJO_DB_USER:-forgejo}',
@@ -54,7 +68,7 @@ async function main() {
         networks: ['forgejo-network'],
       },
       forgejo: {
-        image: `codeberg.org/forgejo/forgejo:${FORGEJO_VERSION}`,
+        image: forgejoImage,
         restart: 'always',
         dependsOn: ['postgres'],
         environment: {
@@ -97,7 +111,7 @@ async function main() {
   });
 
   // ──────────────────────────────────────────────────────────────
-  // 3. Verify Stack Status
+  // 4. Verify Stack Status
   // ──────────────────────────────────────────────────────────────
 
   console.log('\n🔍 Checking Forgejo stack status...\n');
@@ -120,7 +134,7 @@ async function main() {
   console.log('✅ Stack is up and running!');
 
   // ──────────────────────────────────────────────────────────────
-  // 4. Health Check: Verify PostgreSQL is ready via exec
+  // 5. Health Check: Verify PostgreSQL is ready via exec
   // ──────────────────────────────────────────────────────────────
 
   console.log('\n🏥 Performing database health check...\n');
@@ -137,7 +151,7 @@ async function main() {
   }
 
   // ──────────────────────────────────────────────────────────────
-  // 5. Usage Instructions
+  // 6. Usage Instructions
   // ──────────────────────────────────────────────────────────────
 
   console.log(`
@@ -162,7 +176,7 @@ Useful stack commands:
 `);
 
   // ──────────────────────────────────────────────────────────────
-  // 6. Graceful Cleanup Handler
+  // 7. Graceful Cleanup Handler
   // ──────────────────────────────────────────────────────────────
 
   const cleanup = async () => {

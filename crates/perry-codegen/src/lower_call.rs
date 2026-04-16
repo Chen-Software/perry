@@ -2381,6 +2381,18 @@ pub(crate) fn lower_native_method_call(
         eprintln!("perry/ui warning: method '{}' not in dispatch table (args: {})", method, args.len());
     }
 
+    if module == "perry/container" && object.is_none() {
+        if let Some(sig) = perry_container_table_lookup(method) {
+            return lower_perry_ui_table_call(ctx, sig, args);
+        }
+    }
+
+    if module == "perry/compose" && object.is_none() {
+        if let Some(sig) = perry_compose_table_lookup(method) {
+            return lower_perry_ui_table_call(ctx, sig, args);
+        }
+    }
+
     if module == "perry/ui" && method == "App" && object.is_none() && args.len() == 1 {
         if let Expr::Object(props) = &args[0] {
             let mut title_ptr: String = "0".to_string();
@@ -2580,6 +2592,7 @@ pub(crate) fn lower_native_method_call(
             }
             let return_type = match sig.ret {
                 UiReturnKind::Widget => I64,
+                UiReturnKind::Str => I64,
                 UiReturnKind::F64 => DOUBLE,
                 UiReturnKind::Void => crate::types::VOID,
             };
@@ -2595,6 +2608,10 @@ pub(crate) fn lower_native_method_call(
                 UiReturnKind::Widget => {
                     let raw = blk.call(I64, sig.runtime, &ref_args);
                     Ok(crate::expr::nanbox_pointer_inline(blk, &raw))
+                }
+                UiReturnKind::Str => {
+                    let raw = blk.call(I64, sig.runtime, &ref_args);
+                    Ok(crate::expr::nanbox_string_inline(blk, &raw))
                 }
                 UiReturnKind::F64 => {
                     Ok(blk.call(DOUBLE, sig.runtime, &ref_args))
@@ -3414,6 +3431,8 @@ enum UiArgKind {
 enum UiReturnKind {
     /// Widget handle: NaN-box the i64 result with POINTER_TAG.
     Widget,
+    /// String pointer: NaN-box the i64 result with STRING_TAG.
+    Str,
     /// Raw f64: pass through unchanged. Used by `scrollviewGetOffset` etc.
     F64,
     /// Void return: emit `call void` and return the `0.0` sentinel f64.
@@ -3851,6 +3870,46 @@ fn perry_ui_table_lookup(method: &str) -> Option<&'static UiSig> {
     PERRY_UI_TABLE.iter().find(|s| s.method == method)
 }
 
+/// Dispatch table for perry/container module.
+static PERRY_CONTAINER_TABLE: &[UiSig] = &[
+    UiSig { method: "run", runtime: "js_container_run", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "create", runtime: "js_container_create", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "start", runtime: "js_container_start", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "stop", runtime: "js_container_stop", args: &[UiArgKind::Str, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
+    UiSig { method: "remove", runtime: "js_container_remove", args: &[UiArgKind::Str, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
+    UiSig { method: "list", runtime: "js_container_list", args: &[UiArgKind::I64Raw], ret: UiReturnKind::Widget },
+    UiSig { method: "inspect", runtime: "js_container_inspect", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "logs", runtime: "js_container_logs", args: &[UiArgKind::Str, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
+    UiSig { method: "exec", runtime: "js_container_exec", args: &[UiArgKind::Str, UiArgKind::Str, UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "pullImage", runtime: "js_container_pullImage", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "listImages", runtime: "js_container_listImages", args: &[], ret: UiReturnKind::Widget },
+    UiSig { method: "removeImage", runtime: "js_container_removeImage", args: &[UiArgKind::Str, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
+    UiSig { method: "getBackend", runtime: "js_container_getBackend", args: &[], ret: UiReturnKind::Str },
+    UiSig { method: "detectBackend", runtime: "js_container_detectBackend", args: &[], ret: UiReturnKind::Widget },
+    UiSig { method: "composeUp", runtime: "js_container_composeUp", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
+];
+
+/// Dispatch table for perry/compose module.
+static PERRY_COMPOSE_TABLE: &[UiSig] = &[
+    UiSig { method: "up", runtime: "js_compose_up", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "down", runtime: "js_compose_down", args: &[UiArgKind::I64Raw, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
+    UiSig { method: "ps", runtime: "js_compose_ps", args: &[UiArgKind::I64Raw], ret: UiReturnKind::Widget },
+    UiSig { method: "logs", runtime: "js_compose_logs", args: &[UiArgKind::I64Raw, UiArgKind::Str, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
+    UiSig { method: "exec", runtime: "js_compose_exec", args: &[UiArgKind::I64Raw, UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "config", runtime: "js_compose_config", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "start", runtime: "js_compose_start", args: &[UiArgKind::I64Raw, UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "stop", runtime: "js_compose_stop", args: &[UiArgKind::I64Raw, UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "restart", runtime: "js_compose_restart", args: &[UiArgKind::I64Raw, UiArgKind::Str], ret: UiReturnKind::Widget },
+];
+
+fn perry_container_table_lookup(method: &str) -> Option<&'static UiSig> {
+    PERRY_CONTAINER_TABLE.iter().find(|s| s.method == method)
+}
+
+fn perry_compose_table_lookup(method: &str) -> Option<&'static UiSig> {
+    PERRY_COMPOSE_TABLE.iter().find(|s| s.method == method)
+}
+
 fn perry_ui_instance_method_lookup(method: &str) -> Option<&'static UiSig> {
     PERRY_UI_INSTANCE_TABLE.iter().find(|s| s.method == method)
 }
@@ -3977,6 +4036,7 @@ fn lower_perry_ui_table_call(
     // cross-module call site uses for `perry_fn_*`.
     let return_type = match sig.ret {
         UiReturnKind::Widget => I64,
+        UiReturnKind::Str => I64,
         UiReturnKind::F64 => DOUBLE,
         UiReturnKind::Void => crate::types::VOID,
     };
@@ -3995,6 +4055,11 @@ fn lower_perry_ui_table_call(
             let blk = ctx.block();
             let handle = blk.call(I64, sig.runtime, &arg_slices);
             Ok(nanbox_pointer_inline(blk, &handle))
+        }
+        UiReturnKind::Str => {
+            let blk = ctx.block();
+            let handle = blk.call(I64, sig.runtime, &arg_slices);
+            Ok(nanbox_string_inline(blk, &handle))
         }
         UiReturnKind::F64 => {
             Ok(ctx.block().call(DOUBLE, sig.runtime, &arg_slices))
