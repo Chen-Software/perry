@@ -4655,50 +4655,54 @@ fn lower_native_module_dispatch(
                 arg_types.push(I64);
             }
         }
+fn lower_perry_container_compose_call(
+    ctx: &mut FnCtx<'_>,
+    symbol: &str,
+    handle_id: Option<String>,
+    args: &[Expr],
+) -> Result<String> {
+    let mut lowered: Vec<String> = Vec::with_capacity(args.len());
+    let mut arg_types: Vec<crate::types::LlvmType> = Vec::with_capacity(args.len() + 1);
+    let mut llvm_args: Vec<(crate::types::LlvmType, &str)> = Vec::with_capacity(args.len() + 1);
+
+    if let Some(ref h) = handle_id {
+        arg_types.push(I64);
+        llvm_args.push((I64, h.as_str()));
     }
 
-    // Determine return type for the declare
-    let ret_type = match sig.ret {
-        NativeRetKind::Ptr | NativeRetKind::Str => I64,
-        NativeRetKind::F64 => DOUBLE,
-        NativeRetKind::I32Void => I32,
-        NativeRetKind::Void => crate::types::VOID,
-    };
-
-    ctx.pending_declares.push((sig.runtime.to_string(), ret_type, arg_types));
-
-    let arg_slices: Vec<(crate::types::LlvmType, &str)> =
-        llvm_args.iter().map(|(t, s)| (*t, s.as_str())).collect();
-
-    match sig.ret {
-        NativeRetKind::Ptr => {
+    for a in args {
+        let val = lower_expr(ctx, a)?;
+        if is_string_expr(ctx, a) {
             let blk = ctx.block();
-            let raw = blk.call(I64, sig.runtime, &arg_slices);
-            Ok(nanbox_pointer_inline(blk, &raw))
-        }
-        NativeRetKind::Str => {
-            // Returned raw *mut StringHeader — NaN-box with STRING_TAG so
-            // downstream string ops (JSON.stringify, ===, .length) work.
-            // Null pointer (header value 0) is returned as TAG_NULL so
-            // `request.header('missing')` reads as `null` instead of a
-            // dangling string pointer.
+            let raw_ptr = blk.call(I64, "js_get_string_pointer_unified", &[(DOUBLE, &val)]);
+            lowered.push(raw_ptr);
+            arg_types.push(PTR);
+        } else if matches!(a, Expr::Integer(_) | Expr::Number(_)) || matches!(crate::type_analysis::static_type_of(ctx, a), Some(perry_types::Type::Number) | Some(perry_types::Type::Boolean)) {
             let blk = ctx.block();
-            let raw = blk.call(I64, sig.runtime, &arg_slices);
-            let is_null = blk.icmp_eq(I64, &raw, "0");
-            let boxed = nanbox_string_inline(blk, &raw);
-            let null_val = double_literal(f64::from_bits(crate::nanbox::TAG_NULL));
-            Ok(blk.select(crate::types::I1, &is_null, DOUBLE, &null_val, &boxed))
+            let i = blk.fptosi(DOUBLE, &val, I64);
+            lowered.push(i);
+            arg_types.push(I64);
+        } else {
+            let blk = ctx.block();
+            let zero_i = "0".to_string();
+            let json_str_box = blk.call(DOUBLE, "js_json_stringify", &[(DOUBLE, &val), (I32, &zero_i)]);
+            let bits = blk.bitcast_double_to_i64(&json_str_box);
+            let raw_ptr = blk.and(I64, &bits, crate::nanbox::POINTER_MASK_I64);
+            lowered.push(raw_ptr);
+            arg_types.push(PTR);
         }
-        NativeRetKind::F64 => {
-            Ok(ctx.block().call(DOUBLE, sig.runtime, &arg_slices))
-        }
-        NativeRetKind::I32Void => {
-            let _discard = ctx.block().call(I32, sig.runtime, &arg_slices);
-            Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
-        }
-        NativeRetKind::Void => {
-            ctx.block().call_void(sig.runtime, &arg_slices);
-            Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
-        }
+    }
+
+    for (idx, v) in lowered.iter().enumerate() {
+        let t_idx = idx + (if handle_id.is_some() { 1 } else { 0 });
+        llvm_args.push((arg_types[t_idx], v.as_str()));
+    }
+
+    ctx.pending_declares.push((symbol.to_string(), PTR, arg_types));
+    let blk = ctx.block();
+    let promise_ptr = blk.call(PTR, symbol, &llvm_args);
+    let ptr_i64 = blk.ptrtoint(&promise_ptr, I64);
+    Ok(nanbox_pointer_inline(blk, &ptr_i64))
+}
     }
 }
