@@ -466,9 +466,11 @@ pub(crate) struct FnCtx<'a> {
     /// per-access NaN-box unwrap.
     pub flat_const_arrays: &'a std::collections::HashMap<u32, FlatConstInfo>,
 
-    /// (Issue #51) Counter for per-site inline cache globals. Each
-    /// `PropertyGet` site gets a unique `@perry_ic_<N>` global holding
-    /// `[cached_keys_ptr, cached_slot_idx]` (16 bytes).
+    /// Clamp-pattern function IDs. Call sites emit smin/smax inline.
+    pub clamp3_functions: &'a std::collections::HashSet<u32>,
+    pub clamp_u8_functions: &'a std::collections::HashSet<u32>,
+
+    /// (Issue #51) Counter for per-site inline cache globals.
     pub ic_site_counter: u32,
 
     /// (Issue #51) Names of IC globals created during lowering. After
@@ -1016,55 +1018,43 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 BinaryOp::Pow => {
                     blk.call(DOUBLE, "js_math_pow", &[(DOUBLE, &l), (DOUBLE, &r)])
                 }
-                // Bitwise ops: JS ToInt32 semantics require safe
-                // i64 conversion then truncation to i32, because
-                // fptosi(f64→i32) is UB for values outside
-                // [-2^31, 2^31-1] (e.g. 0xFFFFFFFF = 4294967295).
+                // Bitwise ops: JS ToInt32 semantics — NaN and
+                // ±Infinity must produce 0 (fptosi of these is UB
+                // in LLVM). `toint32` emits the NaN/Inf guard
+                // inline, then fptosi(f64→i64) + trunc(i64→i32).
                 BinaryOp::BitAnd => {
-                    let li64 = blk.fptosi(DOUBLE, &l, I64);
-                    let ri64 = blk.fptosi(DOUBLE, &r, I64);
-                    let li = blk.trunc(I64, &li64, I32);
-                    let ri = blk.trunc(I64, &ri64, I32);
+                    let li = blk.toint32(&l);
+                    let ri = blk.toint32(&r);
                     let v = blk.and(I32, &li, &ri);
                     blk.sitofp(I32, &v, DOUBLE)
                 }
                 BinaryOp::BitOr => {
-                    let li64 = blk.fptosi(DOUBLE, &l, I64);
-                    let ri64 = blk.fptosi(DOUBLE, &r, I64);
-                    let li = blk.trunc(I64, &li64, I32);
-                    let ri = blk.trunc(I64, &ri64, I32);
+                    let li = blk.toint32(&l);
+                    let ri = blk.toint32(&r);
                     let v = blk.or(I32, &li, &ri);
                     blk.sitofp(I32, &v, DOUBLE)
                 }
                 BinaryOp::BitXor => {
-                    let li64 = blk.fptosi(DOUBLE, &l, I64);
-                    let ri64 = blk.fptosi(DOUBLE, &r, I64);
-                    let li = blk.trunc(I64, &li64, I32);
-                    let ri = blk.trunc(I64, &ri64, I32);
+                    let li = blk.toint32(&l);
+                    let ri = blk.toint32(&r);
                     let v = blk.xor(I32, &li, &ri);
                     blk.sitofp(I32, &v, DOUBLE)
                 }
                 BinaryOp::Shl => {
-                    let li64 = blk.fptosi(DOUBLE, &l, I64);
-                    let ri64 = blk.fptosi(DOUBLE, &r, I64);
-                    let li = blk.trunc(I64, &li64, I32);
-                    let ri = blk.trunc(I64, &ri64, I32);
+                    let li = blk.toint32(&l);
+                    let ri = blk.toint32(&r);
                     let v = blk.shl(I32, &li, &ri);
                     blk.sitofp(I32, &v, DOUBLE)
                 }
                 BinaryOp::Shr => {
-                    let li64 = blk.fptosi(DOUBLE, &l, I64);
-                    let ri64 = blk.fptosi(DOUBLE, &r, I64);
-                    let li = blk.trunc(I64, &li64, I32);
-                    let ri = blk.trunc(I64, &ri64, I32);
+                    let li = blk.toint32(&l);
+                    let ri = blk.toint32(&r);
                     let v = blk.ashr(I32, &li, &ri);
                     blk.sitofp(I32, &v, DOUBLE)
                 }
                 BinaryOp::UShr => {
-                    let li64 = blk.fptosi(DOUBLE, &l, I64);
-                    let ri64 = blk.fptosi(DOUBLE, &r, I64);
-                    let li = blk.trunc(I64, &li64, I32);
-                    let ri = blk.trunc(I64, &ri64, I32);
+                    let li = blk.toint32(&l);
+                    let ri = blk.toint32(&r);
                     let v = blk.lshr(I32, &li, &ri);
                     blk.uitofp(I32, &v, DOUBLE)
                 }

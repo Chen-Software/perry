@@ -324,6 +324,20 @@ impl LlBlock {
         r
     }
 
+    /// ECMAScript ToInt32: `fptosi` with a NaN/Infinity guard.
+    /// NaN and ±Infinity produce 0 (per spec), normal values go through
+    /// the standard `fptosi(f64→i64) + trunc(i64→i32)` path.
+    pub fn toint32(&mut self, val: &str) -> String {
+        use crate::types::{DOUBLE, I1, I32, I64};
+        let is_nan = self.fcmp("uno", val, "0.0");
+        let fabs = self.call(DOUBLE, "llvm.fabs.f64", &[(DOUBLE, val)]);
+        let is_inf = self.fcmp("oeq", &fabs, "0x7FF0000000000000");
+        let is_bad = self.or(I1, &is_nan, &is_inf);
+        let safe = self.select(I1, &is_bad, DOUBLE, "0.0", val);
+        let as_i64 = self.fptosi(DOUBLE, &safe, I64);
+        self.trunc(I64, &as_i64, I32)
+    }
+
     pub fn trunc(&mut self, from_ty: LlvmType, val: &str, to_ty: LlvmType) -> String {
         let r = self.reg();
         self.emit(format!("{} = trunc {} {} to {}", r, from_ty, val, to_ty));
