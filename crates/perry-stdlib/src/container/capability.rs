@@ -3,6 +3,7 @@
 use super::types::{ContainerError, ContainerLogs, ContainerSpec};
 use super::verification;
 use super::get_global_backend;
+use perry_container_compose::backend::SecurityProfile;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -33,7 +34,7 @@ pub async fn alloy_container_run_capability(
     };
 
     let backend = Arc::clone(get_global_backend().await?);
-    let handle = backend.run(&spec).await.map_err(|e| ContainerError::BackendError { code: -1, message: e.to_string() })?;
+    let handle = backend.run_with_security(&spec, &SecurityProfile::default()).await.map_err(|e| ContainerError::BackendError { code: -1, message: e.to_string() })?;
 
     backend.logs(&handle.id, None).await.map_err(|e| ContainerError::BackendError { code: -1, message: e.to_string() })
 }

@@ -227,7 +227,7 @@ proptest! {
             map.insert(
                 name.clone(),
                 ComposeDependsOn {
-                    condition: None,
+                    condition: perry_container_compose::types::DependsOnCondition::ServiceStarted,
                     required: None,
                     restart: None,
                 },
