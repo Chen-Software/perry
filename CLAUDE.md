@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.65
+**Current Version:** 0.5.66
 
 ## TypeScript Parity Status
 
@@ -150,6 +150,7 @@ First-resolved directory cached in `compile_package_dirs`; subsequent imports re
 
 Keep entries to 1-2 lines max. Full details in CHANGELOG.md.
 
+- **v0.5.66** — Consolidated per-allocation TLS state (issue #62). `MALLOC_OBJECTS` + `MALLOC_SET` merged into one `RefCell<MallocState>` (one TLS lookup + one borrow_mut per `gc_malloc` instead of two of each; adjacent fields share a cacheline). `GC_IN_ALLOC` + `GC_SUPPRESSED` merged into a single `Cell<u8>` bitfield so `gc_check_trigger`'s fast-path pre-check is one TLS read. Sweep destructures the struct and removes from `set` inline instead of re-entering TLS per freed object. **str_concat 65→63ms, toString 80→78ms, template 65→62ms** (modest: TLS on macOS aarch64 is ~5ns, not the 30–40ns the issue estimated — real bottleneck is `malloc()` itself, a future bump-allocator would move the needle). 259 workspace tests pass, gap suite unchanged at 14/28 · 117 diffs.
 - **v0.5.65** — Homogeneous-shape stringify template + ASCII-clean escape fast path (issue #59). `stringify_array_depth` now detects arrays of objects sharing one `keys_array` pointer, builds a single key-prefix table (`"{\"id\":"`, `",\"name\":"`, …) once per array, and reuses it across every element — fusing open-brace/comma with the following key into one `push_str` and skipping per-field key dereferences. `primitive_only` templates skip the per-element undefined/closure pre-scan (rolled back via `buf.truncate` on stray undefined). `write_escaped_string` prechecks `bytes.iter().any(…)` for escape-triggering bytes so the escape-free common case becomes `push('"') + push_str + push('"')`. **Stringify: 52ms→45ms (1.32× Node was 1.5×). Roundtrip: 197ms→187ms (1.26× Node)**.
 - **v0.5.64** — Typed `ptr`-slot + `getelementptr inbounds` for Buffer/Uint8Array const locals + per-buffer alias-scope metadata for LLVM noalias. `Stmt::Let` on `Buffer.alloc(N)` pre-computes `handle + 8` into a `ptr` alloca; `Uint8ArrayGet/Set` emits `getelementptr inbounds i8, ptr %base, i32 %idx` instead of the `inttoptr(handle + offset)` chain — giving LLVM proper pointer provenance so the LoopVectorizer can identify array bounds. Module-level `!alias.scope`/`!noalias` nodes (per-buffer scopes in a shared domain, noalias sets enumerating other buffers) prove `src` reads don't alias `dst` writes. **image_conv blur: 283ms→183ms (1.55× faster, 1.08× Zig was 1.67×). Total: 335ms→230ms (1.15× Zig was 1.67×). Input gen: 21ms→15ms**.
 - **v0.5.63** — Stringify closure/toJSON guard + persistent parse key cache + inline value dispatch (issue #59). Pre-scans object fields for POINTER_TAG to skip toJSON key scan and closure checks on data-only objects. PARSE_KEY_CACHE persists across parses (capped at 4096) — saves ~10k gc_malloc per repeated parse of homogeneous JSON. Inline common-type dispatch in stringify_object avoids function call overhead per field. **Stringify: 55→52ms. Roundtrip: 199→197ms (1.3× Node)**.

@@ -3,7 +3,7 @@
 //! Design:
 //! - 8-byte GcHeader prepended to every heap allocation (invisible to callers)
 //! - Arena objects (arrays/objects): discovered by walking arena blocks linearly (zero per-alloc tracking cost)
-//! - Malloc objects (strings/closures/promises/bigints/errors): tracked in MALLOC_OBJECTS list
+//! - Malloc objects (strings/closures/promises/bigints/errors): tracked in MALLOC_STATE
 //! - Mark phase: conservative stack scan + explicit thread-local root scanning + type-specific tracing
 //! - Sweep phase: free malloc objects; arena objects added to free list for reuse
 //! - Trigger: only checked on new arena block allocation or explicit gc() call
@@ -74,12 +74,29 @@ pub struct GcStats {
     pub last_pause_us: u64,
 }
 
-thread_local! {
-    /// Malloc-allocated objects tracked for GC (strings, closures, bigints, promises, errors)
-    static MALLOC_OBJECTS: RefCell<Vec<*mut GcHeader>> = RefCell::new(Vec::new());
+/// Issue #62: consolidated malloc-tracking state. Before this, the hot path of
+/// `gc_malloc` touched four separate thread-local slots (`GC_IN_ALLOC`,
+/// `MALLOC_OBJECTS`, `MALLOC_SET`, `GC_IN_ALLOC` again) plus two RefCell
+/// panic-check borrows. Each TLS lookup on macOS/ARM costs ~30-40ns because it
+/// goes through `pthread_getspecific`, so per-allocation overhead was dominated
+/// by dispatch, not the actual tracking work. Bundling the two tracked
+/// collections into one `RefCell<MallocState>` (and `GC_IN_ALLOC` /
+/// `GC_SUPPRESSED` into a single `Cell<u8>` below) collapses the hot path from
+/// 4 TLS + 2 borrow_mut to 3 TLS + 1 borrow_mut, with the adjacent `objects`
+/// and `set` fields sharing a single cacheline for better locality.
+pub(crate) struct MallocState {
+    /// Malloc-allocated objects tracked for GC (strings/closures/bigints/…)
+    pub(crate) objects: Vec<*mut GcHeader>,
+    /// O(1) lookup set for validating malloc pointers (mirrors `objects`).
+    /// Used by `gc_realloc` to distinguish live, GC-freed, and arena pointers.
+    pub(crate) set: HashSet<usize>,
+}
 
-    /// O(1) lookup set for validating malloc pointers (mirrors MALLOC_OBJECTS)
-    static MALLOC_SET: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+thread_local! {
+    pub(crate) static MALLOC_STATE: RefCell<MallocState> = RefCell::new(MallocState {
+        objects: Vec::new(),
+        set: HashSet::new(),
+    });
 
     /// Free list of arena slots available for reuse: (user_ptr, payload_size)
     pub(crate) static ARENA_FREE_LIST: RefCell<Vec<(*mut u8, usize)>> = RefCell::new(Vec::new());
@@ -105,17 +122,26 @@ thread_local! {
     /// Module-level global variable addresses (registered by codegen)
     static GLOBAL_ROOTS: RefCell<Vec<*mut u64>> = RefCell::new(Vec::new());
 
-    /// Reentrancy guard: true while gc_malloc/gc_realloc is mutating MALLOC_OBJECTS/MALLOC_SET.
-    /// Prevents gc_check_trigger() from running a collection while allocation tracking is in progress,
-    /// which would cause RefCell double-borrow panics (SIGABRT).
-    static GC_IN_ALLOC: Cell<bool> = Cell::new(false);
-
-    /// Suppression flag: when true, gc_check_trigger() skips collection entirely.
-    /// Used by JSON.parse to avoid mid-parse GC cycles — parse is synchronous
-    /// and roots intermediate values in PARSE_ROOTS, so deferring GC until
-    /// after parse completes is safe and eliminates O(n*m) GC overhead.
-    static GC_SUPPRESSED: Cell<bool> = Cell::new(false);
+    /// Bit 0: reentrancy guard (`GC_FLAG_IN_ALLOC`) — set while gc_malloc /
+    /// gc_realloc is mutating MALLOC_STATE. Prevents gc_check_trigger() from
+    /// running a collection mid-tracking, which would cause RefCell
+    /// double-borrow panics (SIGABRT).
+    ///
+    /// Bit 1: suppression (`GC_FLAG_SUPPRESSED`) — when set, gc_check_trigger()
+    /// skips collection entirely. Used by JSON.parse to avoid mid-parse GC
+    /// cycles (parse is synchronous and roots intermediate values in
+    /// PARSE_ROOTS, so deferring GC until after parse completes is safe and
+    /// eliminates O(n*m) GC overhead).
+    ///
+    /// Issue #62: merged into a single Cell<u8> so the fast path of
+    /// `gc_check_trigger` reads both flags with one TLS access + one load.
+    static GC_FLAGS: Cell<u8> = Cell::new(0);
 }
+
+/// Bit 0 of GC_FLAGS — in_alloc reentrancy guard.
+const GC_FLAG_IN_ALLOC: u8 = 0b01;
+/// Bit 1 of GC_FLAGS — suppression flag (JSON.parse).
+const GC_FLAG_SUPPRESSED: u8 = 0b10;
 
 /// Threshold: run GC when total arena bytes exceed this
 const GC_THRESHOLD_INITIAL_BYTES: usize = 128 * 1024 * 1024; // 128MB
@@ -188,7 +214,7 @@ thread_local! {
 
 /// Allocate memory via malloc with GcHeader prepended.
 /// Returns pointer to usable memory AFTER the header.
-/// The allocation is tracked in MALLOC_OBJECTS.
+/// The allocation is tracked in MALLOC_STATE.
 pub fn gc_malloc(size: usize, obj_type: u8) -> *mut u8 {
     let total = GC_HEADER_SIZE + size;
     let layout = Layout::from_size_align(total, 8).unwrap();
@@ -221,14 +247,13 @@ pub fn gc_malloc(size: usize, obj_type: u8) -> *mut u8 {
 
         let user_ptr = raw.add(GC_HEADER_SIZE);
 
-        GC_IN_ALLOC.with(|f| f.set(true));
-        MALLOC_OBJECTS.with(|list| {
-            list.borrow_mut().push(header);
+        GC_FLAGS.with(|f| f.set(f.get() | GC_FLAG_IN_ALLOC));
+        MALLOC_STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            s.objects.push(header);
+            s.set.insert(header as usize);
         });
-        MALLOC_SET.with(|set| {
-            set.borrow_mut().insert(header as usize);
-        });
-        GC_IN_ALLOC.with(|f| f.set(false));
+        GC_FLAGS.with(|f| f.set(f.get() & !GC_FLAG_IN_ALLOC));
 
         user_ptr
     }
@@ -247,7 +272,7 @@ pub fn gc_malloc_batch(sizes: &[usize], obj_type: u8) -> Vec<*mut u8> {
     let mut headers = Vec::with_capacity(n);
 
     unsafe {
-        GC_IN_ALLOC.with(|f| f.set(true));
+        GC_FLAGS.with(|f| f.set(f.get() | GC_FLAG_IN_ALLOC));
 
         for &size in sizes {
             let total = GC_HEADER_SIZE + size;
@@ -266,18 +291,15 @@ pub fn gc_malloc_batch(sizes: &[usize], obj_type: u8) -> Vec<*mut u8> {
             results.push(raw.add(GC_HEADER_SIZE));
         }
 
-        MALLOC_OBJECTS.with(|list| {
-            let mut list = list.borrow_mut();
-            list.extend_from_slice(&headers);
-        });
-        MALLOC_SET.with(|set| {
-            let mut set = set.borrow_mut();
+        MALLOC_STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            s.objects.extend_from_slice(&headers);
             for &h in &headers {
-                set.insert(h as usize);
+                s.set.insert(h as usize);
             }
         });
 
-        GC_IN_ALLOC.with(|f| f.set(false));
+        GC_FLAGS.with(|f| f.set(f.get() & !GC_FLAG_IN_ALLOC));
     }
 
     results
@@ -301,8 +323,8 @@ pub fn gc_realloc(old_user_ptr: *mut u8, new_payload_size: usize) -> *mut u8 {
     // Validate the pointer is in our tracked set before dereferencing the header.
     // This prevents SIGABRT when gc_realloc is called on a pointer that was
     // freed by GC (use-after-free) or was never allocated by gc_malloc.
-    let is_tracked = MALLOC_SET.with(|set| {
-        set.borrow().contains(&(old_header as usize))
+    let is_tracked = MALLOC_STATE.with(|s| {
+        s.borrow().set.contains(&(old_header as usize))
     });
 
     if !is_tracked {
@@ -339,24 +361,21 @@ pub fn gc_realloc(old_user_ptr: *mut u8, new_payload_size: usize) -> *mut u8 {
         let new_header = new_raw as *mut GcHeader;
         (*new_header).size = new_total as u32;
 
-        // Update pointer in MALLOC_OBJECTS and MALLOC_SET if it changed
+        // Update pointer in MALLOC_STATE (objects + set) if it changed.
         if new_header != old_header {
-            GC_IN_ALLOC.with(|f| f.set(true));
-            MALLOC_OBJECTS.with(|list| {
-                let mut list = list.borrow_mut();
-                for ptr in list.iter_mut() {
+            GC_FLAGS.with(|f| f.set(f.get() | GC_FLAG_IN_ALLOC));
+            MALLOC_STATE.with(|s| {
+                let mut s = s.borrow_mut();
+                for ptr in s.objects.iter_mut() {
                     if *ptr == old_header {
                         *ptr = new_header;
                         break;
                     }
                 }
+                s.set.remove(&(old_header as usize));
+                s.set.insert(new_header as usize);
             });
-            MALLOC_SET.with(|set| {
-                let mut set = set.borrow_mut();
-                set.remove(&(old_header as usize));
-                set.insert(new_header as usize);
-            });
-            GC_IN_ALLOC.with(|f| f.set(false));
+            GC_FLAGS.with(|f| f.set(f.get() & !GC_FLAG_IN_ALLOC));
         }
 
         new_raw.add(GC_HEADER_SIZE)
@@ -383,19 +402,19 @@ pub extern "C" fn js_gc_register_global_root(ptr: i64) {
 /// Suppress GC triggers. While suppressed, `gc_check_trigger` is a no-op.
 /// Used by JSON.parse to avoid mid-parse GC cycles.
 pub fn gc_suppress() {
-    GC_SUPPRESSED.with(|c| c.set(true));
+    GC_FLAGS.with(|f| f.set(f.get() | GC_FLAG_SUPPRESSED));
 }
 
 /// Resume GC triggers after suppression.
 pub fn gc_unsuppress() {
-    GC_SUPPRESSED.with(|c| c.set(false));
+    GC_FLAGS.with(|f| f.set(f.get() & !GC_FLAG_SUPPRESSED));
 }
 
 /// Rebaseline the malloc-count trigger to the current live set so that
 /// objects just created during a GC-suppressed window (e.g. JSON.parse)
 /// don't immediately trip a collection on the next allocation.
 pub fn gc_bump_malloc_trigger() {
-    let current = MALLOC_OBJECTS.with(|list| list.borrow().len());
+    let current = MALLOC_STATE.with(|s| s.borrow().objects.len());
     let step = GC_MALLOC_COUNT_STEP.with(|c| c.get());
     GC_NEXT_MALLOC_TRIGGER.with(|c| c.set(current + step));
 }
@@ -404,7 +423,8 @@ pub fn gc_bump_malloc_trigger() {
 /// Skips collection if we're inside gc_malloc/gc_realloc to prevent
 /// RefCell double-borrow panics (reentrancy from allocation → arena grow → GC → sweep).
 pub fn gc_check_trigger() {
-    if GC_IN_ALLOC.with(|f| f.get()) || GC_SUPPRESSED.with(|f| f.get()) {
+    // Issue #62: single TLS access covers both `in_alloc` and `suppressed`.
+    if GC_FLAGS.with(|f| f.get()) & (GC_FLAG_IN_ALLOC | GC_FLAG_SUPPRESSED) != 0 {
         return;
     }
     use crate::arena::arena_total_bytes;
@@ -438,7 +458,7 @@ pub fn gc_check_trigger() {
         // Rebaseline malloc trigger too — the just-completed collection
         // swept malloc objects, so the next malloc-count trigger should
         // be relative to the new survivor count.
-        let survivors = MALLOC_OBJECTS.with(|list| list.borrow().len());
+        let survivors = MALLOC_STATE.with(|s| s.borrow().objects.len());
         let mstep = GC_MALLOC_COUNT_STEP.with(|c| c.get());
         GC_NEXT_MALLOC_TRIGGER.with(|c| c.set(survivors + mstep));
         return;
@@ -456,12 +476,12 @@ pub fn gc_check_trigger() {
     // This lets tight loops that produce tons of dead temporaries
     // (string concat, object creation) ramp the step quickly so they
     // pay only a handful of GC cycles instead of ~100.
-    let malloc_count = MALLOC_OBJECTS.with(|list| list.borrow().len());
+    let malloc_count = MALLOC_STATE.with(|s| s.borrow().objects.len());
     let next_malloc_trigger = GC_NEXT_MALLOC_TRIGGER.with(|c| c.get());
     if malloc_count >= next_malloc_trigger {
         let pre_count = malloc_count;
         gc_collect_inner();
-        let survivors = MALLOC_OBJECTS.with(|list| list.borrow().len());
+        let survivors = MALLOC_STATE.with(|s| s.borrow().objects.len());
         // Adapt the malloc-count step based on collection effectiveness.
         //
         // Issue #58 insight: in tight allocation loops the conservative
@@ -638,7 +658,7 @@ impl ValidPointerSet {
 /// Build a set of all valid user-space pointers (pointers returned to callers).
 /// Used to validate candidates found during conservative stack scanning.
 fn build_valid_pointer_set() -> ValidPointerSet {
-    let malloc_count = MALLOC_OBJECTS.with(|list| list.borrow().len());
+    let malloc_count = MALLOC_STATE.with(|s| s.borrow().objects.len());
     // 48 bytes is a conservative under-estimate (smaller than the
     // typical 96-byte class instance) so the Vec doesn't realloc.
     let arena_estimate = crate::arena::arena_total_bytes() / 48;
@@ -651,9 +671,9 @@ fn build_valid_pointer_set() -> ValidPointerSet {
     });
 
     // Malloc objects
-    MALLOC_OBJECTS.with(|list| {
-        let list = list.borrow();
-        for &header in list.iter() {
+    MALLOC_STATE.with(|s| {
+        let s = s.borrow();
+        for &header in s.objects.iter() {
             let user_ptr = unsafe { (header as *mut u8).add(GC_HEADER_SIZE) };
             set.insert(user_ptr as usize);
         }
@@ -924,9 +944,9 @@ fn trace_marked_objects(valid_ptrs: &ValidPointerSet) {
     });
 
     // Malloc objects
-    MALLOC_OBJECTS.with(|list| {
-        let list = list.borrow();
-        for &header in list.iter() {
+    MALLOC_STATE.with(|s| {
+        let s = s.borrow();
+        for &header in s.objects.iter() {
             unsafe {
                 if (*header).gc_flags & GC_FLAG_MARKED != 0 {
                     worklist.push(header);
@@ -1276,12 +1296,14 @@ unsafe fn trace_error(user_ptr: *mut u8, valid_ptrs: &ValidPointerSet, worklist:
 fn sweep() -> u64 {
     let mut freed_bytes: u64 = 0;
 
-    // Sweep malloc objects
-    MALLOC_OBJECTS.with(|list| {
-        let mut list = list.borrow_mut();
+    // Sweep malloc objects. Issue #62: unified state borrow lets us remove from
+    // `set` inline instead of paying a second TLS lookup per freed object.
+    MALLOC_STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        let MallocState { objects, set } = &mut *s;
         let mut i = 0;
-        while i < list.len() {
-            let header = list[i];
+        while i < objects.len() {
+            let header = objects[i];
             unsafe {
                 if (*header).gc_flags & GC_FLAG_PINNED != 0 {
                     // Pinned objects are always kept alive — clear mark bit inline
@@ -1311,11 +1333,9 @@ fn sweep() -> u64 {
 
                     let layout = Layout::from_size_align(total_size, 8).unwrap();
                     // Remove from tracking set BEFORE dealloc
-                    MALLOC_SET.with(|set| {
-                        set.borrow_mut().remove(&(header as usize));
-                    });
+                    set.remove(&(header as usize));
                     dealloc(header as *mut u8, layout);
-                    list.swap_remove(i);
+                    objects.swap_remove(i);
                     // Don't increment i — swap_remove moved last element here
                 } else {
                     // Surviving object — clear mark bit inline to avoid separate heap walk
@@ -1427,9 +1447,9 @@ fn clear_marks() {
     });
 
     // Clear malloc objects
-    MALLOC_OBJECTS.with(|list| {
-        let list = list.borrow();
-        for &header in list.iter() {
+    MALLOC_STATE.with(|s| {
+        let s = s.borrow();
+        for &header in s.objects.iter() {
             unsafe {
                 (*header).gc_flags &= !GC_FLAG_MARKED;
             }
@@ -1542,9 +1562,9 @@ mod tests {
         }
 
         // Verify it's tracked in MALLOC_OBJECTS
-        let tracked = MALLOC_SET.with(|set| {
+        let tracked = MALLOC_STATE.with(|s| {
             let header = unsafe { header_from_user_ptr(ptr) };
-            set.borrow().contains(&(header as usize))
+            s.borrow().set.contains(&(header as usize))
         });
         assert!(tracked, "allocated object should be tracked in MALLOC_SET");
     }
@@ -1603,9 +1623,9 @@ mod tests {
         }
 
         // Verify tracking updated
-        let tracked = MALLOC_SET.with(|set| {
+        let tracked = MALLOC_STATE.with(|s| {
             let header = unsafe { header_from_user_ptr(new_ptr) };
-            set.borrow().contains(&(header as usize))
+            s.borrow().set.contains(&(header as usize))
         });
         assert!(tracked, "reallocated object should be tracked");
     }
@@ -1648,8 +1668,8 @@ mod tests {
             gc_collect_inner();
 
             // Verify still tracked
-            let tracked = MALLOC_SET.with(|set| {
-                set.borrow().contains(&(header as usize))
+            let tracked = MALLOC_STATE.with(|s| {
+                s.borrow().set.contains(&(header as usize))
             });
             assert!(tracked, "pinned object should survive GC");
 
