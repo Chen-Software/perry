@@ -3,7 +3,7 @@
 //! Provides `ComposeEngine::up()`, `down()`, `ps()`, `logs()`, `exec()`, etc.
 //! Uses Kahn's algorithm for dependency resolution.
 
-use crate::backend::ContainerBackend;
+use crate::backend::{ContainerBackend, NetworkConfig, VolumeConfig};
 pub use crate::types::ContainerLogs;
 use crate::error::{ComposeError, Result};
 use crate::service;
@@ -105,8 +105,9 @@ impl ComposeEngine {
                 if external {
                     continue;
                 }
-                let net_config = net_config_opt.as_ref().cloned().unwrap_or_default();
-                let resolved_name = net_config.name.as_deref().unwrap_or(net_name.as_str());
+                let net_config_full = net_config_opt.as_ref().cloned().unwrap_or_default();
+                let resolved_name = net_config_full.name.as_deref().unwrap_or(net_name.as_str());
+                let net_config = NetworkConfig::from(&net_config_full);
                 tracing::info!("Creating network '{}'…", resolved_name);
                 self.backend
                     .create_network(resolved_name, &net_config)
@@ -125,8 +126,9 @@ impl ComposeEngine {
                 if external {
                     continue;
                 }
-                let vol_config = vol_config_opt.as_ref().cloned().unwrap_or_default();
-                let resolved_name = vol_config.name.as_deref().unwrap_or(vol_name.as_str());
+                let vol_config_full = vol_config_opt.as_ref().cloned().unwrap_or_default();
+                let resolved_name = vol_config_full.name.as_deref().unwrap_or(vol_name.as_str());
+                let vol_config = VolumeConfig::from(&vol_config_full);
                 tracing::info!("Creating volume '{}'…", resolved_name);
                 self.backend
                     .create_volume(resolved_name, &vol_config)
