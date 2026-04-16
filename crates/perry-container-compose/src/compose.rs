@@ -56,25 +56,47 @@ impl ComposeEngine {
         _build: bool,
         _remove_orphans: bool,
     ) -> Result<ComposeHandle> {
+        let mut created_networks: Vec<String> = Vec::new();
+        let mut created_volumes: Vec<String> = Vec::new();
+        let mut started_containers: Vec<String> = Vec::new();
+
         // 1. Create networks
         if let Some(networks) = &self.spec.networks {
             for (name, config) in networks {
-                if let Some(cfg) = config {
-                    self.backend.create_network(name, cfg).await?;
+                let res = if let Some(cfg) = config {
+                    self.backend.create_network(name, cfg).await
                 } else {
-                    self.backend.create_network(name, &Default::default()).await?;
+                    self.backend.create_network(name, &Default::default()).await
+                };
+                if let Err(e) = res {
+                    let msg = e.to_string().to_lowercase();
+                    if msg.contains("already exists") {
+                        continue;
+                    }
+                    self.rollback(&started_containers, &created_networks, &created_volumes).await;
+                    return Err(e);
                 }
+                created_networks.push(name.clone());
             }
         }
 
         // 2. Create volumes
         if let Some(volumes) = &self.spec.volumes {
             for (name, config) in volumes {
-                if let Some(cfg) = config {
-                    self.backend.create_volume(name, cfg).await?;
+                let res = if let Some(cfg) = config {
+                    self.backend.create_volume(name, cfg).await
                 } else {
-                    self.backend.create_volume(name, &Default::default()).await?;
+                    self.backend.create_volume(name, &Default::default()).await
+                };
+                if let Err(e) = res {
+                    let msg = e.to_string().to_lowercase();
+                    if msg.contains("already exists") {
+                        continue;
+                    }
+                    self.rollback(&started_containers, &created_networks, &created_volumes).await;
+                    return Err(e);
                 }
+                created_volumes.push(name.clone());
             }
         }
 
@@ -86,9 +108,12 @@ impl ComposeEngine {
             order.iter().filter(|s| services.contains(s)).collect()
         };
 
-        let mut started = Vec::new();
         for svc_name in target {
             let svc = self.spec.services.get(svc_name).unwrap();
+
+            // Explicit pull before run (Requirement 6.13)
+            let _ = self.backend.pull_image(&svc.image_ref(svc_name)).await;
+
             let container_name = service::service_container_name(svc, svc_name);
 
             // Extract primary network if any
@@ -148,14 +173,10 @@ impl ComposeEngine {
 
             match self.backend.run(&container_spec).await {
                 Ok(_) => {
-                    started.push(container_name);
+                    started_containers.push(container_name);
                 }
                 Err(e) => {
-                    // Rollback
-                    for name in started.iter().rev() {
-                        let _ = self.backend.stop(name, Some(10)).await;
-                        let _ = self.backend.remove(name, true).await;
-                    }
+                    self.rollback(&started_containers, &created_networks, &created_volumes).await;
                     return Err(ComposeError::ServiceStartupFailed {
                         service: svc_name.clone(),
                         message: e.to_string(),
@@ -285,6 +306,19 @@ impl ComposeEngine {
     pub async fn restart(&self, services: &[String]) -> Result<()> {
         self.stop(services).await?;
         self.start(services).await
+    }
+
+    async fn rollback(&self, started_containers: &[String], created_networks: &[String], created_volumes: &[String]) {
+        for name in started_containers.iter().rev() {
+            let _ = self.backend.stop(name, Some(10)).await;
+            let _ = self.backend.remove(name, true).await;
+        }
+        for name in created_networks.iter().rev() {
+            let _ = self.backend.remove_network(name).await;
+        }
+        for name in created_volumes.iter().rev() {
+            let _ = self.backend.remove_volume(name).await;
+        }
     }
 }
 

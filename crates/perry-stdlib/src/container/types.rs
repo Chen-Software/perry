@@ -214,5 +214,8 @@ pub fn parse_container_spec(spec_ptr: *const StringHeader) -> Result<ContainerSp
 /// Parse `ComposeSpec` from a JSON StringHeader pointer.
 pub fn parse_compose_spec(spec_ptr: *const StringHeader) -> Result<ComposeSpec, String> {
     let json = unsafe { string_from_header(spec_ptr) }.ok_or("Invalid spec pointer")?;
-    serde_json::from_str(&json).map_err(|e| e.to_string())
+    // Support environment variable interpolation in the JSON spec
+    let env = std::env::vars().collect();
+    let interpolated = perry_container_compose::yaml::interpolate_yaml(&json, &env);
+    serde_json::from_str(&interpolated).map_err(|e| e.to_string())
 }

@@ -16,7 +16,7 @@
  * - Proper port mapping with firewall considerations
  */
 
-import { composeUp, getBackend } from 'perry/container';
+import { composeUp, getBackend, pullImage } from 'perry/container';
 
 async function main() {
   // ──────────────────────────────────────────────────────────────
@@ -30,8 +30,21 @@ async function main() {
   // Forgejo Production Stack Configuration
   // ──────────────────────────────────────────────────────────────
 
-  const FORGEJO_VERSION = '1.23-stable';
+  const FORGEJO_VERSION = '9';
+  const forgejoImage = `codeberg.org/forgejo/forgejo:${FORGEJO_VERSION}`;
   const postgresVersion = '16-alpine';
+  const postgresImage = `postgres:${postgresVersion}`;
+
+  // ──────────────────────────────────────────────────────────────
+  // Explicit Image Pulling (Required for Production)
+  // ──────────────────────────────────────────────────────────────
+
+  console.log('📥 Pulling required images...');
+  console.log(`- ${forgejoImage}`);
+  await pullImage(forgejoImage);
+  console.log(`- ${postgresImage}`);
+  await pullImage(postgresImage);
+  console.log('✅ Images pulled successfully.\n');
 
   console.log('🚀 Bringing up Forgejo stack...');
 
@@ -40,7 +53,7 @@ async function main() {
     version: '3.8',
     services: {
       postgres: {
-        image: `postgres:${postgresVersion}`,
+        image: postgresImage,
         restart: 'always',
         environment: {
           POSTGRES_USER: '${FORGEJO_DB_USER:-forgejo}',
@@ -52,7 +65,7 @@ async function main() {
         networks: ['forgejo-network'],
       },
       forgejo: {
-        image: 'codeberg.org/forgejo/forgejo:${FORGEJO_VERSION:-1.23-stable}',
+        image: forgejoImage,
         restart: 'always',
         dependsOn: ['postgres'],
         environment: {
