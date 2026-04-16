@@ -20,7 +20,11 @@ static BACKEND: OnceCell<Arc<dyn ContainerBackend>> = OnceCell::new();
 /// Get or initialize the global backend instance
 pub fn get_global_backend() -> Result<Arc<dyn ContainerBackend>, ContainerError> {
     BACKEND.get_or_try_init(|| {
-        tokio::runtime::Handle::current().block_on(async {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| ContainerError::BackendError { code: -1, message: format!("Failed to create tokio runtime: {}", e) })?;
+        rt.block_on(async {
             detect_backend().await.map(Arc::from).map_err(ContainerError::from)
         })
     }).cloned()

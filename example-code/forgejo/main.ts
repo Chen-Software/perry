@@ -15,7 +15,7 @@
  * - Environment variable interpolation
  * - Proper port mapping with firewall considerations
  *
- * Run: perry run crates/perry-container-compose/examples/forgejo/main.ts
+ * Run: perry run example-code/forgejo/main.ts
  */
 
 import { composeUp, getBackend } from 'perry/container';
