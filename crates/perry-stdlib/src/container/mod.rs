@@ -10,22 +10,31 @@ pub mod verification;
 
 // Internal helpers visible to other container modules
 pub(crate) mod mod_priv {
-    use super::backend::{ContainerBackend, get_backend};
+    use perry_container_compose::backend::{detect_backend, ContainerBackend};
     use std::sync::{Arc, OnceLock};
+    use super::backend::BackendAdapter;
 
-    static BACKEND: OnceLock<Arc<dyn ContainerBackend>> = OnceLock::new();
+    static BACKEND: OnceLock<Arc<dyn super::backend::ContainerBackend>> = OnceLock::new();
 
-    pub fn get_global_backend_instance() -> Arc<dyn ContainerBackend> {
+    pub fn get_global_backend_instance() -> Arc<dyn super::backend::ContainerBackend> {
         BACKEND.get_or_init(|| {
-            get_backend()
-                .expect("Failed to initialize container backend")
+            // Check PERRY_CONTAINER_BACKEND override first via detect_backend
+            match tokio::runtime::Handle::current().block_on(detect_backend()) {
+                Ok(b) => {
+                    let adapter = BackendAdapter { inner: Arc::new(b) };
+                    Arc::new(adapter) as Arc<dyn super::backend::ContainerBackend>
+                },
+                Err(probed) => {
+                    panic!("No container backend found. Probed: {:?}", probed);
+                }
+            }
         }).clone()
     }
 }
 
 use perry_runtime::{js_promise_new, Promise, StringHeader};
 use std::sync::Arc;
-use self::mod_priv::get_global_backend_instance;
+pub use self::mod_priv::get_global_backend_instance;
 
 /// Helper to extract string from StringHeader pointer
 unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
@@ -160,15 +169,24 @@ pub unsafe extern "C" fn js_container_logs(id_ptr: *const StringHeader, tail: f6
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_exec(id_ptr: *const StringHeader, cmd_json: *const StringHeader) -> *mut Promise {
+pub unsafe extern "C" fn js_container_exec(
+    id_ptr: *const StringHeader,
+    cmd_json: *const StringHeader,
+    env_json: *const StringHeader,
+    workdir_ptr: *const StringHeader,
+) -> *mut Promise {
     let promise = js_promise_new();
     let id = string_from_header(id_ptr).unwrap_or_default();
     let cmd_str = string_from_header(cmd_json).unwrap_or_default();
     let cmd: Vec<String> = serde_json::from_str(&cmd_str).unwrap_or_else(|_| {
         cmd_str.split_whitespace().map(String::from).collect()
     });
+    let env_str = string_from_header(env_json).unwrap_or_default();
+    let env: Option<std::collections::HashMap<String, String>> = serde_json::from_str(&env_str).ok();
+    let workdir = string_from_header(workdir_ptr);
+
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        match get_global_backend_instance().exec(&id, &cmd, None, None).await {
+        match get_global_backend_instance().exec(&id, &cmd, env.as_ref(), workdir.as_deref()).await {
             Ok(logs) => Ok(types::register_container_logs(logs)),
             Err(e) => Err(e.to_string()),
         }
@@ -210,7 +228,7 @@ pub unsafe extern "C" fn js_container_removeImage(image_ptr: *const StringHeader
 
 #[no_mangle]
 pub unsafe extern "C" fn js_container_getBackend() -> *const StringHeader {
-    string_to_js(get_global_backend_instance().name())
+    string_to_js(get_global_backend_instance().backend_name())
 }
 
 // ============ Compose Functions ============
@@ -228,12 +246,22 @@ pub unsafe extern "C" fn js_container_composeUp(spec_json: *const StringHeader) 
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         let backend = get_global_backend_instance();
-        let adapter = Arc::new(backend::BackendAdapter { inner: backend });
         let project_name = spec.name.clone().unwrap_or_else(|| "perry-stack".to_string());
-        let engine = perry_container_compose::ComposeEngine::new(spec, project_name, adapter);
-        match engine.up(&[], true, true, false).await {
-            Ok(handle) => Ok(types::register_compose_engine(engine, handle.stack_id)),
-            Err(e) => Err(e.to_string()),
+        // Since get_global_backend_instance returns Arc<dyn ContainerBackend>,
+        // and ComposeEngine expects Arc<dyn perry_container_compose::backend::ContainerBackend>,
+        // we need to access the inner field of BackendAdapter if possible.
+        // For simplicity, we create a new adapter from the same detected backend.
+        match perry_container_compose::backend::detect_backend().await {
+            Ok(inner_backend) => {
+                let engine = perry_container_compose::ComposeEngine::new(spec, project_name, Arc::new(inner_backend));
+                match engine.up(&[], true, true, false).await {
+                    Ok(handle) => Ok(types::register_compose_engine(handle.stack_id)),
+                    Err(e) => Err(e.to_string()),
+                }
+            },
+            Err(probed) => {
+                Err(format!("No container backend found. Probed: {:?}", probed))
+            }
         }
     });
     promise
@@ -316,7 +344,7 @@ pub unsafe extern "C" fn js_container_compose_exec(
     });
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         if let Some(engine) = types::get_compose_engine(handle_id) {
-            match engine.exec(&service, &cmd).await {
+            match engine.exec(&service, &cmd, None, None).await {
                 Ok(res) => Ok(types::register_container_logs(types::ContainerLogs {
                     stdout: res.stdout,
                     stderr: res.stderr,
@@ -331,12 +359,12 @@ pub unsafe extern "C" fn js_container_compose_exec(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_config(handle_id: u64) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_config(handle_id: u64, _spec_json: *const StringHeader) -> *mut Promise {
     let promise = js_promise_new();
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         if let Some(engine) = types::get_compose_engine(handle_id) {
-            match serde_json::to_string(&engine.spec) {
-                Ok(json) => Ok(types::register_string(json)),
+            match engine.config() {
+                Ok(yaml) => Ok(types::register_string(yaml)),
                 Err(e) => Err(e.to_string()),
             }
         } else {
@@ -389,6 +417,59 @@ pub unsafe extern "C" fn js_container_compose_restart(handle_id: u64, services_j
         }
     });
     promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_up(spec_json: *const StringHeader) -> *mut Promise {
+    js_container_composeUp(spec_json)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_down(handle_id: u64, volumes: f64) -> *mut Promise {
+    js_container_compose_down(handle_id, volumes)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_ps(handle_id: u64) -> *mut Promise {
+    js_container_compose_ps(handle_id)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_logs(
+    handle_id: u64,
+    service_ptr: *const StringHeader,
+    tail: f64,
+) -> *mut Promise {
+    js_container_compose_logs(handle_id, service_ptr, tail)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_exec(
+    handle_id: u64,
+    service_ptr: *const StringHeader,
+    cmd_ptr: *const StringHeader,
+) -> *mut Promise {
+    js_container_compose_exec(handle_id, service_ptr, cmd_ptr)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_config(handle_id: u64, spec_json: *const StringHeader) -> *mut Promise {
+    js_container_compose_config(handle_id, spec_json)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_start(handle_id: u64, services_json: *const StringHeader) -> *mut Promise {
+    js_container_compose_start(handle_id, services_json)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_stop(handle_id: u64, services_json: *const StringHeader) -> *mut Promise {
+    js_container_compose_stop(handle_id, services_json)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_restart(handle_id: u64, services_json: *const StringHeader) -> *mut Promise {
+    js_container_compose_restart(handle_id, services_json)
 }
 
 #[no_mangle]

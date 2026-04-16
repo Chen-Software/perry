@@ -284,6 +284,14 @@ impl ComposeEngine {
         self.stop(services).await?;
         self.start(services).await
     }
+
+    pub fn get_engine(stack_id: u64) -> Option<Arc<Self>> {
+        COMPOSE_ENGINES.lock().unwrap().get(&stack_id).cloned()
+    }
+
+    pub fn remove_engine(stack_id: u64) -> Option<Arc<Self>> {
+        COMPOSE_ENGINES.lock().unwrap().shift_remove(&stack_id)
+    }
 }
 
 pub fn resolve_startup_order(spec: &ComposeSpec) -> Result<Vec<String>> {
