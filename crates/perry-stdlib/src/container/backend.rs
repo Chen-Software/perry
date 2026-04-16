@@ -1,5 +1,6 @@
 pub use perry_container_compose::backend::{
-    CliBackend, CliProtocol, DockerProtocol, AppleContainerProtocol, LimaProtocol, detect_backend,
+    OciBackend, BackendDriver, OciCommandBuilder, detect_backend,
+    NetworkConfig, VolumeConfig, SecurityProfile,
 };
 pub use perry_container_compose::error::BackendProbeResult;
 pub use perry_container_compose::backend::ContainerBackend;

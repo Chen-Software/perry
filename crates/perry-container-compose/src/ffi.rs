@@ -6,7 +6,8 @@
 //! - Results are serialised to JSON strings before being handed back to JS
 
 use crate::compose::ComposeEngine;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 // ──────────────────────────────────────────────────────────────
 // Minimal re-implementation of the Perry runtime string types
@@ -68,6 +69,10 @@ fn parse_compose_file(file_ptr: *const StringHeader) -> Option<PathBuf> {
     unsafe { string_from_header(file_ptr) }.map(PathBuf::from)
 }
 
+async fn get_backend() -> crate::error::Result<Arc<dyn crate::backend::ContainerBackend + Send + Sync>> {
+    crate::backend::detect_backend().await.map(Arc::from)
+}
+
 // ──────────────────────────────────────────────────────────────
 // Exported FFI functions
 // ──────────────────────────────────────────────────────────────
@@ -79,8 +84,8 @@ pub unsafe extern "C" fn js_compose_start(file_ptr: *const StringHeader) -> *con
     match crate::project::ComposeProject::load_from_files(&files, None, &[]) {
         Err(e) => json_err(&e.to_string()),
         Ok(proj) => {
-            let backend = match crate::backend::get_backend() {
-                Ok(b) => std::sync::Arc::from(b),
+            let backend = match block(get_backend()) {
+                Ok(b) => b,
                 Err(e) => return json_err(&e.to_string()),
             };
             let engine = ComposeEngine::new(proj.spec, proj.project_name, backend);
@@ -99,8 +104,8 @@ pub unsafe extern "C" fn js_compose_stop(file_ptr: *const StringHeader) -> *cons
     match crate::project::ComposeProject::load_from_files(&files, None, &[]) {
         Err(e) => json_err(&e.to_string()),
         Ok(proj) => {
-            let backend = match crate::backend::get_backend() {
-                Ok(b) => std::sync::Arc::from(b),
+            let backend = match block(get_backend()) {
+                Ok(b) => b,
                 Err(e) => return json_err(&e.to_string()),
             };
             let engine = ComposeEngine::new(proj.spec, proj.project_name, backend);
@@ -119,8 +124,8 @@ pub unsafe extern "C" fn js_compose_ps(file_ptr: *const StringHeader) -> *const 
     match crate::project::ComposeProject::load_from_files(&files, None, &[]) {
         Err(e) => json_err(&e.to_string()),
         Ok(proj) => {
-            let backend = match crate::backend::get_backend() {
-                Ok(b) => std::sync::Arc::from(b),
+            let backend = match block(get_backend()) {
+                Ok(b) => b,
                 Err(e) => return json_err(&e.to_string()),
             };
             let engine = ComposeEngine::new(proj.spec, proj.project_name, backend);
@@ -147,33 +152,26 @@ pub unsafe extern "C" fn js_compose_ps(file_ptr: *const StringHeader) -> *const 
 #[no_mangle]
 pub unsafe extern "C" fn js_compose_logs(
     file_ptr: *const StringHeader,
-    services_ptr: *const StringHeader,
-    follow: bool,
+    service_ptr: *const StringHeader,
+    _follow: bool,
 ) -> *const StringHeader {
     let files: Vec<PathBuf> = parse_compose_file(file_ptr).into_iter().collect();
-    let services: Vec<String> = string_from_header(services_ptr)
-        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
-        .unwrap_or_default();
+    let service = unsafe { string_from_header(service_ptr) };
 
     match crate::project::ComposeProject::load_from_files(&files, None, &[]) {
         Err(e) => json_err(&e.to_string()),
         Ok(proj) => {
-            let backend = match crate::backend::get_backend() {
-                Ok(b) => std::sync::Arc::from(b),
+            let backend = match block(get_backend()) {
+                Ok(b) => b,
                 Err(e) => return json_err(&e.to_string()),
             };
             let engine = ComposeEngine::new(proj.spec, proj.project_name, backend);
-            match block(engine.logs(&services, None)) {
+            match block(engine.logs(service.as_deref(), None)) {
                 Err(e) => json_err(&e.to_string()),
-                Ok(logs_map) => {
-                    let pairs: Vec<String> = logs_map
-                        .iter()
-                        .map(|(k, v)| {
-                            let escaped = v.replace('"', "\\\"").replace('\n', "\\n");
-                            format!("\"{}\":\"{}\"", k, escaped)
-                        })
-                        .collect();
-                    let obj = format!("{{{}}}", pairs.join(","));
+                Ok(logs) => {
+                    let stdout = logs.stdout.replace('"', "\\\"").replace('\n', "\\n");
+                    let stderr = logs.stderr.replace('"', "\\\"").replace('\n', "\\n");
+                    let obj = format!("{{\"stdout\":\"{}\",\"stderr\":\"{}\"}}", stdout, stderr);
                     json_ok(&obj)
                 }
             }
@@ -199,8 +197,8 @@ pub unsafe extern "C" fn js_compose_exec(
     match crate::project::ComposeProject::load_from_files(&files, None, &[]) {
         Err(e) => json_err(&e.to_string()),
         Ok(proj) => {
-            let backend = match crate::backend::get_backend() {
-                Ok(b) => std::sync::Arc::from(b),
+            let backend = match block(get_backend()) {
+                Ok(b) => b,
                 Err(e) => return json_err(&e.to_string()),
             };
             let engine = ComposeEngine::new(proj.spec, proj.project_name, backend);
@@ -210,8 +208,8 @@ pub unsafe extern "C" fn js_compose_exec(
                     let stdout = result.stdout.replace('"', "\\\"").replace('\n', "\\n");
                     let stderr = result.stderr.replace('"', "\\\"").replace('\n', "\\n");
                     let payload = format!(
-                        "{{\"stdout\":\"{}\",\"stderr\":\"{}\",\"exitCode\":{}}}",
-                        stdout, stderr, result.exit_code
+                        "{{\"stdout\":\"{}\",\"stderr\":\"{}\"}}",
+                        stdout, stderr
                     );
                     json_ok(&payload)
                 }

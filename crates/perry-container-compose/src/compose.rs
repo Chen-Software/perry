@@ -26,9 +26,13 @@ static NEXT_STACK_ID: AtomicU64 = AtomicU64::new(1);
 pub struct ComposeEngine {
     pub spec: ComposeSpec,
     pub project_name: String,
-    pub backend: Arc<dyn ContainerBackend>,
+    pub backend: Arc<dyn ContainerBackend + Send + Sync>,
     /// Services that were started in this session
     started_containers: std::sync::Mutex<Vec<String>>,
+    /// networks that were created in this session
+    created_networks: std::sync::Mutex<Vec<String>>,
+    /// volumes that were created in this session
+    created_volumes: std::sync::Mutex<Vec<String>>,
 }
 
 impl ComposeEngine {
@@ -36,13 +40,15 @@ impl ComposeEngine {
     pub fn new(
         spec: ComposeSpec,
         project_name: String,
-        backend: Arc<dyn ContainerBackend>,
+        backend: Arc<dyn ContainerBackend + Send + Sync>,
     ) -> Self {
         ComposeEngine {
             spec,
             project_name,
             backend,
             started_containers: std::sync::Mutex::new(Vec::new()),
+            created_networks: std::sync::Mutex::new(Vec::new()),
+            created_volumes: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -105,16 +111,25 @@ impl ComposeEngine {
                 if external {
                     continue;
                 }
-                let net_config = net_config_opt.as_ref().cloned().unwrap_or_default();
-                let resolved_name = net_config.name.as_deref().unwrap_or(net_name.as_str());
+                let net_config_raw = net_config_opt.as_ref().cloned().unwrap_or_default();
+                let resolved_name = net_config_raw.name.as_deref().unwrap_or(net_name.as_str());
+
+                let net_config = crate::backend::NetworkConfig {
+                    driver: net_config_raw.driver.clone(),
+                    labels: net_config_raw.labels.as_ref().map(|l| l.to_map()),
+                    internal: net_config_raw.internal.unwrap_or(false),
+                    enable_ipv6: net_config_raw.enable_ipv6.unwrap_or(false),
+                };
+
                 tracing::info!("Creating network '{}'…", resolved_name);
-                self.backend
-                    .create_network(resolved_name, &net_config)
-                    .await
-                    .map_err(|e| ComposeError::ServiceStartupFailed {
+                if let Err(e) = self.backend.create_network(resolved_name, &net_config).await {
+                    self.rollback(&self.started_containers, &self.created_networks, &self.created_volumes).await;
+                    return Err(ComposeError::ServiceStartupFailed {
                         service: format!("network/{}", net_name),
                         message: e.to_string(),
-                    })?;
+                    });
+                }
+                self.created_networks.lock().unwrap().push(resolved_name.to_string());
             }
         }
 
@@ -125,22 +140,27 @@ impl ComposeEngine {
                 if external {
                     continue;
                 }
-                let vol_config = vol_config_opt.as_ref().cloned().unwrap_or_default();
-                let resolved_name = vol_config.name.as_deref().unwrap_or(vol_name.as_str());
+                let vol_config_raw = vol_config_opt.as_ref().cloned().unwrap_or_default();
+                let resolved_name = vol_config_raw.name.as_deref().unwrap_or(vol_name.as_str());
+
+                let vol_config = crate::backend::VolumeConfig {
+                    driver: vol_config_raw.driver.clone(),
+                    labels: vol_config_raw.labels.as_ref().map(|l| l.to_map()),
+                };
+
                 tracing::info!("Creating volume '{}'…", resolved_name);
-                self.backend
-                    .create_volume(resolved_name, &vol_config)
-                    .await
-                    .map_err(|e| ComposeError::ServiceStartupFailed {
+                if let Err(e) = self.backend.create_volume(resolved_name, &vol_config).await {
+                    self.rollback(&self.started_containers, &self.created_networks, &self.created_volumes).await;
+                    return Err(ComposeError::ServiceStartupFailed {
                         service: format!("volume/{}", vol_name),
                         message: e.to_string(),
-                    })?;
+                    });
+                }
+                self.created_volumes.lock().unwrap().push(resolved_name.to_string());
             }
         }
 
         // 3. Start services in dependency order
-        let mut started: Vec<String> = Vec::new();
-
         for svc_name in target {
             let svc = self
                 .spec
@@ -189,24 +209,60 @@ impl ComposeEngine {
             if let Err(e) = res {
                 // ROLLBACK
                 tracing::error!("Service '{}' failed to start, rolling back...", svc_name);
-                for c_name in started.iter().rev() {
-                    let _ = self.backend.stop(c_name, None).await;
-                    let _ = self.backend.remove(c_name, true).await;
-                }
+                self.rollback(&self.started_containers, &self.created_networks, &self.created_volumes).await;
                 return Err(ComposeError::ServiceStartupFailed {
                     service: svc_name.clone(),
                     message: e.to_string(),
                 });
             }
 
-            started.push(container_name.clone());
+            self.started_containers.lock().unwrap().push(container_name.clone());
         }
-
-        // Record started containers
-        self.started_containers.lock().unwrap().extend(started);
 
         // Register and return handle
         Ok(self.register())
+    }
+
+    /// Roll back all previously started containers, created networks, and created volumes.
+    async fn rollback(
+        &self,
+        containers: &std::sync::Mutex<Vec<String>>,
+        networks: &std::sync::Mutex<Vec<String>>,
+        volumes: &std::sync::Mutex<Vec<String>>,
+    ) -> () {
+        // Stop and remove containers in reverse order
+        let to_stop = {
+            let mut started = containers.lock().unwrap();
+            let items = started.clone();
+            started.clear();
+            items
+        };
+        for c_name in to_stop.iter().rev() {
+            let _ = self.backend.stop(c_name, None).await;
+            let _ = self.backend.remove(c_name, true).await;
+        }
+
+        // Remove created networks in reverse order
+        let to_remove_nets = {
+            let mut created_nets = networks.lock().unwrap();
+            let items = created_nets.clone();
+            created_nets.clear();
+            items
+        };
+        for n_name in to_remove_nets.iter().rev() {
+            let _ = self.backend.remove_network(n_name).await;
+        }
+
+        // Remove created volumes in reverse order
+        let to_remove_vols = {
+            let mut created_vols = volumes.lock().unwrap();
+            let items = created_vols.clone();
+            created_vols.clear();
+            items
+        };
+        for v_name in to_remove_vols.iter().rev() {
+            let _ = self.backend.remove_volume(v_name).await;
+        }
     }
 
     // ============ down / stop ============

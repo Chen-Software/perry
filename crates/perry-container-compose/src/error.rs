@@ -14,7 +14,8 @@ pub struct BackendProbeResult {
 }
 
 /// Top-level crate error
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ComposeError {
     #[error("Dependency cycle detected in services: {services:?}")]
     DependencyCycle { services: Vec<String> },
@@ -29,13 +30,13 @@ pub enum ComposeError {
     NotFound(String),
 
     #[error("Parse error: {0}")]
-    ParseError(#[from] serde_yaml::Error),
+    ParseError(#[serde(serialize_with = "serialize_error")] serde_yaml::Error),
 
     #[error("JSON error: {0}")]
-    JsonError(#[from] serde_json::Error),
+    JsonError(#[serde(serialize_with = "serialize_error")] serde_json::Error),
 
     #[error("I/O error: {0}")]
-    IoError(#[from] std::io::Error),
+    IoError(#[serde(serialize_with = "serialize_error")] std::io::Error),
 
     #[error("Validation error: {message}")]
     ValidationError { message: String },
@@ -51,6 +52,32 @@ pub enum ComposeError {
 
     #[error("Backend '{name}' is not available: {reason}")]
     BackendNotAvailable { name: String, reason: String },
+}
+
+fn serialize_error<S, E>(e: &E, serializer: S) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+    E: std::fmt::Display,
+{
+    serializer.serialize_str(&e.to_string())
+}
+
+impl From<serde_yaml::Error> for ComposeError {
+    fn from(e: serde_yaml::Error) -> Self {
+        Self::ParseError(e)
+    }
+}
+
+impl From<serde_json::Error> for ComposeError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::JsonError(e)
+    }
+}
+
+impl From<std::io::Error> for ComposeError {
+    fn from(e: std::io::Error) -> Self {
+        Self::IoError(e)
+    }
 }
 
 impl ComposeError {
