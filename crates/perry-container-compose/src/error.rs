@@ -60,9 +60,12 @@ pub type Result<T> = std::result::Result<T, ComposeError>;
 pub fn compose_error_to_js(e: &ComposeError) -> String {
     let code = match e {
         ComposeError::NotFound(_) => 404,
+        ComposeError::FileNotFound { .. } => 404,
         ComposeError::BackendError { code, .. } => *code,
         ComposeError::DependencyCycle { .. } => 422,
         ComposeError::ValidationError { .. } => 400,
+        ComposeError::ParseError(_) => 400,
+        ComposeError::JsonError(_) => 400,
         ComposeError::VerificationFailed { .. } => 403,
         ComposeError::NoBackendFound { .. } => 503,
         ComposeError::BackendNotAvailable { .. } => 503,

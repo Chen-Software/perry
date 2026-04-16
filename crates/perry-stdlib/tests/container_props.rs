@@ -137,12 +137,12 @@ proptest! {
             map.insert(key.clone(), val);
         }
 
-        let lod = perry_stdlib::container::ListOrDict::Dict(map);
+        let lod = perry_stdlib::container::ListOrDict::Dict(map.clone());
         let result = lod.to_map();
 
         // All keys should be preserved
-        prop_assert_eq!(result.len(), keys.len());
-        for key in &keys {
+        prop_assert_eq!(result.len(), map.len());
+        for key in map.keys() {
             prop_assert!(result.contains_key(key), "key {} should be in result", key);
         }
     }
@@ -227,7 +227,7 @@ proptest! {
             map.insert(
                 name.clone(),
                 ComposeDependsOn {
-                    condition: None,
+                    condition: perry_container_compose::types::DependsOnCondition::ServiceStarted,
                     required: None,
                     restart: None,
                 },
