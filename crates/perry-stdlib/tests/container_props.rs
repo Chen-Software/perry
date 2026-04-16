@@ -120,11 +120,12 @@ proptest! {
 
     #[test]
     fn prop_list_or_dict_to_map_dict(
-        keys in proptest::collection::vec("[A-Z][A-Z0-9_]{1,8}", 1..=8),
+        keys_vec in proptest::collection::vec("[A-Z][A-Z0-9_]{1,8}", 1..=8),
         int_val in 0i64..1000,
         bool_val in proptest::bool::ANY,
         str_val in "[a-z0-9_]{1,10}",
     ) {
+        let keys: std::collections::HashSet<String> = keys_vec.into_iter().collect();
         let mut map = IndexMap::new();
         // Mix different value types across keys
         for (i, key) in keys.iter().enumerate() {
@@ -227,7 +228,7 @@ proptest! {
             map.insert(
                 name.clone(),
                 ComposeDependsOn {
-                    condition: None,
+                    condition: perry_container_compose::types::DependsOnCondition::ServiceStarted,
                     required: None,
                     restart: None,
                 },
@@ -267,13 +268,15 @@ proptest! {
                 reason: "test reason".to_string(),
             },
             3 => perry_stdlib::container::ContainerError::DependencyCycle {
-                cycle: vec![msg.clone()],
+                services: vec![msg.clone()],
             },
             4 => perry_stdlib::container::ContainerError::ServiceStartupFailed {
                 service: msg.clone(),
-                error: "test error".to_string(),
+                message: "test error".to_string(),
             },
-            _ => perry_stdlib::container::ContainerError::InvalidConfig(msg.clone()),
+            _ => perry_stdlib::container::ContainerError::ValidationError {
+                message: msg.clone(),
+            },
         };
 
         let display = format!("{}", error);
@@ -283,7 +286,7 @@ proptest! {
             2 => "verification failed",
             3 => "Dependency cycle",
             4 => "failed to start",
-            _ => "Invalid configuration",
+            _ => "Validation error",
         };
 
         prop_assert!(
