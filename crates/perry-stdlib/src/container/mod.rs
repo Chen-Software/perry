@@ -484,7 +484,7 @@ pub unsafe extern "C" fn js_container_removeImage(reference_ptr: *const StringHe
 /// Bring up a Compose stack
 /// FFI: js_compose_up(spec_json: *const StringHeader) -> *mut Promise
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_up(spec_ptr: *const perry_runtime::StringHeader) -> *mut Promise {
+pub unsafe extern "C" fn js_compose_up(spec_ptr: *const StringHeader) -> *mut Promise {
     let promise = js_promise_new();
 
     let spec = match types::parse_compose_spec(spec_ptr) {
