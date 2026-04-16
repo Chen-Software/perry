@@ -18,7 +18,7 @@
  * Run: npx tsx crates/perry-container-compose/examples/forgejo/main.ts
  */
 
-import { composeUp, getBackend } from 'perry/container';
+import { composeUp, getBackend, pullImage, imageExists } from 'perry/container';
 
 async function main() {
   // ──────────────────────────────────────────────────────────────
@@ -46,9 +46,13 @@ async function main() {
   ];
 
   for (const img of images) {
-    console.log(`  - ${img}`);
-    // Explicitly pull each image before starting the stack
-    await pullImage(img);
+    if (await imageExists(img)) {
+      console.log(`  - ${img} (already exists)`);
+    } else {
+      console.log(`  - ${img} (pulling...)`);
+      // Explicitly pull each image before starting the stack
+      await pullImage(img);
+    }
   }
 
   // Stack name for tracking

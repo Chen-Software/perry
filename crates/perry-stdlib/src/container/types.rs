@@ -70,6 +70,10 @@ pub fn register_image_info_list(list: Vec<ImageInfo>) -> u64 {
     handle::register_handle(list) as u64
 }
 
+pub fn register_image_info(info: ImageInfo) -> u64 {
+    handle::register_handle(info) as u64
+}
+
 pub fn with_image_info_list<R>(id: u64, f: impl FnOnce(&Vec<ImageInfo>) -> R) -> Option<R> {
     handle::with_handle(id as Handle, f)
 }

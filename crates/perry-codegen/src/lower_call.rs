@@ -3471,6 +3471,8 @@ const PERRY_CONTAINER_TABLE: &[(&str, &str)] = &[
     ("pullImage", "js_container_pullImage"),
     ("listImages", "js_container_listImages"),
     ("removeImage", "js_container_removeImage"),
+    ("inspectImage", "js_container_inspectImage"),
+    ("imageExists", "js_container_imageExists"),
     ("getBackend", "js_container_getBackend"),
     ("composeUp", "js_container_compose_up"),
 ];

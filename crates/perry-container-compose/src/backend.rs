@@ -38,6 +38,7 @@ pub trait ContainerBackend: Send + Sync {
     ) -> Result<ContainerLogs>;
     async fn pull_image(&self, reference: &str) -> Result<()>;
     async fn list_images(&self) -> Result<Vec<ImageInfo>>;
+    async fn inspect_image(&self, reference: &str) -> Result<ImageInfo>;
     async fn remove_image(&self, reference: &str, force: bool) -> Result<()>;
     async fn create_network(&self, name: &str, config: &ComposeNetwork) -> Result<()>;
     async fn remove_network(&self, name: &str) -> Result<()>;
@@ -59,6 +60,7 @@ pub trait CliProtocol: Send + Sync {
     fn exec_args(&self, id: &str, cmd: &[String], env: Option<&HashMap<String, String>>, workdir: Option<&str>) -> Vec<String>;
     fn pull_image_args(&self, reference: &str) -> Vec<String>;
     fn list_images_args(&self) -> Vec<String>;
+    fn inspect_image_args(&self, reference: &str) -> Vec<String>;
     fn remove_image_args(&self, reference: &str, force: bool) -> Vec<String>;
     fn create_network_args(&self, name: &str, config: &ComposeNetwork) -> Vec<String>;
     fn remove_network_args(&self, name: &str) -> Vec<String>;
@@ -217,6 +219,10 @@ impl CliProtocol for DockerProtocol {
         vec!["images".into(), "--format".into(), "json".into()]
     }
 
+    fn inspect_image_args(&self, reference: &str) -> Vec<String> {
+        vec!["image".into(), "inspect".into(), "--format".into(), "json".into(), reference.into()]
+    }
+
     fn remove_image_args(&self, reference: &str, force: bool) -> Vec<String> {
         let mut args = vec!["rmi".into()];
         if force { args.push("-f".into()); }
@@ -327,6 +333,7 @@ impl CliProtocol for AppleContainerProtocol {
     fn exec_args(&self, id: &str, cmd: &[String], env: Option<&HashMap<String, String>>, workdir: Option<&str>) -> Vec<String> { DockerProtocol.exec_args(id, cmd, env, workdir) }
     fn pull_image_args(&self, reference: &str) -> Vec<String> { DockerProtocol.pull_image_args(reference) }
     fn list_images_args(&self) -> Vec<String> { DockerProtocol.list_images_args() }
+    fn inspect_image_args(&self, reference: &str) -> Vec<String> { DockerProtocol.inspect_image_args(reference) }
     fn remove_image_args(&self, reference: &str, force: bool) -> Vec<String> { DockerProtocol.remove_image_args(reference, force) }
     fn create_network_args(&self, name: &str, config: &ComposeNetwork) -> Vec<String> { DockerProtocol.create_network_args(name, config) }
     fn remove_network_args(&self, name: &str) -> Vec<String> { DockerProtocol.remove_network_args(name) }
@@ -396,6 +403,11 @@ impl CliProtocol for LimaProtocol {
     fn list_images_args(&self) -> Vec<String> {
         let mut args = vec!["shell".into(), self.instance.clone(), "nerdctl".into()];
         args.extend(DockerProtocol.list_images_args());
+        args
+    }
+    fn inspect_image_args(&self, reference: &str) -> Vec<String> {
+        let mut args = vec!["shell".into(), self.instance.clone(), "nerdctl".into()];
+        args.extend(DockerProtocol.inspect_image_args(reference));
         args
     }
     fn remove_image_args(&self, reference: &str, force: bool) -> Vec<String> {
@@ -537,6 +549,13 @@ impl ContainerBackend for CliBackend {
         let args = self.protocol.list_images_args();
         let (stdout, _) = self.exec_raw(&args).await?;
         self.protocol.parse_list_images_output(&stdout)
+    }
+
+    async fn inspect_image(&self, reference: &str) -> Result<ImageInfo> {
+        let args = self.protocol.inspect_image_args(reference);
+        let (stdout, _) = self.exec_raw(&args).await?;
+        let mut images = self.protocol.parse_list_images_output(&stdout)?;
+        images.pop().ok_or_else(|| ComposeError::NotFound(format!("Image not found: {reference}")))
     }
 
     async fn remove_image(&self, reference: &str, force: bool) -> Result<()> {
