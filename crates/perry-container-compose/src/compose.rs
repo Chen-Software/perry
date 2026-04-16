@@ -3,10 +3,12 @@
 //! Provides `ComposeEngine::up()`, `down()`, `ps()`, `logs()`, `exec()`, etc.
 //! Uses Kahn's algorithm for dependency resolution.
 
-use crate::backend::{ContainerBackend, NetworkConfig, VolumeConfig};
+use crate::backend::ContainerBackend;
 use crate::error::{ComposeError, Result};
 use crate::service;
-use crate::types::{ComposeHandle, ComposeSpec, ContainerInfo, ContainerLogs};
+use crate::types::{
+    ComposeHandle, ComposeNetwork, ComposeSpec, ComposeVolume, ContainerInfo, ContainerLogs,
+};
 use indexmap::IndexMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -112,10 +114,7 @@ impl ComposeEngine {
                     .and_then(|c| c.name.as_deref())
                     .unwrap_or(net_name.as_str())
                     .to_string();
-                let config = net_config_opt
-                    .as_ref()
-                    .map(NetworkConfig::from)
-                    .unwrap_or_default();
+                let config = net_config_opt.clone().unwrap_or_default();
                 tracing::info!("Creating network '{}'…", resolved_name);
                 if let Err(e) = self.backend.create_network(&resolved_name, &config).await {
                     for n in created_networks.iter().rev() {
@@ -145,10 +144,7 @@ impl ComposeEngine {
                     .and_then(|c| c.name.as_deref())
                     .unwrap_or(vol_name.as_str())
                     .to_string();
-                let config = vol_config_opt
-                    .as_ref()
-                    .map(VolumeConfig::from)
-                    .unwrap_or_default();
+                let config = vol_config_opt.clone().unwrap_or_default();
                 tracing::info!("Creating volume '{}'…", resolved_name);
                 if let Err(e) = self.backend.create_volume(&resolved_name, &config).await {
                     for v in created_volumes.iter().rev() {
@@ -170,6 +166,7 @@ impl ComposeEngine {
         let mut started_containers: Vec<String> = Vec::new();
 
         for svc_name in &target {
+            let rollback_info = (started_containers.clone(), created_networks.clone(), created_volumes.clone());
             let svc = self
                 .spec
                 .services
@@ -187,12 +184,8 @@ impl ComposeEngine {
                     // Exists but stopped — start it
                     tracing::info!("Starting existing container for '{}'…", svc_name);
                     if let Err(e) = self.backend.start(&container_name).await {
-                        self.rollback_startup(
-                            &started_containers,
-                            &created_networks,
-                            &created_volumes,
-                        )
-                        .await;
+                        let (s, n, v) = rollback_info;
+                        self.rollback_startup(&s, &n, &v).await;
                         return Err(ComposeError::ServiceStartupFailed {
                             service: svc_name.clone(),
                             message: e.to_string(),
@@ -205,12 +198,8 @@ impl ComposeEngine {
                     // Container doesn't exist — fall through to create it
                 }
                 Err(e) => {
-                    self.rollback_startup(
-                        &started_containers,
-                        &created_networks,
-                        &created_volumes,
-                    )
-                    .await;
+                    let (s, n, v) = rollback_info;
+                    self.rollback_startup(&s, &n, &v).await;
                     return Err(ComposeError::ServiceStartupFailed {
                         service: svc_name.clone(),
                         message: e.to_string(),
@@ -253,12 +242,8 @@ impl ComposeEngine {
 
             tracing::info!("Starting service '{}'…", svc_name);
             if let Err(e) = self.backend.run(&spec).await {
-                self.rollback_startup(
-                    &started_containers,
-                    &created_networks,
-                    &created_volumes,
-                )
-                .await;
+                let (s, n, v) = rollback_info;
+                self.rollback_startup(&s, &n, &v).await;
                 return Err(ComposeError::ServiceStartupFailed {
                     service: svc_name.clone(),
                     message: e.to_string(),

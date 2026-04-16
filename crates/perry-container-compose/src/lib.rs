@@ -6,30 +6,26 @@
 //! 2. As a library imported from Perry TypeScript applications
 //! 3. Via FFI from compiled Perry TypeScript code (requires `ffi` feature)
 
-pub mod backend;
-pub mod cli;
-pub mod compose;
-pub mod config;
+pub mod types;
 pub mod error;
+pub mod yaml;
 pub mod project;
 pub mod service;
-pub mod types;
-pub mod yaml;
+pub mod compose;
+pub mod backend;
+pub mod cli;
+pub mod config;
 
-// FFI exports (Perry TypeScript integration)
 #[cfg(feature = "ffi")]
 pub mod ffi;
 
 // Re-exports
 pub use error::{ComposeError, Result};
-pub use types::{ComposeHandle, ComposeService, ComposeSpec};
+pub use types::{ComposeSpec, ComposeService, ComposeHandle};
 pub use compose::ComposeEngine;
 pub use project::ComposeProject;
 pub use backend::{
-    ContainerBackend, CliBackend, CliProtocol, DockerProtocol, AppleContainerProtocol,
-    LimaProtocol, detect_backend,
-    // Legacy shims kept for backward compatibility
-    Backend, ContainerStatus, ExecResult, get_backend, get_container_backend,
-    NetworkConfig, VolumeConfig,
+    ContainerBackend, OciBackend, BackendDriver, OciCommandBuilder,
+    detect_backend, get_backend,
 };
 pub use error::BackendProbeResult;

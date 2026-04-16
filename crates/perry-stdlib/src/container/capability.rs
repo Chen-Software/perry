@@ -78,16 +78,24 @@ pub async fn run_capability(
     command: &str,
     config: &CapabilityConfig,
 ) -> Result<CapabilityResult, ContainerError> {
-    // 1. Resolve image
-    let image = config
+    // 1. Resolve and verify image
+    let image_ref = config
         .image
         .clone()
         .unwrap_or_else(verification::get_default_base_image);
 
-    // 2. Optional image verification
-    if config.verify_image {
-        verification::verify_image(&image).await?;
-    }
+    let digest = if config.verify_image {
+        verification::verify_image(&image_ref).await?
+    } else {
+        // Fallback for unverified
+        image_ref.clone()
+    };
+
+    let image = if digest.starts_with("sha256:") {
+        format!("{}@{}", image_ref, digest)
+    } else {
+        image_ref
+    };
 
     // 3. Build container spec
     let container_name = format!(
@@ -107,7 +115,7 @@ pub async fn run_capability(
         cmd: Some(vec!["/bin/sh".to_string(), "-c".to_string(), command.to_string()]),
         entrypoint: None,
         network: if config.network {
-            Some("bridge".to_string())
+            None
         } else {
             Some("none".to_string())
         },
@@ -211,7 +219,7 @@ async fn wait_for_container(
                     return Ok(0);
                 }
             }
-            Err(ContainerError::NotFound(_)) => {
+            Err(perry_container_compose::error::ComposeError::NotFound(_)) => {
                 // Container already removed (--rm), assume success
                 return Ok(0);
             }
