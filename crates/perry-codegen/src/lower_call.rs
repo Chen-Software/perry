@@ -2576,6 +2576,13 @@ pub(crate) fn lower_native_method_call(
                         llvm_args.push((I64, i));
                         runtime_param_types.push(I64);
                     }
+                    UiArgKind::Json => {
+                        let v = lower_expr(ctx, arg)?;
+                        let blk = ctx.block();
+                        let h = blk.call(I64, "js_json_stringify", &[(DOUBLE, &v), (I32, "0")]);
+                        llvm_args.push((I64, h));
+                        runtime_param_types.push(I64);
+                    }
                 }
             }
             let return_type = match sig.ret {
@@ -3407,6 +3414,9 @@ enum UiArgKind {
     Closure,
     /// Raw i64 (rare; some setters take an enum tag as i64).
     I64Raw,
+    /// JSON string: lower the JSValue, then call `js_json_stringify`
+    /// to get a StringHeader pointer.
+    Json,
 }
 
 /// What the perry/ui FFI function returns and how to box it.
@@ -3967,6 +3977,13 @@ fn lower_perry_ui_table_call(
                 let blk = ctx.block();
                 let i = blk.fptosi(DOUBLE, &v, I64);
                 llvm_args.push((I64, i));
+                runtime_param_types.push(I64);
+            }
+            UiArgKind::Json => {
+                let v = lower_expr(ctx, arg)?;
+                let blk = ctx.block();
+                let h = blk.call(I64, "js_json_stringify", &[(DOUBLE, &v), (I32, "0")]);
+                llvm_args.push((I64, h));
                 runtime_param_types.push(I64);
             }
         }

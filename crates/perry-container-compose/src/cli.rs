@@ -128,23 +128,20 @@ pub async fn run(cli: Cli) -> Result<()> {
         cli.env_files.clone(),
     );
     let project = ComposeProject::load(&config)?;
-    let backend: Arc<dyn crate::backend::ContainerBackend> =
-        Arc::from(crate::backend::detect_backend().await?);
-    let engine = Arc::new(ComposeEngine::new(
-        project.spec.clone(),
-        project.project_name.clone(),
-        backend,
-    ));
+    let backend = Arc::from(crate::backend::get_backend().await?);
+    let engine = Arc::new(ComposeEngine::new(project.spec.clone(), project.project_name.clone(), backend));
 
     match cli.command {
         Commands::Up(args) => {
-            engine
+            engine.clone()
                 .up(&args.services, args.detach, args.build, args.remove_orphans)
                 .await?;
         }
 
         Commands::Down(args) => {
-            engine.down(args.volumes, args.remove_orphans).await?;
+            engine
+                .down(&args.services, args.remove_orphans, args.volumes)
+                .await?;
         }
 
         Commands::Start(args) => {
@@ -165,13 +162,17 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
 
         Commands::Logs(args) => {
-            let service = args.services.first().map(|s| s.as_str());
-            let logs = engine.logs(service, args.tail).await?;
-            if !logs.stdout.is_empty() {
-                print!("{}", logs.stdout);
-            }
-            if !logs.stderr.is_empty() {
-                eprint!("{}", logs.stderr);
+            let logs_map = engine.logs(&args.services, args.tail).await?;
+
+            let mut names: Vec<&String> = logs_map.keys().collect();
+            names.sort();
+            for name in names {
+                let log = &logs_map[name];
+                if !log.is_empty() {
+                    for line in log.lines() {
+                        println!("{} | {}", name, line);
+                    }
+                }
             }
         }
 
@@ -217,15 +218,9 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
         }
 
-        Commands::Config(args) => {
+        Commands::Config(_args) => {
             let yaml = engine.config()?;
-            if args.format == "json" {
-                let value: serde_yaml::Value = serde_yaml::from_str(&yaml)?;
-                let json = serde_json::to_string_pretty(&value)?;
-                println!("{}", json);
-            } else {
-                println!("{}", yaml);
-            }
+            println!("{}", yaml);
         }
     }
 

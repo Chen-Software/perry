@@ -1,178 +1,31 @@
-//! Type definitions for the perry/container module.
-//!
-//! All types here conform to the [compose-spec JSON schema](https://github.com/compose-spec/compose-spec/blob/main/schema/compose-spec.json)
-//! and are used both as the TypeScript-facing API surface and as the internal
-//! Rust representation passed to the ComposeEngine.
+//! Container module types matching the design.
 
 use perry_runtime::{JSValue, StringHeader};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use crate::common::{register_handle, get_handle, Handle};
 
-use crate::common::handle::{self, Handle};
+// ============ Single Container Types ============
 
-// ============ Global Handle Registries ============
-//
-// CONTAINER_HANDLES stores ContainerHandle values keyed by a monotonically
-// increasing u64 ID.  COMPOSE_HANDLES stores live ComposeEngine instances
-// (from perry-container-compose) so that subsequent compose operations
-// (down, ps, logs, exec, …) can look up the engine by the handle ID that
-// was returned to TypeScript.
-
-/// Global registry of live `ContainerHandle` values.
-pub static CONTAINER_HANDLES: OnceLock<dashmap::DashMap<u64, ContainerHandle>> = OnceLock::new();
-
-/// Global registry of live `ComposeEngine` instances.
-pub static COMPOSE_HANDLES: OnceLock<dashmap::DashMap<u64, perry_container_compose::compose::ComposeEngine>> = OnceLock::new();
-
-/// Monotonically increasing handle ID counter shared by both registries.
-pub static NEXT_HANDLE_ID: AtomicU64 = AtomicU64::new(1);
-
-fn container_handles() -> &'static dashmap::DashMap<u64, ContainerHandle> {
-    CONTAINER_HANDLES.get_or_init(dashmap::DashMap::new)
-}
-
-fn compose_handles() -> &'static dashmap::DashMap<u64, perry_container_compose::compose::ComposeEngine> {
-    COMPOSE_HANDLES.get_or_init(dashmap::DashMap::new)
-}
-
-/// Insert a `ContainerHandle` into the global registry and return its new ID.
-pub fn register_container_handle(h: ContainerHandle) -> u64 {
-    let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
-    container_handles().insert(id, h);
-    id
-}
-
-/// Insert a `ComposeEngine` into the global registry and return its new ID.
-pub fn register_compose_engine(engine: perry_container_compose::compose::ComposeEngine) -> u64 {
-    let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
-    compose_handles().insert(id, engine);
-    id
-}
-
-// ============ Legacy Handle Registry (common::handle) ============
-//
-// The functions below delegate to crate::common::handle for types that are
-// not stored in the OnceLock registries above (ContainerInfo lists, logs,
-// image lists, and the old ComposeHandle struct).  They are kept for
-// backwards compatibility with the existing FFI functions in mod.rs.
-
-/// Register a `ContainerHandle` in the legacy registry and return an opaque integer handle.
-/// Prefer `register_container_handle` for new code.
-pub fn register_container_handle_legacy(h: ContainerHandle) -> u64 {
-    handle::register_handle(h) as u64
-}
-
-/// Retrieve a `ContainerHandle` by handle id (read-only) from the legacy registry.
-pub fn get_container_handle(id: u64) -> Option<handle::Handle> {
-    let h = id as Handle;
-    if handle::handle_exists(h) { Some(h) } else { None }
-}
-
-/// Register a single `ContainerInfo` and return an opaque integer handle.
-pub fn register_container_info(info: ContainerInfo) -> u64 {
-    handle::register_handle(info) as u64
-}
-
-/// Register a `Vec<ContainerInfo>` (list result from `list` / `ps`) and return an opaque integer handle.
-pub fn register_container_info_list(list: Vec<ContainerInfo>) -> u64 {
-    handle::register_handle(list) as u64
-}
-
-/// Retrieve the container info list associated with a handle.
-pub fn with_container_info_list<R>(id: u64, f: impl FnOnce(&Vec<ContainerInfo>) -> R) -> Option<R> {
-    handle::with_handle(id as Handle, f)
-}
-
-/// Take (remove and return) the container info list from the registry.
-pub fn take_container_info_list(id: u64) -> Option<Vec<ContainerInfo>> {
-    handle::take_handle(id as Handle)
-}
-
-/// Register a `ComposeHandle` and return an opaque integer handle.
-pub fn register_compose_handle(h: ComposeHandle) -> u64 {
-    handle::register_handle(h) as u64
-}
-
-/// Retrieve a `ComposeHandle` by handle id.
-pub fn get_compose_handle(id: u64) -> Option<&'static ComposeHandle> {
-    handle::get_handle(id as Handle)
-}
-
-/// Take (remove and return) the `ComposeHandle` from the registry.
-pub fn take_compose_handle(id: u64) -> Option<ComposeHandle> {
-    handle::take_handle(id as Handle)
-}
-
-/// Register `ContainerLogs` and return an opaque integer handle.
-pub fn register_container_logs(logs: ContainerLogs) -> u64 {
-    handle::register_handle(logs) as u64
-}
-
-/// Retrieve `ContainerLogs` by handle id (read-only).
-pub fn with_container_logs<R>(id: u64, f: impl FnOnce(&ContainerLogs) -> R) -> Option<R> {
-    handle::with_handle(id as Handle, f)
-}
-
-/// Take (remove and return) `ContainerLogs` from the registry.
-pub fn take_container_logs(id: u64) -> Option<ContainerLogs> {
-    handle::take_handle(id as Handle)
-}
-
-/// Register a `Vec<ImageInfo>` and return an opaque integer handle.
-pub fn register_image_info_list(list: Vec<ImageInfo>) -> u64 {
-    handle::register_handle(list) as u64
-}
-
-/// Retrieve the image info list associated with a handle.
-pub fn with_image_info_list<R>(id: u64, f: impl FnOnce(&Vec<ImageInfo>) -> R) -> Option<R> {
-    handle::with_handle(id as Handle, f)
-}
-
-/// Take (remove and return) the image info list from the registry.
-pub fn take_image_info_list(id: u64) -> Option<Vec<ImageInfo>> {
-    handle::take_handle(id as Handle)
-}
-
-/// Drop a handle from the registry (force cleanup from JS GC / explicit close).
-pub fn drop_container_handle(id: u64) -> bool {
-    handle::drop_handle(id as Handle)
-}
-
-// ============ Core Container Types ============
-
-/// Configuration for a single container.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ContainerSpec {
-    /// Container image (required)
     pub image: String,
-    /// Container name (optional)
     pub name: Option<String>,
-    /// Port mappings e.g. "8080:80"
     pub ports: Option<Vec<String>>,
-    /// Volume mounts e.g. "/host:/container:ro"
     pub volumes: Option<Vec<String>>,
-    /// Environment variables
     pub env: Option<HashMap<String, String>>,
-    /// Command override
     pub cmd: Option<Vec<String>>,
-    /// Entrypoint override
     pub entrypoint: Option<Vec<String>>,
-    /// Network to attach to
     pub network: Option<String>,
-    /// Remove container on exit
     pub rm: Option<bool>,
 }
 
-/// Opaque handle returned by `run()` / `create()`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContainerHandle {
     pub id: String,
     pub name: Option<String>,
 }
 
-/// Metadata about a container instance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContainerInfo {
     pub id: String,
@@ -180,164 +33,72 @@ pub struct ContainerInfo {
     pub image: String,
     pub status: String,
     pub ports: Vec<String>,
-    /// ISO 8601
     pub created: String,
 }
 
-/// Stdout + stderr captured from a container operation.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContainerLogs {
     pub stdout: String,
     pub stderr: String,
+    pub exit_code: i32,
 }
 
-/// Metadata about a locally-available OCI image.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageInfo {
     pub id: String,
     pub repository: String,
     pub tag: String,
     pub size: u64,
-    /// ISO 8601
     pub created: String,
 }
 
-// ============ Compose: ListOrDict ============
+// ============ Compose Types ============
 
-/// Compose-spec `list_or_dict` pattern.
-/// Can be either a mapping (`Record<string, string|number|boolean|null>`) or a
-/// `KEY=VALUE` string list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ListOrDict {
-    Dict(HashMap<String, Option<serde_json::Value>>),
     List(Vec<String>),
+    Dict(HashMap<String, Option<serde_json::Value>>),
 }
 
 impl ListOrDict {
-    /// Resolve to a flat `HashMap<String, String>`.
     pub fn to_map(&self) -> HashMap<String, String> {
         match self {
-            ListOrDict::Dict(map) => map
+            ListOrDict::Dict(m) => m
                 .iter()
                 .map(|(k, v)| {
-                    let val = match v {
-                        Some(serde_json::Value::String(s)) => s.clone(),
-                        Some(serde_json::Value::Number(n)) => n.to_string(),
-                        Some(serde_json::Value::Bool(b)) => b.to_string(),
-                        Some(serde_json::Value::Null) | None => String::new(),
-                        Some(other) => other.to_string(),
-                    };
-                    (k.clone(), val)
+                    let val_str = v.as_ref().and_then(|val| val.as_str()).unwrap_or("");
+                    (k.clone(), val_str.to_string())
                 })
                 .collect(),
-            ListOrDict::List(list) => list
+            ListOrDict::List(v) => v
                 .iter()
-                .filter_map(|entry| {
-                    let mut parts = entry.splitn(2, '=');
-                    let key = parts.next()?.to_owned();
-                    let val = parts.next().unwrap_or("").to_owned();
-                    Some((key, val))
+                .filter_map(|s| {
+                    let mut parts = s.splitn(2, '=');
+                    let k = parts.next()?.to_owned();
+                    let v = parts.next().unwrap_or("").to_owned();
+                    Some((k, v))
                 })
                 .collect(),
         }
     }
 }
 
-// ============ Compose: Port ============
-
-/// Long-form port mapping (compose-spec `ports` entry).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComposeServicePort {
-    pub name: Option<String>,
-    pub mode: Option<String>,
-    pub host_ip: Option<String>,
-    /// Container port (number or string range e.g. "80-90")
-    pub target: serde_json::Value,
-    /// Published/host port (string or number)
-    pub published: Option<serde_json::Value>,
-    pub protocol: Option<String>,
-    pub app_protocol: Option<String>,
+pub enum ComposeDependsOnCondition {
+    #[serde(rename = "service_started")]
+    ServiceStarted,
+    #[serde(rename = "service_healthy")]
+    ServiceHealthy,
+    #[serde(rename = "service_completed_successfully")]
+    ServiceCompletedSuccessfully,
 }
 
-/// `ports` entry: either a short string/number form or a long object form.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ComposePortEntry {
-    Short(serde_json::Value),  // string or number
-    Long(ComposeServicePort),
-}
-
-// ============ Compose: Volume Mount ============
-
-/// Bind-mount options.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ComposeBindOptions {
-    pub propagation: Option<String>,
-    pub create_host_path: Option<bool>,
-    /// "enabled" | "disabled" | "writable" | "readonly"
-    pub recursive: Option<String>,
-    /// "z" | "Z"
-    pub selinux: Option<String>,
-}
-
-/// Named-volume mount options.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ComposeVolumeOptions {
-    pub labels: Option<ListOrDict>,
-    pub nocopy: Option<bool>,
-    pub subpath: Option<String>,
-}
-
-/// Tmpfs mount options.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ComposeTmpfsOptions {
-    pub size: Option<serde_json::Value>,
-    pub mode: Option<u32>,
-}
-
-/// Image-based volume options.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ComposeImageVolumeOptions {
-    pub subpath: Option<String>,
-}
-
-/// Long-form volume mount (compose-spec `volumes` entry).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComposeServiceVolume {
-    /// "bind" | "volume" | "tmpfs" | "cluster" | "npipe" | "image"
-    #[serde(rename = "type")]
-    pub volume_type: String,
-    pub source: Option<String>,
-    pub target: Option<String>,
-    pub read_only: Option<bool>,
-    pub consistency: Option<String>,
-    pub bind: Option<ComposeBindOptions>,
-    pub volume: Option<ComposeVolumeOptions>,
-    pub tmpfs: Option<ComposeTmpfsOptions>,
-    pub image: Option<ComposeImageVolumeOptions>,
-}
-
-/// `volumes` entry: either a short string form or a long object form.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ComposeVolumeEntry {
-    Short(String),
-    Long(ComposeServiceVolume),
-}
-
-// ============ Compose: depends_on ============
-
-/// Object-form condition for a single dependency.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComposeDependsOn {
-    /// "service_started" | "service_healthy" | "service_completed_successfully"
-    pub condition: String,
-    pub required: Option<bool>,
-    pub restart: Option<bool>,
+    pub condition: ComposeDependsOnCondition,
 }
 
-/// `depends_on`: either a list of service names or an object map.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ComposeDependsOnEntry {
@@ -345,105 +106,64 @@ pub enum ComposeDependsOnEntry {
     Map(HashMap<String, ComposeDependsOn>),
 }
 
-impl ComposeDependsOnEntry {
-    pub fn service_names(&self) -> Vec<String> {
-        match self {
-            ComposeDependsOnEntry::List(names) => names.clone(),
-            ComposeDependsOnEntry::Map(map) => map.keys().cloned().collect(),
-        }
-    }
-}
-
-// ============ Compose: Healthcheck ============
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComposeHealthcheck {
-    pub test: serde_json::Value, // string | string[]
+    pub test: Option<serde_json::Value>,
     pub interval: Option<String>,
     pub timeout: Option<String>,
     pub retries: Option<u32>,
     pub start_period: Option<String>,
-    pub start_interval: Option<String>,
-    pub disable: Option<bool>,
-}
-
-// ============ Compose: Logging ============
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComposeLogging {
-    pub driver: Option<String>,
-    pub options: Option<HashMap<String, Option<String>>>,
-}
-
-// ============ Compose: Deploy ============
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ComposeResourceLimit {
-    pub cpus: Option<serde_json::Value>,
-    pub memory: Option<String>,
-    pub pids: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ComposeDeployResources {
-    pub limits: Option<ComposeResourceLimit>,
-    pub reservations: Option<ComposeResourceLimit>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ComposeDeployRestartPolicy {
-    pub condition: Option<String>,
-    pub delay: Option<String>,
-    pub max_attempts: Option<u32>,
-    pub window: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ComposeDeployUpdateConfig {
-    pub parallelism: Option<u32>,
-    pub delay: Option<String>,
-    pub failure_action: Option<String>,
-    pub monitor: Option<String>,
-    pub max_failure_ratio: Option<f64>,
-    pub order: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeDeployment {
-    pub mode: Option<String>,
+    pub resources: Option<serde_json::Value>,
     pub replicas: Option<u32>,
-    pub labels: Option<ListOrDict>,
-    pub resources: Option<ComposeDeployResources>,
-    pub restart_policy: Option<ComposeDeployRestartPolicy>,
-    pub update_config: Option<ComposeDeployUpdateConfig>,
-    pub rollback_config: Option<ComposeDeployUpdateConfig>,
-    pub placement: Option<serde_json::Value>,
+    pub restart_policy: Option<serde_json::Value>,
 }
 
-// ============ Compose: Build ============
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ComposeLogging {
+    pub driver: Option<String>,
+    pub options: Option<HashMap<String, String>>,
+}
 
-/// Full build configuration (compose-spec `build` object form).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ComposePortEntry {
+    Short(serde_json::Value),
+    Long(ComposeServicePort),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ComposeServicePort {
+    pub target: u32,
+    pub published: Option<u32>,
+    pub protocol: Option<String>,
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ComposeVolumeEntry {
+    Short(String),
+    Long(ComposeServiceVolume),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ComposeServiceVolume {
+    #[serde(rename = "type")]
+    pub type_str: Option<String>,
+    pub source: Option<String>,
+    pub target: Option<String>,
+    pub read_only: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeServiceBuild {
     pub context: Option<String>,
     pub dockerfile: Option<String>,
-    pub dockerfile_inline: Option<String>,
-    pub args: Option<ListOrDict>,
-    pub ssh: Option<serde_json::Value>,
-    pub labels: Option<ListOrDict>,
-    pub cache_from: Option<Vec<String>>,
-    pub cache_to: Option<Vec<String>>,
-    pub no_cache: Option<bool>,
-    pub additional_contexts: Option<serde_json::Value>,
-    pub network: Option<String>,
-    pub target: Option<String>,
-    pub shm_size: Option<serde_json::Value>,
-    pub extra_hosts: Option<ListOrDict>,
-    pub isolation: Option<String>,
-    pub privileged: Option<bool>,
-    pub secrets: Option<Vec<serde_json::Value>>,
-    pub tags: Option<Vec<String>>,
-    pub platforms: Option<Vec<String>>,
+    pub args: Option<HashMap<String, String>>,
     pub pull: Option<bool>,
     pub provenance: Option<serde_json::Value>,
     pub sbom: Option<serde_json::Value>,
@@ -451,7 +171,6 @@ pub struct ComposeServiceBuild {
     pub ulimits: Option<serde_json::Value>,
 }
 
-/// `build` field: either a string shorthand (context path) or a full object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ComposeBuildEntry {
@@ -459,9 +178,6 @@ pub enum ComposeBuildEntry {
     Object(ComposeServiceBuild),
 }
 
-// ============ Compose: NetworkConfig ============
-
-/// Per-service network attachment config.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeServiceNetworkConfig {
     pub aliases: Option<Vec<String>>,
@@ -470,7 +186,6 @@ pub struct ComposeServiceNetworkConfig {
     pub priority: Option<i32>,
 }
 
-/// `networks` on a service: either a list or an object map.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ComposeServiceNetworks {
@@ -478,24 +193,14 @@ pub enum ComposeServiceNetworks {
     Map(HashMap<String, Option<ComposeServiceNetworkConfig>>),
 }
 
-// ============ Compose: Service ============
-
-/// A single service definition (compose-spec `service` schema).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeService {
-    // ── image / build ──
     pub image: Option<String>,
     pub build: Option<ComposeBuildEntry>,
-
-    // ── command / entrypoint ──
     pub command: Option<serde_json::Value>,
     pub entrypoint: Option<serde_json::Value>,
-
-    // ── environment ──
     pub environment: Option<ListOrDict>,
     pub env_file: Option<serde_json::Value>,
-
-    // ── networking ──
     pub ports: Option<Vec<ComposePortEntry>>,
     pub networks: Option<ComposeServiceNetworks>,
     pub network_mode: Option<String>,
@@ -504,28 +209,16 @@ pub struct ComposeService {
     pub dns: Option<serde_json::Value>,
     pub dns_search: Option<serde_json::Value>,
     pub expose: Option<Vec<serde_json::Value>>,
-
-    // ── storage ──
     pub volumes: Option<Vec<ComposeVolumeEntry>>,
     pub tmpfs: Option<serde_json::Value>,
     pub shm_size: Option<serde_json::Value>,
-
-    // ── dependencies ──
     pub depends_on: Option<ComposeDependsOnEntry>,
-
-    // ── container identity ──
     pub container_name: Option<String>,
     pub labels: Option<ListOrDict>,
-
-    // ── lifecycle ──
     pub restart: Option<String>,
     pub stop_signal: Option<String>,
     pub stop_grace_period: Option<String>,
-
-    // ── healthcheck ──
     pub healthcheck: Option<ComposeHealthcheck>,
-
-    // ── security ──
     pub privileged: Option<bool>,
     pub read_only: Option<bool>,
     pub user: Option<String>,
@@ -535,44 +228,27 @@ pub struct ComposeService {
     pub sysctls: Option<ListOrDict>,
     pub ulimits: Option<serde_json::Value>,
     pub pid: Option<String>,
-
-    // ── i/o ──
     pub stdin_open: Option<bool>,
     pub tty: Option<bool>,
     pub working_dir: Option<String>,
-
-    // ── resources (short-form, no deploy) ──
     pub mem_limit: Option<serde_json::Value>,
     pub memswap_limit: Option<serde_json::Value>,
     pub cpus: Option<serde_json::Value>,
     pub cpu_shares: Option<i64>,
-
-    // ── deploy ──
     pub deploy: Option<ComposeDeployment>,
     pub develop: Option<serde_json::Value>,
     pub scale: Option<u32>,
-
-    // ── logging ──
     pub logging: Option<ComposeLogging>,
-
-    // ── platform ──
     pub platform: Option<String>,
     pub pull_policy: Option<String>,
     pub profiles: Option<Vec<String>>,
-
-    // ── secrets / configs ──
     pub secrets: Option<Vec<serde_json::Value>>,
     pub configs: Option<Vec<serde_json::Value>>,
-
-    // ── extension / advanced ──
     pub extends: Option<serde_json::Value>,
     pub post_start: Option<Vec<serde_json::Value>>,
     pub pre_stop: Option<Vec<serde_json::Value>>,
 }
 
-// ============ Compose: Network ============
-
-/// IPAM subnet config entry.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeNetworkIpamConfig {
     pub subnet: Option<String>,
@@ -581,7 +257,6 @@ pub struct ComposeNetworkIpamConfig {
     pub aux_addresses: Option<HashMap<String, String>>,
 }
 
-/// IPAM configuration block.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeNetworkIpam {
     pub driver: Option<String>,
@@ -589,7 +264,6 @@ pub struct ComposeNetworkIpam {
     pub options: Option<HashMap<String, String>>,
 }
 
-/// Top-level network definition.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeNetwork {
     pub name: Option<String>,
@@ -604,9 +278,6 @@ pub struct ComposeNetwork {
     pub labels: Option<ListOrDict>,
 }
 
-// ============ Compose: Volume ============
-
-/// Top-level volume definition.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeVolume {
     pub name: Option<String>,
@@ -616,9 +287,6 @@ pub struct ComposeVolume {
     pub labels: Option<ListOrDict>,
 }
 
-// ============ Compose: Secret ============
-
-/// Top-level secret definition.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeSecret {
     pub name: Option<String>,
@@ -631,9 +299,6 @@ pub struct ComposeSecret {
     pub template_driver: Option<String>,
 }
 
-// ============ Compose: Config ============
-
-/// Top-level config definition.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeConfig {
     pub name: Option<String>,
@@ -645,38 +310,20 @@ pub struct ComposeConfig {
     pub template_driver: Option<String>,
 }
 
-// ============ ComposeSpec (root) ============
-
-/// Root compose specification — conforms to the official compose-spec JSON schema.
-///
-/// This is the sole accepted input format for `composeUp()`.
-/// No YAML file paths are accepted by the TypeScript API.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeSpec {
-    /// Optional stack name
     pub name: Option<String>,
-    /// Deprecated but accepted; not used for validation
     pub version: Option<String>,
-    /// Service definitions (required)
     #[serde(default)]
     pub services: HashMap<String, ComposeService>,
-    /// Top-level network definitions
     pub networks: Option<HashMap<String, Option<ComposeNetwork>>>,
-    /// Top-level volume definitions
     pub volumes: Option<HashMap<String, Option<ComposeVolume>>>,
-    /// Top-level secret definitions
     pub secrets: Option<HashMap<String, Option<ComposeSecret>>>,
-    /// Top-level config definitions
     pub configs: Option<HashMap<String, Option<ComposeConfig>>>,
-    /// Included compose files (object form from compose-spec)
     pub include: Option<Vec<serde_json::Value>>,
-    /// AI model definitions (compose-spec extension)
     pub models: Option<HashMap<String, serde_json::Value>>,
 }
 
-// ============ ComposeHandle ============
-
-/// Opaque handle to a running compose stack, returned by `composeUp()`.
 #[derive(Debug, Clone)]
 pub struct ComposeHandle {
     pub name: String,
@@ -686,13 +333,44 @@ pub struct ComposeHandle {
     pub containers: HashMap<String, ContainerHandle>,
 }
 
+// ============ Global Registries ============
+
+pub fn register_container_handle(h: ContainerHandle) -> Handle {
+    register_handle(h)
+}
+
+pub fn get_container_handle(id: Handle) -> Option<&'static ContainerHandle> {
+    get_handle::<ContainerHandle>(id)
+}
+
+pub fn register_compose_handle(h: ComposeHandle) -> Handle {
+    register_handle(h)
+}
+
+pub fn get_compose_handle(id: Handle) -> Option<&'static ComposeHandle> {
+    get_handle::<ComposeHandle>(id)
+}
+
+pub fn register_container_info(h: ContainerInfo) -> Handle {
+    register_handle(h)
+}
+
+pub fn register_container_logs(h: ContainerLogs) -> Handle {
+    register_handle(h)
+}
+
+pub fn register_image_info(h: ImageInfo) -> Handle {
+    register_handle(h)
+}
+
 // ============ Error Types ============
 
-/// Container module errors.
 #[derive(Debug, Clone)]
 pub enum ContainerError {
     NotFound(String),
     BackendError { code: i32, message: String },
+    NoBackendFound { probed: Vec<perry_container_compose::error::BackendProbeResult> },
+    BackendNotAvailable { name: String, reason: String },
     VerificationFailed { image: String, reason: String },
     DependencyCycle { cycle: Vec<String> },
     ServiceStartupFailed { service: String, error: String },
@@ -705,6 +383,12 @@ impl std::fmt::Display for ContainerError {
             ContainerError::NotFound(id) => write!(f, "Container not found: {}", id),
             ContainerError::BackendError { code, message } => {
                 write!(f, "Backend error (code {}): {}", code, message)
+            }
+            ContainerError::NoBackendFound { probed } => {
+                write!(f, "No container backend found. Probed: {:?}", probed)
+            }
+            ContainerError::BackendNotAvailable { name, reason } => {
+                write!(f, "Backend {} is not available: {}", name, reason)
             }
             ContainerError::VerificationFailed { image, reason } => {
                 write!(f, "Image verification failed for {}: {}", image, reason)
@@ -722,28 +406,10 @@ impl std::fmt::Display for ContainerError {
 
 impl std::error::Error for ContainerError {}
 
-// ============ JSValue Parsing ============
-
-/// Parse `ContainerSpec` from a JSValue pointer.
-///
-/// In production Perry binaries the compiler generates native struct
-/// construction directly; this path is only exercised in testing scaffolds
-/// that pass raw JSON strings.
 pub fn parse_container_spec(_spec_ptr: *const JSValue) -> Result<ContainerSpec, String> {
-    Err(
-        "ContainerSpec must be constructed by the Perry compiler via native codegen, \
-         not parsed at runtime."
-            .to_string(),
-    )
+    Err("ContainerSpec must be constructed via native codegen".to_string())
 }
 
-/// Parse `ComposeSpec` from a JSValue pointer.
-///
-/// Same note as `parse_container_spec` above.
 pub fn parse_compose_spec(_spec_ptr: *const JSValue) -> Result<ComposeSpec, String> {
-    Err(
-        "ComposeSpec must be constructed by the Perry compiler via native codegen, \
-         not parsed at runtime."
-            .to_string(),
-    )
+    Err("ComposeSpec must be constructed via native codegen".to_string())
 }

@@ -9,8 +9,8 @@
 #[cfg(feature = "integration-tests")]
 mod integration {
     use perry_container_compose::compose::resolve_startup_order;
-    use perry_container_compose::types::{ComposeService, ComposeSpec, DependsOnSpec};
-    use perry_container_compose::yaml::{interpolate, parse_dotenv, parse_compose_yaml};
+    use perry_container_compose::types::ComposeSpec;
+    use perry_container_compose::yaml::{interpolate, parse_dotenv};
     use std::collections::HashMap;
 
     #[test]

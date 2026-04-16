@@ -98,6 +98,8 @@ pub const NATIVE_MODULES: &[&str] = &[
     "worker_threads",
     // Perry threading primitives (parallelMap, spawn)
     "perry/thread",
+    "perry/container",
+    "perry/container-compose",
     // Perry container module (OCI container management)
     "perry/container",
     // SQLite
@@ -129,6 +131,8 @@ const RUNTIME_ONLY_MODULES: &[&str] = &[
     "perry/widget",
     "perry/i18n",
     "perry/thread",
+    "perry/container",
+    "perry/container-compose",
 ];
 
 /// Check if a native module import requires linking perry-stdlib.

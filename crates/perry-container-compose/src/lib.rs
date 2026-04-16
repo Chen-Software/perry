@@ -21,15 +21,8 @@ pub mod yaml;
 pub mod ffi;
 
 // Re-exports
-pub use error::{ComposeError, Result};
+pub use error::{ComposeError, Result, BackendProbeResult};
 pub use types::{ComposeHandle, ComposeService, ComposeSpec};
 pub use compose::ComposeEngine;
 pub use project::ComposeProject;
-pub use backend::{
-    ContainerBackend, CliBackend, CliProtocol, DockerProtocol, AppleContainerProtocol,
-    LimaProtocol, detect_backend,
-    // Legacy shims kept for backward compatibility
-    Backend, ContainerStatus, ExecResult, get_backend, get_container_backend,
-    NetworkConfig, VolumeConfig,
-};
-pub use error::BackendProbeResult;
+pub use backend::{ContainerBackend, get_backend, detect_backend};
