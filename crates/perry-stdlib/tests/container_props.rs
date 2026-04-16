@@ -1,7 +1,7 @@
 //! Property-based tests for the perry-stdlib container module.
 //!
 //! Tests ContainerSpec CLI argument generation, verification cache
-//! idempotence, error propagation, ListOrDict/ComposeDependsOnEntry
+//! idempotence, error propagation, ListOrDict/DependsOnSpec
 //! behavior, ContainerError Display formatting, typed ComposeSpec
 //! round-trips, and handle registry type safety.
 //!
@@ -11,7 +11,7 @@
 use perry_stdlib::container::types::*;
 use proptest::prelude::*;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use perry_container_compose::indexmap::IndexMap;
 
 // ============ Property 2: ContainerSpec CLI argument round-trip ============
 // Feature: perry-container, Property 2: ContainerSpec CLI argument round-trip
@@ -136,13 +136,13 @@ proptest! {
         bool_val in proptest::bool::ANY,
         str_val in "[a-z0-9_]{1,10}",
     ) {
-        let mut map = HashMap::new();
+        let mut map = IndexMap::new();
         // Mix different value types across keys
         for (i, key) in keys.iter().enumerate() {
-            let val: Option<serde_json::Value> = match i % 4 {
-                0 => Some(serde_json::Value::String(str_val.clone())),
-                1 => Some(serde_json::Value::Number(int_val.into())),
-                2 => Some(serde_json::Value::Bool(bool_val)),
+            let val: Option<serde_yaml::Value> = match i % 4 {
+                0 => Some(serde_yaml::Value::String(str_val.clone())),
+                1 => Some(serde_yaml::Value::Number(int_val.into())),
+                2 => Some(serde_yaml::Value::Bool(bool_val)),
                 _ => None, // Null
             };
             map.insert(key.clone(), val);
@@ -216,7 +216,7 @@ proptest! {
     }
 }
 
-// ============ Property: ComposeDependsOnEntry service_names — List vs Map ============
+// ============ Property: DependsOnSpec service_names — List vs Map ============
 // Validates: Both List and Map variants produce the same set of service names.
 
 proptest! {
@@ -227,22 +227,22 @@ proptest! {
         names in proptest::collection::vec("[a-z][a-z0-9_-]{1,10}", 1..=6),
     ) {
         // List variant
-        let list_entry = ComposeDependsOnEntry::List(names.clone());
+        let list_entry = DependsOnSpec::List(names.clone());
         let list_names = list_entry.service_names();
 
         // Map variant (same keys)
-        let mut map = HashMap::new();
+        let mut map = IndexMap::new();
         for name in &names {
             map.insert(
                 name.clone(),
                 ComposeDependsOn {
-                    condition: "service_started".to_string(),
+                    condition: Some(perry_container_compose::types::DependsOnCondition::ServiceStarted),
                     required: None,
                     restart: None,
                 },
             );
         }
-        let map_entry = ComposeDependsOnEntry::Map(map);
+        let map_entry = DependsOnSpec::Map(map);
         let map_names = map_entry.service_names();
 
         // Both should yield the same service names (order may differ for Map)
