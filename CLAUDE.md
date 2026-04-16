@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.61
+**Current Version:** 0.5.62
 
 ## TypeScript Parity Status
 
@@ -150,6 +150,7 @@ First-resolved directory cached in `compile_package_dirs`; subsequent imports re
 
 Keep entries to 1-2 lines max. Full details in CHANGELOG.md.
 
+- **v0.5.62** — JSON.stringify fast paths (issue #59 follow-up). `write_number` uses `itoa`/`ryu` instead of `format!` (zero heap alloc per number). Direct `gc_malloc` for stringify result skips `compute_utf16_len` scan (JSON is always ASCII). Depth-based circular ref check: `STRINGIFY_STACK` TLS only accessed at depth >128, eliminating per-object borrow overhead. `gc_obj_type` trusted for OBJECT dispatch (removed redundant `is_object_pointer`). Removed stale GC debug print. **JSON.stringify 50×10k: 97ms→55ms (1.8× faster, 1.6× Node). Roundtrip: 241ms→199ms (1.3× Node). RSS: 254MB (stable)**.
 - **v0.5.61** — `-mcpu=native` in clang codegen for architecture-specific optimizations (NEON, AES, etc.). Blur: 310ms→283ms. **image_conv total: 375ms→335ms (1.6× Zig, was 1.8×)**.
 - **v0.5.61** — Adaptive GC malloc-count step + fused string-number concat (closes #58). GC malloc-count trigger now backs off when collection is ineffective (<15% freed → 4× step, <50% → 2× step), preventing useless GC cycles during tight allocation loops where conservative stack scanning keeps everything alive. Fused `js_string_concat_value`/`js_value_concat_string` eliminates intermediate string allocation for `"str" + number` patterns. **Object+string alloc loop: 1012ms→148ms (6.8× faster, ~10× Node 15ms). Was 218× slower at v0.5.44**.
 - **v0.5.60** — Math.imul polyfill detection + unsigned i32 locals (`>>> 0` seeding). Phase 0 in inline pass detects `imul32`-like polyfills (2-param, half-word decomposition, `| 0` return) and rewrites calls to `MathImul(a, b)` → single `mul i32`. `collect_integer_let_ids` now seeds `>>> 0` mutable inits; i32 slot init uses `fptosi→i64 + trunc→i32` to safely handle unsigned values exceeding INT32_MAX. **FNV: 60ms→37ms (1.6×), input gen: 123ms→24ms (5.1×). Total: 480ms→375ms (1.57× Zig, was 2.2×)**.

@@ -572,11 +572,11 @@ unsafe fn write_number(buf: &mut String, value: f64) {
     if value.is_nan() || value.is_infinite() {
         buf.push_str("null");
     } else if value.fract() == 0.0 && value.abs() < (i64::MAX as f64) {
-        use std::fmt::Write;
-        let _ = write!(buf, "{}", value as i64);
+        let mut itoa_buf = itoa::Buffer::new();
+        buf.push_str(itoa_buf.format(value as i64));
     } else {
-        let s = format!("{}", value);
-        buf.push_str(&s);
+        let mut ryu_buf = ryu::Buffer::new();
+        buf.push_str(ryu_buf.format(value));
     }
 }
 
@@ -776,38 +776,128 @@ unsafe fn stringify_value(value: f64, type_hint: u32, buf: &mut String) {
     write_number(buf, value);
 }
 
-unsafe fn stringify_object(ptr: *const u8, buf: &mut String) {
-    // Circular reference check
-    if STRINGIFY_STACK.with(|s| s.borrow().contains(&(ptr as usize))) {
-        let msg = "Converting circular structure to JSON";
-        let msg_ptr = js_string_from_bytes(msg.as_ptr(), msg.len() as u32);
-        // Use js_typeerror_new so error_kind == ERROR_KIND_TYPE_ERROR and
-        // `e instanceof TypeError` returns true (matching Node).
-        let err_ptr = crate::error::js_typeerror_new(msg_ptr);
-        crate::exception::js_throw(f64::from_bits(POINTER_TAG | (err_ptr as u64 & POINTER_MASK)));
+/// Depth-aware stringify for recursive calls from stringify_object_inner.
+/// For non-pointer values this is identical to stringify_value; for
+/// objects/arrays it threads the depth counter through.
+#[inline]
+unsafe fn stringify_value_depth(value: f64, type_hint: u32, buf: &mut String, depth: u32) {
+    let bits: u64 = value.to_bits();
+
+    // Fast path: non-pointer values don't recurse
+    if bits == TAG_NULL { buf.push_str("null"); return; }
+    if bits == TAG_TRUE { buf.push_str("true"); return; }
+    if bits == TAG_FALSE { buf.push_str("false"); return; }
+
+    let tag = bits & 0xFFFF_0000_0000_0000;
+    if tag == STRING_TAG {
+        let str_ptr = (bits & POINTER_MASK) as *const StringHeader;
+        if let Some(s) = str_from_header(str_ptr) {
+            write_escaped_string(buf, s);
+        } else {
+            buf.push_str("null");
+        }
+        return;
     }
-    STRINGIFY_STACK.with(|s| s.borrow_mut().push(ptr as usize));
+
+    if tag == BIGINT_TAG {
+        let bigint_ptr = (bits & POINTER_MASK) as *const crate::BigIntHeader;
+        let str_ptr = crate::bigint::js_bigint_to_string(bigint_ptr);
+        if let Some(s) = str_from_header(str_ptr) {
+            write_escaped_string(buf, s);
+        } else {
+            buf.push_str("null");
+        }
+        return;
+    }
+
+    if let Some(ptr) = extract_pointer(bits) {
+        if type_hint == TYPE_OBJECT {
+            stringify_object_inner(ptr, buf, depth);
+            return;
+        }
+        if type_hint == TYPE_ARRAY {
+            stringify_array_depth(ptr, buf, depth);
+            return;
+        }
+        match gc_obj_type(ptr) {
+            crate::gc::GC_TYPE_OBJECT => stringify_object_inner(ptr, buf, depth),
+            crate::gc::GC_TYPE_ARRAY => stringify_array_depth(ptr, buf, depth),
+            crate::gc::GC_TYPE_STRING => {
+                let str_ptr = ptr as *const StringHeader;
+                if let Some(s) = str_from_header(str_ptr) {
+                    write_escaped_string(buf, s);
+                } else {
+                    buf.push_str("null");
+                }
+            }
+            _ => {
+                if is_object_pointer(ptr) {
+                    stringify_object_inner(ptr, buf, depth);
+                } else {
+                    let arr = ptr as *const crate::ArrayHeader;
+                    if !arr.is_null() {
+                        let len = (*arr).length;
+                        let cap = (*arr).capacity;
+                        if len <= cap && cap > 0 && cap < 10000 {
+                            stringify_array_depth(ptr, buf, depth);
+                            return;
+                        }
+                    }
+                    let str_ptr = ptr as *const StringHeader;
+                    if let Some(s) = str_from_header(str_ptr) {
+                        write_escaped_string(buf, s);
+                    } else {
+                        buf.push_str("null");
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    write_number(buf, value);
+}
+
+/// Stringify depth counter — avoids TLS `STRINGIFY_STACK` access for
+/// shallow (non-circular) object graphs. Only activates full tracking
+/// at depth > MAX_FAST_DEPTH to catch genuine circular refs.
+const MAX_FAST_DEPTH: u32 = 128;
+
+unsafe fn stringify_object(ptr: *const u8, buf: &mut String) {
+    stringify_object_inner(ptr, buf, 0)
+}
+
+unsafe fn stringify_object_inner(ptr: *const u8, buf: &mut String, depth: u32) {
+    if depth > MAX_FAST_DEPTH {
+        // Deep nesting — switch to full circular detection
+        if STRINGIFY_STACK.with(|s| s.borrow().contains(&(ptr as usize))) {
+            let msg = "Converting circular structure to JSON";
+            let msg_ptr = js_string_from_bytes(msg.as_ptr(), msg.len() as u32);
+            let err_ptr = crate::error::js_typeerror_new(msg_ptr);
+            crate::exception::js_throw(f64::from_bits(POINTER_TAG | (err_ptr as u64 & POINTER_MASK)));
+        }
+        STRINGIFY_STACK.with(|s| s.borrow_mut().push(ptr as usize));
+    }
 
     // Check for toJSON method
     if let Some(to_json_val) = object_get_to_json(ptr) {
-        STRINGIFY_STACK.with(|s| s.borrow_mut().pop());
+        if depth > MAX_FAST_DEPTH {
+            STRINGIFY_STACK.with(|s| s.borrow_mut().pop());
+        }
         stringify_value(to_json_val, TYPE_UNKNOWN, buf);
         return;
     }
 
     let obj = ptr as *const crate::ObjectHeader;
     let num_fields = (*obj).field_count;
-    buf.push('{');
-
     let keys_arr = (*obj).keys_array;
     let keys_len = (*keys_arr).length;
     let keys_elements = (keys_arr as *const u8).add(std::mem::size_of::<crate::ArrayHeader>()) as *const f64;
     let fields_ptr = (ptr as *const u8)
         .add(std::mem::size_of::<crate::ObjectHeader>()) as *const f64;
 
-    // Use keys_len as the iteration count since field_count may include pre-allocated slots.
-    // Only the first keys_len fields have corresponding key names.
     let actual_fields = std::cmp::min(num_fields, keys_len);
+    buf.push('{');
     let mut first = true;
     for f in 0..actual_fields {
         let field_val = *fields_ptr.add(f as usize);
@@ -845,10 +935,12 @@ unsafe fn stringify_object(ptr: *const u8, buf: &mut String) {
             let _ = write!(buf, "\"field{}\":", f);
         }
 
-        stringify_value(field_val, TYPE_UNKNOWN, buf);
+        stringify_value_depth(field_val, TYPE_UNKNOWN, buf, depth + 1);
     }
     buf.push('}');
-    STRINGIFY_STACK.with(|s| s.borrow_mut().pop());
+    if depth > MAX_FAST_DEPTH {
+        STRINGIFY_STACK.with(|s| s.borrow_mut().pop());
+    }
 }
 
 unsafe fn stringify_array(ptr: *const u8, buf: &mut String) {
@@ -895,14 +987,91 @@ unsafe fn stringify_array(ptr: *const u8, buf: &mut String) {
                 elem_bits as *const u8
             };
             match gc_obj_type(elem_ptr) {
+                crate::gc::GC_TYPE_OBJECT => stringify_object(elem_ptr, buf),
                 crate::gc::GC_TYPE_ARRAY => stringify_array(elem_ptr, buf),
-                crate::gc::GC_TYPE_OBJECT => {
-                    if is_object_pointer(elem_ptr) {
-                        stringify_object(elem_ptr, buf);
+                crate::gc::GC_TYPE_STRING => {
+                    let str_ptr = elem_ptr as *const StringHeader;
+                    if let Some(s) = str_from_header(str_ptr) {
+                        write_escaped_string(buf, s);
                     } else {
                         buf.push_str("null");
                     }
                 }
+                _ => {
+                    // Untagged pointer fallback: structural heuristics
+                    if is_object_pointer(elem_ptr) {
+                        stringify_object(elem_ptr, buf);
+                    } else {
+                        let arr_elem = elem_ptr as *const crate::ArrayHeader;
+                        let arr_len = (*arr_elem).length;
+                        let arr_cap = (*arr_elem).capacity;
+                        if arr_len <= arr_cap && arr_cap > 0 && arr_cap < 10000 {
+                            stringify_array(elem_ptr, buf);
+                        } else {
+                            let str_ptr = elem_ptr as *const StringHeader;
+                            if let Some(s) = str_from_header(str_ptr) {
+                                write_escaped_string(buf, s);
+                            } else {
+                                buf.push_str("null");
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            write_number(buf, elem);
+        }
+    }
+    buf.push(']');
+}
+
+/// Depth-aware variant of stringify_array for recursive calls.
+unsafe fn stringify_array_depth(ptr: *const u8, buf: &mut String, depth: u32) {
+    let arr = ptr as *const crate::ArrayHeader;
+    let len = (*arr).length;
+    let elements = (arr as *const u8).add(std::mem::size_of::<crate::ArrayHeader>()) as *const f64;
+
+    buf.push('[');
+    for i in 0..len {
+        if i > 0 {
+            buf.push(',');
+        }
+        let elem = *elements.add(i as usize);
+        let elem_bits = elem.to_bits();
+        let elem_tag = elem_bits & 0xFFFF_0000_0000_0000;
+
+        if elem_bits == TAG_UNDEFINED {
+            buf.push_str("null");
+        } else if elem_tag == STRING_TAG {
+            let str_ptr = (elem_bits & POINTER_MASK) as *const StringHeader;
+            if let Some(s) = str_from_header(str_ptr) {
+                write_escaped_string(buf, s);
+            } else {
+                buf.push_str("null");
+            }
+        } else if elem_bits == TAG_NULL {
+            buf.push_str("null");
+        } else if elem_bits == TAG_TRUE {
+            buf.push_str("true");
+        } else if elem_bits == TAG_FALSE {
+            buf.push_str("false");
+        } else if elem_tag == BIGINT_TAG {
+            let bigint_ptr = (elem_bits & POINTER_MASK) as *const crate::BigIntHeader;
+            let str_ptr = crate::bigint::js_bigint_to_string(bigint_ptr);
+            if let Some(s) = str_from_header(str_ptr) {
+                write_escaped_string(buf, s);
+            } else {
+                buf.push_str("null");
+            }
+        } else if elem_tag == POINTER_TAG || is_raw_pointer(elem_bits) {
+            let elem_ptr = if elem_tag == POINTER_TAG {
+                (elem_bits & POINTER_MASK) as *const u8
+            } else {
+                elem_bits as *const u8
+            };
+            match gc_obj_type(elem_ptr) {
+                crate::gc::GC_TYPE_OBJECT => stringify_object_inner(elem_ptr, buf, depth),
+                crate::gc::GC_TYPE_ARRAY => stringify_array_depth(elem_ptr, buf, depth),
                 crate::gc::GC_TYPE_STRING => {
                     let str_ptr = elem_ptr as *const StringHeader;
                     if let Some(s) = str_from_header(str_ptr) {
@@ -913,13 +1082,13 @@ unsafe fn stringify_array(ptr: *const u8, buf: &mut String) {
                 }
                 _ => {
                     if is_object_pointer(elem_ptr) {
-                        stringify_object(elem_ptr, buf);
+                        stringify_object_inner(elem_ptr, buf, depth);
                     } else {
                         let arr_elem = elem_ptr as *const crate::ArrayHeader;
                         let arr_len = (*arr_elem).length;
                         let arr_cap = (*arr_elem).capacity;
                         if arr_len <= arr_cap && arr_cap > 0 && arr_cap < 10000 {
-                            stringify_array(elem_ptr, buf);
+                            stringify_array_depth(elem_ptr, buf, depth);
                         } else {
                             let str_ptr = elem_ptr as *const StringHeader;
                             if let Some(s) = str_from_header(str_ptr) {
@@ -964,7 +1133,21 @@ pub unsafe extern "C" fn js_json_stringify(value: f64, type_hint: u32) -> *mut S
     let estimated = estimate_json_size(value, type_hint);
     let mut buf = String::with_capacity(estimated);
     stringify_value(value, type_hint, &mut buf);
-    js_string_from_bytes(buf.as_ptr(), buf.len() as u32)
+    // JSON output is always ASCII (non-ASCII is \uXXXX escaped), so
+    // utf16_len == byte_len. Use gc_malloc directly and skip the
+    // compute_utf16_len byte scan that js_string_from_bytes performs.
+    let len = buf.len() as u32;
+    let total = std::mem::size_of::<StringHeader>() + len as usize;
+    let raw = crate::gc::gc_malloc(total, crate::gc::GC_TYPE_STRING);
+    let ptr = raw as *mut StringHeader;
+    (*ptr).utf16_len = len;
+    (*ptr).byte_len = len;
+    (*ptr).capacity = len;
+    (*ptr).refcount = 0;
+    if len > 0 {
+        std::ptr::copy_nonoverlapping(buf.as_ptr(), raw.add(std::mem::size_of::<StringHeader>()), len as usize);
+    }
+    ptr
 }
 
 // ─── Specialized stringify functions ──────────────────────────────────────────
