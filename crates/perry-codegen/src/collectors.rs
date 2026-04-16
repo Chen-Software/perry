@@ -1216,9 +1216,19 @@ fn collect_ref_ids_in_expr(e: &perry_hir::Expr, out: &mut HashSet<u32>) {
 /// Closure captures: writes from inside a closure body go through `LocalSet`
 /// with a rhs that's typically not int32-producing, so mutably-captured
 /// locals naturally fall out. Read-only captures remain qualified.
+fn is_clamp_call(e: &perry_hir::Expr, clamp_fn_ids: &HashSet<u32>) -> bool {
+    if let perry_hir::Expr::Call { callee, .. } = e {
+        if let perry_hir::Expr::FuncRef(fid) = callee.as_ref() {
+            return clamp_fn_ids.contains(fid);
+        }
+    }
+    false
+}
+
 pub(crate) fn collect_integer_locals(
     stmts: &[perry_hir::Stmt],
     flat_const_ids: &HashSet<u32>,
+    clamp_fn_ids: &HashSet<u32>,
 ) -> HashSet<u32> {
     let mut candidates: HashSet<u32> = HashSet::new();
 
@@ -1229,7 +1239,7 @@ pub(crate) fn collect_integer_locals(
     let mut flat_row_alias_ids: HashSet<u32> = HashSet::new();
     collect_flat_row_aliases(stmts, flat_const_ids, &mut flat_row_alias_ids);
 
-    collect_integer_let_ids(stmts, &mut candidates, flat_const_ids, &flat_row_alias_ids);
+    collect_integer_let_ids(stmts, &mut candidates, flat_const_ids, &flat_row_alias_ids, clamp_fn_ids);
 
     // Iterate to a fixed point (issue #49): `is_int32_producing_expr` now
     // recognizes `LocalGet(id)` as int-producing when `id` is itself
@@ -1242,7 +1252,7 @@ pub(crate) fn collect_integer_locals(
         let mut disqualified: HashSet<u32> = HashSet::new();
         collect_non_int_localset_ids_in_stmts(
             stmts, &mut disqualified, &candidates,
-            flat_const_ids, &flat_row_alias_ids,
+            flat_const_ids, &flat_row_alias_ids, clamp_fn_ids,
         );
         let before = candidates.len();
         candidates.retain(|id| !disqualified.contains(id));
@@ -1321,6 +1331,7 @@ fn is_int32_producing_expr(
     known_int_locals: &HashSet<u32>,
     flat_const_ids: &HashSet<u32>,
     flat_row_alias_ids: &HashSet<u32>,
+    clamp_fn_ids: &HashSet<u32>,
 ) -> bool {
     use perry_hir::{BinaryOp, Expr};
     match e {
@@ -1335,8 +1346,15 @@ fn is_int32_producing_expr(
         Expr::Binary { op, left, right }
             if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul) =>
         {
-            is_int32_producing_expr(left, known_int_locals, flat_const_ids, flat_row_alias_ids)
-                && is_int32_producing_expr(right, known_int_locals, flat_const_ids, flat_row_alias_ids)
+            is_int32_producing_expr(left, known_int_locals, flat_const_ids, flat_row_alias_ids, clamp_fn_ids)
+                && is_int32_producing_expr(right, known_int_locals, flat_const_ids, flat_row_alias_ids, clamp_fn_ids)
+        }
+        Expr::Call { callee, .. } => {
+            if let Expr::FuncRef(fid) = callee.as_ref() {
+                clamp_fn_ids.contains(fid)
+            } else {
+                false
+            }
         }
         Expr::Binary { op, .. } => matches!(
             op,
@@ -1387,6 +1405,7 @@ fn collect_integer_let_ids(
     out: &mut HashSet<u32>,
     flat_const_ids: &HashSet<u32>,
     flat_row_alias_ids: &HashSet<u32>,
+    clamp_fn_ids: &HashSet<u32>,
 ) {
     use perry_hir::{Expr, Stmt};
     for s in stmts {
@@ -1394,41 +1413,42 @@ fn collect_integer_let_ids(
             Stmt::Let { id, init: Some(init), .. }
                 if matches!(init, Expr::Integer(_))
                     || is_flat_const_indexget(init, flat_const_ids, flat_row_alias_ids)
+                    || is_clamp_call(init, clamp_fn_ids)
  =>
             {
                 out.insert(*id);
             }
             Stmt::If { then_branch, else_branch, .. } => {
-                collect_integer_let_ids(then_branch, out, flat_const_ids, flat_row_alias_ids);
+                collect_integer_let_ids(then_branch, out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 if let Some(eb) = else_branch {
-                    collect_integer_let_ids(eb, out, flat_const_ids, flat_row_alias_ids);
+                    collect_integer_let_ids(eb, out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 }
             }
             Stmt::For { init, body, .. } => {
                 if let Some(init_stmt) = init {
-                    collect_integer_let_ids(std::slice::from_ref(init_stmt), out, flat_const_ids, flat_row_alias_ids);
+                    collect_integer_let_ids(std::slice::from_ref(init_stmt), out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 }
-                collect_integer_let_ids(body, out, flat_const_ids, flat_row_alias_ids);
+                collect_integer_let_ids(body, out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
             }
             Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
-                collect_integer_let_ids(body, out, flat_const_ids, flat_row_alias_ids);
+                collect_integer_let_ids(body, out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
             }
             Stmt::Try { body, catch, finally } => {
-                collect_integer_let_ids(body, out, flat_const_ids, flat_row_alias_ids);
+                collect_integer_let_ids(body, out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 if let Some(c) = catch {
-                    collect_integer_let_ids(&c.body, out, flat_const_ids, flat_row_alias_ids);
+                    collect_integer_let_ids(&c.body, out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 }
                 if let Some(f) = finally {
-                    collect_integer_let_ids(f, out, flat_const_ids, flat_row_alias_ids);
+                    collect_integer_let_ids(f, out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 }
             }
             Stmt::Switch { cases, .. } => {
                 for c in cases {
-                    collect_integer_let_ids(&c.body, out, flat_const_ids, flat_row_alias_ids);
+                    collect_integer_let_ids(&c.body, out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 }
             }
             Stmt::Labeled { body, .. } => {
-                collect_integer_let_ids(std::slice::from_ref(body.as_ref()), out, flat_const_ids, flat_row_alias_ids);
+                collect_integer_let_ids(std::slice::from_ref(body.as_ref()), out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
             }
             _ => {}
         }
@@ -1450,15 +1470,16 @@ fn collect_non_int_localset_ids_in_stmts(
     known_int_locals: &HashSet<u32>,
     flat_const_ids: &HashSet<u32>,
     flat_row_alias_ids: &HashSet<u32>,
+    clamp_fn_ids: &HashSet<u32>,
 ) {
     collect_localset_ids_in_stmts_filtered(
-        stmts, out, Some(known_int_locals), flat_const_ids, flat_row_alias_ids,
+        stmts, out, Some(known_int_locals), flat_const_ids, flat_row_alias_ids, clamp_fn_ids,
     );
 }
 
 fn collect_localset_ids_in_stmts(stmts: &[perry_hir::Stmt], out: &mut HashSet<u32>) {
     let empty = HashSet::new();
-    collect_localset_ids_in_stmts_filtered(stmts, out, None, &empty, &empty);
+    collect_localset_ids_in_stmts_filtered(stmts, out, None, &empty, &empty, &empty);
 }
 
 fn collect_localset_ids_in_stmts_filtered(
@@ -1467,37 +1488,38 @@ fn collect_localset_ids_in_stmts_filtered(
     filter: Option<&HashSet<u32>>,
     flat_const_ids: &HashSet<u32>,
     flat_row_alias_ids: &HashSet<u32>,
+    clamp_fn_ids: &HashSet<u32>,
 ) {
     use perry_hir::Stmt;
     for s in stmts {
         match s {
             Stmt::Expr(e) | Stmt::Throw(e) => {
-                collect_localset_ids_in_expr_filtered(e, out, filter, flat_const_ids, flat_row_alias_ids)
+                collect_localset_ids_in_expr_filtered(e, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids)
             }
             Stmt::Return(opt) => {
                 if let Some(e) = opt {
-                    collect_localset_ids_in_expr_filtered(e, out, filter, flat_const_ids, flat_row_alias_ids);
+                    collect_localset_ids_in_expr_filtered(e, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 }
             }
             Stmt::Let { init, .. } => {
                 if let Some(e) = init {
-                    collect_localset_ids_in_expr_filtered(e, out, filter, flat_const_ids, flat_row_alias_ids);
+                    collect_localset_ids_in_expr_filtered(e, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 }
             }
             Stmt::If { condition, then_branch, else_branch } => {
-                collect_localset_ids_in_expr_filtered(condition, out, filter, flat_const_ids, flat_row_alias_ids);
-                collect_localset_ids_in_stmts_filtered(then_branch, out, filter, flat_const_ids, flat_row_alias_ids);
+                collect_localset_ids_in_expr_filtered(condition, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
+                collect_localset_ids_in_stmts_filtered(then_branch, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 if let Some(eb) = else_branch {
-                    collect_localset_ids_in_stmts_filtered(eb, out, filter, flat_const_ids, flat_row_alias_ids);
+                    collect_localset_ids_in_stmts_filtered(eb, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 }
             }
             Stmt::While { condition, body } => {
-                collect_localset_ids_in_expr_filtered(condition, out, filter, flat_const_ids, flat_row_alias_ids);
-                collect_localset_ids_in_stmts_filtered(body, out, filter, flat_const_ids, flat_row_alias_ids);
+                collect_localset_ids_in_expr_filtered(condition, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
+                collect_localset_ids_in_stmts_filtered(body, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
             }
             Stmt::DoWhile { body, condition } => {
-                collect_localset_ids_in_stmts_filtered(body, out, filter, flat_const_ids, flat_row_alias_ids);
-                collect_localset_ids_in_expr_filtered(condition, out, filter, flat_const_ids, flat_row_alias_ids);
+                collect_localset_ids_in_stmts_filtered(body, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
+                collect_localset_ids_in_expr_filtered(condition, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
             }
             Stmt::For { init, condition, update, body } => {
                 if let Some(init_stmt) = init {
@@ -1507,32 +1529,33 @@ fn collect_localset_ids_in_stmts_filtered(
                         filter,
                         flat_const_ids,
                         flat_row_alias_ids,
+                        clamp_fn_ids,
                     );
                 }
                 if let Some(cond) = condition {
-                    collect_localset_ids_in_expr_filtered(cond, out, filter, flat_const_ids, flat_row_alias_ids);
+                    collect_localset_ids_in_expr_filtered(cond, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 }
                 if let Some(upd) = update {
-                    collect_localset_ids_in_expr_filtered(upd, out, filter, flat_const_ids, flat_row_alias_ids);
+                    collect_localset_ids_in_expr_filtered(upd, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 }
-                collect_localset_ids_in_stmts_filtered(body, out, filter, flat_const_ids, flat_row_alias_ids);
+                collect_localset_ids_in_stmts_filtered(body, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
             }
             Stmt::Try { body, catch, finally } => {
-                collect_localset_ids_in_stmts_filtered(body, out, filter, flat_const_ids, flat_row_alias_ids);
+                collect_localset_ids_in_stmts_filtered(body, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 if let Some(c) = catch {
-                    collect_localset_ids_in_stmts_filtered(&c.body, out, filter, flat_const_ids, flat_row_alias_ids);
+                    collect_localset_ids_in_stmts_filtered(&c.body, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 }
                 if let Some(f) = finally {
-                    collect_localset_ids_in_stmts_filtered(f, out, filter, flat_const_ids, flat_row_alias_ids);
+                    collect_localset_ids_in_stmts_filtered(f, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 }
             }
             Stmt::Switch { discriminant, cases } => {
-                collect_localset_ids_in_expr_filtered(discriminant, out, filter, flat_const_ids, flat_row_alias_ids);
+                collect_localset_ids_in_expr_filtered(discriminant, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 for c in cases {
                     if let Some(t) = &c.test {
-                        collect_localset_ids_in_expr_filtered(t, out, filter, flat_const_ids, flat_row_alias_ids);
+                        collect_localset_ids_in_expr_filtered(t, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                     }
-                    collect_localset_ids_in_stmts_filtered(&c.body, out, filter, flat_const_ids, flat_row_alias_ids);
+                    collect_localset_ids_in_stmts_filtered(&c.body, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 }
             }
             Stmt::Labeled { body, .. } => {
@@ -1542,6 +1565,7 @@ fn collect_localset_ids_in_stmts_filtered(
                     filter,
                     flat_const_ids,
                     flat_row_alias_ids,
+                    clamp_fn_ids,
                 );
             }
             _ => {}
@@ -1551,7 +1575,7 @@ fn collect_localset_ids_in_stmts_filtered(
 
 fn collect_localset_ids_in_expr(e: &perry_hir::Expr, out: &mut HashSet<u32>) {
     let empty = HashSet::new();
-    collect_localset_ids_in_expr_filtered(e, out, None, &empty, &empty);
+    collect_localset_ids_in_expr_filtered(e, out, None, &empty, &empty, &empty);
 }
 
 fn collect_localset_ids_in_expr_filtered(
@@ -1560,15 +1584,16 @@ fn collect_localset_ids_in_expr_filtered(
     filter: Option<&HashSet<u32>>,
     flat_const_ids: &HashSet<u32>,
     flat_row_alias_ids: &HashSet<u32>,
+    clamp_fn_ids: &HashSet<u32>,
 ) {
     use perry_hir::{ArrayElement, CallArg, Expr};
     let mut walk = |sub: &Expr, out: &mut HashSet<u32>| {
-        collect_localset_ids_in_expr_filtered(sub, out, filter, flat_const_ids, flat_row_alias_ids);
+        collect_localset_ids_in_expr_filtered(sub, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
     };
     match e {
         Expr::LocalSet(id, value) => {
             match filter {
-                Some(known) if is_int32_producing_expr(value, known, flat_const_ids, flat_row_alias_ids) => {}
+                Some(known) if is_int32_producing_expr(value, known, flat_const_ids, flat_row_alias_ids, clamp_fn_ids) => {}
                 _ => {
                     out.insert(*id);
                 }

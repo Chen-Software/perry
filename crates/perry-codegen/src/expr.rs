@@ -700,7 +700,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             if let Some(i32_slot) = ctx.i32_counter_slots.get(id).cloned() {
                 if !ctx.closure_captures.contains_key(id)
                     && !(ctx.boxed_vars.contains(id) && !ctx.module_globals.contains_key(id))
-                    && can_lower_expr_as_i32(value, &ctx.i32_counter_slots, ctx.flat_const_arrays, &ctx.array_row_aliases, ctx.integer_locals)
+                    && can_lower_expr_as_i32(value, &ctx.i32_counter_slots, ctx.flat_const_arrays, &ctx.array_row_aliases, ctx.integer_locals, ctx.clamp3_functions, ctx.clamp_u8_functions)
                 {
                     let v_i32 = lower_expr_as_i32(ctx, value)?;
                     let blk = ctx.block();
@@ -982,8 +982,8 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     let flat_ca = &ctx.flat_const_arrays;
                     let ara = &ctx.array_row_aliases;
                     let int_locals = &ctx.integer_locals;
-                    if can_lower_expr_as_i32(div_l, i32_slots, flat_ca, ara, int_locals)
-                        && can_lower_expr_as_i32(div_r, i32_slots, flat_ca, ara, int_locals)
+                    if can_lower_expr_as_i32(div_l, i32_slots, flat_ca, ara, int_locals, &ctx.clamp3_functions, &ctx.clamp_u8_functions)
+                        && can_lower_expr_as_i32(div_r, i32_slots, flat_ca, ara, int_locals, &ctx.clamp3_functions, &ctx.clamp_u8_functions)
                     {
                         let a = lower_expr_as_i32(ctx, div_l)?;
                         let b = lower_expr_as_i32(ctx, div_r)?;
@@ -7241,13 +7241,13 @@ fn try_lower_flat_const_index_get(
     let flat_ca = ctx.flat_const_arrays.clone();
     let ara = ctx.array_row_aliases.clone();
     let int_locals = ctx.integer_locals.clone();
-    let row_i32 = if can_lower_expr_as_i32(&row_expr, &i32_slots, &flat_ca, &ara, &int_locals) {
+    let row_i32 = if can_lower_expr_as_i32(&row_expr, &i32_slots, &flat_ca, &ara, &int_locals, ctx.clamp3_functions, ctx.clamp_u8_functions) {
         lower_expr_as_i32(ctx, &row_expr)?
     } else {
         let d = lower_expr(ctx, &row_expr)?;
         ctx.block().fptosi(DOUBLE, &d, I32)
     };
-    let col_i32 = if can_lower_expr_as_i32(&col_expr, &i32_slots, &flat_ca, &ara, &int_locals) {
+    let col_i32 = if can_lower_expr_as_i32(&col_expr, &i32_slots, &flat_ca, &ara, &int_locals, ctx.clamp3_functions, ctx.clamp_u8_functions) {
         lower_expr_as_i32(ctx, &col_expr)?
     } else {
         let d = lower_expr(ctx, &col_expr)?;
@@ -7327,6 +7327,8 @@ pub(crate) fn can_lower_expr_as_i32(
     flat_const_arrays: &std::collections::HashMap<u32, FlatConstInfo>,
     array_row_aliases: &std::collections::HashMap<u32, (u32, Box<Expr>)>,
     integer_locals: &std::collections::HashSet<u32>,
+    clamp3_fns: &std::collections::HashSet<u32>,
+    clamp_u8_fns: &std::collections::HashSet<u32>,
 ) -> bool {
     match e {
         Expr::Integer(n) => i32::try_from(*n).is_ok(),
@@ -7335,8 +7337,18 @@ pub(crate) fn can_lower_expr_as_i32(
         Expr::Binary { op, left, right }
             if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul) =>
         {
-            can_lower_expr_as_i32(left, i32_slots, flat_const_arrays, array_row_aliases, integer_locals)
-                && can_lower_expr_as_i32(right, i32_slots, flat_const_arrays, array_row_aliases, integer_locals)
+            can_lower_expr_as_i32(left, i32_slots, flat_const_arrays, array_row_aliases, integer_locals, clamp3_fns, clamp_u8_fns)
+                && can_lower_expr_as_i32(right, i32_slots, flat_const_arrays, array_row_aliases, integer_locals, clamp3_fns, clamp_u8_fns)
+        }
+        Expr::Call { callee, args, .. } => {
+            if let Expr::FuncRef(fid) = callee.as_ref() {
+                if (clamp3_fns.contains(fid) && args.len() == 3)
+                    || (clamp_u8_fns.contains(fid) && args.len() == 1)
+                {
+                    return args.iter().all(|a| can_lower_expr_as_i32(a, i32_slots, flat_const_arrays, array_row_aliases, integer_locals, clamp3_fns, clamp_u8_fns));
+                }
+            }
+            false
         }
         // Issue #50 bridge: element of a flat-const 2D int table.
         Expr::IndexGet { object, .. } => match object.as_ref() {
