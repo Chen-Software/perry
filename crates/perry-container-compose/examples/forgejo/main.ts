@@ -35,6 +35,22 @@ async function main() {
   const FORGEJO_VERSION = '1.23-stable';
   const postgresVersion = '16-alpine';
 
+  // ──────────────────────────────────────────────────────────────
+  // Explicit Image Pulling
+  // ──────────────────────────────────────────────────────────────
+
+  console.log('📥 Pulling required images...\n');
+  const images = [
+    `postgres:${postgresVersion}`,
+    `codeberg.org/forgejo/forgejo:${FORGEJO_VERSION}`
+  ];
+
+  for (const img of images) {
+    console.log(`  - ${img}`);
+    // Explicitly pull each image before starting the stack
+    await pullImage(img);
+  }
+
   // Stack name for tracking
   const stack = await composeUp({
     version: '3.8',
