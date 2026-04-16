@@ -16,6 +16,13 @@ thread_local! {
     /// Stack of object pointers currently being stringified (for circular detection).
     static STRINGIFY_STACK: RefCell<Vec<usize>> = RefCell::new(Vec::new());
 
+    /// Key string intern cache for JSON.parse (issue #51 follow-up).
+    /// Maps key bytes → already-allocated StringHeader pointer.
+    /// Avoids re-allocating "id", "name", etc. for every record in a
+    /// homogeneous JSON array. Cleared at the end of each top-level parse.
+    static PARSE_KEY_CACHE: RefCell<std::collections::HashMap<Vec<u8>, *const StringHeader>> =
+        RefCell::new(std::collections::HashMap::new());
+
     /// GC roots for in-progress JSON.parse. Each entry is a JSValue bit pattern
     /// (stored as f64 so the scanner can hand it to the NaN-boxed mark path).
     ///
@@ -65,6 +72,16 @@ pub fn scan_parse_roots(mark: &mut dyn FnMut(f64)) {
     PARSE_ROOTS.with(|r| {
         for &v in r.borrow().iter() {
             mark(v);
+        }
+    });
+    // Also mark interned key strings so GC doesn't sweep them mid-parse.
+    PARSE_KEY_CACHE.with(|c| {
+        for &ptr in c.borrow().values() {
+            if !ptr.is_null() {
+                mark(f64::from_bits(
+                    crate::value::STRING_TAG | (ptr as u64 & 0x0000_FFFF_FFFF_FFFF),
+                ));
+            }
         }
     });
 }
@@ -257,21 +274,33 @@ impl<'a> DirectParser<'a> {
         }
         self.expect(b'}');
 
-        let count = pairs.len();
-        let js_obj = js_object_alloc(0, count as u32);
+        // Issue #51 follow-up: use js_object_set_field_by_name (goes through
+        // the TRANSITION_CACHE) so all records from the same JSON schema
+        // share their keys_array pointer. Combined with key interning via
+        // PARSE_KEY_CACHE, this gives:
+        //  - First record: N string allocs + N transition-cache misses.
+        //  - Subsequent records: 0 string allocs + N transition-cache hits.
+        //  - The monomorphic inline cache (PIC) at each PropertyGet site
+        //    then hits for every record after the first.
+        let js_obj = js_object_alloc(0, 0);
         let obj_slot = parse_root_push(JSValue::object_ptr(js_obj as *mut u8));
-        let keys_arr = js_array_alloc(count as u32);
-        parse_root_push(JSValue::object_ptr(keys_arr as *mut u8));
 
-        for (idx, (key, value)) in pairs.into_iter().enumerate() {
-            let key_ptr = js_string_from_bytes(key.as_ptr(), key.len() as u32);
-            // Root the fresh key string before the next allocation (js_array_push
-            // may grow → arena alloc → GC).
-            parse_root_push(JSValue::string_ptr(key_ptr));
-            js_array_push(keys_arr, JSValue::string_ptr(key_ptr));
-            js_object_set_field(js_obj, idx as u32, value);
+        for (_idx, (key, value)) in pairs.into_iter().enumerate() {
+            let key_ptr = PARSE_KEY_CACHE.with(|c| {
+                let mut cache = c.borrow_mut();
+                if let Some(&cached) = cache.get(&key) {
+                    cached
+                } else {
+                    let ptr = js_string_from_bytes(key.as_ptr(), key.len() as u32);
+                    cache.insert(key.clone(), ptr);
+                    ptr
+                }
+            });
+            parse_root_push(JSValue::string_ptr(key_ptr as *mut StringHeader));
+            crate::object::js_object_set_field_by_name(
+                js_obj, key_ptr as *mut StringHeader, f64::from_bits(value.bits()),
+            );
         }
-        js_object_set_keys(js_obj, keys_arr);
         // Restore roots — js_obj is returned; caller is responsible for rooting it
         // before triggering any further allocation.
         parse_root_restore(saved_roots);

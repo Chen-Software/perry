@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.44
+**Current Version:** 0.5.45
 
 ## TypeScript Parity Status
 
@@ -177,6 +177,7 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 
 Keep entries here to 1-2 lines max. Detailed write-ups live in CHANGELOG.md.
 
+- **v0.5.45** — JSON.parse key interning + transition-cache shape sharing (v0.5.45). `parse_object` now uses a thread-local `PARSE_KEY_CACHE` (HashMap<Vec<u8>, *const StringHeader>) to intern key strings — first record allocates N keys, subsequent records 0. Objects are built via `js_object_set_field_by_name` (transition cache) instead of manual keys_array construction, so all records from the same schema share their `keys_array` pointer. This enables the v0.5.44 PIC to hit on every PropertyGet after the first record. Combined: parse(500×20 records) dropped from unmeasurable (OOM/crash at 2000 iters) to 10ms, transform from 10s+ to 1ms. 20-record pipeline: Perry 12ms vs Node 4ms (3× gap, was 547×).
 - **v0.5.44** — Monomorphic inline cache for PropertyGet (closes #51). Per-site `[2 x i64]` globals (`@perry_ic_N`) cache `(keys_array_ptr, slot_index)`. Fast path: load obj→keys_array (offset 16), compare cached → direct field load at obj+24+slot*8 (no call, no hash, no linear scan). Miss: `js_object_get_field_ic_miss` does full lookup + primes cache. Guards: skip cache for non-regular objects (Error, Closure, etc.) and when `ACCESSORS_IN_USE` is set (getters/setters need the full dispatch). JSON-parsed objects currently get per-object keys_arrays (no shape sharing from the parser), so the PIC hits only for class instances and object-literal shapes shared via the transition cache. Follow-up: shape-sharing in JSON.parse to unlock the PIC for parsed records.
 - **v0.5.43** — Wire #49 int-analysis ↔ #50 flat-const bridge (v0.5.43). `collect_integer_let_ids` now accepts `let k = krow[j]` (flat-const IndexGet) as an integer init, and `can_lower_expr_as_i32` + `lower_expr_as_i32` accept `LocalGet(k)` for any local in `integer_locals` (falling through to `lower_expr→fptosi` for const locals without an i32 slot — LLVM's instcombine collapses the `fptosi(sitofp(load i32))` identity). This closes the loop between #49's i32 accumulator and #50's flat table: `rAcc += src[idx] * k` where `k` comes from `KERNEL[ky+2][kx+2]` now runs entirely in i32. image_conv 3840×2160 Gaussian blur: **1.95s → 0.66s (-66%)**, now within 2.7× of Zig (vs previous 8×).
 - **v0.5.42** — `!invariant.load !0` metadata on Array/Buffer length loads (closes #52). `LlBlock::safe_load_i32_from_ptr` (used by every bounds check for `Uint8ArrayGet`/`Set`, `IndexGet`, `IndexSet`, `arr.length`) now tags the header `i32` load with `!invariant.load`. LLVM's GVN + LICM are then free to hoist the length reload out of read-only loops over the same buffer — the prior emission forced a reload on every bounds check even when the buffer was loop-invariant, blocking autovectorization of pixel/hash/codec loops. Module-level `!0 = !{}` declared alongside the attribute groups in `LlModule::to_ir`.
