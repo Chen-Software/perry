@@ -162,6 +162,41 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
                 ctx.local_closure_func_ids.insert(*id, *cfid);
             }
 
+            // Scalar replacement: if this Let binds a non-escaping array
+            // literal, skip the heap allocation entirely. Each element gets
+            // its own stack alloca; constant-index reads in the Let's scope
+            // load directly from the corresponding slot. See the
+            // `collect_non_escaping_arrays` pass in collectors.rs for the
+            // escape criteria.
+            if let Some(perry_hir::Expr::Array(elements)) = init.as_ref() {
+                if ctx.non_escaping_arrays.contains_key(id) {
+                    let n = elements.len();
+                    let mut slots: Vec<String> = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        slots.push(ctx.func.alloca_entry(DOUBLE));
+                    }
+                    // Evaluate each element expression first; store the
+                    // result into its slot. Order matches source, so any
+                    // side effects stay observable in the same sequence the
+                    // heap-allocating path would have produced.
+                    for (i, elem) in elements.iter().enumerate() {
+                        let v = lower_expr(ctx, elem)?;
+                        ctx.block().store(DOUBLE, &v, &slots[i]);
+                    }
+                    ctx.scalar_replaced_arrays.insert(*id, slots);
+
+                    // Register the local's type + a dummy slot so any surviving
+                    // LocalGet (e.g. debug instrumentation, unrecognized
+                    // expression shapes the collector conservatively rejected)
+                    // still resolves; the actual scalar-replaced reads short-
+                    // circuit before hitting this slot.
+                    ctx.local_types.insert(*id, refined_ty);
+                    let dummy_slot = ctx.func.alloca_entry(DOUBLE);
+                    ctx.locals.insert(*id, dummy_slot);
+                    return Ok(());
+                }
+            }
+
             // Scalar replacement: if this Let binds a non-escaping New,
             // skip the heap allocation entirely. Create a stack alloca
             // per field and inline the constructor stores into those allocas.

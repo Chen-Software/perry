@@ -457,6 +457,20 @@ pub(crate) struct FnCtx<'a> {
     /// intercepts these to emit scalar-replaced field allocas.
     pub non_escaping_news: std::collections::HashMap<u32, String>,
 
+    /// Scalar-replaced non-escaping array literals. When `let arr =
+    /// [a, b, c]` and `arr` is only read at constant indices (and for
+    /// `.length`), each slot becomes a stack alloca. Map: local_id →
+    /// `[slot_0, slot_1, ..., slot_(N-1)]`. IndexGet on
+    /// `LocalGet(id), Integer(k)` loads directly from `slots[k]`, and
+    /// `PropertyGet LocalGet(id), "length"` folds to the constant N.
+    pub scalar_replaced_arrays: std::collections::HashMap<u32, Vec<String>>,
+
+    /// Non-escaping array literals identified by escape analysis. Maps
+    /// local_id → length. Used by the Stmt::Let lowering to intercept
+    /// `let arr = [a, b, c]` and emit per-index allocas instead of a
+    /// heap array, and by `.length` reads to fold to the constant.
+    pub non_escaping_arrays: std::collections::HashMap<u32, u32>,
+
     /// (Issue #50) Module-level const 2D int arrays folded into a flat
     /// `[N x i32]` LLVM constant. Maps local_id → (flat_global_name, rows,
     /// cols). Populated at module compile, before any function lowering.
@@ -1549,6 +1563,27 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // bench_array_ops with ~400K reads per iteration this is a
         // major performance win.
         Expr::IndexGet { object, index } => {
+            // Scalar-replaced array literal: `arr[k]` where arr was bound to
+            // `[...]` and never escaped, and k is a compile-time index in
+            // range. Loads directly from the kth stack alloca — no heap,
+            // no runtime call, no bounds check. See `collect_non_escaping_arrays`.
+            if let Expr::LocalGet(id) = object.as_ref() {
+                if let Some(slots) = ctx.scalar_replaced_arrays.get(id).cloned() {
+                    let k = match index.as_ref() {
+                        Expr::Integer(k) if *k >= 0 => Some(*k as usize),
+                        Expr::Number(f) if f.is_finite() && *f >= 0.0 && f.fract() == 0.0 => {
+                            Some(*f as usize)
+                        }
+                        _ => None,
+                    };
+                    if let Some(k) = k {
+                        if k < slots.len() {
+                            return Ok(ctx.block().load(DOUBLE, &slots[k]));
+                        }
+                    }
+                }
+            }
+
             // Issue #50: flat-const 2D int array fast path. Replaces
             // `X[i][j]` (inline) and `krow[j]` (aliased row pattern)
             // with a direct GEP + load from a private `[N x i32]`
@@ -1822,6 +1857,15 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                         Some(HirType::Named(_)) | Some(HirType::Tuple(_))
                     )) =>
         {
+            // Scalar-replaced array literal: length is a compile-time
+            // constant — no header to load from (the heap array doesn't
+            // exist). Must be checked before the cached-length path
+            // because scalar-replaced arrays aren't registered there.
+            if let Expr::LocalGet(arr_id) = object.as_ref() {
+                if let Some(&len) = ctx.non_escaping_arrays.get(arr_id) {
+                    return Ok(double_literal(len as f64));
+                }
+            }
             // Cached-length fast path: when the surrounding for-loop
             // header has hoisted `arr.length` into a stack slot
             // (because it spotted `for (...; i < arr.length; ...)` and
@@ -2162,6 +2206,13 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             if let Expr::LocalGet(id) = object.as_ref() {
                 if let Some(slot) = ctx.scalar_replaced.get(id).and_then(|fs| fs.get(property.as_str())).cloned() {
                     return Ok(ctx.block().load(DOUBLE, &slot));
+                }
+                // Scalar-replaced array literal: `.length` folds to a
+                // compile-time constant. No heap access, no runtime call.
+                if property == "length" {
+                    if let Some(&len) = ctx.non_escaping_arrays.get(id) {
+                        return Ok(double_literal(len as f64));
+                    }
                 }
             }
             // Also handle `this` during scalar-replaced ctor inlining

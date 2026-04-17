@@ -1496,6 +1496,9 @@ fn compile_function(
     let non_escaping_news = crate::collectors::collect_non_escaping_news(
         &f.body, &boxed_vars, module_globals,
     );
+    let non_escaping_arrays = crate::collectors::collect_non_escaping_arrays(
+        &f.body, &boxed_vars, module_globals,
+    );
 
     let mut ctx = FnCtx {
         func: lf,
@@ -1544,8 +1547,10 @@ fn compile_function(
         imported_vars: &cross_module.imported_vars,
         compile_time_constants: &cross_module.compile_time_constants,
         scalar_replaced: std::collections::HashMap::new(),
+        scalar_replaced_arrays: std::collections::HashMap::new(),
         scalar_ctor_target: Vec::new(),
         non_escaping_news,
+        non_escaping_arrays,
         flat_const_arrays: &cross_module.flat_const_arrays,
         array_row_aliases: HashMap::new(),
         clamp3_functions: &cross_module.clamp3_functions,
@@ -1749,6 +1754,9 @@ fn compile_closure(
     let non_escaping_news = crate::collectors::collect_non_escaping_news(
         body, &closure_boxed_vars, module_globals,
     );
+    let non_escaping_arrays = crate::collectors::collect_non_escaping_arrays(
+        body, &closure_boxed_vars, module_globals,
+    );
 
     let mut ctx = FnCtx {
         func: lf,
@@ -1801,8 +1809,10 @@ fn compile_closure(
         imported_vars: &cross_module.imported_vars,
         compile_time_constants: &cross_module.compile_time_constants,
         scalar_replaced: std::collections::HashMap::new(),
+        scalar_replaced_arrays: std::collections::HashMap::new(),
         scalar_ctor_target: Vec::new(),
         non_escaping_news,
+        non_escaping_arrays,
         flat_const_arrays: &cross_module.flat_const_arrays,
         array_row_aliases: HashMap::new(),
         clamp3_functions: &cross_module.clamp3_functions,
@@ -1907,6 +1917,9 @@ fn compile_method(
     let non_escaping_news = crate::collectors::collect_non_escaping_news(
         &method.body, &method_boxed_vars, module_globals,
     );
+    let non_escaping_arrays = crate::collectors::collect_non_escaping_arrays(
+        &method.body, &method_boxed_vars, module_globals,
+    );
 
     let mut ctx = FnCtx {
         func: lf,
@@ -1955,8 +1968,10 @@ fn compile_method(
         imported_vars: &cross_module.imported_vars,
         compile_time_constants: &cross_module.compile_time_constants,
         scalar_replaced: std::collections::HashMap::new(),
+        scalar_replaced_arrays: std::collections::HashMap::new(),
         scalar_ctor_target: Vec::new(),
         non_escaping_news,
+        non_escaping_arrays,
         flat_const_arrays: &cross_module.flat_const_arrays,
         array_row_aliases: HashMap::new(),
         clamp3_functions: &cross_module.clamp3_functions,
@@ -2086,6 +2101,9 @@ fn compile_module_entry(
         let main_non_escaping_news = crate::collectors::collect_non_escaping_news(
             &hir.init, &main_boxed_vars, module_globals,
         );
+        let main_non_escaping_arrays = crate::collectors::collect_non_escaping_arrays(
+            &hir.init, &main_boxed_vars, module_globals,
+        );
         let mut ctx = FnCtx {
             func: main,
             locals: HashMap::new(),
@@ -2133,8 +2151,10 @@ fn compile_module_entry(
             imported_vars: &cross_module.imported_vars,
             compile_time_constants: &cross_module.compile_time_constants,
             scalar_replaced: std::collections::HashMap::new(),
+            scalar_replaced_arrays: std::collections::HashMap::new(),
             scalar_ctor_target: Vec::new(),
             non_escaping_news: main_non_escaping_news,
+            non_escaping_arrays: main_non_escaping_arrays,
             flat_const_arrays: &cross_module.flat_const_arrays,
             array_row_aliases: HashMap::new(),
         clamp3_functions: &cross_module.clamp3_functions,
@@ -2275,6 +2295,9 @@ fn compile_module_entry(
         let init_non_escaping_news = crate::collectors::collect_non_escaping_news(
             &hir.init, &init_boxed_vars, module_globals,
         );
+        let init_non_escaping_arrays = crate::collectors::collect_non_escaping_arrays(
+            &hir.init, &init_boxed_vars, module_globals,
+        );
         let mut ctx = FnCtx {
             func: init_fn,
             locals: HashMap::new(),
@@ -2322,8 +2345,10 @@ fn compile_module_entry(
             imported_vars: &cross_module.imported_vars,
             compile_time_constants: &cross_module.compile_time_constants,
             scalar_replaced: std::collections::HashMap::new(),
+            scalar_replaced_arrays: std::collections::HashMap::new(),
             scalar_ctor_target: Vec::new(),
             non_escaping_news: init_non_escaping_news,
+            non_escaping_arrays: init_non_escaping_arrays,
             flat_const_arrays: &cross_module.flat_const_arrays,
             array_row_aliases: HashMap::new(),
         clamp3_functions: &cross_module.clamp3_functions,
@@ -2613,6 +2638,9 @@ fn compile_static_method(
     let non_escaping_news = crate::collectors::collect_non_escaping_news(
         &f.body, &static_boxed_vars, module_globals,
     );
+    let non_escaping_arrays = crate::collectors::collect_non_escaping_arrays(
+        &f.body, &static_boxed_vars, module_globals,
+    );
 
     let mut ctx = FnCtx {
         func: lf,
@@ -2665,8 +2693,10 @@ fn compile_static_method(
         imported_vars: &cross_module.imported_vars,
         compile_time_constants: &cross_module.compile_time_constants,
         scalar_replaced: std::collections::HashMap::new(),
+        scalar_replaced_arrays: std::collections::HashMap::new(),
         scalar_ctor_target: Vec::new(),
         non_escaping_news,
+        non_escaping_arrays,
         flat_const_arrays: &cross_module.flat_const_arrays,
         array_row_aliases: HashMap::new(),
         clamp3_functions: &cross_module.clamp3_functions,
