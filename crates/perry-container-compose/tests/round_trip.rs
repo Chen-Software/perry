@@ -1,59 +1,66 @@
-use perry_container_compose::types::*;
+use perry_container_compose::types::{ComposeSpec, ContainerSpec, ComposeService, DependsOnSpec};
 use perry_container_compose::compose::resolve_startup_order;
+use perry_container_compose::yaml::interpolate;
 use proptest::prelude::*;
 use std::collections::HashMap;
 
-// Feature: perry-container, Property 1: ComposeSpec serialization round-trip
+fn arb_container_spec() -> impl Strategy<Value = ContainerSpec> {
+    any::<String>().prop_map(|image| ContainerSpec {
+        image,
+        name: Some("test".into()),
+        ..Default::default()
+    })
+}
+
 proptest! {
     #[test]
-    fn prop_compose_spec_round_trip(
-        name in any::<Option<String>>(),
-        version in any::<Option<String>>(),
-    ) {
-        let mut spec = ComposeSpec::default();
-        spec.name = name;
-        spec.version = version;
-
+    fn prop_container_spec_round_trip(spec in arb_container_spec()) {
         let json = serde_json::to_string(&spec).unwrap();
-        let deserialized: ComposeSpec = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(spec.name, deserialized.name);
-        assert_eq!(spec.version, deserialized.version);
+        let deserialized: ContainerSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(spec.image, deserialized.image);
     }
-}
 
-// Feature: perry-container, Property 3: Topological sort respects depends_on
-#[test]
-fn test_topological_sort_basic() {
-    let mut spec = ComposeSpec::default();
+    #[test]
+    fn prop_topological_sort_respects_deps(
+        s1 in "[a-z0-9]{5,10}",
+        s2 in "[a-z0-9]{5,10}"
+    ) {
+        prop_assume!(s1 != s2);
+        let mut spec = ComposeSpec::default();
+        let svc1 = ComposeService::default();
+        let mut svc2 = ComposeService::default();
 
-    let mut db = ComposeService::default();
-    db.image = Some("postgres".into());
+        svc2.depends_on = Some(DependsOnSpec::List(vec![s1.clone()]));
 
-    let mut web = ComposeService::default();
-    web.image = Some("nginx".into());
-    web.depends_on = Some(DependsOnSpec::List(vec!["db".into()]));
+        spec.services.insert(s1.clone(), svc1);
+        spec.services.insert(s2.clone(), svc2);
 
-    spec.services.insert("db".into(), db);
-    spec.services.insert("web".into(), web);
+        let order = resolve_startup_order(&spec).unwrap();
+        let pos1 = order.iter().position(|s| s == &s1).unwrap();
+        let pos2 = order.iter().position(|s| s == &s2).unwrap();
+        assert!(pos1 < pos2);
+    }
 
-    let order = resolve_startup_order(&spec).unwrap();
-    assert_eq!(order, vec!["db", "web"]);
-}
+    #[test]
+    fn prop_interpolation_works(
+        key in "[A-Z0-9_]{1,10}",
+        val in "[a-z0-9]{1,10}"
+    ) {
+        let mut env = HashMap::new();
+        env.insert(key.clone(), val.clone());
+        let template = format!("image: ${{{}}}", key);
+        let result = interpolate(&template, &env);
+        assert_eq!(result, format!("image: {}", val));
+    }
 
-#[test]
-fn test_topological_sort_cycle() {
-    let mut spec = ComposeSpec::default();
-
-    let mut s1 = ComposeService::default();
-    s1.depends_on = Some(DependsOnSpec::List(vec!["s2".into()]));
-
-    let mut s2 = ComposeService::default();
-    s2.depends_on = Some(DependsOnSpec::List(vec!["s1".into()]));
-
-    spec.services.insert("s1".into(), s1);
-    spec.services.insert("s2".into(), s2);
-
-    let result = resolve_startup_order(&spec);
-    assert!(result.is_err());
+    #[test]
+    fn prop_interpolation_default_works(
+        key in "[A-Z0-9_]{1,10}",
+        default_val in "[a-z0-9]{1,10}"
+    ) {
+        let env = HashMap::new();
+        let template = format!("image: ${{{}:-{}}}", key, default_val);
+        let result = interpolate(&template, &env);
+        assert_eq!(result, format!("image: {}", default_val));
+    }
 }

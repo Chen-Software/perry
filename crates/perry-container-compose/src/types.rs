@@ -284,6 +284,17 @@ pub struct ComposeNetwork {
     pub labels: Option<ListOrDict>,
 }
 
+impl From<ComposeNetwork> for crate::backend::NetworkConfig {
+    fn from(cn: ComposeNetwork) -> Self {
+        Self {
+            driver: cn.driver,
+            labels: cn.labels.map(|l| l.to_map()).unwrap_or_default(),
+            internal: cn.internal.unwrap_or(false),
+            enable_ipv6: cn.enable_ipv6.unwrap_or(false),
+        }
+    }
+}
+
 /// Top-level volume definition
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeVolume {
@@ -292,6 +303,15 @@ pub struct ComposeVolume {
     pub driver_opts: Option<IndexMap<String, String>>,
     pub external: Option<bool>,
     pub labels: Option<ListOrDict>,
+}
+
+impl From<ComposeVolume> for crate::backend::VolumeConfig {
+    fn from(cv: ComposeVolume) -> Self {
+        Self {
+            driver: cv.driver,
+            labels: cv.labels.map(|l| l.to_map()).unwrap_or_default(),
+        }
+    }
 }
 
 /// Top-level secret definition

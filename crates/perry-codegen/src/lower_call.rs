@@ -2373,7 +2373,25 @@ pub(crate) fn lower_native_method_call(
     }
 
     if module == "perry/compose" && object.is_none() {
-        if let Some(sig) = perry_compose_table_lookup(method) {
+        if let Some(sig) = perry_container_compose_table_lookup(method) {
+            return lower_perry_ui_table_call(ctx, sig, args);
+        }
+    }
+
+    if module == "perry/container-compose" && object.is_none() {
+        if let Some(sig) = perry_container_compose_table_lookup(method) {
+            return lower_perry_ui_table_call(ctx, sig, args);
+        }
+    }
+
+    if module == "perry/compose" && object.is_none() {
+        if let Some(sig) = perry_container_compose_table_lookup(method) {
+            return lower_perry_ui_table_call(ctx, sig, args);
+        }
+    }
+
+    if module == "perry/container-compose" && object.is_none() {
+        if let Some(sig) = perry_container_compose_table_lookup(method) {
             return lower_perry_ui_table_call(ctx, sig, args);
         }
     }
@@ -3933,27 +3951,27 @@ static PERRY_CONTAINER_TABLE: &[UiSig] = &[
     UiSig { method: "imageExists", runtime: "js_container_imageExists", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
     UiSig { method: "removeImage", runtime: "js_container_removeImage", args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Widget },
     UiSig { method: "getBackend", runtime: "js_container_getBackend", args: &[], ret: UiReturnKind::Str },
-    UiSig { method: "composeUp", runtime: "js_container_composeUp", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "composeUp", runtime: "js_compose_up", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
 ];
 
-static PERRY_COMPOSE_TABLE: &[UiSig] = &[
+static PERRY_CONTAINER_COMPOSE_TABLE: &[UiSig] = &[
     UiSig { method: "up", runtime: "js_compose_up", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
     UiSig { method: "down", runtime: "js_compose_down", args: &[UiArgKind::F64, UiArgKind::F64], ret: UiReturnKind::Widget },
     UiSig { method: "ps", runtime: "js_compose_ps", args: &[UiArgKind::F64], ret: UiReturnKind::Widget },
     UiSig { method: "logs", runtime: "js_compose_logs", args: &[UiArgKind::F64, UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Widget },
-    UiSig { method: "exec", runtime: "js_compose_exec", args: &[UiArgKind::F64, UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Widget },
     UiSig { method: "config", runtime: "js_compose_config", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
     UiSig { method: "start", runtime: "js_compose_start", args: &[UiArgKind::F64, UiArgKind::Str], ret: UiReturnKind::Widget },
     UiSig { method: "stop", runtime: "js_compose_stop", args: &[UiArgKind::F64, UiArgKind::Str], ret: UiReturnKind::Widget },
     UiSig { method: "restart", runtime: "js_compose_restart", args: &[UiArgKind::F64, UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "exec", runtime: "js_compose_exec", args: &[UiArgKind::F64, UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Widget },
 ];
 
 fn perry_container_table_lookup(method: &str) -> Option<&'static UiSig> {
     PERRY_CONTAINER_TABLE.iter().find(|s| s.method == method || s.runtime == method)
 }
 
-fn perry_compose_table_lookup(method: &str) -> Option<&'static UiSig> {
-    PERRY_COMPOSE_TABLE.iter().find(|s| s.method == method || s.runtime == method)
+fn perry_container_compose_table_lookup(method: &str) -> Option<&'static UiSig> {
+    PERRY_CONTAINER_COMPOSE_TABLE.iter().find(|s| s.method == method || s.runtime == method)
 }
 
 /// Lower a perry/ui call described by `sig`. Walks each arg, applies

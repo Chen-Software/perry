@@ -58,12 +58,12 @@ impl ComposeEngine {
     ) -> Result<ComposeHandle> {
         if let Some(networks) = &self.spec.networks {
             for (name, config) in networks {
-                self.backend.create_network(name, config.as_ref().unwrap_or(&Default::default())).await?;
+                self.backend.create_network(name, &config.clone().unwrap_or_default().into()).await?;
             }
         }
         if let Some(volumes) = &self.spec.volumes {
             for (name, config) in volumes {
-                self.backend.create_volume(name, config.as_ref().unwrap_or(&Default::default())).await?;
+                self.backend.create_volume(name, &config.clone().unwrap_or_default().into()).await?;
             }
         }
 

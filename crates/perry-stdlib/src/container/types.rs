@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use perry_runtime::StringHeader;
+use perry_container_compose::compose::get_compose_engine;
 
 pub use perry_container_compose::types::{
     ComposeHandle, ComposeSpec, ListOrDict, ContainerSpec, ContainerHandle,
@@ -92,11 +93,21 @@ pub fn register_image_info_list(images: Vec<ImageInfo>) -> u64 {
 pub fn take_image_info_list(h: u64) -> Option<Vec<ImageInfo>> {
     IMAGE_INFO_LISTS.lock().unwrap().remove(&h)
 }
+
 pub fn register_compose_handle(handle: ComposeHandle) -> u64 { handle.stack_id }
 
 pub fn take_compose_handle(id: u64) -> Option<ComposeHandle> {
-    Some(ComposeHandle { stack_id: id, project_name: "".into(), services: vec![] })
+    get_compose_engine(id).map(|e| ComposeHandle {
+        stack_id: id,
+        project_name: e.project_name.clone(),
+        services: e.spec.services.keys().cloned().collect(),
+    })
 }
+
 pub fn get_compose_handle(id: u64) -> Option<ComposeHandle> {
-    Some(ComposeHandle { stack_id: id, project_name: "".into(), services: vec![] })
+    get_compose_engine(id).map(|e| ComposeHandle {
+        stack_id: id,
+        project_name: e.project_name.clone(),
+        services: e.spec.services.keys().cloned().collect(),
+    })
 }

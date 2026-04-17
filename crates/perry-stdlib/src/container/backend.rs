@@ -1,4 +1,4 @@
-pub use perry_container_compose::backend::{ContainerBackend, OciBackend, BackendDriver, detect_backend};
+pub use perry_container_compose::backend::{ContainerBackend, CliBackend, CliProtocol, detect_backend};
 use crate::container::types::ContainerError;
 use std::sync::{Arc, OnceLock};
 
