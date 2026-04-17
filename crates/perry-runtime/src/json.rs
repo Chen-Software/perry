@@ -45,6 +45,13 @@ thread_local! {
     static PARSE_KEY_CACHE: RefCell<std::collections::HashMap<Vec<u8>, *const StringHeader>> =
         RefCell::new(std::collections::HashMap::new());
 
+    /// Reentrancy depth counter for JSON.stringify (issue #67). 0 means
+    /// no call in progress; ≥1 means a reentrant (toJSON callback) path.
+    /// Used to skip the shape_cache save/restore dance for the common
+    /// non-reentrant case — a plain `clear_shape_cache` at the outermost
+    /// call's exit handles correctness without a Vec alloc/swap.
+    static STRINGIFY_DEPTH: std::cell::Cell<u32> = std::cell::Cell::new(0);
+
     /// GC roots for in-progress JSON.parse. Each entry is a JSValue bit pattern
     /// (stored as f64 so the scanner can hand it to the NaN-boxed mark path).
     ///
@@ -95,17 +102,15 @@ fn take_stringify_buf() -> String {
     STRINGIFY_BUF.with(|b| b.take()).unwrap_or_default()
 }
 
-/// Restore the scratch buffer after use, keeping whichever capacity is larger.
+/// Restore the scratch buffer after use. In a reentrant call the inner
+/// restore runs first with a (typically smaller) buffer, but the outer
+/// restore runs last and overwrites with its larger buffer — so the
+/// final TLS state always holds the largest recently-used buffer without
+/// needing a per-call capacity comparison.
 #[inline]
 fn restore_stringify_buf(mut buf: String) {
     buf.clear();
-    STRINGIFY_BUF.with(|b| {
-        let existing = b.take();
-        match existing {
-            Some(e) if e.capacity() > buf.capacity() => b.set(Some(e)),
-            _ => b.set(Some(buf)),
-        }
-    });
+    STRINGIFY_BUF.with(|b| b.set(Some(buf)));
 }
 
 /// Save & clear the shape cache for the duration of a top-level stringify
@@ -120,6 +125,14 @@ fn take_shape_cache() -> Vec<(*mut crate::ArrayHeader, Box<ShapeTemplate>)> {
 #[inline]
 fn restore_shape_cache(saved: Vec<(*mut crate::ArrayHeader, Box<ShapeTemplate>)>) {
     SHAPE_CACHE.with(|c| *c.borrow_mut() = saved);
+}
+
+/// Clear cache without allocating a fresh Vec (keeps capacity, drops entries).
+/// Used in place of restore when we know the cache was empty at call entry —
+/// the outermost stringify call in a tight loop skips the save entirely.
+#[inline]
+fn clear_shape_cache() {
+    SHAPE_CACHE.with(|c| c.borrow_mut().clear());
 }
 
 /// Maximum cache entries per call. Workloads with more distinct shapes
@@ -1032,6 +1045,9 @@ unsafe fn stringify_object_inner(ptr: *const u8, buf: &mut String, depth: u32) {
         STRINGIFY_STACK.with(|s| s.borrow_mut().push(ptr as usize));
     }
 
+    let obj = ptr as *const crate::ObjectHeader;
+    let num_fields = (*obj).field_count;
+
     // Templated fast path (#64 follow-up): if this object's shape has been
     // seen before in this stringify call, emit via the cached prefix table
     // and skip per-object `has_pointer_fields` / `object_get_to_json` /
@@ -1039,17 +1055,24 @@ unsafe fn stringify_object_inner(ptr: *const u8, buf: &mut String, depth: u32) {
     // returns false on any element-specific mismatch (different shape,
     // stray UNDEFINED, closure), at which point we fall through to the
     // slow path below.
-    if let Some(tmpl_ptr) = shape_template_for(ptr) {
-        if try_emit_shape_element(make_pointer_bits(ptr), &*tmpl_ptr, buf, depth) {
-            if depth > MAX_FAST_DEPTH {
-                STRINGIFY_STACK.with(|s| s.borrow_mut().pop());
+    //
+    // Guard (issue #67): skip the template machinery for small objects.
+    // `shape_template_for` allocates a Box<ShapeTemplate> + Vec<String>
+    // + one String per field on miss (~4-5 heap allocs), and the cache
+    // is wiped at every top-level call exit — so for a one-shot small
+    // top-level stringify the build is pure overhead vs. the inline slow
+    // path below. The arrayof-objects fast path (stringify_array_depth)
+    // uses a separate build_shape_prefix_template that's unaffected.
+    if num_fields >= 5 {
+        if let Some(tmpl_ptr) = shape_template_for(ptr) {
+            if try_emit_shape_element(make_pointer_bits(ptr), &*tmpl_ptr, buf, depth) {
+                if depth > MAX_FAST_DEPTH {
+                    STRINGIFY_STACK.with(|s| s.borrow_mut().pop());
+                }
+                return;
             }
-            return;
         }
     }
-
-    let obj = ptr as *const crate::ObjectHeader;
-    let num_fields = (*obj).field_count;
     let keys_arr = (*obj).keys_array;
     let keys_len = (*keys_arr).length;
     let keys_elements = (keys_arr as *const u8).add(std::mem::size_of::<crate::ArrayHeader>()) as *const f64;
@@ -1057,24 +1080,40 @@ unsafe fn stringify_object_inner(ptr: *const u8, buf: &mut String, depth: u32) {
         .add(std::mem::size_of::<crate::ObjectHeader>()) as *const f64;
     let actual_fields = std::cmp::min(num_fields, keys_len);
 
-    // Deferred toJSON + closure checks: scan fields once to detect if any
-    // value is a POINTER_TAG that could be a closure. For data-only objects
-    // (the common case from JSON.parse / object literals) this lets us skip
-    // the toJSON key scan and per-field is_closure_value entirely.
-    let has_pointer_fields = {
+    // Deferred toJSON + closure checks (issue #67 tightening): scan fields
+    // once to detect if any field is actually a closure. For data-only
+    // objects with nested arrays/objects (e.g. `{a:1, b:"", c:[...]}`) the
+    // earlier has_pointer_fields heuristic false-positived because any
+    // POINTER_TAG field triggered the `object_get_to_json` key walk — even
+    // though a toJSON method requires the *value* at the "toJSON" key to
+    // be a closure. Reading offset 12 (CLOSURE_MAGIC) per pointer field is
+    // cheaper (~3ns/field) than walking the keys array looking for a
+    // "toJSON" string that almost never exists (~15ns).
+    let has_closure_field = {
         let mut found = false;
         for f in 0..actual_fields {
-            let tag = (*fields_ptr.add(f as usize)).to_bits() & 0xFFFF_0000_0000_0000;
-            if tag == POINTER_TAG {
-                found = true;
-                break;
+            let bits = (*fields_ptr.add(f as usize)).to_bits();
+            let tag = bits & 0xFFFF_0000_0000_0000;
+            let ptr_candidate = if tag == POINTER_TAG {
+                (bits & POINTER_MASK) as *const u8
+            } else if is_raw_pointer(bits) {
+                bits as *const u8
+            } else {
+                std::ptr::null()
+            };
+            if !ptr_candidate.is_null() {
+                let type_tag = *(ptr_candidate.add(12) as *const u32);
+                if type_tag == crate::closure::CLOSURE_MAGIC {
+                    found = true;
+                    break;
+                }
             }
         }
         found
     };
 
-    if has_pointer_fields {
-        // Only objects with pointer-tagged fields can have closures/toJSON.
+    if has_closure_field {
+        // Only objects with closure-typed fields can have a toJSON method.
         // Check toJSON first, then filter closures in the loop below.
         if let Some(to_json_val) = object_get_to_json(ptr) {
             if depth > MAX_FAST_DEPTH {
@@ -1094,8 +1133,10 @@ unsafe fn stringify_object_inner(ptr: *const u8, buf: &mut String, depth: u32) {
         if field_bits == TAG_UNDEFINED {
             continue;
         }
-        // Skip closures per JSON spec (only possible for pointer-tagged values)
-        if has_pointer_fields && is_closure_value(field_bits) {
+        // Skip closures per JSON spec (only possible for pointer-tagged values).
+        // Guarded by has_closure_field: if no field is a closure, the in-loop
+        // check is skipped entirely for every field.
+        if has_closure_field && is_closure_value(field_bits) {
             continue;
         }
 
@@ -1517,19 +1558,35 @@ unsafe fn estimate_json_size(value: f64, type_hint: u32) -> usize {
 /// Returns a string pointer
 #[no_mangle]
 pub unsafe extern "C" fn js_json_stringify(value: f64, type_hint: u32) -> *mut StringHeader {
-    let saved_cache = take_shape_cache();
+    // Non-reentrant fast path (issue #67): skip the shape_cache save/restore
+    // round-trip (two RefCell.borrow_mut's + a Vec mem::take/assign) for the
+    // common outermost call. A simple Cell-based depth counter identifies
+    // reentrant calls (toJSON callbacks); only those pay for the save.
+    let prior_depth = STRINGIFY_DEPTH.with(|d| {
+        let c = d.get();
+        d.set(c + 1);
+        c
+    });
+    let saved_cache = if prior_depth > 0 {
+        Some(take_shape_cache())
+    } else {
+        None
+    };
     let mut buf = take_stringify_buf();
-    let estimated = estimate_json_size(value, type_hint);
-    if buf.capacity() < estimated {
-        buf.reserve(estimated - buf.capacity());
-    }
+    // Scratch buffer is pre-sized to 4096 on first thread-local init and
+    // retained across calls, so most small stringifies never hit a
+    // String::reserve. `push_str` grows on overflow for the rare
+    // single-call output that exceeds that, so skip the estimate call
+    // (issue #67: it was ~10ns of wasted work per call for small values).
     stringify_value(value, type_hint, &mut buf);
     // JSON output is always ASCII (non-ASCII is \uXXXX escaped), so
-    // utf16_len == byte_len. Use gc_malloc directly and skip the
-    // compute_utf16_len byte scan that js_string_from_bytes performs.
+    // utf16_len == byte_len. Arena-allocate (issue #67): saves ~60ns vs
+    // gc_malloc on the per-call result (bump pointer + GcHeader init vs
+    // mimalloc + MALLOC_STATE push + set insert). Arena walker already
+    // tracks GC_TYPE_STRING (v0.5.68), so collection works unchanged.
     let len = buf.len() as u32;
     let total = std::mem::size_of::<StringHeader>() + len as usize;
-    let raw = crate::gc::gc_malloc(total, crate::gc::GC_TYPE_STRING);
+    let raw = crate::arena::arena_alloc_gc(total, 8, crate::gc::GC_TYPE_STRING);
     let ptr = raw as *mut StringHeader;
     (*ptr).utf16_len = len;
     (*ptr).byte_len = len;
@@ -1539,7 +1596,11 @@ pub unsafe extern "C" fn js_json_stringify(value: f64, type_hint: u32) -> *mut S
         std::ptr::copy_nonoverlapping(buf.as_ptr(), raw.add(std::mem::size_of::<StringHeader>()), len as usize);
     }
     restore_stringify_buf(buf);
-    restore_shape_cache(saved_cache);
+    match saved_cache {
+        Some(s) => restore_shape_cache(s),
+        None => clear_shape_cache(),
+    }
+    STRINGIFY_DEPTH.with(|d| d.set(d.get() - 1));
     ptr
 }
 
@@ -2029,7 +2090,18 @@ pub unsafe extern "C" fn js_json_stringify_with_replacer(
         return std::ptr::null_mut();
     }
 
-    let saved_cache = take_shape_cache();
+    // Non-reentrant fast path (issue #67): same depth-counter trick as
+    // js_json_stringify — skip shape_cache save for the outermost call.
+    let prior_depth = STRINGIFY_DEPTH.with(|d| {
+        let c = d.get();
+        d.set(c + 1);
+        c
+    });
+    let saved_cache = if prior_depth > 0 {
+        Some(take_shape_cache())
+    } else {
+        None
+    };
     let estimated = estimate_json_size(value, type_hint);
     let mut buf = take_stringify_buf();
     if buf.capacity() < estimated {
@@ -2090,7 +2162,11 @@ pub unsafe extern "C" fn js_json_stringify_with_replacer(
 
     let result = js_string_from_bytes(buf.as_ptr(), buf.len() as u32);
     restore_stringify_buf(buf);
-    restore_shape_cache(saved_cache);
+    match saved_cache {
+        Some(s) => restore_shape_cache(s),
+        None => clear_shape_cache(),
+    }
+    STRINGIFY_DEPTH.with(|d| d.set(d.get() - 1));
     result
 }
 
@@ -2488,7 +2564,18 @@ pub unsafe extern "C" fn js_json_stringify_full(
     // Clear the circular detection stack
     STRINGIFY_STACK.with(|s| s.borrow_mut().clear());
 
-    let saved_cache = take_shape_cache();
+    // Non-reentrant fast path (issue #67): same depth-counter trick as
+    // js_json_stringify — skip shape_cache save for the outermost call.
+    let prior_depth = STRINGIFY_DEPTH.with(|d| {
+        let c = d.get();
+        d.set(c + 1);
+        c
+    });
+    let saved_cache = if prior_depth > 0 {
+        Some(take_shape_cache())
+    } else {
+        None
+    };
     let mut buf = take_stringify_buf();
 
     if let Some(ref allowed_keys) = array_replacer {
@@ -2515,6 +2602,14 @@ pub unsafe extern "C" fn js_json_stringify_full(
         let replaced_bits = replaced_root.to_bits();
         if replaced_bits == TAG_UNDEFINED {
             STRINGIFY_STACK.with(|s| s.borrow_mut().clear());
+            // Restore shape cache and decrement depth before early return
+            // (we already incremented STRINGIFY_DEPTH and took the cache).
+            restore_stringify_buf(buf);
+            match saved_cache {
+                Some(s) => restore_shape_cache(s),
+                None => clear_shape_cache(),
+            }
+            STRINGIFY_DEPTH.with(|d| d.set(d.get() - 1));
             return TAG_UNDEFINED as i64;
         }
         // For simplicity: when function replacer is used with pretty, we don't
@@ -2565,7 +2660,11 @@ pub unsafe extern "C" fn js_json_stringify_full(
         );
     }
     restore_stringify_buf(buf);
-    restore_shape_cache(saved_cache);
+    match saved_cache {
+        Some(s) => restore_shape_cache(s),
+        None => clear_shape_cache(),
+    }
+    STRINGIFY_DEPTH.with(|d| d.set(d.get() - 1));
     // Return as NaN-boxed string
     (STRING_TAG | (result_ptr as u64 & POINTER_MASK)) as i64
 }
