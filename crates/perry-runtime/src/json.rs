@@ -24,6 +24,20 @@ thread_local! {
     static STRINGIFY_BUF: std::cell::Cell<Option<String>> =
         std::cell::Cell::new(Some(String::with_capacity(4096)));
 
+    /// Per-call shape-template cache (#64 follow-up). Keys on `keys_array`
+    /// raw pointer — within one top-level stringify call no GC runs over
+    /// the user object graph (the buffer/result allocations don't move
+    /// keys arrays), so pointer identity is a stable shape ID. Cleared
+    /// (saved+restored) at the entry of each `js_json_stringify` /
+    /// `js_json_stringify_full` / `..with_replacer` call so reentrant
+    /// `toJSON` callbacks don't return stale templates.
+    ///
+    /// `Box<ShapeTemplate>` lives on the heap so its address is stable
+    /// even when the cache `Vec` reallocates — we hand out raw pointers
+    /// to the templates and they must outlive the borrow.
+    static SHAPE_CACHE: RefCell<Vec<(*mut crate::ArrayHeader, Box<ShapeTemplate>)>> =
+        RefCell::new(Vec::new());
+
     /// Key string intern cache for JSON.parse (issue #51 follow-up).
     /// Maps key bytes → already-allocated StringHeader pointer.
     /// Avoids re-allocating "id", "name", etc. for every record in a
@@ -92,6 +106,79 @@ fn restore_stringify_buf(mut buf: String) {
             _ => b.set(Some(buf)),
         }
     });
+}
+
+/// Save & clear the shape cache for the duration of a top-level stringify
+/// call. Reentrant `toJSON` callbacks would otherwise inherit the outer
+/// call's templates and (worse) clear them on exit, dangling pointers we
+/// already handed out. Mirrors `take_stringify_buf` in spirit.
+#[inline]
+fn take_shape_cache() -> Vec<(*mut crate::ArrayHeader, Box<ShapeTemplate>)> {
+    SHAPE_CACHE.with(|c| std::mem::take(&mut *c.borrow_mut()))
+}
+
+#[inline]
+fn restore_shape_cache(saved: Vec<(*mut crate::ArrayHeader, Box<ShapeTemplate>)>) {
+    SHAPE_CACHE.with(|c| *c.borrow_mut() = saved);
+}
+
+/// Maximum cache entries per call. Workloads with more distinct shapes
+/// fall back to per-object building. We never evict — the raw pointers we
+/// hand out must outlive cache mutations, and `swap_remove` would drop a
+/// `Box` whose heap address might be in active use up the call stack.
+/// 32 entries × ~40 bytes ≈ 1.3 KB; a stringify graph that exceeds this
+/// gets the pre-cache slow path on overflow shapes only.
+const SHAPE_CACHE_CAP: usize = 32;
+
+/// Look up (or build & insert) the shape template for an object. Returns
+/// `None` if the object isn't templatable (no keys array, too many fields,
+/// malformed key strings) or if the cache is full and missed.
+///
+/// Returns a raw pointer because lifetimes can't survive the TLS borrow.
+/// The pointer stays valid until the next `take_shape_cache` (top-level
+/// entry/exit) — within one stringify traversal we only `push`, and
+/// `Box`'s heap address is stable across `Vec` growth.
+#[inline]
+unsafe fn shape_template_for(obj_ptr: *const u8) -> Option<*const ShapeTemplate> {
+    let obj = obj_ptr as *const crate::ObjectHeader;
+    let keys_arr = (*obj).keys_array;
+    if keys_arr.is_null() {
+        return None;
+    }
+
+    SHAPE_CACHE.with(|c| {
+        // Fast path: linear scan from the back — recently-used entries
+        // cluster there for typical traversal orders (shape A's elements
+        // recurse into shape B repeatedly).
+        {
+            let cache = c.borrow();
+            for entry in cache.iter().rev() {
+                if entry.0 == keys_arr {
+                    return Some(&*entry.1 as *const ShapeTemplate);
+                }
+            }
+            if cache.len() >= SHAPE_CACHE_CAP {
+                return None;
+            }
+        }
+
+        // Miss — build, insert, return raw pointer to the boxed template.
+        let elem_bits = make_pointer_bits(obj_ptr);
+        let template = build_shape_prefix_template(elem_bits)?;
+        let mut cache = c.borrow_mut();
+        // Re-check cap after the borrow round-trip (a recursive call
+        // during template build could have filled the cache).
+        if cache.len() >= SHAPE_CACHE_CAP {
+            return None;
+        }
+        cache.push((keys_arr, Box::new(template)));
+        Some(&*cache.last().unwrap().1 as *const ShapeTemplate)
+    })
+}
+
+#[inline]
+fn make_pointer_bits(ptr: *const u8) -> u64 {
+    POINTER_TAG | (ptr as u64 & POINTER_MASK)
 }
 
 /// Root scanner called by GC — marks every value in PARSE_ROOTS as live.
@@ -931,6 +1018,22 @@ unsafe fn stringify_object_inner(ptr: *const u8, buf: &mut String, depth: u32) {
         STRINGIFY_STACK.with(|s| s.borrow_mut().push(ptr as usize));
     }
 
+    // Templated fast path (#64 follow-up): if this object's shape has been
+    // seen before in this stringify call, emit via the cached prefix table
+    // and skip per-object `has_pointer_fields` / `object_get_to_json` /
+    // key-lookup work. `try_emit_shape_element` rolls back the buffer and
+    // returns false on any element-specific mismatch (different shape,
+    // stray UNDEFINED, closure), at which point we fall through to the
+    // slow path below.
+    if let Some(tmpl_ptr) = shape_template_for(ptr) {
+        if try_emit_shape_element(make_pointer_bits(ptr), &*tmpl_ptr, buf, depth) {
+            if depth > MAX_FAST_DEPTH {
+                STRINGIFY_STACK.with(|s| s.borrow_mut().pop());
+            }
+            return;
+        }
+    }
+
     let obj = ptr as *const crate::ObjectHeader;
     let num_fields = (*obj).field_count;
     let keys_arr = (*obj).keys_array;
@@ -1400,6 +1503,7 @@ unsafe fn estimate_json_size(value: f64, type_hint: u32) -> usize {
 /// Returns a string pointer
 #[no_mangle]
 pub unsafe extern "C" fn js_json_stringify(value: f64, type_hint: u32) -> *mut StringHeader {
+    let saved_cache = take_shape_cache();
     let mut buf = take_stringify_buf();
     let estimated = estimate_json_size(value, type_hint);
     if buf.capacity() < estimated {
@@ -1421,6 +1525,7 @@ pub unsafe extern "C" fn js_json_stringify(value: f64, type_hint: u32) -> *mut S
         std::ptr::copy_nonoverlapping(buf.as_ptr(), raw.add(std::mem::size_of::<StringHeader>()), len as usize);
     }
     restore_stringify_buf(buf);
+    restore_shape_cache(saved_cache);
     ptr
 }
 
@@ -1910,6 +2015,7 @@ pub unsafe extern "C" fn js_json_stringify_with_replacer(
         return std::ptr::null_mut();
     }
 
+    let saved_cache = take_shape_cache();
     let estimated = estimate_json_size(value, type_hint);
     let mut buf = take_stringify_buf();
     if buf.capacity() < estimated {
@@ -1970,6 +2076,7 @@ pub unsafe extern "C" fn js_json_stringify_with_replacer(
 
     let result = js_string_from_bytes(buf.as_ptr(), buf.len() as u32);
     restore_stringify_buf(buf);
+    restore_shape_cache(saved_cache);
     result
 }
 
@@ -2367,6 +2474,7 @@ pub unsafe extern "C" fn js_json_stringify_full(
     // Clear the circular detection stack
     STRINGIFY_STACK.with(|s| s.borrow_mut().clear());
 
+    let saved_cache = take_shape_cache();
     let mut buf = take_stringify_buf();
 
     if let Some(ref allowed_keys) = array_replacer {
@@ -2443,6 +2551,7 @@ pub unsafe extern "C" fn js_json_stringify_full(
         );
     }
     restore_stringify_buf(buf);
+    restore_shape_cache(saved_cache);
     // Return as NaN-boxed string
     (STRING_TAG | (result_ptr as u64 & POINTER_MASK)) as i64
 }
