@@ -138,6 +138,7 @@ impl CliProtocol for DockerProtocol {
         for (k, v) in spec.env.as_ref().iter().flat_map(|m| m.iter()) { args.extend(["-e".into(), format!("{k}={v}")]); }
         if let Some(net) = &spec.network { args.extend(["--network".into(), net.clone()]); }
         if spec.rm.unwrap_or(false) { args.push("--rm".into()); }
+        if spec.read_only.unwrap_or(false) { args.push("--read-only".into()); }
         if let Some(ep) = &spec.entrypoint {
             args.push("--entrypoint".into());
             args.push(ep.join(" "));
@@ -154,6 +155,7 @@ impl CliProtocol for DockerProtocol {
         for vol in spec.volumes.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["-v".into(), vol.clone()]); }
         for (k, v) in spec.env.as_ref().iter().flat_map(|m| m.iter()) { args.extend(["-e".into(), format!("{k}={v}")]); }
         if let Some(net) = &spec.network { args.extend(["--network".into(), net.clone()]); }
+        if spec.read_only.unwrap_or(false) { args.push("--read-only".into()); }
         if let Some(ep) = &spec.entrypoint {
             args.push("--entrypoint".into());
             args.push(ep.join(" "));
@@ -312,6 +314,7 @@ impl CliProtocol for AppleContainerProtocol {
         for port in spec.ports.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["-p".into(), port.clone()]); }
         for vol in spec.volumes.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["-v".into(), vol.clone()]); }
         for (k, v) in spec.env.as_ref().iter().flat_map(|m| m.iter()) { args.extend(["-e".into(), format!("{k}={v}")]); }
+        if spec.read_only.unwrap_or(false) { args.push("--read-only".into()); }
         args.push(spec.image.clone());
         for c in spec.cmd.as_ref().iter().flat_map(|v| v.iter()) { args.push(c.clone()); }
         args
@@ -565,10 +568,12 @@ impl ContainerBackend for CliBackend {
     }
 }
 
-pub async fn detect_backend() -> std::result::Result<CliBackend, Vec<BackendProbeResult>> {
+pub async fn detect_backend() -> Result<Box<dyn ContainerBackend>> {
     if let Ok(name) = std::env::var("PERRY_CONTAINER_BACKEND") {
         return probe_candidate(&name).await
-            .map_err(|reason| vec![BackendProbeResult { name: name.clone(), available: false, reason }]);
+            .map_err(|reason| ComposeError::NoBackendFound {
+                probed: vec![BackendProbeResult { name: name.clone(), available: false, reason }]
+            });
     }
 
     let candidates = platform_candidates();
@@ -582,7 +587,7 @@ pub async fn detect_backend() -> std::result::Result<CliBackend, Vec<BackendProb
         }
     }
 
-    Err(results)
+    Err(ComposeError::NoBackendFound { probed: results })
 }
 
 fn platform_candidates() -> &'static [&'static str] {
@@ -593,7 +598,7 @@ fn platform_candidates() -> &'static [&'static str] {
     }
 }
 
-async fn probe_candidate(name: &str) -> std::result::Result<CliBackend, String> {
+async fn probe_candidate(name: &str) -> std::result::Result<Box<dyn ContainerBackend>, String> {
     let which_bin = |name: &str| -> std::result::Result<PathBuf, String> {
         which::which(name).map_err(|_| format!("{} not found", name))
     };
@@ -601,7 +606,7 @@ async fn probe_candidate(name: &str) -> std::result::Result<CliBackend, String> 
     match name {
         "apple/container" => {
             let bin = which_bin("container")?;
-            Ok(CliBackend::new(bin, Box::new(AppleContainerProtocol)))
+            Ok(Box::new(CliBackend::new(bin, Box::new(AppleContainerProtocol))))
         }
         "podman" => {
             let bin = which_bin("podman")?;
@@ -612,11 +617,11 @@ async fn probe_candidate(name: &str) -> std::result::Result<CliBackend, String> 
                     return Err("no podman machine running".into());
                 }
             }
-            Ok(CliBackend::new(bin, Box::new(DockerProtocol)))
+            Ok(Box::new(CliBackend::new(bin, Box::new(DockerProtocol))))
         }
         "orbstack" => {
             let bin = which_bin("orb").or_else(|_| which_bin("docker")).map_err(|_| "orbstack not found")?;
-            Ok(CliBackend::new(bin, Box::new(DockerProtocol)))
+            Ok(Box::new(CliBackend::new(bin, Box::new(DockerProtocol))))
         }
         "colima" => {
             let bin = which_bin("colima")?;
@@ -625,7 +630,7 @@ async fn probe_candidate(name: &str) -> std::result::Result<CliBackend, String> 
                 return Err("colima not running".into());
             }
             let dbin = which_bin("docker").map_err(|_| "docker cli not found for colima")?;
-            Ok(CliBackend::new(dbin, Box::new(DockerProtocol)))
+            Ok(Box::new(CliBackend::new(dbin, Box::new(DockerProtocol))))
         }
         "lima" => {
             let bin = which_bin("limactl")?;
@@ -635,15 +640,15 @@ async fn probe_candidate(name: &str) -> std::result::Result<CliBackend, String> 
                 .find(|v| v["status"] == "Running")
                 .and_then(|v| v["name"].as_str().map(|s| s.to_string()))
                 .ok_or("no running lima instance")?;
-            Ok(CliBackend::new(bin, Box::new(LimaProtocol { instance })))
+            Ok(Box::new(CliBackend::new(bin, Box::new(LimaProtocol { instance }))))
         }
         "nerdctl" => {
             let bin = which_bin("nerdctl")?;
-            Ok(CliBackend::new(bin, Box::new(DockerProtocol)))
+            Ok(Box::new(CliBackend::new(bin, Box::new(DockerProtocol))))
         }
         "docker" => {
             let bin = which_bin("docker")?;
-            Ok(CliBackend::new(bin, Box::new(DockerProtocol)))
+            Ok(Box::new(CliBackend::new(bin, Box::new(DockerProtocol))))
         }
         _ => Err("unknown backend".into()),
     }

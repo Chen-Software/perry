@@ -118,9 +118,8 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     let project = ComposeProject::load(&config)?;
 
-    let backend = crate::backend::detect_backend().await
-        .map_err(|probed| ComposeError::NoBackendFound { probed })?;
-    let backend = Arc::new(backend);
+    let backend = crate::backend::detect_backend().await?;
+    let backend = Arc::from(backend);
 
     let engine = ComposeEngine::new(project.spec.clone(), project.project_name.clone(), backend);
 

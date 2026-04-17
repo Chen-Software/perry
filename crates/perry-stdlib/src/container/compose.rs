@@ -33,10 +33,20 @@ impl ComposeWrapper {
     }
 
     pub async fn logs(&self, _handle: &ComposeHandle, service: Option<&str>, tail: Option<u32>) -> Result<ContainerLogs, ContainerError> {
-        self.engine.logs(service, tail).await.map_err(Into::into)
+        let services = service.map(|s| vec![s.to_string()]).unwrap_or_default();
+        let logs_map = self.engine.logs(&services, tail).await.map_err(ContainerError::from)?;
+
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+
+        for (svc, logs) in logs_map {
+            stdout.push_str(&format!("[{}] {}\n", svc, logs));
+        }
+
+        Ok(ContainerLogs { stdout, stderr })
     }
 
     pub async fn exec(&self, _handle: &ComposeHandle, service: &str, cmd: &[String]) -> Result<ContainerLogs, ContainerError> {
-        self.engine.exec(service, cmd).await.map_err(Into::into)
+        self.engine.exec(service, cmd, None, None).await.map_err(Into::into)
     }
 }

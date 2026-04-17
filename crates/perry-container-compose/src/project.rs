@@ -1,7 +1,9 @@
 use crate::error::{ComposeError, Result};
 use crate::config::ProjectConfig;
 use crate::types::ComposeSpec;
-use std::path::PathBuf;
+use crate::yaml;
+use std::path::{Path, PathBuf};
+use std::collections::HashMap;
 
 pub struct ComposeProject {
     pub spec: ComposeSpec,
@@ -12,12 +14,27 @@ pub struct ComposeProject {
 
 impl ComposeProject {
     pub fn load(config: &ProjectConfig) -> Result<Self> {
-        // TODO: Implement full project loading
+        let project_dir = std::env::current_dir().map_err(ComposeError::IoError)?;
+        let project_name = config.resolve_project_name(&project_dir);
+        let compose_files = config.resolve_compose_files();
+
+        if compose_files.is_empty() {
+            return Err(ComposeError::FileNotFound {
+                path: "No compose file found (tried compose.yaml, docker-compose.yml, etc.)".into()
+            });
+        }
+
+        // Load environment
+        let env = yaml::load_env(&project_dir, &config.env_files);
+
+        // Parse and merge files
+        let spec = yaml::parse_and_merge_files(&compose_files, &env)?;
+
         Ok(Self {
-            spec: ComposeSpec::default(),
-            project_name: config.project_name.clone().unwrap_or_default(),
-            project_dir: PathBuf::from("."),
-            compose_files: config.files.clone(),
+            spec,
+            project_name,
+            project_dir,
+            compose_files,
         })
     }
 }

@@ -30,8 +30,8 @@ async fn get_global_backend() -> Result<&'static Arc<dyn ContainerBackend>, Cont
     }
 
     let b = detect_backend().await
-        .map(|b| Arc::new(b) as Arc<dyn ContainerBackend>)
-        .map_err(|probed| ContainerError::NoBackendFound { probed })?;
+        .map(|b| Arc::from(b) as Arc<dyn ContainerBackend>)
+        .map_err(|e| ContainerError::from(e))?;
 
     let _ = BACKEND.set(b);
     Ok(BACKEND.get().unwrap())

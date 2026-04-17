@@ -143,6 +143,7 @@ impl ComposeEngine {
                 entrypoint: None,
                 network,
                 rm: None,
+                read_only: svc.read_only,
             };
 
             match self.backend.run(&container_spec).await {
