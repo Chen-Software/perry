@@ -27,6 +27,13 @@ tests/test-*
 bench_*
 !bench_*.ts
 
+# Compiled benchmark binaries in suite/ (01_startup, 05_fibonacci, etc.)
+benchmarks/suite/[0-9][0-9]_*
+!benchmarks/suite/[0-9][0-9]_*.ts
+benchmarks/suite/_perry_failed_stubs.o
+benchmarks/suite/*.o
+.bench-results/
+
 # Compiled output binaries (catch-all for extensionless files in root)
 # Named binaries from example/benchmark compilation
 worker

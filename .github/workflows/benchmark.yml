@@ -1,0 +1,331 @@
+name: Regression Check
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  release:
+    types: [published]
+  workflow_dispatch:
+  schedule:
+    # Nightly at 03:00 UTC catches drift between releases
+    - cron: '0 3 * * *'
+
+# Don't cancel in-progress benchmark runs — we want complete samples
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  MACOSX_DEPLOYMENT_TARGET: "13.0"
+  # Release gate: hard-fail on any regression
+  # PR / main push: just warn, don't block (noisy CI runners produce false positives)
+  IS_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') || github.event_name == 'release' }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Performance (speed + RAM) regression check
+  # ---------------------------------------------------------------------------
+  performance:
+    runs-on: macos-14
+    outputs:
+      status: ${{ steps.compare.outputs.status }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need history to compare against previous commits on main
+          fetch-depth: 2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Setup Node.js (for perf comparison)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build release perry
+        run: cargo build --release
+
+      - name: Run benchmarks (median of 3 runs)
+        id: compare
+        run: |
+          # Release tags: hard-fail. Everything else: warn-only.
+          if [[ "$IS_RELEASE" == "true" ]]; then
+            WARN_FLAG=""
+            echo "Mode: RELEASE GATE (hard-fail on regressions)"
+          else
+            WARN_FLAG="--warn-only"
+            echo "Mode: warn-only (non-blocking)"
+          fi
+
+          mkdir -p .bench-results
+
+          # Run full suite (15 base benchmarks + 7 regression-probe benchmarks)
+          ./benchmarks/compare.sh \
+            --full \
+            --runs 3 \
+            --json-out .bench-results/current.json \
+            --speed-threshold 20 \
+            --memory-threshold 30 \
+            $WARN_FLAG \
+            | tee .bench-results/output.txt
+
+          # Capture status for the summary job
+          if grep -q "REGRESSION" .bench-results/output.txt; then
+            echo "status=regression" >> "$GITHUB_OUTPUT"
+          elif grep -q "improvement" .bench-results/output.txt; then
+            echo "status=improved" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=ok" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate GitHub Actions summary
+        if: always()
+        run: |
+          python3 <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, os
+          cur_path = ".bench-results/current.json"
+          base_path = "benchmarks/baseline.json"
+          if not os.path.exists(cur_path):
+              print("## Benchmark run failed")
+              print("No current results JSON produced.")
+              exit(0)
+          cur = json.load(open(cur_path))
+          base = json.load(open(base_path)) if os.path.exists(base_path) else {"benchmarks": {}}
+          mode = "RELEASE GATE" if os.environ.get("IS_RELEASE") == "true" else "tracking (warn-only)"
+
+          print(f"## Performance Regression Check — {mode}")
+          print()
+          print(f"- Baseline commit: `{base.get('commit','?')}`")
+          print(f"- Current commit:  `{cur.get('commit','?')}`")
+          print(f"- Runner: macos-14 / median of 3 runs")
+          print()
+          print("| Benchmark | Perry (ms) | Node (ms) | Ratio | Perry RAM (KB) | Node RAM (KB) | Δ Speed | Δ RAM |")
+          print("|-----------|-----------:|----------:|------:|---------------:|--------------:|--------:|------:|")
+          for name, c in cur["benchmarks"].items():
+              b = base.get("benchmarks", {}).get(name, {})
+              p_ms = c.get("perry_ms")
+              n_ms = c.get("node_ms", "-")
+              p_rss = c.get("perry_rss_kb", 0)
+              n_rss = c.get("node_rss_kb", 0)
+              ratio = c.get("speed_ratio", "-")
+              d_speed = "-"
+              d_ram = "-"
+              if b.get("perry_ms") and p_ms is not None and b["perry_ms"] > 0:
+                  pct = (p_ms - b["perry_ms"]) / b["perry_ms"] * 100
+                  emoji = "🔴" if pct > 20 else ("🟡" if pct > 10 else ("🟢" if pct < -10 else ""))
+                  d_speed = f"{emoji} {pct:+.1f}%"
+              if b.get("perry_rss_kb") and p_rss and b["perry_rss_kb"] > 0:
+                  pct = (p_rss - b["perry_rss_kb"]) / b["perry_rss_kb"] * 100
+                  emoji = "🔴" if pct > 30 else ("🟡" if pct > 15 else ("🟢" if pct < -15 else ""))
+                  d_ram = f"{emoji} {pct:+.1f}%"
+              print(f"| `{name}` | {p_ms} | {n_ms} | {ratio} | {p_rss} | {n_rss} | {d_speed} | {d_ram} |")
+          PY
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ github.sha }}
+          path: |
+            .bench-results/current.json
+            .bench-results/output.txt
+            benchmarks/baseline.json
+          retention-days: 90
+
+  # ---------------------------------------------------------------------------
+  # Binary size regression (deterministic, zero variance — good CI gate)
+  # ---------------------------------------------------------------------------
+  binary-size:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build release binaries
+        run: cargo build --release
+
+      - name: Measure and compare binary sizes
+        run: |
+          mkdir -p .bench-results
+          python3 <<'PY'
+          import json, os, subprocess
+          targets = {
+              "perry": "target/release/perry",
+              "libperry_runtime": "target/release/libperry_runtime.a",
+              "libperry_stdlib": "target/release/libperry_stdlib.a",
+          }
+          sizes = {}
+          for name, path in targets.items():
+              if os.path.exists(path):
+                  sizes[name] = os.path.getsize(path)
+          commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                                  capture_output=True, text=True).stdout.strip()
+          current = {"commit": commit, "sizes": sizes}
+          with open(".bench-results/binary-sizes.json", "w") as f:
+              json.dump(current, f, indent=2)
+
+          baseline_path = "benchmarks/binary-size-baseline.json"
+          baseline = json.load(open(baseline_path)) if os.path.exists(baseline_path) else {"sizes": {}}
+
+          is_release = os.environ.get("IS_RELEASE") == "true"
+          fail_threshold = 15  # percent
+          warn_threshold = 5
+
+          summary = ["## Binary Size Check\n",
+                     f"- Commit: `{commit}`",
+                     f"- Baseline commit: `{baseline.get('commit','?')}`\n",
+                     "| Binary | Current | Baseline | Change |",
+                     "|--------|--------:|---------:|-------:|"]
+          regressions = []
+          for name, size in sizes.items():
+              base = baseline.get("sizes", {}).get(name)
+              if base and base > 0:
+                  pct = (size - base) / base * 100
+                  if pct > fail_threshold:
+                      emoji = "🔴"
+                      regressions.append(f"{name}: +{pct:.1f}% ({base} → {size} bytes)")
+                  elif pct > warn_threshold:
+                      emoji = "🟡"
+                  elif pct < -warn_threshold:
+                      emoji = "🟢"
+                  else:
+                      emoji = ""
+                  change = f"{emoji} {pct:+.1f}% ({size - base:+d} B)"
+              else:
+                  change = "new"
+              base_str = f"{base:,}" if base else "-"
+              summary.append(f"| `{name}` | {size:,} | {base_str} | {change} |")
+
+          step_sum = os.environ.get("GITHUB_STEP_SUMMARY")
+          if step_sum:
+              with open(step_sum, "a") as f:
+                  f.write("\n".join(summary) + "\n")
+          print("\n".join(summary))
+
+          if is_release and regressions:
+              print("\n❌ Binary size regressions exceed threshold:", flush=True)
+              for r in regressions:
+                  print(f"  - {r}")
+              raise SystemExit(1)
+          PY
+
+      - name: Upload binary size results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-sizes-${{ github.sha }}
+          path: .bench-results/binary-sizes.json
+          retention-days: 90
+
+  # ---------------------------------------------------------------------------
+  # Compile time regression (uses wall-clock; noisy but directional)
+  # ---------------------------------------------------------------------------
+  compile-time:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Measure clean-build time
+        run: |
+          mkdir -p .bench-results
+          # Three clean builds, report median
+          TIMES=()
+          for i in 1 2 3; do
+            cargo clean -q
+            START=$(date +%s)
+            cargo build --release -q
+            END=$(date +%s)
+            ELAPSED=$((END - START))
+            echo "run $i: ${ELAPSED}s"
+            TIMES+=("$ELAPSED")
+          done
+          python3 <<PY > .bench-results/compile-time.json
+          import json, subprocess
+          times = sorted([$(IFS=,; echo "${TIMES[*]}")])
+          median = times[1]
+          commit = subprocess.run(["git","rev-parse","--short","HEAD"],capture_output=True,text=True).stdout.strip()
+          print(json.dumps({"commit": commit, "clean_build_seconds_median": median, "samples": times}))
+          PY
+          cat .bench-results/compile-time.json
+
+          # Emit summary
+          MEDIAN=$(python3 -c "import json; print(json.load(open('.bench-results/compile-time.json'))['clean_build_seconds_median'])")
+          {
+            echo "## Compile-Time Check"
+            echo ""
+            echo "Clean \`cargo build --release\` (median of 3): **${MEDIAN}s**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload compile-time results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compile-time-${{ github.sha }}
+          path: .bench-results/compile-time.json
+          retention-days: 90
+
+  # ---------------------------------------------------------------------------
+  # Baseline auto-update on main (if improvements detected, no regressions)
+  # Disabled by default — opt in by setting repo var AUTO_UPDATE_BASELINE=true
+  # ---------------------------------------------------------------------------
+  update-baseline:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.AUTO_UPDATE_BASELINE == 'true'
+    runs-on: macos-14
+    needs: performance
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download benchmark results
+        uses: actions/download-artifact@v4
+        with:
+          name: benchmark-results-${{ github.sha }}
+          path: .bench-results
+
+      - name: Update baseline if improvements
+        run: |
+          if [[ "${{ needs.performance.outputs.status }}" != "improved" ]]; then
+            echo "No improvements to commit"
+            exit 0
+          fi
+          cp .bench-results/current.json benchmarks/baseline.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add benchmarks/baseline.json
+          if git diff --staged --quiet; then
+            echo "No baseline changes"
+            exit 0
+          fi
+          git commit -m "chore: update performance baseline [skip ci]"
+          git push

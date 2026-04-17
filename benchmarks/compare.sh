@@ -31,11 +31,22 @@ NC='\033[0m'
 
 UPDATE_BASELINE=0
 QUICK_MODE=0
+FULL_MODE=0
+RUNS=1
+JSON_OUT=""
+WARN_ONLY=0
 
-for arg in "$@"; do
-  case "$arg" in
-    --update-baseline) UPDATE_BASELINE=1 ;;
-    --quick) QUICK_MODE=1 ;;
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --update-baseline) UPDATE_BASELINE=1; shift ;;
+    --quick) QUICK_MODE=1; shift ;;
+    --full) FULL_MODE=1; shift ;;
+    --runs) RUNS="$2"; shift 2 ;;
+    --json-out) JSON_OUT="$2"; shift 2 ;;
+    --warn-only) WARN_ONLY=1; shift ;;
+    --speed-threshold) SPEED_THRESHOLD="$2"; shift 2 ;;
+    --memory-threshold) MEMORY_THRESHOLD="$2"; shift 2 ;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
 done
 
@@ -48,6 +59,9 @@ fi
 # Select benchmarks
 if [[ $QUICK_MODE -eq 1 ]]; then
   BENCHMARKS="02_loop_overhead.ts 05_fibonacci.ts 06_math_intensive.ts 10_nested_loops.ts 13_factorial.ts"
+elif [[ $FULL_MODE -eq 1 ]]; then
+  # Full suite including the regression-probe benchmarks added for performance tracking
+  BENCHMARKS="02_loop_overhead.ts 03_array_write.ts 04_array_read.ts 05_fibonacci.ts 06_math_intensive.ts 07_object_create.ts 08_string_concat.ts 09_method_calls.ts 10_nested_loops.ts 11_prime_sieve.ts 12_binary_trees.ts 13_factorial.ts 14_closure.ts 15_mandelbrot.ts 16_matrix_multiply.ts bench_gc_pressure.ts bench_json_roundtrip.ts bench_object_property.ts bench_int_arithmetic.ts bench_buffer_readwrite.ts bench_array_grow.ts bench_string_heavy.ts"
 else
   BENCHMARKS="02_loop_overhead.ts 03_array_write.ts 04_array_read.ts 05_fibonacci.ts 06_math_intensive.ts 07_object_create.ts 08_string_concat.ts 09_method_calls.ts 10_nested_loops.ts 11_prime_sieve.ts 12_binary_trees.ts 13_factorial.ts 14_closure.ts 15_mandelbrot.ts 16_matrix_multiply.ts"
 fi
@@ -119,31 +133,58 @@ else
 fi
 echo "────────────────────────────────────────────────────────────────────────────────"
 
+median() {
+  # Median of space-separated integers (simple, small N)
+  python3 -c "import sys; xs=sorted(int(x) for x in sys.argv[1:]); print(xs[len(xs)//2] if xs else 0)" "$@"
+}
+
 set +e  # Disable errexit for measurement loop (grep/awk may return non-zero)
 for bench in $BENCHMARKS; do
   name="${bench%.ts}"
   display=$(echo "$name" | sed 's/^[0-9]*_//')
 
-  # Run Perry with RSS measurement
+  # Run Perry RUNS times, take median for stability on CI
   perry_ms="ERR"
   perry_rss=0
   if [[ -f "$SUITE_DIR/$name" ]]; then
-    result=$(measure_rss "$SUITE_DIR/$name")
-    perry_rss=$(echo "$result" | head -1 | cut -d'|' -f1)
-    perry_output=$(echo "$result" | sed 's/^[0-9]*|//')
-    perry_ms=$(extract_time "$perry_output")
-    [[ -z "$perry_ms" ]] && perry_ms="ERR"
+    p_ms_samples=()
+    p_rss_samples=()
+    for (( run=0; run<RUNS; run++ )); do
+      result=$(measure_rss "$SUITE_DIR/$name")
+      r_rss=$(echo "$result" | head -1 | cut -d'|' -f1)
+      r_out=$(echo "$result" | sed 's/^[0-9]*|//')
+      r_ms=$(extract_time "$r_out")
+      [[ -n "$r_ms" ]] && p_ms_samples+=("$r_ms")
+      [[ "$r_rss" -gt 0 ]] 2>/dev/null && p_rss_samples+=("$r_rss")
+    done
+    if [[ ${#p_ms_samples[@]} -gt 0 ]]; then
+      perry_ms=$(median "${p_ms_samples[@]}")
+    fi
+    if [[ ${#p_rss_samples[@]} -gt 0 ]]; then
+      perry_rss=$(median "${p_rss_samples[@]}")
+    fi
   fi
 
-  # Run Node with RSS measurement
+  # Run Node RUNS times, take median
   node_ms="-"
   node_rss=0
   if [[ $HAS_NODE -eq 1 ]]; then
-    result=$(measure_rss node "$SUITE_DIR/$bench")
-    node_rss=$(echo "$result" | head -1 | cut -d'|' -f1)
-    node_output=$(echo "$result" | sed 's/^[0-9]*|//')
-    node_ms=$(extract_time "$node_output")
-    [[ -z "$node_ms" ]] && node_ms="-"
+    n_ms_samples=()
+    n_rss_samples=()
+    for (( run=0; run<RUNS; run++ )); do
+      result=$(measure_rss node "$SUITE_DIR/$bench")
+      r_rss=$(echo "$result" | head -1 | cut -d'|' -f1)
+      r_out=$(echo "$result" | sed 's/^[0-9]*|//')
+      r_ms=$(extract_time "$r_out")
+      [[ -n "$r_ms" ]] && n_ms_samples+=("$r_ms")
+      [[ "$r_rss" -gt 0 ]] 2>/dev/null && n_rss_samples+=("$r_rss")
+    done
+    if [[ ${#n_ms_samples[@]} -gt 0 ]]; then
+      node_ms=$(median "${n_ms_samples[@]}")
+    fi
+    if [[ ${#n_rss_samples[@]} -gt 0 ]]; then
+      node_rss=$(median "${n_rss_samples[@]}")
+    fi
   fi
 
   # Calculate ratios
@@ -175,7 +216,11 @@ echo ""
 # ---------------------------------------------------------------------------
 # Generate current results JSON
 # ---------------------------------------------------------------------------
-CURRENT_JSON=$(mktemp)
+if [[ -n "$JSON_OUT" ]]; then
+  CURRENT_JSON="$JSON_OUT"
+else
+  CURRENT_JSON=$(mktemp)
+fi
 python3 - "$RESULTS_FILE" "$CURRENT_JSON" <<'PYEOF'
 import json, sys
 results_file, output_file = sys.argv[1], sys.argv[2]
@@ -239,6 +284,12 @@ print()
 print(f"{'Benchmark':<20s} {'Speed Δ':>10s} {'RAM Δ':>10s} {'Status':>12s}")
 print("─" * 55)
 
+# Noise floors: percentage swings on tiny measurements are unreliable.
+# A 7ms jitter on a 9ms benchmark is 78% but means nothing. Require both
+# the absolute delta AND percentage to exceed the threshold.
+MIN_SPEED_DELTA_MS = 20   # need at least 20ms absolute change to flag
+MIN_RAM_DELTA_KB = 2048   # need at least 2MB absolute change to flag
+
 for name, cur in current["benchmarks"].items():
     base = baseline.get("benchmarks", {}).get(name)
     if not base:
@@ -248,13 +299,15 @@ for name, cur in current["benchmarks"].items():
     # Speed comparison
     speed_status = "ok"
     speed_delta = "-"
-    if cur.get("perry_ms") and base.get("perry_ms") and base["perry_ms"] > 0:
-        pct = (cur["perry_ms"] - base["perry_ms"]) / base["perry_ms"] * 100
+    if cur.get("perry_ms") is not None and base.get("perry_ms") is not None and base["perry_ms"] > 0:
+        abs_delta = cur["perry_ms"] - base["perry_ms"]
+        pct = abs_delta / base["perry_ms"] * 100
         speed_delta = f"{pct:+.1f}%"
-        if pct > speed_thresh:
+        # Flag only if BOTH percentage AND absolute delta exceed threshold
+        if pct > speed_thresh and abs(abs_delta) >= MIN_SPEED_DELTA_MS:
             speed_status = "REGRESSION"
             regressions.append(f"{name}: speed +{pct:.1f}% ({base['perry_ms']}ms → {cur['perry_ms']}ms)")
-        elif pct < -speed_thresh:
+        elif pct < -speed_thresh and abs(abs_delta) >= MIN_SPEED_DELTA_MS:
             speed_status = "improved"
             improvements.append(f"{name}: speed {pct:.1f}% ({base['perry_ms']}ms → {cur['perry_ms']}ms)")
 
@@ -262,12 +315,13 @@ for name, cur in current["benchmarks"].items():
     mem_status = "ok"
     mem_delta = "-"
     if cur.get("perry_rss_kb") and base.get("perry_rss_kb") and base["perry_rss_kb"] > 0:
-        pct = (cur["perry_rss_kb"] - base["perry_rss_kb"]) / base["perry_rss_kb"] * 100
+        abs_delta = cur["perry_rss_kb"] - base["perry_rss_kb"]
+        pct = abs_delta / base["perry_rss_kb"] * 100
         mem_delta = f"{pct:+.1f}%"
-        if pct > mem_thresh:
+        if pct > mem_thresh and abs(abs_delta) >= MIN_RAM_DELTA_KB:
             mem_status = "REGRESSION"
             regressions.append(f"{name}: RAM +{pct:.1f}% ({base['perry_rss_kb']}KB → {cur['perry_rss_kb']}KB)")
-        elif pct < -mem_thresh:
+        elif pct < -mem_thresh and abs(abs_delta) >= MIN_RAM_DELTA_KB:
             mem_status = "improved"
             improvements.append(f"{name}: RAM {pct:.1f}% ({base['perry_rss_kb']}KB → {cur['perry_rss_kb']}KB)")
 
@@ -286,6 +340,13 @@ elif improvements:
 else:
     print("✅ No significant changes")
 PYEOF
+  COMPARE_EXIT=$?
+
+  if [[ $COMPARE_EXIT -ne 0 && $WARN_ONLY -eq 1 ]]; then
+    echo ""
+    echo "--warn-only: regressions detected but not failing build"
+    COMPARE_EXIT=0
+  fi
 
 elif [[ $UPDATE_BASELINE -eq 1 ]]; then
   cp "$CURRENT_JSON" "$BASELINE"
@@ -294,7 +355,13 @@ elif [[ $UPDATE_BASELINE -eq 1 ]]; then
 fi
 
 # Cleanup
-rm -f "$RESULTS_FILE" "$CURRENT_JSON"
-cd "$SUITE_DIR" && rm -f 02_loop_overhead 03_array_write 04_array_read 05_fibonacci \
+rm -f "$RESULTS_FILE"
+# Only remove CURRENT_JSON if it was a tempfile (not user-requested via --json-out)
+[[ -z "$JSON_OUT" ]] && rm -f "$CURRENT_JSON"
+cd "$SUITE_DIR" && rm -f 01_startup 02_loop_overhead 03_array_write 04_array_read 05_fibonacci \
   06_math_intensive 07_object_create 08_string_concat 09_method_calls 10_nested_loops \
-  11_prime_sieve 12_binary_trees 13_factorial 14_closure 15_mandelbrot 16_matrix_multiply 2>/dev/null
+  11_prime_sieve 12_binary_trees 13_factorial 14_closure 15_mandelbrot 16_matrix_multiply \
+  bench_gc_pressure bench_json_roundtrip bench_object_property bench_int_arithmetic \
+  bench_buffer_readwrite bench_array_grow bench_string_heavy 2>/dev/null
+
+exit ${COMPARE_EXIT:-0}
