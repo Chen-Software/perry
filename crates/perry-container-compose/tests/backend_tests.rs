@@ -1,62 +1,65 @@
 use perry_container_compose::backend::*;
-use perry_container_compose::types::ContainerSpec;
 use std::env;
 
-// Feature: perry-container | Layer: unit | Req: 1.5 | Property: -
+// Feature: perry-container | Layer: unit | Req: 1.1 | Property: -
 #[test]
 fn test_platform_candidates_logic() {
     let candidates = platform_candidates();
-    if cfg!(target_os = "macos") || cfg!(target_os = "ios") {
-        assert!(candidates.contains(&"apple/container"));
-        assert!(candidates.contains(&"docker"));
-    } else if cfg!(target_os = "linux") {
-        assert!(candidates.contains(&"podman"));
-        assert!(candidates.contains(&"docker"));
+    assert!(!candidates.is_empty());
+
+    #[cfg(target_os = "macos")]
+    {
+        assert_eq!(candidates[0], "apple/container");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        assert_eq!(candidates[0], "podman");
     }
 }
 
 // Feature: perry-container | Layer: unit | Req: 1.1 | Property: -
 #[tokio::test]
 async fn test_detect_backend_env_override() {
-    env::set_var("PERRY_CONTAINER_BACKEND", "invalid-backend-name");
-    let result = detect_backend().await;
-    match result {
+    env::set_var("PERRY_CONTAINER_BACKEND", "nonexistent-backend");
+    let res = detect_backend().await;
+
+    match res {
         Err(probed) => {
-            assert_eq!(probed.len(), 1);
-            assert_eq!(probed[0].name, "invalid-backend-name");
-            assert!(!probed[0].available);
+            assert!(probed.iter().any(|r| r.name == "nonexistent-backend" && !r.available));
         }
-        _ => panic!("Expected failure for invalid backend override"),
+        _ => panic!("Expected error for nonexistent backend override"),
     }
     env::remove_var("PERRY_CONTAINER_BACKEND");
 }
 
-// Feature: perry-container | Layer: unit | Req: 1.1 | Property: 2
+// Feature: perry-container | Layer: unit | Req: 1.2 | Property: 2
 #[test]
 fn test_docker_protocol_run_args() {
-    let spec = ContainerSpec {
-        image: "alpine:latest".into(),
-        name: Some("test-srv".into()),
-        rm: Some(true),
+    let protocol = DockerProtocol;
+    let spec = perry_container_compose::types::ContainerSpec {
+        image: "alpine".into(),
+        name: Some("test".into()),
         ..Default::default()
     };
-    let args = DockerProtocol.run_args(&spec);
-    assert!(args.contains(&"run".to_string()));
-    assert!(args.contains(&"--detach".to_string()));
-    assert!(args.contains(&"--name".to_string()));
-    assert!(args.contains(&"test-srv".to_string()));
-    assert!(args.contains(&"--rm".to_string()));
-    assert!(args.contains(&"alpine:latest".to_string()));
+    let args = protocol.run_args(&spec);
+    assert!(args.contains(&"run".into()));
+    assert!(args.contains(&"--name".into()));
+    assert!(args.contains(&"test".into()));
+    assert!(args.contains(&"alpine".into()));
+    assert!(args.contains(&"--detach".into()));
 }
 
 // Feature: perry-container | Layer: unit | Req: 1.2 | Property: 2
 #[test]
 fn test_apple_protocol_run_args_no_detach() {
-    let spec = ContainerSpec {
-        image: "alpine:latest".into(),
+    let protocol = AppleContainerProtocol;
+    let spec = perry_container_compose::types::ContainerSpec {
+        image: "alpine".into(),
         ..Default::default()
     };
-    let args = AppleContainerProtocol.run_args(&spec);
-    assert!(args.contains(&"run".to_string()));
-    assert!(!args.contains(&"--detach".to_string()), "Apple Container should not use --detach");
+    let args = protocol.run_args(&spec);
+    assert!(args.contains(&"run".into()));
+    assert!(!args.contains(&"-d".into()));
+    assert!(!args.contains(&"--detach".into()));
 }

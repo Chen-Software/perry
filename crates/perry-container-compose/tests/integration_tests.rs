@@ -7,54 +7,53 @@ use std::sync::Arc;
 #[cfg(feature = "integration-tests")]
 #[tokio::test]
 #[ignore]
-async fn test_compose_full_lifecycle_integration() {
-    let backend = match detect_backend().await {
-        Ok(b) => Arc::new(b),
-        Err(_) => return,
-    };
+async fn test_compose_up_down_integration() {
+    let backend_res = detect_backend().await;
+    if backend_res.is_err() { return; }
+    let backend = Arc::new(backend_res.unwrap());
 
     let yaml = r#"
 services:
   web:
-    image: alpine:latest
+    image: alpine
     command: ["sleep", "60"]
 "#;
-    let spec: ComposeSpec = serde_yaml::from_str(yaml).expect("Failed to parse YAML");
-    let engine = ComposeEngine::new(spec, "int-test-stack".into(), backend);
+    let spec = ComposeSpec::parse_str(yaml).unwrap();
+    let project_name = format!("test-project-{}", rand::random::<u32>());
+    let engine = ComposeEngine::new(spec, project_name.clone(), backend.clone());
 
-    // 1. Up
-    let handle = engine.up(&[], true, false, false).await.expect("Up failed");
-    assert!(!handle.services.is_empty(), "Stack handle should have services");
+    // up
+    let handle = engine.up(&[], true, false, false).await.expect("Up should succeed");
+    assert_eq!(handle.project_name, project_name);
 
-    // 2. Ps
-    let statuses = engine.ps().await.expect("Ps failed");
-    assert!(statuses.iter().any(|s| s.image.contains("alpine")), "Should find alpine container");
+    // ps
+    let containers = engine.ps().await.expect("Ps should succeed");
+    assert!(containers.iter().any(|c| c.image.contains("alpine")));
 
-    // 3. Down
-    engine.down(&[], false, true).await.expect("Down failed");
+    // down
+    engine.down(&[], false, true).await.expect("Down should succeed");
 }
 
-// Feature: perry-container | Layer: integration | Req: 5.1 | Property: -
+// Feature: perry-container | Layer: integration | Req: 6.6 | Property: -
 #[cfg(feature = "integration-tests")]
 #[tokio::test]
 #[ignore]
 async fn test_container_exec_integration() {
-    use perry_container_compose::types::ContainerSpec;
-    let backend = match detect_backend().await {
-        Ok(b) => Arc::new(b),
-        Err(_) => return,
-    };
+    let backend_res = detect_backend().await;
+    if backend_res.is_err() { return; }
+    let backend = Arc::new(backend_res.unwrap());
 
-    let spec = ContainerSpec {
-        image: "alpine:latest".into(),
-        cmd: Some(vec!["sleep".into(), "10".into()]),
-        rm: Some(true),
+    let spec = perry_container_compose::types::ContainerSpec {
+        image: "alpine".into(),
+        cmd: Some(vec!["sleep".into(), "60".into()]),
         ..Default::default()
     };
-    let handle = backend.run(&spec).await.expect("Run failed");
 
-    let result = backend.exec(&handle.id, &["echo".into(), "hi-perry".into()], None, None).await.expect("Exec failed");
-    assert!(result.stdout.contains("hi-perry"), "Exec stdout should contain hi-perry");
+    let handle = backend.run(&spec).await.expect("Run should succeed");
 
-    let _ = backend.stop(&handle.id, Some(1)).await;
+    let logs = backend.exec(&handle.id, &vec!["echo".into(), "hello".into()], None, None).await.expect("Exec should succeed");
+    assert!(logs.stdout.contains("hello"));
+
+    backend.stop(&handle.id, Some(0)).await.ok();
+    backend.remove(&handle.id, true).await.ok();
 }
