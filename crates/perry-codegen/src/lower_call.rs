@@ -2610,9 +2610,9 @@ pub(crate) fn lower_native_method_call(
             }
             let return_type = match sig.ret {
                 UiReturnKind::Widget => I64,
-                UiReturnKind::F64 => DOUBLE,
+                UiReturnKind::Widget => DOUBLE,
                 UiReturnKind::Void => crate::types::VOID,
-                UiReturnKind::Str => I64,
+                UiReturnKind::Widget => I64,
             };
             ctx.pending_declares.push((sig.runtime.to_string(), return_type, runtime_param_types));
             let ref_args: Vec<(crate::types::LlvmType, &str)> =
@@ -2627,10 +2627,10 @@ pub(crate) fn lower_native_method_call(
                     let raw = blk.call(I64, sig.runtime, &ref_args);
                     Ok(crate::expr::nanbox_pointer_inline(blk, &raw))
                 }
-                UiReturnKind::F64 => {
+                UiReturnKind::Widget => {
                     Ok(blk.call(DOUBLE, sig.runtime, &ref_args))
                 }
-                UiReturnKind::Str => {
+                UiReturnKind::Widget => {
                     let raw = blk.call(I64, sig.runtime, &ref_args);
                     Ok(crate::expr::nanbox_string_inline(blk, &raw))
                 }
@@ -3525,7 +3525,7 @@ const PERRY_UI_TABLE: &[UiSig] = &[
     UiSig { method: "scrollViewSetChild", runtime: "perry_ui_scrollview_set_child",
             args: &[UiArgKind::Widget, UiArgKind::Widget], ret: UiReturnKind::Void },
     UiSig { method: "scrollViewGetOffset", runtime: "perry_ui_scrollview_get_offset",
-            args: &[UiArgKind::Widget], ret: UiReturnKind::F64 },
+            args: &[UiArgKind::Widget], ret: UiReturnKind::Widget },
     UiSig { method: "scrollViewSetOffset", runtime: "perry_ui_scrollview_set_offset",
             args: &[UiArgKind::Widget, UiArgKind::F64, UiArgKind::F64], ret: UiReturnKind::Void },
     UiSig { method: "scrollViewScrollTo", runtime: "perry_ui_scrollview_scroll_to",
@@ -3620,7 +3620,7 @@ const PERRY_UI_TABLE: &[UiSig] = &[
     UiSig { method: "stateCreate", runtime: "perry_ui_state_create",
             args: &[UiArgKind::F64], ret: UiReturnKind::Widget },
     UiSig { method: "stateGet", runtime: "perry_ui_state_get",
-            args: &[UiArgKind::Widget], ret: UiReturnKind::F64 },
+            args: &[UiArgKind::Widget], ret: UiReturnKind::Widget },
     UiSig { method: "stateSet", runtime: "perry_ui_state_set",
             args: &[UiArgKind::Widget, UiArgKind::F64], ret: UiReturnKind::Void },
     UiSig { method: "stateOnChange", runtime: "perry_ui_state_on_change",
@@ -3640,7 +3640,7 @@ const PERRY_UI_TABLE: &[UiSig] = &[
 
     // ---- TextField extras ----
     UiSig { method: "textfieldGetString", runtime: "perry_ui_textfield_get_string",
-            args: &[UiArgKind::Widget], ret: UiReturnKind::F64 },
+            args: &[UiArgKind::Widget], ret: UiReturnKind::Widget },
     UiSig { method: "textfieldFocus", runtime: "perry_ui_textfield_focus",
             args: &[UiArgKind::Widget], ret: UiReturnKind::Void },
     UiSig { method: "textfieldBlurAll", runtime: "perry_ui_textfield_blur_all",
@@ -3662,7 +3662,7 @@ const PERRY_UI_TABLE: &[UiSig] = &[
             args: &[UiArgKind::Widget, UiArgKind::F64, UiArgKind::F64, UiArgKind::F64, UiArgKind::F64],
             ret: UiReturnKind::Void },
     UiSig { method: "textareaGetString", runtime: "perry_ui_textarea_get_string",
-            args: &[UiArgKind::Widget], ret: UiReturnKind::F64 },
+            args: &[UiArgKind::Widget], ret: UiReturnKind::Widget },
 
     // ---- Text extras ----
     UiSig { method: "textSetSelectable", runtime: "perry_ui_text_set_selectable",
@@ -3732,7 +3732,7 @@ const PERRY_UI_TABLE: &[UiSig] = &[
     UiSig { method: "pickerAddItem", runtime: "perry_ui_picker_add_item",
             args: &[UiArgKind::Widget, UiArgKind::Str], ret: UiReturnKind::Void },
     UiSig { method: "pickerGetSelected", runtime: "perry_ui_picker_get_selected",
-            args: &[UiArgKind::Widget], ret: UiReturnKind::F64 },
+            args: &[UiArgKind::Widget], ret: UiReturnKind::Widget },
     UiSig { method: "pickerSetSelected", runtime: "perry_ui_picker_set_selected",
             args: &[UiArgKind::Widget, UiArgKind::I64Raw], ret: UiReturnKind::Void },
 
@@ -3779,7 +3779,7 @@ const PERRY_UI_TABLE: &[UiSig] = &[
 
     // ---- Clipboard ----
     UiSig { method: "clipboardRead", runtime: "perry_ui_clipboard_read",
-            args: &[], ret: UiReturnKind::F64 },
+            args: &[], ret: UiReturnKind::Widget },
     UiSig { method: "clipboardWrite", runtime: "perry_ui_clipboard_write",
             args: &[UiArgKind::Str], ret: UiReturnKind::Void },
 
@@ -3848,7 +3848,7 @@ const PERRY_UI_TABLE: &[UiSig] = &[
 
     // ---- File dialog polling ----
     UiSig { method: "pollOpenFile", runtime: "perry_ui_poll_open_file",
-            args: &[], ret: UiReturnKind::F64 },
+            args: &[], ret: UiReturnKind::Widget },
 
     // ---- Keyboard shortcuts ----
     UiSig { method: "addKeyboardShortcut", runtime: "perry_ui_add_keyboard_shortcut",
@@ -3879,7 +3879,7 @@ const PERRY_UI_INSTANCE_TABLE: &[UiSig] = &[
 
     // ---- State instance methods ----
     UiSig { method: "value", runtime: "perry_ui_state_get",
-            args: &[], ret: UiReturnKind::F64 },
+            args: &[], ret: UiReturnKind::Widget },
     UiSig { method: "set", runtime: "perry_ui_state_set",
             args: &[UiArgKind::F64], ret: UiReturnKind::Void },
 ];
@@ -3901,35 +3901,35 @@ fn perry_ui_instance_method_lookup(method: &str) -> Option<&'static UiSig> {
 /// since the calling convention is identical.
 static PERRY_SYSTEM_TABLE: &[UiSig] = &[
     UiSig { method: "isDarkMode", runtime: "perry_system_is_dark_mode",
-            args: &[], ret: UiReturnKind::F64 },
+            args: &[], ret: UiReturnKind::Widget },
     UiSig { method: "getDeviceIdiom", runtime: "perry_get_device_idiom",
-            args: &[], ret: UiReturnKind::F64 },
+            args: &[], ret: UiReturnKind::Widget },
     UiSig { method: "openURL", runtime: "perry_system_open_url",
             args: &[UiArgKind::Str], ret: UiReturnKind::Void },
     UiSig { method: "keychainSave", runtime: "perry_system_keychain_save",
             args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Void },
     UiSig { method: "keychainGet", runtime: "perry_system_keychain_get",
-            args: &[UiArgKind::Str], ret: UiReturnKind::F64 },
+            args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
     UiSig { method: "keychainDelete", runtime: "perry_system_keychain_delete",
             args: &[UiArgKind::Str], ret: UiReturnKind::Void },
     UiSig { method: "preferencesGet", runtime: "perry_system_preferences_get",
-            args: &[UiArgKind::Str], ret: UiReturnKind::F64 },
+            args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
     UiSig { method: "preferencesSet", runtime: "perry_system_preferences_set",
             args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Void },
     UiSig { method: "notificationSend", runtime: "perry_system_notification_send",
             args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Void },
     UiSig { method: "audioStart", runtime: "perry_system_audio_start",
-            args: &[], ret: UiReturnKind::F64 },
+            args: &[], ret: UiReturnKind::Widget },
     UiSig { method: "audioStop", runtime: "perry_system_audio_stop",
             args: &[], ret: UiReturnKind::Void },
     UiSig { method: "audioGetLevel", runtime: "perry_system_audio_get_level",
-            args: &[], ret: UiReturnKind::F64 },
+            args: &[], ret: UiReturnKind::Widget },
     UiSig { method: "audioGetPeak", runtime: "perry_system_audio_get_peak",
-            args: &[], ret: UiReturnKind::F64 },
+            args: &[], ret: UiReturnKind::Widget },
     UiSig { method: "audioGetWaveform", runtime: "perry_system_audio_get_waveform",
-            args: &[UiArgKind::F64], ret: UiReturnKind::F64 },
+            args: &[UiArgKind::F64], ret: UiReturnKind::Widget },
     UiSig { method: "getDeviceModel", runtime: "perry_system_get_device_model",
-            args: &[], ret: UiReturnKind::F64 },
+            args: &[], ret: UiReturnKind::Widget },
 ];
 
 fn perry_system_table_lookup(method: &str) -> Option<&'static UiSig> {
@@ -4052,9 +4052,9 @@ fn lower_perry_ui_table_call(
     // cross-module call site uses for `perry_fn_*`.
     let return_type = match sig.ret {
         UiReturnKind::Widget => I64,
-        UiReturnKind::F64 => DOUBLE,
+        UiReturnKind::Widget => DOUBLE,
         UiReturnKind::Void => crate::types::VOID,
-        UiReturnKind::Str => I64,
+        UiReturnKind::Widget => I64,
     };
     ctx.pending_declares.push((
         sig.runtime.to_string(),
@@ -4072,14 +4072,14 @@ fn lower_perry_ui_table_call(
             let handle = blk.call(I64, sig.runtime, &arg_slices);
             Ok(nanbox_pointer_inline(blk, &handle))
         }
-        UiReturnKind::F64 => {
+        UiReturnKind::Widget => {
             Ok(ctx.block().call(DOUBLE, sig.runtime, &arg_slices))
         }
         UiReturnKind::Void => {
             ctx.block().call_void(sig.runtime, &arg_slices);
             Ok(double_literal(0.0))
         }
-        UiReturnKind::Str => {
+        UiReturnKind::Widget => {
             let blk = ctx.block();
             let handle = blk.call(I64, sig.runtime, &arg_slices);
             Ok(nanbox_string_inline(blk, &handle))

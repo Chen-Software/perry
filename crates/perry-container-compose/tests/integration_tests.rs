@@ -1,10 +1,4 @@
 //! Integration tests for perry-container-compose.
-//!
-//! These tests require a running container backend and are gated
-//! by `#[cfg(feature = "integration-tests")]`.
-//!
-//! The unit tests and property tests are in the modules themselves
-//! and in `tests/round_trip.rs`.
 
 #[cfg(feature = "integration-tests")]
 mod integration {
@@ -127,3 +121,85 @@ services:
         assert!(base.services.contains_key("db"));
     }
 }
+
+#[cfg(feature = "integration-tests")]
+mod live_integration {
+    use perry_container_compose::backend::*;
+
+    // Feature: perry-container | Layer: integration | Req: none | Property: -
+    #[tokio::test]
+    #[ignore]
+    async fn test_real_backend_check() {
+        let backend_res = detect_backend().await;
+        if backend_res.is_err() { return; }
+        let backend = backend_res.unwrap();
+        backend.check_available().await.expect("backend check_available failed");
+    }
+
+    // Feature: perry-container | Layer: integration | Req: none | Property: -
+    #[tokio::test]
+    #[ignore]
+    async fn test_real_backend_images() {
+        let backend_res = detect_backend().await;
+        if backend_res.is_err() { return; }
+        let backend = backend_res.unwrap();
+        let images = backend.list_images().await.expect("list_images failed");
+        assert!(images.iter().any(|i| i.repository.contains("alpine")));
+    }
+
+    // Feature: perry-container | Layer: integration | Req: none | Property: -
+    #[tokio::test]
+    #[ignore]
+    async fn test_real_backend_image_exists() {
+        let backend_res = detect_backend().await;
+        if backend_res.is_err() { return; }
+        let backend = backend_res.unwrap();
+        let exists = backend.image_exists("alpine:latest").await.expect("image_exists failed");
+        assert!(exists);
+        let not_exists = backend.image_exists("nonexistent:123").await.expect("image_exists failed");
+        assert!(!not_exists);
+    }
+
+    // Feature: perry-container | Layer: integration | Req: none | Property: -
+    #[tokio::test]
+    #[ignore]
+    async fn test_real_backend_networks() {
+        let backend_res = detect_backend().await;
+        if backend_res.is_err() { return; }
+        let backend = backend_res.unwrap();
+        let name = format!("perry-net-{}", rand::random::<u32>());
+        backend.create_network(&name, &NetworkConfig::default()).await.expect("create_network failed");
+        backend.remove_network(&name).await.expect("remove_network failed");
+    }
+
+    // Feature: perry-container | Layer: integration | Req: none | Property: -
+    #[tokio::test]
+    #[ignore]
+    async fn test_real_backend_volumes() {
+        let backend_res = detect_backend().await;
+        if backend_res.is_err() { return; }
+        let backend = backend_res.unwrap();
+        let name = format!("perry-vol-{}", rand::random::<u32>());
+        backend.create_volume(&name, &VolumeConfig::default()).await.expect("create_volume failed");
+        backend.remove_volume(&name).await.expect("remove_volume failed");
+    }
+}
+
+/*
+Coverage Table:
+| Requirement | Test name | Layer |
+|-------------|-----------|-------|
+| 6.4         | test_topological_order_linear | integration |
+| 6.5         | test_circular_dependency_detected | integration |
+| 7.1         | test_parse_simple_compose | integration |
+| 7.8         | test_env_interpolation | integration |
+| 7.10        | test_compose_merge_override | integration |
+| none        | test_real_backend_check | integration |
+| none        | test_real_backend_images | integration |
+| none        | test_real_backend_image_exists | integration |
+| none        | test_real_backend_networks | integration |
+| none        | test_real_backend_volumes | integration |
+
+Deferred Requirements:
+- Req 6.8, 6.9, 12.5: Container/Compose execution (up/run) deferred due to overlay mount failure in sandbox environment.
+*/
