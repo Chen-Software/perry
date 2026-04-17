@@ -13,7 +13,7 @@ crate-type = ["rlib", "staticlib"]
 default = ["full"]
 
 # Full stdlib - everything included
-full = ["http-server", "http-client", "database", "crypto", "compression", "email", "websocket", "image", "scheduler", "ids", "html-parser", "rate-limit", "validation", "container", "net", "tls"]
+full = ["http-server", "http-client", "database", "crypto", "compression", "email", "websocket", "image", "scheduler", "ids", "html-parser", "rate-limit", "validation", "container", "net", "tls", "integration-tests"]
 
 # Minimal core - just what's needed for basic programs
 core = []
@@ -76,6 +76,9 @@ ids = ["dep:uuid", "dep:nanoid"]
 
 # Container module (OCI container management)
 container = ["dep:async-trait", "dep:tokio", "async-runtime", "dep:perry-container-compose", "dep:serde_yaml"]
+
+# Integration tests feature
+integration-tests = ["container"]
 
 # Async runtime (tokio) - internal feature
 async-runtime = ["dep:tokio"]
