@@ -218,7 +218,7 @@ impl ComposeEngine {
         &self,
         services: &[String],
         tail: Option<u32>,
-    ) -> Result<HashMap<String, String>> {
+    ) -> Result<HashMap<String, ContainerLogs>> {
         let mut all_logs = HashMap::new();
         let target: Vec<&String> = if services.is_empty() {
             self.spec.services.keys().collect()
@@ -230,7 +230,7 @@ impl ComposeEngine {
             let svc = self.spec.services.get(svc_name).unwrap();
             let container_name = service::service_container_name(svc, svc_name);
             if let Ok(logs) = self.backend.logs(&container_name, tail).await {
-                all_logs.insert(svc_name.clone(), format!("STDOUT:\n{}\nSTDERR:\n{}", logs.stdout, logs.stderr));
+                all_logs.insert(svc_name.clone(), logs);
             }
         }
         Ok(all_logs)

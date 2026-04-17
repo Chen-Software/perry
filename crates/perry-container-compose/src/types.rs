@@ -4,7 +4,7 @@
 //! compose-spec YAML document, plus the opaque `ComposeHandle` returned by
 //! `ComposeEngine::up()`.
 
-use indexmap::IndexMap;
+pub use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 /// Convert a `serde_yaml::Value` to a string representation.

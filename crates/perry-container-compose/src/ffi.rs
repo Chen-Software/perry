@@ -7,6 +7,7 @@
 use crate::compose::ComposeEngine;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::collections::HashMap;
 
 // ──────────────────────────────────────────────────────────────
 // Minimal re-implementation of the Perry runtime string types
@@ -71,10 +72,9 @@ fn parse_compose_file(file_ptr: *const StringHeader) -> Option<PathBuf> {
 fn make_engine(files: Vec<PathBuf>) -> Result<Arc<ComposeEngine>, String> {
     let proj = crate::project::ComposeProject::load_from_files(&files, None, &[])
         .map_err(|e| e.to_string())?;
-    let backend: Arc<dyn crate::backend::ContainerBackend> = block(crate::backend::detect_backend())
-        .map(Arc::from)
-        .map_err(|e| e.to_string())?;
-    Ok(Arc::new(ComposeEngine::new(proj.spec, proj.project_name, backend)))
+    let backend: Box<dyn crate::backend::ContainerBackend> = block(crate::backend::detect_backend())
+        .map_err(|e| format!("No backend found: {:?}", e))?;
+    Ok(Arc::new(ComposeEngine::new(proj.spec, proj.project_name, Arc::from(backend))))
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -98,7 +98,7 @@ pub unsafe extern "C" fn js_compose_stop(file_ptr: *const StringHeader) -> *cons
     let files: Vec<PathBuf> = parse_compose_file(file_ptr).into_iter().collect();
     match make_engine(files) {
         Err(e) => json_err(&e),
-        Ok(engine) => match block(engine.down(false, false)) {
+        Ok(engine) => match block(engine.down(&[], false, false)) {
             Ok(_) => json_ok("null"),
             Err(e) => json_err(&e.to_string()),
         },
@@ -140,14 +140,16 @@ pub unsafe extern "C" fn js_compose_logs(
         .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
         .and_then(|v| v.into_iter().next());
 
+    let services = service.as_ref().map(|s| vec![s.clone()]).unwrap_or_default();
+
     match make_engine(files) {
         Err(e) => json_err(&e),
-        Ok(engine) => match block(engine.logs(service.as_deref(), None)) {
+        Ok(engine) => match block(engine.logs(&services, None)) {
             Err(e) => json_err(&e.to_string()),
-            Ok(logs) => {
-                let stdout = logs.stdout.replace('"', "\\\"").replace('\n', "\\n");
-                let stderr = logs.stderr.replace('"', "\\\"").replace('\n', "\\n");
-                let payload = format!("{{\"stdout\":\"{}\",\"stderr\":\"{}\"}}", stdout, stderr);
+            Ok(logs_map) => {
+                let combined = logs_map.values().cloned().collect::<Vec<_>>().join("\n");
+                let stdout = combined.replace('"', "\\\"").replace('\n', "\\n");
+                let payload = format!("{{\"stdout\":\"{}\",\"stderr\":\"\"}}", stdout);
                 json_ok(&payload)
             }
         },
@@ -171,7 +173,7 @@ pub unsafe extern "C" fn js_compose_exec(
 
     match make_engine(files) {
         Err(e) => json_err(&e),
-        Ok(engine) => match block(engine.exec(&service, &cmd)) {
+        Ok(engine) => match block(engine.exec(&service, &cmd, None, None)) {
             Err(e) => json_err(&e.to_string()),
             Ok(result) => {
                 let stdout = result.stdout.replace('"', "\\\"").replace('\n', "\\n");
