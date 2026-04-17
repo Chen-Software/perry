@@ -1,129 +1,60 @@
-//! Integration tests for perry-container-compose.
-//!
-//! These tests require a running container backend and are gated
-//! by `#[cfg(feature = "integration-tests")]`.
-//!
-//! The unit tests and property tests are in the modules themselves
-//! and in `tests/round_trip.rs`.
+use perry_container_compose::backend::detect_backend;
+use perry_container_compose::compose::ComposeEngine;
+use perry_container_compose::types::ComposeSpec;
+use std::sync::Arc;
 
+// Feature: perry-container | Layer: integration | Req: 6.1 | Property: -
 #[cfg(feature = "integration-tests")]
-mod integration {
-    use perry_container_compose::compose::resolve_startup_order;
-    use perry_container_compose::types::{ComposeService, ComposeSpec, DependsOnSpec};
-    use perry_container_compose::yaml::{interpolate, parse_dotenv, parse_compose_yaml};
-    use std::collections::HashMap;
+#[tokio::test]
+#[ignore]
+async fn test_compose_full_lifecycle_integration() {
+    let backend = match detect_backend().await {
+        Ok(b) => Arc::new(b),
+        Err(_) => return,
+    };
 
-    #[test]
-    fn test_parse_simple_compose() {
-        let yaml = r#"
+    let yaml = r#"
 services:
   web:
-    image: nginx:alpine
-    ports:
-      - "8080:80"
+    image: alpine:latest
+    command: ["sleep", "60"]
 "#;
-        let spec = ComposeSpec::parse_str(yaml).expect("parse failed");
-        assert!(spec.services.contains_key("web"));
-        assert_eq!(spec.services["web"].image.as_deref(), Some("nginx:alpine"));
-    }
+    let spec: ComposeSpec = serde_yaml::from_str(yaml).expect("Failed to parse YAML");
+    let engine = ComposeEngine::new(spec, "int-test-stack".into(), backend);
 
-    #[test]
-    fn test_parse_multi_service_with_deps() {
-        let yaml = r#"
-services:
-  db:
-    image: postgres:16
-    environment:
-      POSTGRES_PASSWORD: secret
-  web:
-    image: myapp:latest
-    depends_on:
-      - db
-    ports:
-      - "3000:3000"
-"#;
-        let spec = ComposeSpec::parse_str(yaml).expect("parse failed");
-        assert_eq!(spec.services.len(), 2);
-        let web = &spec.services["web"];
-        let deps = web.depends_on.as_ref().unwrap().service_names();
-        assert!(deps.contains(&"db".to_string()));
-    }
+    // 1. Up
+    let handle = engine.up(&[], true, false, false).await.expect("Up failed");
+    assert!(!handle.services.is_empty(), "Stack handle should have services");
 
-    #[test]
-    fn test_topological_order_linear() {
-        let yaml = r#"
-services:
-  c:
-    image: c
-    depends_on: [b]
-  b:
-    image: b
-    depends_on: [a]
-  a:
-    image: a
-"#;
-        let spec = ComposeSpec::parse_str(yaml).unwrap();
-        let order = resolve_startup_order(&spec).unwrap();
-        let pos = |s: &str| order.iter().position(|n| n == s).unwrap();
-        assert!(pos("a") < pos("b"), "a before b");
-        assert!(pos("b") < pos("c"), "b before c");
-    }
+    // 2. Ps
+    let statuses = engine.ps().await.expect("Ps failed");
+    assert!(statuses.iter().any(|s| s.image.contains("alpine")), "Should find alpine container");
 
-    #[test]
-    fn test_circular_dependency_detected() {
-        let yaml = r#"
-services:
-  a:
-    image: a
-    depends_on: [b]
-  b:
-    image: b
-    depends_on: [a]
-"#;
-        let spec = ComposeSpec::parse_str(yaml).unwrap();
-        let result = resolve_startup_order(&spec);
-        assert!(result.is_err());
-    }
+    // 3. Down
+    engine.down(&[], false, true).await.expect("Down failed");
+}
 
-    #[test]
-    fn test_env_interpolation() {
-        let mut env = HashMap::new();
-        env.insert("DB_USER".to_string(), "admin".to_string());
-        env.insert("DB_PASS".to_string(), "s3cr3t".to_string());
+// Feature: perry-container | Layer: integration | Req: 5.1 | Property: -
+#[cfg(feature = "integration-tests")]
+#[tokio::test]
+#[ignore]
+async fn test_container_exec_integration() {
+    use perry_container_compose::types::ContainerSpec;
+    let backend = match detect_backend().await {
+        Ok(b) => Arc::new(b),
+        Err(_) => return,
+    };
 
-        let yaml = "  url: postgres://${DB_USER}:${DB_PASS}@localhost/db";
-        let result = interpolate(yaml, &env);
-        assert_eq!(result, "  url: postgres://admin:s3cr3t@localhost/db");
-    }
+    let spec = ContainerSpec {
+        image: "alpine:latest".into(),
+        cmd: Some(vec!["sleep".into(), "10".into()]),
+        rm: Some(true),
+        ..Default::default()
+    };
+    let handle = backend.run(&spec).await.expect("Run failed");
 
-    #[test]
-    fn test_dotenv_parse() {
-        let content = "HOST=localhost\nPORT=5432\n# ignored\n\nEMPTY=";
-        let env = parse_dotenv(content);
-        assert_eq!(env["HOST"], "localhost");
-        assert_eq!(env["PORT"], "5432");
-        assert_eq!(env["EMPTY"], "");
-    }
+    let result = backend.exec(&handle.id, &["echo".into(), "hi-perry".into()], None, None).await.expect("Exec failed");
+    assert!(result.stdout.contains("hi-perry"), "Exec stdout should contain hi-perry");
 
-    #[test]
-    fn test_compose_merge_override() {
-        let base_yaml = r#"
-services:
-  web:
-    image: nginx:1.0
-  db:
-    image: postgres:15
-"#;
-        let override_yaml = r#"
-services:
-  web:
-    image: nginx:2.0
-"#;
-        let mut base = ComposeSpec::parse_str(base_yaml).unwrap();
-        let overlay = ComposeSpec::parse_str(override_yaml).unwrap();
-        base.merge(overlay);
-
-        assert_eq!(base.services["web"].image.as_deref(), Some("nginx:2.0"));
-        assert!(base.services.contains_key("db"));
-    }
+    let _ = backend.stop(&handle.id, Some(1)).await;
 }

@@ -95,7 +95,7 @@ pub enum DependsOnCondition {
 }
 
 /// Per-dependency entry in the object form of depends_on
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeDependsOn {
     pub condition: Option<DependsOnCondition>,
     #[serde(default)]
@@ -207,7 +207,7 @@ impl VolumeEntry {
 // ============ Port ============
 
 /// Port mapping (long form, compose-spec §service.ports[])
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeServicePort {
     pub name: Option<String>,
     pub mode: Option<String>,

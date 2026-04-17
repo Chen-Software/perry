@@ -604,7 +604,7 @@ pub async fn detect_backend() -> std::result::Result<CliBackend, Vec<BackendProb
     Err(results)
 }
 
-fn platform_candidates() -> &'static [&'static str] {
+pub fn platform_candidates() -> &'static [&'static str] {
     if cfg!(target_os = "macos") || cfg!(target_os = "ios") {
         &["apple/container", "orbstack", "colima", "rancher-desktop", "podman", "lima", "docker"]
     } else {

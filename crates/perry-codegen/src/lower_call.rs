@@ -2357,17 +2357,20 @@ pub(crate) fn lower_native_method_call(
     //
     // Extending: add a row to PERRY_UI_TABLE matching the TS method name
     if module == "perry/container" || module == "perry/container-compose" || module == "perry/compose" {
-        if let Some((_, ffi_symbol)) = PERRY_CONTAINER_TABLE.iter().chain(PERRY_CONTAINER_COMPOSE_TABLE.iter()).find(|(m, _)| *m == method) {
-            return lower_perry_container_compose_call(ctx, ffi_symbol, None, args);
-        }
-    }
+        let handle_id = if let Some(recv) = object {
+            let recv_val = lower_expr(ctx, recv)?;
+            let blk = ctx.block();
+            Some(unbox_to_i64(blk, &recv_val))
+        } else {
+            None
+        };
 
-    if module == "perry/container" || module == "perry/container-compose" || module == "perry/compose" {
-        let recv_val = lower_expr(ctx, object.unwrap())?;
-        let blk = ctx.block();
-        let handle = unbox_to_i64(blk, &recv_val);
-        if let Some((_, ffi_symbol)) = PERRY_CONTAINER_TABLE.iter().chain(PERRY_CONTAINER_COMPOSE_TABLE.iter()).find(|(m, _)| *m == method) {
-            return lower_perry_container_compose_call(ctx, ffi_symbol, Some(handle), args);
+        if let Some((_, ffi_symbol)) = PERRY_CONTAINER_TABLE
+            .iter()
+            .chain(PERRY_CONTAINER_COMPOSE_TABLE.iter())
+            .find(|(m, _)| *m == method)
+        {
+            return lower_perry_container_compose_call(ctx, ffi_symbol, handle_id, args);
         }
     }
 
