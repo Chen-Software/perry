@@ -1,0 +1,21 @@
+# Generated fixtures — too large to check in (108 MB JSON, 24 MB PPM).
+# scripts/gen_json.py + scripts/gen_image.py recreate deterministically.
+assets/*.json
+assets/*.ppm
+
+# Rust / Zig build artefacts
+workloads/*/rust/target/
+workloads/*/zig/zig-out/
+workloads/*/zig/zig-cache/
+workloads/*/zig/.zig-cache/
+
+# Perry compiled binaries (any name). Keep the .ts sources, strip the bins.
+workloads/3_image_convolution/perry/image_conv
+workloads/3_image_convolution/perry/image_conv_*
+workloads/1_json_pipeline/perry/json_pipeline
+workloads/1_json_pipeline/perry/json_pipeline_*
+workloads/3_image_convolution/perry/assets/
+workloads/1_json_pipeline/perry/assets/
+
+# Harness intermediates
+results/*.rows
