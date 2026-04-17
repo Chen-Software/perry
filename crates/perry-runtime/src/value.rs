@@ -1517,12 +1517,12 @@ pub extern "C" fn js_value_length_f64(value: f64) -> f64 {
     // nonsense.
     if top16 == 0x7FFD {
         let handle = (bits & POINTER_MASK) as usize;
-        // Constrain to the macOS ARM64 userspace heap window
-        // (4GB < h < 128TB). Anything outside isn't a real heap
-        // pointer — corrupted NaN-boxes in the __PAGEZERO region or
-        // above the 47-bit cap would otherwise segfault the GC-header
-        // read at `handle - 8`.
-        if handle < 0x1_0000_0000 || handle >= 0x8000_0000_0000 {
+        // Constrain to the observed mimalloc heap window on Darwin
+        // (2 TB < h < 128 TB). Empirically, macOS ARM64 mimalloc
+        // allocations land in 3-5 TB; anything below 2 TB is a
+        // corrupted NaN-box (e.g. `BufferHeader { length: 0,
+        // capacity: 255 }` read as u64 produces handle 1 TB).
+        if handle < 0x200_0000_0000 || handle >= 0x8000_0000_0000 {
             return 0.0;
         }
         if crate::buffer::is_registered_buffer(handle) {

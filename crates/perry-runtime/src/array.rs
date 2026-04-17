@@ -9,19 +9,35 @@ use std::ptr;
 use crate::arena::arena_alloc_gc;
 
 /// Strip NaN-boxing tags from an array pointer and guard against invalid values.
+///
+/// Issue #73 follow-up: the `> 0x1000` (4 KB) floor is too permissive
+/// for the macOS ARM64 heap layout. A corrupted NaN-box whose 48-bit
+/// handle lands in the 1 TB — 2 TB window (e.g. `0x00FF_0000_0000` —
+/// a `BufferHeader { length: 0, capacity: 255 }` read as u64) clears
+/// the old floor and segfaults `(*arr).length` / SIMD memcpy inside
+/// `js_array_slice` / `js_array_length` / etc. Real mimalloc + arena
+/// allocations on Darwin consistently land in the 3-5 TB range;
+/// constraining to `>= 2 TB && < 128 TB` rejects the observed
+/// corruption patterns without cutting off any real heap pointer.
 #[inline(always)]
 fn clean_arr_ptr(arr: *const ArrayHeader) -> *const ArrayHeader {
+    const HEAP_MIN: u64 = 0x200_0000_0000; // 2 TB — above observed corrupt handles
+    const HEAP_MAX: u64 = 0x8000_0000_0000; // 47-bit userspace cap
     let bits = arr as u64;
     let top16 = bits >> 48;
     if top16 >= 0x7FF8 {
         if top16 == 0x7FFC || (bits & 0x0000_FFFF_FFFF_FFFF) == 0 {
             return std::ptr::null();
         }
-        let cleaned = (bits & 0x0000_FFFF_FFFF_FFFF) as *const ArrayHeader;
-        if (cleaned as usize) < 0x1000 { return std::ptr::null(); }
-        cleaned
+        let cleaned_bits = bits & 0x0000_FFFF_FFFF_FFFF;
+        if cleaned_bits < HEAP_MIN || cleaned_bits >= HEAP_MAX {
+            return std::ptr::null();
+        }
+        cleaned_bits as *const ArrayHeader
     } else {
-        if bits < 0x1000 { return std::ptr::null(); }
+        if bits < HEAP_MIN || bits >= HEAP_MAX {
+            return std::ptr::null();
+        }
         arr
     }
 }

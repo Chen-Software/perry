@@ -1922,16 +1922,19 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let blk = ctx.block();
             let recv_bits = blk.bitcast_double_to_i64(&recv_box);
             let recv_handle = blk.and(I64, &recv_bits, POINTER_MASK_I64);
-            // Constrain to the macOS ARM64 userspace heap range:
-            //   lower > 0x1_0000_0000 (skip __PAGEZERO and small-
-            //                          handle NaN-boxes)
+            // Constrain to the observed macOS ARM64 mimalloc heap window.
+            // Real allocations land in the 3-5 TB range on Darwin due to
+            // ASLR + mmap's high-address allocation strategy; bogus
+            // POINTER_TAG NaN-boxes (e.g. a `BufferHeader { length: 0,
+            // capacity: 255 }` read as u64 produces handle
+            // `0x00FF_0000_0000` ≈ 1 TB) reliably fall below this window.
+            // The prior `> 0x1_0000_0000` (4 GB) floor let 1 TB through;
+            // `> 0x200_0000_0000` (2 TB) is conservative enough to reject
+            // the pathological cases we've captured while still clearing
+            // every real mimalloc allocation observed in bench profiling.
             //   upper < 0x8000_0000_0000 (47-bit userspace cap; above
             //                             this is kernel / unmapped)
-            // mimalloc / arena pointers always land in this window.
-            // An above-cap handle (e.g. 0x00FF_0000_0000_0000) flowing
-            // through here would otherwise segfault the GC-header byte
-            // read at `handle - 8` on the next step.
-            let above_floor = blk.icmp_ugt(I64, &recv_handle, "4294967296"); // > 0x1_0000_0000
+            let above_floor = blk.icmp_ugt(I64, &recv_handle, "2199023255552"); // > 0x200_0000_0000 (2 TB)
             let below_ceil = blk.icmp_ult(I64, &recv_handle, "140737488355328"); // < 0x8000_0000_0000
             let handle_ok = blk.and(I1, &above_floor, &below_ceil);
 
@@ -2440,17 +2443,24 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let key_bits = blk.bitcast_double_to_i64(&key_box);
             let key_handle = blk.and(I64, &key_bits, POINTER_MASK_I64);
 
-            // Issue #70: guard against non-pointer receivers before the PIC
-            // deref. `globalThis` lowers to `double_literal(0.0)` and flows
-            // through `const g: any = globalThis; g.foo` as a plain 0.0 —
-            // masking gives handle=0 and the unguarded `load obj+16` below
-            // segfaulted. Any NaN-box that isn't POINTER_TAG/STRING_TAG lands
-            // in the same window (INT32_TAG extracts, TAG_UNDEFINED, TAG_NULL,
-            // plain doubles). Runtime slow paths already guard with
-            // `is_valid_obj_ptr`; match that threshold (>0x100000) inline so
-            // the fast PIC path keeps its invariants. Happy-path cost is one
-            // cmp + one always-taken cond_br — branch-predicted and hoistable.
-            let is_valid = ctx.block().icmp_ugt(I64, &obj_handle, "1048576");
+            // Issue #70/#73: guard against non-pointer receivers before the
+            // PIC deref. `globalThis` lowers to `double_literal(0.0)` and
+            // flows through `const g: any = globalThis; g.foo` as a plain
+            // 0.0 — masking gives handle=0 and the unguarded `load obj+16`
+            // below segfaulted. Any NaN-box that isn't POINTER_TAG/STRING_TAG
+            // lands in the same window. Issue #73 follow-up: the old
+            // `> 0x100000` (1 MB) bar let corrupted NaN-boxes with handles
+            // like `0x00FF_0000_0000` (1 TB, unmapped) through, segfaulting
+            // the subsequent `ldurb obj_type, [handle-8]` added in v0.5.82.
+            // Tighten to the observed mimalloc heap window on Darwin:
+            //   above 2 TB (empirical floor — real allocations consistently
+            //               land in 3-5 TB per crash-dump profiling)
+            //   below 128 TB (47-bit userspace cap)
+            // Real heap pointers always land in this window; two LLVM
+            // `icmp` that the branch predictor handles on the hot path.
+            let above_floor = ctx.block().icmp_ugt(I64, &obj_handle, "2199023255552"); // > 0x200_0000_0000 (2 TB)
+            let below_ceil = ctx.block().icmp_ult(I64, &obj_handle, "140737488355328"); // < 0x8000_0000_0000
+            let is_valid = ctx.block().and(I1, &above_floor, &below_ceil);
             let pic_idx = ctx.new_block("pget.recv_ok");
             let invalid_idx = ctx.new_block("pget.recv_bad");
             let final_merge_idx = ctx.new_block("pget.recv_merge");
