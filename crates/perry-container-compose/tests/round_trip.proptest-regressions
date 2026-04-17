@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 743d61c5b25167919a36a19368ff837b07f039070be23c239cc0c60fa4c634ea # shrinks to spec = ContainerSpec { image: "𐖕ਇÔÅ{%9\\&I<�m", name: None, ports: None, volumes: None, env: Some({"\"}Ⱥ*⻎D�\\B᪡Ѩ{qT8¥": "O<r.𑎋{.𞺣e\u{dca}Ænᝨᤴ.wਸ�VȺ", "J𞄟¥sR𑩡Ⱥ:.𔒠=`<¥🕴\\ଋ\\Ⱥ𖿠ஞ🕴Rࢉ='": "%b"}), cmd: None, entrypoint: None, network: None, rm: Some(false) }

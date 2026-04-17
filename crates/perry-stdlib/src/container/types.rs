@@ -7,24 +7,26 @@
 use perry_runtime::{JSValue, StringHeader};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
+use dashmap::DashMap;
 
 use crate::common::handle::{self, Handle};
 
 // ============ Handle Registry ============
-//
-// All container-related opaque objects are stored in the global DashMap-based
-// handle registry (crate::common::handle) so they can be retrieved later by
-// their integer handle from the JS side (e.g. composeHandle.ps(), etc.).
 
-/// Register a `ContainerHandle` and return an opaque integer handle.
-pub fn register_container_handle(h: ContainerHandle) -> u64 {
-    handle::register_handle(h) as u64
+static CONTAINER_HANDLES: OnceLock<DashMap<u64, perry_container_compose::types::ContainerHandle>> = OnceLock::new();
+static COMPOSE_HANDLES: OnceLock<DashMap<u64, perry_container_compose::ComposeEngine>> = OnceLock::new();
+static NEXT_HANDLE_ID: AtomicU64 = AtomicU64::new(1);
+
+pub fn register_container_handle(handle: perry_container_compose::types::ContainerHandle) -> u64 {
+    let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
+    CONTAINER_HANDLES.get_or_init(DashMap::new).insert(id, handle);
+    id
 }
 
-/// Retrieve a `ContainerHandle` by handle id (read-only).
-pub fn get_container_handle(id: u64) -> Option<handle::Handle> {
-    let h = id as Handle;
-    if handle::handle_exists(h) { Some(h) } else { None }
+pub fn get_container_handle_obj(id: u64) -> Option<perry_container_compose::types::ContainerHandle> {
+    CONTAINER_HANDLES.get()?.get(&id).map(|r| r.clone())
 }
 
 /// Register a single `ContainerInfo` and return an opaque integer handle.
@@ -48,18 +50,15 @@ pub fn take_container_info_list(id: u64) -> Option<Vec<ContainerInfo>> {
 }
 
 /// Register a `ComposeEngine` and return an opaque integer handle.
-pub fn register_compose_engine(engine: perry_container_compose::ComposeEngine, stack_id: u64) -> u64 {
-    handle::register_handle_with_id(engine, stack_id as Handle) as u64
+pub fn register_compose_engine(engine: perry_container_compose::ComposeEngine) -> u64 {
+    let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
+    COMPOSE_HANDLES.get_or_init(DashMap::new).insert(id, engine);
+    id
 }
 
 /// Retrieve a `ComposeEngine` by handle id.
-pub fn get_compose_engine(id: u64) -> Option<&'static perry_container_compose::ComposeEngine> {
-    handle::get_handle(id as Handle)
-}
-
-/// Take (remove and return) the `ComposeEngine` from the registry.
-pub fn take_compose_engine(id: u64) -> Option<perry_container_compose::ComposeEngine> {
-    handle::take_handle(id as Handle)
+pub fn get_compose_engine(id: u64) -> Option<dashmap::mapref::one::Ref<'static, u64, perry_container_compose::ComposeEngine>> {
+    COMPOSE_HANDLES.get()?.get(&id)
 }
 
 /// Register a string and return an opaque integer handle.
@@ -104,86 +103,27 @@ pub fn drop_container_handle(id: u64) -> bool {
 
 // ============ Core Container Types ============
 
-/// Configuration for a single container.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContainerSpec {
-    /// Container image (required)
-    pub image: String,
-    /// Container name (optional)
-    pub name: Option<String>,
-    /// Port mappings e.g. "8080:80"
-    pub ports: Option<Vec<String>>,
-    /// Volume mounts e.g. "/host:/container:ro"
-    pub volumes: Option<Vec<String>>,
-    /// Environment variables
-    pub env: Option<HashMap<String, String>>,
-    /// Command override
-    pub cmd: Option<Vec<String>>,
-    /// Entrypoint override
-    pub entrypoint: Option<Vec<String>>,
-    /// Network to attach to
-    pub network: Option<String>,
-    /// Remove container on exit
-    pub rm: Option<bool>,
-}
+pub use perry_container_compose::types::{
+    ContainerHandle, ContainerInfo, ContainerLogs, ContainerSpec, ImageInfo,
+};
 
-/// Opaque handle returned by `run()` / `create()`.
-#[derive(Debug, Clone)]
-pub struct ContainerHandle {
-    pub id: String,
-    pub name: Option<String>,
-}
-
-/// Metadata about a container instance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContainerInfo {
-    pub id: String,
+pub struct BackendInfo {
     pub name: String,
-    pub image: String,
-    pub status: String,
-    pub ports: Vec<String>,
-    /// ISO 8601
-    pub created: String,
+    pub available: bool,
+    pub reason: Option<String>,
+    pub version: Option<String>,
 }
 
-impl From<perry_container_compose::types::ContainerInfo> for ContainerInfo {
-    fn from(info: perry_container_compose::types::ContainerInfo) -> Self {
+impl From<perry_container_compose::error::BackendProbeResult> for BackendInfo {
+    fn from(res: perry_container_compose::error::BackendProbeResult) -> Self {
         Self {
-            id: info.id,
-            name: info.name,
-            image: info.image,
-            status: info.status,
-            ports: info.ports,
-            created: info.created,
+            name: res.name,
+            available: res.available,
+            reason: Some(res.reason),
+            version: None,
         }
     }
-}
-
-/// Stdout + stderr captured from a container operation.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ContainerLogs {
-    pub stdout: String,
-    pub stderr: String,
-}
-
-impl From<perry_container_compose::types::ContainerLogs> for ContainerLogs {
-    fn from(logs: perry_container_compose::types::ContainerLogs) -> Self {
-        Self {
-            stdout: logs.stdout,
-            stderr: logs.stderr,
-        }
-    }
-}
-
-/// Metadata about a locally-available OCI image.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ImageInfo {
-    pub id: String,
-    pub repository: String,
-    pub tag: String,
-    pub size: u64,
-    /// ISO 8601
-    pub created: String,
 }
 
 // ============ Compose: ListOrDict ============
@@ -667,7 +607,7 @@ pub struct ComposeHandle {
     pub services: Vec<String>,
     pub networks: Vec<String>,
     pub volumes: Vec<String>,
-    pub containers: HashMap<String, ContainerHandle>,
+    pub containers: HashMap<String, perry_container_compose::types::ContainerHandle>,
 }
 
 // ============ Error Types ============
@@ -709,7 +649,7 @@ impl std::error::Error for ContainerError {}
 // ============ StringHeader Parsing ============
 
 /// Parse `ContainerSpec` from a JSON StringHeader pointer.
-pub unsafe fn parse_container_spec_json(ptr: *const StringHeader) -> Result<ContainerSpec, String> {
+pub unsafe fn parse_container_spec_json(ptr: *const StringHeader) -> Result<perry_container_compose::types::ContainerSpec, String> {
     let s = string_from_header(ptr).ok_or("Invalid spec pointer")?;
     serde_json::from_str(&s).map_err(|e| e.to_string())
 }

@@ -7,7 +7,7 @@ use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use crate::backend::ContainerBackend;
+use crate::backend::{ContainerBackend, NetworkConfig, VolumeConfig};
 
 static COMPOSE_ENGINES: once_cell::sync::Lazy<std::sync::Mutex<IndexMap<u64, Arc<ComposeEngine>>>> =
     once_cell::sync::Lazy::new(|| std::sync::Mutex::new(IndexMap::new()));
@@ -17,14 +17,14 @@ static NEXT_STACK_ID: AtomicU64 = AtomicU64::new(1);
 pub struct ComposeEngine {
     pub spec: ComposeSpec,
     pub project_name: String,
-    pub backend: Arc<dyn ContainerBackend>,
+    pub backend: Arc<dyn ContainerBackend + Send + Sync>,
 }
 
 impl ComposeEngine {
     pub fn new(
         spec: ComposeSpec,
         project_name: String,
-        backend: Arc<dyn ContainerBackend>,
+        backend: Arc<dyn ContainerBackend + Send + Sync>,
     ) -> Self {
         ComposeEngine {
             spec,
@@ -59,22 +59,30 @@ impl ComposeEngine {
         // 1. Create networks
         if let Some(networks) = &self.spec.networks {
             for (name, config) in networks {
+                let mut net_config = NetworkConfig::default();
                 if let Some(cfg) = config {
-                    self.backend.create_network(name, cfg).await?;
-                } else {
-                    self.backend.create_network(name, &Default::default()).await?;
+                    net_config.driver = cfg.driver.clone();
+                    if let Some(labels) = &cfg.labels {
+                        net_config.labels = labels.to_map();
+                    }
+                    net_config.internal = cfg.internal.unwrap_or(false);
+                    net_config.enable_ipv6 = cfg.enable_ipv6.unwrap_or(false);
                 }
+                self.backend.create_network(name, &net_config).await?;
             }
         }
 
         // 2. Create volumes
         if let Some(volumes) = &self.spec.volumes {
             for (name, config) in volumes {
+                let mut vol_config = VolumeConfig::default();
                 if let Some(cfg) = config {
-                    self.backend.create_volume(name, cfg).await?;
-                } else {
-                    self.backend.create_volume(name, &Default::default()).await?;
+                    vol_config.driver = cfg.driver.clone();
+                    if let Some(labels) = &cfg.labels {
+                        vol_config.labels = labels.to_map();
+                    }
                 }
+                self.backend.create_volume(name, &vol_config).await?;
             }
         }
 
