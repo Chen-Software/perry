@@ -154,12 +154,12 @@ proptest! {
             });
             (k, v_opt)
         }).collect();
-        let lod = ListOrDict::Dict(map);
+        let lod = ListOrDict::Dict(map.clone());
         let result = lod.to_map();
 
-        // All keys should be preserved
-        prop_assert_eq!(result.len(), keys.len());
-        for key in &keys {
+        // All unique keys should be preserved
+        prop_assert_eq!(result.len(), map.len());
+        for key in map.keys() {
             prop_assert!(result.contains_key(key), "key {} should be in result", key);
         }
     }
