@@ -35,7 +35,7 @@ const INT32_TAG: u64 = 0x7FFE_0000_0000_0000;
 const INT32_MASK: u64 = 0x0000_0000_FFFF_FFFF;
 
 /// String pointer tag: 0x7FFF_XXXX_XXXX_XXXX (48 bits for string pointer)
-pub(crate) const STRING_TAG: u64 = 0x7FFF_0000_0000_0000;
+pub const STRING_TAG: u64 = 0x7FFF_0000_0000_0000;
 
 /// BigInt pointer tag: 0x7FFA_XXXX_XXXX_XXXX (48 bits for bigint pointer)
 const BIGINT_TAG: u64 = 0x7FFA_0000_0000_0000;

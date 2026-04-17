@@ -49,6 +49,43 @@ impl ListOrDict {
     }
 }
 
+impl PortSpec {
+    pub fn to_string(&self) -> String {
+        match self {
+            PortSpec::Short(v) => match v {
+                serde_yaml::Value::String(s) => s.clone(),
+                serde_yaml::Value::Number(n) => n.to_string(),
+                _ => String::new(),
+            },
+            PortSpec::Long(p) => {
+                let mut s = String::new();
+                if let Some(host_ip) = &p.host_ip {
+                    s.push_str(host_ip);
+                    s.push(':');
+                }
+                if let Some(published) = &p.published {
+                    match published {
+                        serde_yaml::Value::String(pub_s) => s.push_str(pub_s),
+                        serde_yaml::Value::Number(n) => s.push_str(&n.to_string()),
+                        _ => {}
+                    }
+                    s.push(':');
+                }
+                match &p.target {
+                    serde_yaml::Value::String(target_s) => s.push_str(target_s),
+                    serde_yaml::Value::Number(n) => s.push_str(&n.to_string()),
+                    _ => {}
+                }
+                if let Some(proto) = &p.protocol {
+                    s.push('/');
+                    s.push_str(proto);
+                }
+                s
+            }
+        }
+    }
+}
+
 // ============ DependsOn ============
 
 /// depends_on condition values (compose-spec §service.depends_on)
@@ -424,6 +461,108 @@ impl ComposeSpec {
     /// Serialize to YAML string.
     pub fn to_yaml(&self) -> Result<String, crate::error::ComposeError> {
         serde_yaml::to_string(self).map_err(crate::error::ComposeError::ParseError)
+    }
+
+    /// Interpolate all fields in the spec with the given environment.
+    pub fn interpolate(&mut self, env: &std::collections::HashMap<String, String>) {
+        if let Some(name) = &mut self.name {
+            *name = crate::env::interpolate(name, env);
+        }
+
+        for service in self.services.values_mut() {
+            if let Some(image) = &mut service.image {
+                *image = crate::env::interpolate(image, env);
+            }
+            if let Some(container_name) = &mut service.container_name {
+                *container_name = crate::env::interpolate(container_name, env);
+            }
+            if let Some(hostname) = &mut service.hostname {
+                *hostname = crate::env::interpolate(hostname, env);
+            }
+            if let Some(user) = &mut service.user {
+                *user = crate::env::interpolate(user, env);
+            }
+            if let Some(working_dir) = &mut service.working_dir {
+                *working_dir = crate::env::interpolate(working_dir, env);
+            }
+            if let Some(cmd) = &mut service.command {
+                interpolate_yaml_value(cmd, env);
+            }
+            if let Some(ep) = &mut service.entrypoint {
+                interpolate_yaml_value(ep, env);
+            }
+
+            if let Some(env_vars) = &mut service.environment {
+                match env_vars {
+                    ListOrDict::Dict(map) => {
+                        for val in map.values_mut() {
+                            if let Some(v) = val {
+                                interpolate_yaml_value(v, env);
+                            }
+                        }
+                    }
+                    ListOrDict::List(list) => {
+                        for s in list {
+                            *s = crate::env::interpolate(s, env);
+                        }
+                    }
+                }
+            }
+
+            if let Some(ports) = &mut service.ports {
+                for port in ports {
+                    match port {
+                        PortSpec::Short(v) => interpolate_yaml_value(v, env),
+                        PortSpec::Long(p) => {
+                            interpolate_yaml_value(&mut p.target, env);
+                            if let Some(published) = &mut p.published {
+                                interpolate_yaml_value(published, env);
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(volumes) = &mut service.volumes {
+                for vol in volumes {
+                    interpolate_yaml_value(vol, env);
+                }
+            }
+        }
+
+        if let Some(networks) = &mut self.networks {
+            for net in networks.values_mut().flatten() {
+                if let Some(name) = &mut net.name {
+                    *name = crate::env::interpolate(name, env);
+                }
+            }
+        }
+        if let Some(volumes) = &mut self.volumes {
+            for vol in volumes.values_mut().flatten() {
+                if let Some(name) = &mut vol.name {
+                    *name = crate::env::interpolate(name, env);
+                }
+            }
+        }
+    }
+}
+
+fn interpolate_yaml_value(
+    val: &mut serde_yaml::Value,
+    env: &std::collections::HashMap<String, String>,
+) {
+    match val {
+        serde_yaml::Value::String(s) => *s = crate::env::interpolate(s, env),
+        serde_yaml::Value::Sequence(seq) => {
+            for item in seq {
+                interpolate_yaml_value(item, env);
+            }
+        }
+        serde_yaml::Value::Mapping(map) => {
+            for (_k, v) in map {
+                interpolate_yaml_value(v, env);
+            }
+        }
+        _ => {}
     }
 }
 

@@ -2687,9 +2687,9 @@ fn lower_module_decl(
                                                     _ => {}
                                                 }
                                             } else if module_name == "perry/container" && method_name == "composeUp" {
-                                                ctx.register_native_instance(name.clone(), "perry/compose".to_string(), "ComposeHandle".to_string());
-                                            } else if module_name == "perry/compose" && method_name == "up" {
-                                                ctx.register_native_instance(name.clone(), "perry/compose".to_string(), "ComposeHandle".to_string());
+                                                ctx.register_native_instance(name.clone(), "perry/container-compose".to_string(), "ComposeHandle".to_string());
+                                            } else if module_name == "perry/container-compose" && method_name == "up" {
+                                                ctx.register_native_instance(name.clone(), "perry/container-compose".to_string(), "ComposeHandle".to_string());
                                             }
                                         }
                                     }

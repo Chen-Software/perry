@@ -10,6 +10,7 @@ pub mod backend;
 pub mod cli;
 pub mod compose;
 pub mod config;
+pub mod env;
 pub mod error;
 pub mod project;
 pub mod service;
@@ -22,8 +23,8 @@ pub mod ffi;
 
 // Re-exports
 pub use backend::{
-    detect_backend, AppleContainerProtocol, BackendProbeResult, CliBackend, CliProtocol,
-    ContainerBackend, DockerProtocol, LimaProtocol,
+    detect_backend, probe_all_backends, AppleContainerProtocol, BackendProbeResult, CliBackend,
+    CliProtocol, ContainerBackend, DockerProtocol, LimaProtocol,
 };
 pub use compose::ComposeEngine;
 pub use error::{ComposeError, Result};

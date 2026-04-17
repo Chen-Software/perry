@@ -18,7 +18,7 @@
  * Run: npx tsx crates/perry-container-compose/examples/forgejo/main.ts
  */
 
-import { composeUp, getBackend } from 'perry/container';
+import { composeUp, getBackend, pullImage } from 'perry/container';
 
 // ──────────────────────────────────────────────────────────────
 // Verify Backend Support
@@ -33,6 +33,14 @@ console.log(`🔧 Using container backend: ${backend}\n`);
 
 const FORGEJO_VERSION = '1.23-stable';
 const postgresVersion = '16-alpine';
+
+// ──────────────────────────────────────────────────────────────
+// Pull Images (Production Best Practice)
+// ──────────────────────────────────────────────────────────────
+
+console.log('📦 Pulling images...\n');
+await pullImage(`postgres:${postgresVersion}`);
+await pullImage(`codeberg.org/forgejo/forgejo:${FORGEJO_VERSION}`);
 
 // Stack name for tracking
 const stack = await composeUp({

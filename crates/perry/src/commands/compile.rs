@@ -2215,6 +2215,7 @@ fn collect_modules(
                 ctx.uses_container = true;
             }
             if perry_hir::requires_stdlib(&import.source) {
+                eprintln!("DEBUG: requires_stdlib({}) = true", import.source);
                 ctx.needs_stdlib = true;
                 // Track for `--minimal-stdlib` feature computation. Strip
                 // any "node:" prefix so the mapping table sees the bare

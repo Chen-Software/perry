@@ -616,13 +616,18 @@ impl CliProtocol for LimaProtocol {
 
 /// Layer 3: Binary executor, implements ContainerBackend.
 pub struct CliBackend {
+    pub name: String,
     pub bin: PathBuf,
     pub protocol: Box<dyn CliProtocol>,
 }
 
 impl CliBackend {
-    pub fn new(bin: PathBuf, protocol: Box<dyn CliProtocol>) -> Self {
-        Self { bin, protocol }
+    pub fn new(name: String, bin: PathBuf, protocol: Box<dyn CliProtocol>) -> Self {
+        Self {
+            name,
+            bin,
+            protocol,
+        }
     }
 
     async fn exec_raw(&self, args: &[String]) -> Result<(String, String)> {
@@ -649,7 +654,7 @@ impl CliBackend {
 #[async_trait]
 impl ContainerBackend for CliBackend {
     fn backend_name(&self) -> &str {
-        self.bin.file_name().and_then(|n| n.to_str()).unwrap_or("unknown")
+        &self.name
     }
 
     async fn check_available(&self) -> Result<()> {
@@ -764,6 +769,43 @@ pub struct BackendProbeResult {
     pub name: String,
     pub available: bool,
     pub reason: String,
+    pub version: Option<String>,
+}
+
+/// Probes all candidates and returns their status.
+pub async fn probe_all_backends() -> Vec<BackendProbeResult> {
+    let candidates = platform_candidates();
+    let mut results = Vec::new();
+
+    for candidate in candidates {
+        match tokio::time::timeout(Duration::from_secs(2), probe_candidate(candidate)).await {
+            Ok(Ok(_backend)) => {
+                results.push(BackendProbeResult {
+                    name: candidate.to_string(),
+                    available: true,
+                    reason: "available".to_string(),
+                    version: None, // Could potentially populate this
+                });
+            }
+            Ok(Err(reason)) => {
+                results.push(BackendProbeResult {
+                    name: candidate.to_string(),
+                    available: false,
+                    reason,
+                    version: None,
+                });
+            }
+            Err(_) => {
+                results.push(BackendProbeResult {
+                    name: candidate.to_string(),
+                    available: false,
+                    reason: "probe timed out after 2s".to_string(),
+                    version: None,
+                });
+            }
+        }
+    }
+    results
 }
 
 /// Probes for available container runtimes and returns the first available one.
@@ -774,6 +816,7 @@ pub async fn detect_backend() -> Result<CliBackend, Vec<BackendProbeResult>> {
                 name: name.clone(),
                 available: false,
                 reason,
+                version: None,
             }]
         });
     }
@@ -793,6 +836,7 @@ pub async fn detect_backend() -> Result<CliBackend, Vec<BackendProbeResult>> {
                     name: candidate.to_string(),
                     available: false,
                     reason,
+                    version: None,
                 });
             }
             Err(_) => {
@@ -800,6 +844,7 @@ pub async fn detect_backend() -> Result<CliBackend, Vec<BackendProbeResult>> {
                     name: candidate.to_string(),
                     available: false,
                     reason: "probe timed out after 2s".to_string(),
+                    version: None,
                 });
             }
         }
@@ -829,50 +874,90 @@ fn platform_candidates() -> &'static [&'static str] {
 async fn probe_candidate(name: &str) -> Result<CliBackend, String> {
     match name {
         "apple/container" => {
-            let bin = which("container").map_err(|_| "container binary not found on PATH".to_string())?;
+            let bin =
+                which("container").map_err(|_| "container binary not found on PATH".to_string())?;
             run_version_check(&bin).await?;
-            Ok(CliBackend::new(bin, Box::new(AppleContainerProtocol)))
+            Ok(CliBackend::new(
+                name.to_string(),
+                bin,
+                Box::new(AppleContainerProtocol),
+            ))
         }
         "podman" => {
-            let bin = which("podman").map_err(|_| "podman binary not found on PATH".to_string())?;
+            let bin =
+                which("podman").map_err(|_| "podman binary not found on PATH".to_string())?;
             run_version_check(&bin).await?;
             if cfg!(target_os = "macos") {
                 check_podman_machine_running(&bin).await?;
             }
-            Ok(CliBackend::new(bin, Box::new(DockerProtocol)))
+            Ok(CliBackend::new(
+                name.to_string(),
+                bin,
+                Box::new(DockerProtocol),
+            ))
         }
         "orbstack" => {
-            let bin = which("orb").or_else(|_| which("docker"))
+            let bin = which("orb")
+                .or_else(|_| which("docker"))
                 .map_err(|_| "orbstack not found".to_string())?;
             check_orbstack_socket_or_version(&bin).await?;
-            Ok(CliBackend::new(bin, Box::new(DockerProtocol)))
+            Ok(CliBackend::new(
+                name.to_string(),
+                bin,
+                Box::new(DockerProtocol),
+            ))
         }
         "colima" => {
             let bin = which("colima").map_err(|_| "colima binary not found on PATH".to_string())?;
             check_colima_running(&bin).await?;
-            let docker_bin = which("docker").map_err(|_| "docker CLI not found (needed for colima)".to_string())?;
-            Ok(CliBackend::new(docker_bin, Box::new(DockerProtocol)))
+            let docker_bin = which("docker")
+                .map_err(|_| "docker CLI not found (needed for colima)".to_string())?;
+            Ok(CliBackend::new(
+                name.to_string(),
+                docker_bin,
+                Box::new(DockerProtocol),
+            ))
         }
         "rancher-desktop" => {
-            let bin = which("nerdctl").map_err(|_| "nerdctl binary not found on PATH".to_string())?;
+            let bin =
+                which("nerdctl").map_err(|_| "nerdctl binary not found on PATH".to_string())?;
             run_version_check(&bin).await?;
             check_rancher_socket().await?;
-            Ok(CliBackend::new(bin, Box::new(DockerProtocol)))
+            Ok(CliBackend::new(
+                name.to_string(),
+                bin,
+                Box::new(DockerProtocol),
+            ))
         }
         "lima" => {
-            let bin = which("limactl").map_err(|_| "limactl binary not found on PATH".to_string())?;
+            let bin =
+                which("limactl").map_err(|_| "limactl binary not found on PATH".to_string())?;
             let instance = check_lima_running_instance(&bin).await?;
-            Ok(CliBackend::new(bin, Box::new(LimaProtocol { instance })))
+            Ok(CliBackend::new(
+                name.to_string(),
+                bin,
+                Box::new(LimaProtocol { instance }),
+            ))
         }
         "nerdctl" => {
-            let bin = which("nerdctl").map_err(|_| "nerdctl binary not found on PATH".to_string())?;
+            let bin =
+                which("nerdctl").map_err(|_| "nerdctl binary not found on PATH".to_string())?;
             run_version_check(&bin).await?;
-            Ok(CliBackend::new(bin, Box::new(DockerProtocol)))
+            Ok(CliBackend::new(
+                name.to_string(),
+                bin,
+                Box::new(DockerProtocol),
+            ))
         }
         "docker" => {
-            let bin = which("docker").map_err(|_| "docker binary not found on PATH".to_string())?;
+            let bin =
+                which("docker").map_err(|_| "docker binary not found on PATH".to_string())?;
             run_version_check(&bin).await?;
-            Ok(CliBackend::new(bin, Box::new(DockerProtocol)))
+            Ok(CliBackend::new(
+                name.to_string(),
+                bin,
+                Box::new(DockerProtocol),
+            ))
         }
         other => Err(format!("unknown backend: {other}")),
     }

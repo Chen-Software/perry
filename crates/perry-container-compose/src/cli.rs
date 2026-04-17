@@ -118,7 +118,7 @@ pub async fn run() -> Result<()> {
         crate::error::ComposeError::NoBackendFound { probed }
     })?;
 
-    let engine = ComposeEngine::new(project.spec, project.project_name, Arc::new(backend));
+    let mut engine = ComposeEngine::new(project.spec, project.project_name, Arc::new(backend));
 
     match cli.command {
         Commands::Up { detach, build, remove_orphans, services } => {

@@ -4,7 +4,7 @@ use crate::backend::ContainerBackend;
 use crate::error::{ComposeError, Result};
 use crate::service;
 use crate::types::{ComposeHandle, ComposeSpec, ContainerInfo, ContainerLogs};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -32,13 +32,36 @@ impl ComposeEngine {
     }
 
     pub async fn up(
-        &self,
-        _services: &[String],
+        &mut self,
+        services: &[String],
         _detach: bool,
         _build: bool,
         _remove_orphans: bool,
     ) -> Result<ComposeHandle> {
-        let order = resolve_startup_order(&self.spec)?;
+        let env: HashMap<String, String> = std::env::vars().collect();
+        self.spec.interpolate(&env);
+
+        let all_order = resolve_startup_order(&self.spec)?;
+
+        let to_start = if services.is_empty() {
+            all_order
+        } else {
+            let mut requested = HashSet::new();
+            let mut stack = services.to_vec();
+            while let Some(svc) = stack.pop() {
+                if requested.insert(svc.clone()) {
+                    if let Some(service_def) = self.spec.services.get(&svc) {
+                        if let Some(deps) = &service_def.depends_on {
+                            stack.extend(deps.service_names());
+                        }
+                    }
+                }
+            }
+            all_order
+                .into_iter()
+                .filter(|s| requested.contains(s))
+                .collect()
+        };
 
         // 1. Create networks
         if let Some(networks) = &self.spec.networks {
@@ -59,7 +82,7 @@ impl ComposeEngine {
         }
 
         // 3. Start containers in order
-        for svc_name in order {
+        for svc_name in to_start {
             let svc = self.spec.services.get(&svc_name).unwrap();
             let image = svc.image.as_deref().unwrap_or("alpine");
             let container_name = service::generate_name(image, &svc_name);
@@ -68,7 +91,25 @@ impl ComposeEngine {
             let spec = crate::types::ContainerSpec {
                 image: image.to_string(),
                 name: Some(container_name.clone()),
-                ports: svc.ports.as_ref().map(|p| p.iter().map(|_| "todo".to_string()).collect()), // simplified
+                ports: svc.ports.as_ref().map(|ports| {
+                    ports.iter().map(|p| p.to_string()).collect()
+                }),
+                env: svc.environment.as_ref().map(|e| e.to_map()),
+                cmd: svc.command.as_ref().map(yaml_to_vec),
+                entrypoint: svc.entrypoint.as_ref().map(yaml_to_vec),
+                network: match &svc.networks {
+                    Some(crate::types::ServiceNetworks::List(l)) => l.first().cloned(),
+                    Some(crate::types::ServiceNetworks::Map(m)) => m.keys().next().cloned(),
+                    None => None,
+                },
+                volumes: svc.volumes.as_ref().map(|vols| {
+                    vols.iter()
+                        .map(|v| match v {
+                            serde_yaml::Value::String(s) => s.clone(),
+                            _ => serde_yaml::to_string(v).unwrap_or_default(),
+                        })
+                        .collect()
+                }),
                 ..Default::default()
             };
 
@@ -223,4 +264,20 @@ pub fn resolve_startup_order(spec: &ComposeSpec) -> Result<Vec<String>> {
     }
 
     Ok(order)
+}
+
+fn yaml_to_vec(val: &serde_yaml::Value) -> Vec<String> {
+    match val {
+        serde_yaml::Value::String(s) => vec![s.clone()],
+        serde_yaml::Value::Sequence(seq) => seq
+            .iter()
+            .filter_map(|v| match v {
+                serde_yaml::Value::String(s) => Some(s.clone()),
+                serde_yaml::Value::Number(n) => Some(n.to_string()),
+                serde_yaml::Value::Bool(b) => Some(b.to_string()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
 }
