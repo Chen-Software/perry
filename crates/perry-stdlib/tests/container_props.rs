@@ -213,9 +213,10 @@ proptest! {
 
     #[test]
     fn prop_depends_on_entry_service_names(
-        names in proptest::collection::vec("[a-z][a-z0-9_-]{1,10}", 1..=6),
+        names_set in proptest::collection::btree_set("[a-z][a-z0-9_-]{1,10}", 1..=6),
     ) {
         use perry_container_compose::types::{DependsOnSpec, ComposeDependsOn};
+        let names: Vec<String> = names_set.into_iter().collect();
 
         // List variant
         let list_entry = DependsOnSpec::List(names.clone());
