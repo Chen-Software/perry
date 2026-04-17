@@ -88,6 +88,49 @@ impl ComposeEngine {
         };
 
         let mut started = Vec::new();
+        let mut created_networks = Vec::new();
+        let mut created_volumes = Vec::new();
+
+        // 1. Create networks
+        if let Some(networks) = &self.spec.networks {
+            for (name, net) in networks {
+                if let Some(config) = net {
+                    if !self.backend.network_exists(name).await.unwrap_or(false) {
+                        match self.backend.create_network(name, config).await {
+                            Ok(_) => created_networks.push(name.clone()),
+                            Err(e) => {
+                                self.rollback(&started, &created_networks, &created_volumes).await;
+                                return Err(ComposeError::ServiceStartupFailed {
+                                    service: format!("network:{}", name),
+                                    message: e.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Create volumes
+        if let Some(volumes) = &self.spec.volumes {
+            for (name, vol) in volumes {
+                if let Some(config) = vol {
+                    if !self.backend.volume_exists(name).await.unwrap_or(false) {
+                        match self.backend.create_volume(name, config).await {
+                            Ok(_) => created_volumes.push(name.clone()),
+                            Err(e) => {
+                                self.rollback(&started, &created_networks, &created_volumes).await;
+                                return Err(ComposeError::ServiceStartupFailed {
+                                    service: format!("volume:{}", name),
+                                    message: e.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         for svc_name in target {
             let svc = self.spec.services.get(svc_name).unwrap();
             let container_name = service::service_container_name(svc, svc_name);
@@ -152,11 +195,7 @@ impl ComposeEngine {
                     started.push(container_name);
                 }
                 Err(e) => {
-                    // Rollback
-                    for name in started.iter().rev() {
-                        let _ = self.backend.stop(name, Some(10)).await;
-                        let _ = self.backend.remove(name, true).await;
-                    }
+                    self.rollback(&started, &created_networks, &created_volumes).await;
                     return Err(ComposeError::ServiceStartupFailed {
                         service: svc_name.clone(),
                         message: e.to_string(),
@@ -166,6 +205,19 @@ impl ComposeEngine {
         }
 
         Ok(self.register())
+    }
+
+    async fn rollback(&self, containers: &[String], networks: &[String], volumes: &[String]) {
+        for name in containers.iter().rev() {
+            let _ = self.backend.stop(name, Some(10)).await;
+            let _ = self.backend.remove(name, true).await;
+        }
+        for name in networks.iter().rev() {
+            let _ = self.backend.remove_network(name).await;
+        }
+        for name in volumes.iter().rev() {
+            let _ = self.backend.remove_volume(name).await;
+        }
     }
 
     pub async fn down(

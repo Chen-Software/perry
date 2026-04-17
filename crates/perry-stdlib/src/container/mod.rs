@@ -63,6 +63,15 @@ where
     }, converter);
 }
 
+/// Helper to serialize an object to JSValue bits (NaN-boxed string)
+fn serialize_to_js_bits<T: serde::Serialize>(val: T) -> u64 {
+    let json = serde_json::to_string(&val).unwrap_or_else(|_| "{}".to_string());
+    unsafe {
+        let ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
+        perry_runtime::JSValue::string_ptr(ptr).bits()
+    }
+}
+
 // ============ Container Lifecycle ============
 
 /// Run a container from the given spec JSON string
@@ -163,9 +172,9 @@ pub unsafe extern "C" fn js_container_start(id_ptr: *const StringHeader) -> *mut
 }
 
 /// Stop a running container
-/// FFI: js_container_stop(id: *const StringHeader, timeout: i64) -> *mut Promise
+/// FFI: js_container_stop(id: *const StringHeader, timeout: i32) -> *mut Promise
 #[no_mangle]
-pub unsafe extern "C" fn js_container_stop(id_ptr: *const StringHeader, timeout: i64) -> *mut Promise {
+pub unsafe extern "C" fn js_container_stop(id_ptr: *const StringHeader, timeout: i32) -> *mut Promise {
     let promise = js_promise_new();
 
     let id = match string_from_header(id_ptr) {
@@ -189,9 +198,9 @@ pub unsafe extern "C" fn js_container_stop(id_ptr: *const StringHeader, timeout:
 }
 
 /// Remove a container
-/// FFI: js_container_remove(id: *const StringHeader, force: i64) -> *mut Promise
+/// FFI: js_container_remove(id: *const StringHeader, force: i32) -> *mut Promise
 #[no_mangle]
-pub unsafe extern "C" fn js_container_remove(id_ptr: *const StringHeader, force: i64) -> *mut Promise {
+pub unsafe extern "C" fn js_container_remove(id_ptr: *const StringHeader, force: i32) -> *mut Promise {
     let promise = js_promise_new();
 
     let id = match string_from_header(id_ptr) {
@@ -214,16 +223,16 @@ pub unsafe extern "C" fn js_container_remove(id_ptr: *const StringHeader, force:
 }
 
 /// List containers
-/// FFI: js_container_list(all: i64) -> *mut Promise
+/// FFI: js_container_list(all: i32) -> *mut Promise
 #[no_mangle]
-pub unsafe extern "C" fn js_container_list(all: i64) -> *mut Promise {
+pub unsafe extern "C" fn js_container_list(all: i32) -> *mut Promise {
     let promise = js_promise_new();
 
     spawn_container_promise(promise, async move {
         let backend = get_global_backend().await?;
         backend.list(all != 0).await
     }, |containers| {
-        types::register_container_info_list(containers) as u64
+        serialize_to_js_bits(containers)
     });
 
     promise
@@ -249,7 +258,7 @@ pub unsafe extern "C" fn js_container_inspect(id_ptr: *const StringHeader) -> *m
         let backend = get_global_backend().await?;
         backend.inspect(&id).await
     }, |info| {
-        types::register_container_info(info) as u64
+        serialize_to_js_bits(info)
     });
 
     promise
@@ -269,9 +278,9 @@ pub unsafe extern "C" fn js_container_getBackend() -> *const StringHeader {
 // ============ Container Logs and Exec ============
 
 /// Get logs from a container
-/// FFI: js_container_logs(id: *const StringHeader, tail: i64) -> *mut Promise
+/// FFI: js_container_logs(id: *const StringHeader, tail: i32) -> *mut Promise
 #[no_mangle]
-pub unsafe extern "C" fn js_container_logs(id_ptr: *const StringHeader, tail: i64) -> *mut Promise {
+pub unsafe extern "C" fn js_container_logs(id_ptr: *const StringHeader, tail: i32) -> *mut Promise {
     let promise = js_promise_new();
 
     let id = match string_from_header(id_ptr) {
@@ -290,7 +299,7 @@ pub unsafe extern "C" fn js_container_logs(id_ptr: *const StringHeader, tail: i6
         let backend = get_global_backend().await?;
         backend.logs(&id, tail_opt).await
     }, |logs| {
-        types::register_container_logs(logs) as u64
+        serialize_to_js_bits(logs)
     });
 
     promise
@@ -332,7 +341,7 @@ pub unsafe extern "C" fn js_container_exec(
         let backend = get_global_backend().await?;
         backend.exec(&id, &cmd, env.as_ref(), workdir.as_deref()).await
     }, |logs| {
-        types::register_container_logs(logs) as u64
+        serialize_to_js_bits(logs)
     });
 
     promise
@@ -375,16 +384,16 @@ pub unsafe extern "C" fn js_container_listImages() -> *mut Promise {
         let backend = get_global_backend().await?;
         backend.list_images().await
     }, |images| {
-        types::register_image_info_list(images) as u64
+        serialize_to_js_bits(images)
     });
 
     promise
 }
 
 /// Remove an image
-/// FFI: js_container_removeImage(reference: *const StringHeader, force: i64) -> *mut Promise
+/// FFI: js_container_removeImage(reference: *const StringHeader, force: i32) -> *mut Promise
 #[no_mangle]
-pub unsafe extern "C" fn js_container_removeImage(reference_ptr: *const StringHeader, force: i64) -> *mut Promise {
+pub unsafe extern "C" fn js_container_removeImage(reference_ptr: *const StringHeader, force: i32) -> *mut Promise {
     let promise = js_promise_new();
 
     let reference = match string_from_header(reference_ptr) {
@@ -445,9 +454,9 @@ pub unsafe extern "C" fn js_compose_up(spec_ptr: *const StringHeader) -> *mut Pr
 }
 
 /// Stop and remove compose stack.
-/// FFI: js_compose_down(handle_id: i64, volumes: i64) -> *mut Promise
+/// FFI: js_compose_down(handle_id: i64, volumes: i32) -> *mut Promise
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_down(handle_id: i64, volumes: i64) -> *mut Promise {
+pub unsafe extern "C" fn js_compose_down(handle_id: i64, volumes: i32) -> *mut Promise {
     let promise = js_promise_new();
 
     spawn_container_promise(promise, async move {
@@ -472,19 +481,19 @@ pub unsafe extern "C" fn js_compose_ps(handle_id: i64) -> *mut Promise {
 
         engine.ps().await
     }, |containers| {
-        types::register_container_info_list(containers) as u64
+        serialize_to_js_bits(containers)
     });
 
     promise
 }
 
 /// Get logs from compose stack
-/// FFI: js_compose_logs(handle_id: i64, service: *const StringHeader, tail: i64) -> *mut Promise
+/// FFI: js_compose_logs(handle_id: i64, service: *const StringHeader, tail: i32) -> *mut Promise
 #[no_mangle]
 pub unsafe extern "C" fn js_compose_logs(
     handle_id: i64,
     service_ptr: *const StringHeader,
-    tail: i64,
+    tail: i32,
 ) -> *mut Promise {
     let promise = js_promise_new();
 
@@ -500,7 +509,7 @@ pub unsafe extern "C" fn js_compose_logs(
         let stdout = map.values().cloned().collect::<Vec<_>>().join("\n");
         Ok(types::ContainerLogs { stdout, stderr: String::new() })
     }, |logs| {
-        types::register_container_logs(logs) as u64
+        serialize_to_js_bits(logs)
     });
 
     promise
@@ -531,7 +540,7 @@ pub unsafe extern "C" fn js_compose_exec(
 
         engine.exec(&service, &cmd, None, None).await
     }, |logs| {
-        types::register_container_logs(logs) as u64
+        serialize_to_js_bits(logs)
     });
 
     promise
