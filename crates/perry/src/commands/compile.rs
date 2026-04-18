@@ -4417,6 +4417,78 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
                         imported_enums.push((local_name.clone(), members.clone()));
                     }
                 }
+
+                // Named imports only bring in explicitly-imported symbols, so
+                // a class that leaks out of the source module as the return
+                // type of an imported *function* (e.g. `import { makeThing }`
+                // where `makeThing(): Promise<Thing>`) leaves `Thing` invisible
+                // to this module's dispatch tables. `t.doWork(...)` then can't
+                // find `("Thing", "doWork")` in `ctx.methods` and falls through
+                // to `js_native_call_method`, which returns the receiver's
+                // ObjectHeader as a stub. Closes #83.
+                //
+                // Mirror the namespace-import behavior: for every
+                // native-compiled module we import from (and every module that
+                // module transitively re-exports from), enumerate every class
+                // defined in that module and register it for dispatch, even
+                // when the class name wasn't in the specifier list. Local
+                // classes with the same name take precedence in
+                // `compile_module` (the `class_table.contains_key` check), so
+                // this doesn't clobber anything.
+                //
+                // We iterate `ctx.native_modules` directly — NOT the
+                // `exported_classes` BTreeMap. `exported_classes` gets alias
+                // entries stamped under every re-exporter's path (the
+                // `Export::ReExport` / `Export::ExportAll` propagation loop
+                // above), so iterating it would hand us the class keyed by
+                // `index.ts` when it was actually compiled under
+                // `pool.ts`. Using each module's own `hir.classes` Vec guarantees
+                // `src_path` is the TRUE defining module, so the mangled
+                // `perry_method_<source_prefix>__<Class>__<method>` symbol
+                // matches what that module actually emitted (otherwise the
+                // linker fails with "undefined symbol
+                // _perry_method_src_index_ts__Pool__query" when Pool was
+                // compiled under src_pool_ts).
+                let mut origin_paths: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                origin_paths.insert(resolved_path_str.clone());
+                if let Some(exports) = all_module_exports.get(&resolved_path_str) {
+                    for origin_path in exports.values() {
+                        origin_paths.insert(origin_path.clone());
+                    }
+                }
+                for (src_pathbuf, src_hir) in &ctx.native_modules {
+                    let src_path = src_pathbuf.to_string_lossy().to_string();
+                    if !origin_paths.contains(&src_path) {
+                        continue;
+                    }
+                    for class in &src_hir.classes {
+                        if !class.is_exported {
+                            continue;
+                        }
+                        // Dedup across multiple import statements: the same class
+                        // may be transitively reachable from several imports, and
+                        // the same-class-twice case would produce duplicate
+                        // `@perry_class_keys_<modprefix>__<Class>` globals in IR.
+                        // Same-name local classes win via `compile_module`'s
+                        // class_table check, so this filter is strictly about
+                        // cross-module twinning.
+                        if imported_classes.iter().any(|c| c.name == class.name) {
+                            continue;
+                        }
+                        let class_prefix = compute_module_prefix(&src_path, &ctx.project_root);
+                        imported_classes.push(perry_codegen::ImportedClass {
+                            name: class.name.clone(),
+                            local_alias: None,
+                            source_prefix: class_prefix,
+                            constructor_param_count: class.constructor.as_ref().map(|c| c.params.len()).unwrap_or(0),
+                            method_names: class.methods.iter().map(|m| m.name.clone()).collect(),
+                            parent_name: class.extends_name.clone(),
+                            field_names: class.fields.iter().map(|f| f.name.clone()).collect(),
+                            source_class_id: Some(class.id),
+                        });
+                    }
+                }
             }
 
             // Type aliases from all modules
