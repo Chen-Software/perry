@@ -1514,7 +1514,7 @@ fn compile_function(
 
     // Pre-walk: which `let x = new Class(...)` locals never escape?
     let non_escaping_news = crate::collectors::collect_non_escaping_news(
-        &f.body, &boxed_vars, module_globals,
+        &f.body, &boxed_vars, module_globals, classes,
     );
     let non_escaping_arrays = crate::collectors::collect_non_escaping_arrays(
         &f.body, &boxed_vars, module_globals,
@@ -1783,7 +1783,7 @@ fn compile_closure(
     let integer_locals = crate::collectors::collect_integer_locals(body, &cross_module.flat_const_arrays.keys().copied().collect(), &clamp_fn_ids);
 
     let non_escaping_news = crate::collectors::collect_non_escaping_news(
-        body, &closure_boxed_vars, module_globals,
+        body, &closure_boxed_vars, module_globals, classes,
     );
     let non_escaping_arrays = crate::collectors::collect_non_escaping_arrays(
         body, &closure_boxed_vars, module_globals,
@@ -1957,7 +1957,7 @@ fn compile_method(
     let integer_locals = crate::collectors::collect_integer_locals(&method.body, &cross_module.flat_const_arrays.keys().copied().collect(), &clamp_fn_ids);
 
     let non_escaping_news = crate::collectors::collect_non_escaping_news(
-        &method.body, &method_boxed_vars, module_globals,
+        &method.body, &method_boxed_vars, module_globals, classes,
     );
     let non_escaping_arrays = crate::collectors::collect_non_escaping_arrays(
         &method.body, &method_boxed_vars, module_globals,
@@ -2164,7 +2164,7 @@ fn compile_module_entry(
             .union(&cross_module.clamp_u8_functions).chain(cross_module.returns_int_functions.iter()).copied().collect();
         let main_integer_locals = crate::collectors::collect_integer_locals(&hir.init, &cross_module.flat_const_arrays.keys().copied().collect(), &clamp_fn_ids);
         let main_non_escaping_news = crate::collectors::collect_non_escaping_news(
-            &hir.init, &main_boxed_vars, module_globals,
+            &hir.init, &main_boxed_vars, module_globals, classes,
         );
         let main_non_escaping_arrays = crate::collectors::collect_non_escaping_arrays(
             &hir.init, &main_boxed_vars, module_globals,
@@ -2370,7 +2370,7 @@ fn compile_module_entry(
             .union(&cross_module.clamp_u8_functions).chain(cross_module.returns_int_functions.iter()).copied().collect();
         let init_integer_locals = crate::collectors::collect_integer_locals(&hir.init, &cross_module.flat_const_arrays.keys().copied().collect(), &clamp_fn_ids);
         let init_non_escaping_news = crate::collectors::collect_non_escaping_news(
-            &hir.init, &init_boxed_vars, module_globals,
+            &hir.init, &init_boxed_vars, module_globals, classes,
         );
         let init_non_escaping_arrays = crate::collectors::collect_non_escaping_arrays(
             &hir.init, &init_boxed_vars, module_globals,
@@ -2722,7 +2722,7 @@ fn compile_static_method(
 
     let static_boxed_vars = module_boxed_vars.clone();
     let non_escaping_news = crate::collectors::collect_non_escaping_news(
-        &f.body, &static_boxed_vars, module_globals,
+        &f.body, &static_boxed_vars, module_globals, classes,
     );
     let non_escaping_arrays = crate::collectors::collect_non_escaping_arrays(
         &f.body, &static_boxed_vars, module_globals,
