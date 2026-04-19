@@ -68,7 +68,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Build perry
-        run: cargo build --release --target ${{ matrix.target }}
+        # Build only the CLI crate. The default-members list includes
+        # perry-jsruntime (V8), which downloads a prebuilt that 404s on
+        # musl and isn't shipped in the release tarball on any platform.
+        run: cargo build --release --target ${{ matrix.target }} -p perry
 
       - name: Build runtime libraries
         run: |
