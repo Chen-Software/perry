@@ -84,6 +84,7 @@ pub fn module_to_features(module: &str) -> &'static [&'static str] {
         // bignumber.js, lru-cache, commander, exponential-backoff, http,
         // https, events, async_hooks, worker_threads, …) — handled by
         // always-on stdlib code.
+        "perry/container" | "perry/container-compose" => &["container"],
         _ => &[],
     }
 }

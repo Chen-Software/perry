@@ -2,9 +2,8 @@
 
 use super::types::{ContainerError, ContainerLogs, ContainerSpec};
 use super::verification;
-use super::get_global_backend;
+use super::mod_priv::get_global_backend_instance;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 pub struct CapabilityGrants {
     pub network: bool,
@@ -32,8 +31,21 @@ pub async fn alloy_container_run_capability(
         ..Default::default()
     };
 
-    let backend = Arc::clone(get_global_backend().await?);
-    let handle = backend.run(&spec).await.map_err(|e| ContainerError::BackendError { code: -1, message: e.to_string() })?;
+    let backend = get_global_backend_instance().await?;
+    let crate_spec = perry_container_compose::types::ContainerSpec {
+        image: spec.image.clone(),
+        name: spec.name.clone(),
+        ports: spec.ports.clone(),
+        volumes: spec.volumes.clone(),
+        env: spec.env.clone(),
+        cmd: spec.cmd.clone(),
+        entrypoint: spec.entrypoint.clone(),
+        network: spec.network.clone(),
+        rm: spec.rm.clone(),
+    };
 
-    backend.logs(&handle.id, None).await.map_err(|e| ContainerError::BackendError { code: -1, message: e.to_string() })
+    let handle = backend.run(&crate_spec).await.map_err(|e| ContainerError::BackendError { code: -1, message: e.to_string() })?;
+
+    let logs = backend.logs(&handle.id, None).await.map_err(|e| ContainerError::BackendError { code: -1, message: e.to_string() })?;
+    Ok(ContainerLogs::from(logs))
 }

@@ -105,7 +105,7 @@ pub fn drop_container_handle(id: u64) -> bool {
 // ============ Core Container Types ============
 
 /// Configuration for a single container.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ContainerSpec {
     /// Container image (required)
     pub image: String,
@@ -663,11 +663,19 @@ pub struct ComposeSpec {
 /// Opaque handle to a running compose stack, returned by `composeUp()`.
 #[derive(Debug, Clone)]
 pub struct ComposeHandle {
-    pub name: String,
+    pub stack_id: u64,
+    pub project_name: String,
     pub services: Vec<String>,
-    pub networks: Vec<String>,
-    pub volumes: Vec<String>,
-    pub containers: HashMap<String, ContainerHandle>,
+}
+
+impl From<perry_container_compose::types::ComposeHandle> for ComposeHandle {
+    fn from(h: perry_container_compose::types::ComposeHandle) -> Self {
+        Self {
+            stack_id: h.stack_id,
+            project_name: h.project_name,
+            services: h.services,
+        }
+    }
 }
 
 // ============ Error Types ============
@@ -676,11 +684,25 @@ pub struct ComposeHandle {
 #[derive(Debug, Clone)]
 pub enum ContainerError {
     NotFound(String),
-    BackendError { code: i32, message: String },
-    VerificationFailed { image: String, reason: String },
-    DependencyCycle { cycle: Vec<String> },
-    ServiceStartupFailed { service: String, error: String },
+    BackendError {
+        code: i32,
+        message: String,
+    },
+    VerificationFailed {
+        image: String,
+        reason: String,
+    },
+    DependencyCycle {
+        cycle: Vec<String>,
+    },
+    ServiceStartupFailed {
+        service: String,
+        error: String,
+    },
     InvalidConfig(String),
+    NoBackendFound {
+        probed: Vec<perry_container_compose::backend::BackendProbeResult>,
+    },
 }
 
 impl std::fmt::Display for ContainerError {
@@ -700,11 +722,47 @@ impl std::fmt::Display for ContainerError {
                 write!(f, "Service {} failed to start: {}", service, error)
             }
             ContainerError::InvalidConfig(msg) => write!(f, "Invalid configuration: {}", msg),
+            ContainerError::NoBackendFound { probed } => {
+                write!(f, "No container backend found. Probed: {:?}", probed)
+            }
         }
     }
 }
 
 impl std::error::Error for ContainerError {}
+
+impl From<perry_container_compose::error::ComposeError> for ContainerError {
+    fn from(e: perry_container_compose::error::ComposeError) -> Self {
+        match e {
+            perry_container_compose::error::ComposeError::NotFound(id) => {
+                ContainerError::NotFound(id)
+            }
+            perry_container_compose::error::ComposeError::DependencyCycle { services } => {
+                ContainerError::DependencyCycle { cycle: services }
+            }
+            perry_container_compose::error::ComposeError::ServiceStartupFailed {
+                service,
+                message,
+            } => ContainerError::ServiceStartupFailed {
+                service,
+                error: message,
+            },
+            perry_container_compose::error::ComposeError::ValidationError { message } => {
+                ContainerError::InvalidConfig(message)
+            }
+            perry_container_compose::error::ComposeError::BackendError { code, message } => {
+                ContainerError::BackendError { code, message }
+            }
+            perry_container_compose::error::ComposeError::NoBackendFound { probed } => {
+                ContainerError::NoBackendFound { probed }
+            }
+            other => ContainerError::BackendError {
+                code: -1,
+                message: other.to_string(),
+            },
+        }
+    }
+}
 
 // ============ StringHeader Parsing ============
 

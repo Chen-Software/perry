@@ -165,6 +165,7 @@ pub struct CompilationContext {
     /// Whether any TS module calls global `fetch()` (which routes to
     /// reqwest in perry-stdlib's http-client feature).
     pub uses_fetch: bool,
+    pub needs_container: bool,
     /// Whether any TS module uses `crypto.randomBytes` / `randomUUID` /
     /// `sha256` / `md5` as Perry builtins (without `import crypto`).
     /// These lower to `Expr::CryptoRandomBytes`/`CryptoRandomUUID`/
@@ -212,6 +213,7 @@ impl CompilationContext {
             uses_fetch: false,
             uses_crypto_builtins: false,
             needs_thread: false,
+            needs_container: false,
         }
     }
 }
