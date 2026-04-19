@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.105
+**Current Version:** 0.5.106
 
 ## TypeScript Parity Status
 
@@ -150,6 +150,7 @@ First-resolved directory cached in `compile_package_dirs`; subsequent imports re
 
 Keep entries to 1-2 lines max. Full details in CHANGELOG.md.
 
+- **v0.5.106** — Swap `lettre`'s `tokio1-native-tls` feature for `tokio1-rustls-tls` in `crates/perry-stdlib/Cargo.toml`. Eliminates `openssl-sys` / `native-tls` from the transitive dep tree (they were the only holdouts; the policy comment at Cargo.toml:35 already states "rustls only to avoid OpenSSL"). Unblocks the musl CI build — `openssl-sys` was failing with "Could not find openssl via pkg-config: cross-compilation unsupported" on `x86_64-unknown-linux-musl`. No functional change for SMTP clients; rustls provides the same TLS surface.
 - **v0.5.105** — `Int32Array.length` (and other typed-array `.length`) returned 0 because `js_value_length_f64` only handled NaN-boxed pointers (top16 == 0x7FFD); typed arrays sometimes flow as raw `bitcast i64 → double` with top16 == 0. Added a raw-pointer arm guarded on the Darwin mimalloc heap window (≥ 2 TB, < 128 TB) that consults `is_registered_buffer` / `lookup_typed_array_kind`.
 - **v0.5.104** — Extend the v0.5.103 inliner fix: `substitute_locals` now also walks `WeakRefNew`/`WeakRefDeref`/`FinalizationRegistryNew`/`Object{Keys,Values,Entries,FromEntries,IsFrozen,IsSealed,IsExtensible,Create}`/`ArrayFrom`/`Uint8ArrayFrom`/`IteratorToArray`/`StructuredClone`/`QueueMicrotask`/`ProcessNextTick`/`Json{Parse,Stringify}`/`ArrayIsArray`/`Math{Sqrt,Floor,Ceil,Round,Abs,Log,Log2,Log10,Log1p,Clz32,MinSpread,MaxSpread}`. Same root cause as v0.5.103 (catch-all `_ => {}` skipped these single-operand wrappers); same user-visible class of bug — inlined function bodies referenced unmapped pre-inline LocalIds and read the wrong slot. Verified `test_gap_weakref_finalization`'s `function createAndDeref() { const inner = {...}; const innerRef = new WeakRef(inner); ... }` now correctly carries `inner` through to the WeakRef after inlining.
 - **v0.5.103** — Inliner `substitute_locals` now traverses single-operand wrapper expressions (`IsUndefinedOrBareNan`, `IsNaN`, `IsFinite`, `Number`/`String`/`Boolean` coerce, `TypeOf`, `Void`, `Await`, `Delete`, `ParseFloat`, etc.). Prior catch-all `_ => {}` left LocalGet refs inside these wrappers unmapped: a destructuring default like `function f({ a, b = "default" })` lowered to `Conditional { condition: IsUndefinedOrBareNan(LocalGet(orig)), ... else_expr: LocalGet(orig) }`. The else_expr was correctly remapped (caught by the Conditional arm + LocalGet arm), but the IsUndefinedOrBareNan-wrapped condition fell through the catch-all → kept the OLD function-internal LocalGet id → the `condition` always read the wrong slot → default branch never fired → `greet({ name: "World" })` printed `undefined, World!` instead of `Hello, World!`. Removed redundant duplicate `Expr::Await` arm at the same time.

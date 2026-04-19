@@ -1794,21 +1794,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
-name = "foreign-types"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6f339eb8adc052cd2ca78910fda869aefa38d22d5cb648e6485e4d3fc06f3b1"
-dependencies = [
- "foreign-types-shared",
-]
-
-[[package]]
-name = "foreign-types-shared"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
-
-[[package]]
 name = "form_urlencoded"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3116,14 +3101,15 @@ dependencies = [
  "httpdate",
  "idna 1.1.0",
  "mime",
- "native-tls",
  "nom 8.0.0",
  "percent-encoding",
  "quoted_printable",
+ "rustls",
  "socket2 0.6.3",
  "tokio",
- "tokio-native-tls",
+ "tokio-rustls",
  "url",
+ "webpki-roots 1.0.6",
 ]
 
 [[package]]
@@ -3546,23 +3532,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "native-tls"
-version = "0.2.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "465500e14ea162429d264d44189adc38b199b62b1c21eea9f69e4b73cb03bbf2"
-dependencies = [
- "libc",
- "log",
- "openssl",
- "openssl-probe",
- "openssl-sys",
- "schannel",
- "security-framework",
- "security-framework-sys",
- "tempfile",
-]
-
-[[package]]
 name = "new_debug_unreachable"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3936,48 +3905,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
-name = "openssl"
-version = "0.10.76"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "951c002c75e16ea2c65b8c7e4d3d51d5530d8dfa7d060b4776828c88cfb18ecf"
-dependencies = [
- "bitflags",
- "cfg-if",
- "foreign-types",
- "libc",
- "once_cell",
- "openssl-macros",
- "openssl-sys",
-]
-
-[[package]]
-name = "openssl-macros"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a948666b637a0f465e8564c73e89d4dde00d72d4d473cc972f390fc3dcee7d9c"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "openssl-probe"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
-
-[[package]]
-name = "openssl-sys"
-version = "0.9.112"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57d55af3b3e226502be1526dfdba67ab0e9c96fc293004e79576b2b9edb0dbdb"
-dependencies = [
- "cc",
- "libc",
- "pkg-config",
- "vcpkg",
-]
 
 [[package]]
 name = "option-ext"
@@ -4106,7 +4037,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "perry"
-version = "0.5.105"
+version = "0.5.106"
 dependencies = [
  "anyhow",
  "atty",
@@ -4150,7 +4081,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen"
-version = "0.5.105"
+version = "0.5.106"
 dependencies = [
  "anyhow",
  "log",
@@ -4161,7 +4092,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen-glance"
-version = "0.5.105"
+version = "0.5.106"
 dependencies = [
  "anyhow",
  "perry-hir",
@@ -4169,7 +4100,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen-js"
-version = "0.5.105"
+version = "0.5.106"
 dependencies = [
  "anyhow",
  "perry-hir",
@@ -4178,7 +4109,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen-swiftui"
-version = "0.5.105"
+version = "0.5.106"
 dependencies = [
  "anyhow",
  "perry-hir",
@@ -4187,7 +4118,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen-wasm"
-version = "0.5.105"
+version = "0.5.106"
 dependencies = [
  "anyhow",
  "base64",
@@ -4199,7 +4130,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen-wear-tiles"
-version = "0.5.105"
+version = "0.5.106"
 dependencies = [
  "anyhow",
  "perry-hir",
@@ -4207,7 +4138,7 @@ dependencies = [
 
 [[package]]
 name = "perry-diagnostics"
-version = "0.5.105"
+version = "0.5.106"
 dependencies = [
  "serde",
  "serde_json",
@@ -4215,7 +4146,7 @@ dependencies = [
 
 [[package]]
 name = "perry-hir"
-version = "0.5.105"
+version = "0.5.106"
 dependencies = [
  "anyhow",
  "perry-diagnostics",
@@ -4227,7 +4158,7 @@ dependencies = [
 
 [[package]]
 name = "perry-jsruntime"
-version = "0.5.105"
+version = "0.5.106"
 dependencies = [
  "anyhow",
  "deno_core",
@@ -4246,7 +4177,7 @@ dependencies = [
 
 [[package]]
 name = "perry-parser"
-version = "0.5.105"
+version = "0.5.106"
 dependencies = [
  "anyhow",
  "perry-diagnostics",
@@ -4258,7 +4189,7 @@ dependencies = [
 
 [[package]]
 name = "perry-runtime"
-version = "0.5.105"
+version = "0.5.106"
 dependencies = [
  "anyhow",
  "base64",
@@ -4279,7 +4210,7 @@ dependencies = [
 
 [[package]]
 name = "perry-stdlib"
-version = "0.5.105"
+version = "0.5.106"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -4343,7 +4274,7 @@ dependencies = [
 
 [[package]]
 name = "perry-transform"
-version = "0.5.105"
+version = "0.5.106"
 dependencies = [
  "anyhow",
  "perry-hir",
@@ -4353,7 +4284,7 @@ dependencies = [
 
 [[package]]
 name = "perry-types"
-version = "0.5.105"
+version = "0.5.106"
 dependencies = [
  "anyhow",
  "thiserror 1.0.69",
@@ -4361,11 +4292,11 @@ dependencies = [
 
 [[package]]
 name = "perry-ui"
-version = "0.5.105"
+version = "0.5.106"
 
 [[package]]
 name = "perry-ui-android"
-version = "0.5.105"
+version = "0.5.106"
 dependencies = [
  "itoa",
  "jni",
@@ -4379,7 +4310,7 @@ dependencies = [
 
 [[package]]
 name = "perry-ui-geisterhand"
-version = "0.5.105"
+version = "0.5.106"
 dependencies = [
  "rand 0.8.5",
  "serde",
@@ -4389,7 +4320,7 @@ dependencies = [
 
 [[package]]
 name = "perry-ui-gtk4"
-version = "0.5.105"
+version = "0.5.106"
 dependencies = [
  "cairo-rs",
  "gtk4",
@@ -4400,7 +4331,7 @@ dependencies = [
 
 [[package]]
 name = "perry-ui-ios"
-version = "0.5.105"
+version = "0.5.106"
 dependencies = [
  "block2",
  "libc",
@@ -4414,7 +4345,7 @@ dependencies = [
 
 [[package]]
 name = "perry-ui-macos"
-version = "0.5.105"
+version = "0.5.106"
 dependencies = [
  "block2",
  "libc",
@@ -4431,7 +4362,7 @@ version = "0.1.0"
 
 [[package]]
 name = "perry-ui-tvos"
-version = "0.5.105"
+version = "0.5.106"
 dependencies = [
  "block2",
  "libc",
@@ -4445,7 +4376,7 @@ dependencies = [
 
 [[package]]
 name = "perry-ui-watchos"
-version = "0.5.105"
+version = "0.5.106"
 dependencies = [
  "block2",
  "libc",
@@ -4457,7 +4388,7 @@ dependencies = [
 
 [[package]]
 name = "perry-ui-windows"
-version = "0.5.105"
+version = "0.5.106"
 dependencies = [
  "libc",
  "perry-runtime",
@@ -6633,16 +6564,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "tokio-native-tls"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbae76ab933c85776efabc971569dd6119c580d8f5d448769dec1764bf796ef2"
-dependencies = [
- "native-tls",
- "tokio",
 ]
 
 [[package]]
