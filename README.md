@@ -585,7 +585,7 @@ Supports screenshot capture on all native platforms. See the [Geisterhand docs](
 | [perry-postgres](https://github.com/PerryTS/postgres) | PostgreSQL with the same Prisma-compatible API |
 | [perry-prisma](https://github.com/PerryTS/prisma) | MySQL with the same Prisma-compatible API |
 | [perry-apn](https://github.com/PerryTS/push) | Apple Push Notifications (APNs) native library |
-| [@perry/threads](https://github.com/PerryTS/perry/tree/main/packages/perry-threads) | Web Worker parallelism (`parallelMap`, `parallelFilter`, `spawn`) for browser/Node.js |
+| [@perryts/threads](https://github.com/PerryTS/perry/tree/main/packages/perry-threads) | Web Worker parallelism (`parallelMap`, `parallelFilter`, `spawn`) for browser/Node.js |
 | [perry-starter](https://github.com/PerryTS/starter) | Minimal starter project — get up and running in 30 seconds |
 | [perry-demo](https://demo.perryts.com) | Live benchmark dashboard comparing Perry vs Node.js vs Bun |
 | [perry-react-dom](https://github.com/PerryTS/react-dom) | Perry React DOM bridge |
@@ -685,7 +685,7 @@ perry/
 ├── docs/                       # Documentation site (mdBook)
 ├── example-code/               # 8 example applications
 ├── benchmarks/                 # Benchmark suite (Perry vs Node.js vs Bun)
-├── packages/                   # npm packages (@perry/threads)
+├── packages/                   # npm packages (@perryts/threads)
 └── test-files/                 # Test suite
 ```
 
