@@ -1,4 +1,3 @@
-use crate::error::{ComposeError, Result};
 use crate::config::ProjectConfig;
 use crate::types::ComposeSpec;
 use crate::yaml;
@@ -12,7 +11,7 @@ pub struct ComposeProject {
 }
 
 impl ComposeProject {
-    pub fn load(config: &ProjectConfig) -> Result<Self> {
+    pub fn load(config: &ProjectConfig) -> crate::error::Result<Self> {
         let project_dir = config.files.first()
             .and_then(|f| f.parent())
             .map(|p| p.to_path_buf())
@@ -34,7 +33,7 @@ impl ComposeProject {
         })
     }
 
-    pub fn load_from_files(files: &[PathBuf], project_name: Option<String>, env_files: &[PathBuf]) -> Result<Self> {
+    pub fn load_from_files(files: &[PathBuf], project_name: Option<String>, env_files: &[PathBuf]) -> crate::error::Result<Self> {
         let config = ProjectConfig::new(files.to_vec(), project_name, env_files.to_vec());
         Self::load(&config)
     }

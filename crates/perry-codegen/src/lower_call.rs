@@ -2367,15 +2367,25 @@ pub(crate) fn lower_native_method_call(
     }
 
     // perry/container dispatch
-    if module == "perry/container" && object.is_none() {
+    if module == "perry/container" {
         if let Some(sig) = perry_container_table_lookup(method) {
+            if let Some(recv) = object {
+                let mut instance_args = vec![recv.clone()];
+                instance_args.extend_from_slice(args);
+                return lower_perry_ui_table_call(ctx, sig, &instance_args);
+            }
             return lower_perry_ui_table_call(ctx, sig, args);
         }
     }
 
     // perry/container-compose dispatch
-    if module == "perry/container-compose" && object.is_none() {
+    if module == "perry/container-compose" {
         if let Some(sig) = perry_container_compose_table_lookup(method) {
+            if let Some(recv) = object {
+                let mut instance_args = vec![recv.clone()];
+                instance_args.extend_from_slice(args);
+                return lower_perry_ui_table_call(ctx, sig, &instance_args);
+            }
             return lower_perry_ui_table_call(ctx, sig, args);
         }
     }
@@ -3955,6 +3965,8 @@ static PERRY_CONTAINER_TABLE: &[UiSig] = &[
             args: &[], ret: UiReturnKind::Str },
     UiSig { method: "composeUp", runtime: "js_container_composeUp",
             args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
+    UiSig { method: "detectBackend", runtime: "js_container_detectBackend",
+            args: &[], ret: UiReturnKind::Promise },
 ];
 
 /// Dispatch table for perry/container-compose module.

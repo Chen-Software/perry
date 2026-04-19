@@ -231,6 +231,8 @@ pub(crate) struct CrossModuleCtx {
     /// scanning `hir.init`; threaded through every FnCtx so the IndexGet
     /// lowering can intercept `X[i][j]` / `krow[j]` patterns.
     pub flat_const_arrays: std::collections::HashMap<u32, crate::expr::FlatConstInfo>,
+    /// (Issue #51) Module-level counter for per-site inline cache globals.
+    pub ic_site_counter: std::cell::Cell<u32>,
 }
 
 /// Compile a Perry HIR module to an object file via LLVM IR.
@@ -573,6 +575,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
             .filter(|f| crate::collectors::returns_integer(f))
             .map(|f| f.id)
             .collect(),
+        ic_site_counter: std::cell::Cell::new(0),
         flat_const_arrays: {
             // Issue #50: fold module-level `const X: number[][] = [[int, ...], ...]`
             // into a flat `[N x i32]` LLVM constant so `X[i][j]` / `krow[j]` can
@@ -1550,7 +1553,7 @@ fn compile_function(
         array_row_aliases: HashMap::new(),
         clamp3_functions: &cross_module.clamp3_functions,
         clamp_u8_functions: &cross_module.clamp_u8_functions,
-        ic_site_counter: 0,
+        ic_site_counter: &cross_module.ic_site_counter,
         ic_globals: Vec::new(),
     };
     stmt::lower_stmts(&mut ctx, &f.body)
@@ -1806,7 +1809,7 @@ fn compile_closure(
         array_row_aliases: HashMap::new(),
         clamp3_functions: &cross_module.clamp3_functions,
         clamp_u8_functions: &cross_module.clamp_u8_functions,
-        ic_site_counter: 0,
+        ic_site_counter: &cross_module.ic_site_counter,
         ic_globals: Vec::new(),
     };
 
@@ -1959,7 +1962,7 @@ fn compile_method(
         array_row_aliases: HashMap::new(),
         clamp3_functions: &cross_module.clamp3_functions,
         clamp_u8_functions: &cross_module.clamp_u8_functions,
-        ic_site_counter: 0,
+        ic_site_counter: &cross_module.ic_site_counter,
         ic_globals: Vec::new(),
     };
 
@@ -2136,7 +2139,7 @@ fn compile_module_entry(
             array_row_aliases: HashMap::new(),
         clamp3_functions: &cross_module.clamp3_functions,
         clamp_u8_functions: &cross_module.clamp_u8_functions,
-        ic_site_counter: 0,
+        ic_site_counter: &cross_module.ic_site_counter,
         ic_globals: Vec::new(),
         };
         // Register every module-level global's ADDRESS as a GC root so
@@ -2322,7 +2325,7 @@ fn compile_module_entry(
             array_row_aliases: HashMap::new(),
         clamp3_functions: &cross_module.clamp3_functions,
         clamp_u8_functions: &cross_module.clamp_u8_functions,
-        ic_site_counter: 0,
+        ic_site_counter: &cross_module.ic_site_counter,
         ic_globals: Vec::new(),
         };
         // Register every module-level global's ADDRESS as a GC root —
@@ -2612,7 +2615,7 @@ fn compile_static_method(
         array_row_aliases: HashMap::new(),
         clamp3_functions: &cross_module.clamp3_functions,
         clamp_u8_functions: &cross_module.clamp_u8_functions,
-        ic_site_counter: 0,
+        ic_site_counter: &cross_module.ic_site_counter,
         ic_globals: Vec::new(),
     };
     stmt::lower_stmts(&mut ctx, &f.body)

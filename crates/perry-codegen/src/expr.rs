@@ -471,7 +471,7 @@ pub(crate) struct FnCtx<'a> {
     pub clamp_u8_functions: &'a std::collections::HashSet<u32>,
 
     /// (Issue #51) Counter for per-site inline cache globals.
-    pub ic_site_counter: u32,
+    pub ic_site_counter: &'a std::cell::Cell<u32>,
 
     /// (Issue #51) Names of IC globals created during lowering. After
     /// the function is emitted, the caller emits `@<name> = private
@@ -2280,8 +2280,8 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             // loads the field directly at obj+24+slot*8 — no function call,
             // no hash, no linear scan. On miss, calls the slow helper which
             // does the full lookup and primes the cache for next time.
-            let site_id = ctx.ic_site_counter;
-            ctx.ic_site_counter += 1;
+            let site_id = ctx.ic_site_counter.get();
+            ctx.ic_site_counter.set(site_id + 1);
             let cache_name = format!("perry_ic_{}", site_id);
             ctx.pending_declares.push((
                 format!("__ic_decl_{}", site_id),

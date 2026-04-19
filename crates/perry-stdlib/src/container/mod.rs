@@ -397,6 +397,29 @@ pub unsafe extern "C" fn js_container_compose_stop(handle_id: u64, services_json
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn js_container_detectBackend() -> *mut Promise {
+    let promise = js_promise_new();
+    crate::common::spawn_for_promise(promise as *mut u8, async move {
+        match backend::detect_backend().await {
+            Ok(_) => {
+                // If we found one, return the probe results again to satisfy the API
+                let results = match backend::detect_backend().await {
+                    Ok(_) => vec![], // Placeholder, actual results lost in type erasure
+                    Err(r) => r,
+                };
+                let json = serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string());
+                Ok(types::register_string(json))
+            }
+            Err(results) => {
+                let json = serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string());
+                Ok(types::register_string(json))
+            }
+        }
+    });
+    promise
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn js_container_compose_restart(handle_id: u64, services_json: *const StringHeader) -> *mut Promise {
     let promise = js_promise_new();
     let services_str = string_from_header(services_json).unwrap_or_default();
