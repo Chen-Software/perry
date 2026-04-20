@@ -2,22 +2,69 @@
 
 ## Prerequisites
 
-- **Rust toolchain** — Perry is built with Cargo. Install via [rustup](https://rustup.rs/):
-  ```bash
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-  ```
+Perry compiles TypeScript to native binaries by linking with your system's C toolchain, so every install path needs a linker:
 
-- **System linker** — Perry uses your system's C compiler to link:
-  - **macOS**: Xcode Command Line Tools (`xcode-select --install`)
-  - **Linux**: `gcc` or `clang` (`apt install build-essential`)
-  - **Windows**: MSVC via Visual Studio Build Tools
+- **macOS**: Xcode Command Line Tools (`xcode-select --install`)
+- **Linux**: `gcc` or `clang` (`apt install build-essential` on Debian/Ubuntu, `apk add build-base` on Alpine)
+- **Windows**: MSVC via Visual Studio Build Tools with the "Desktop development with C++" workload
+
+The source install additionally needs the **Rust toolchain** via [rustup](https://rustup.rs/).
 
 ## Install Perry
 
-### From Source (recommended)
+### npm / npx (recommended — any platform)
+
+Perry ships as a prebuilt-binary npm package. This is the fastest way to get started and the only path that covers all seven supported platforms (macOS arm64/x64, Linux x64/arm64 glibc + musl, Windows x64) with a single command:
 
 ```bash
-git clone https://github.com/skelpo/perry.git
+# Project-local (pins Perry's version alongside your deps)
+npm install @perryts/perry
+npx perry compile src/main.ts -o myapp && ./myapp
+
+# Global
+npm install -g @perryts/perry
+perry compile src/main.ts -o myapp
+
+# Zero-install, one-shot
+npx -y @perryts/perry compile src/main.ts -o myapp
+```
+
+[`@perryts/perry`](https://www.npmjs.com/package/@perryts/perry) is a thin launcher; npm automatically picks the matching prebuilt via `optionalDependencies` (`@perryts/perry-darwin-arm64`, `@perryts/perry-linux-x64-musl`, etc.) based on your `os` / `cpu` / `libc`. Requires Node.js ≥ 16.
+
+| Platform | Prebuilt package |
+|---|---|
+| macOS arm64 (Apple Silicon) | `@perryts/perry-darwin-arm64` |
+| macOS x64 (Intel) | `@perryts/perry-darwin-x64` |
+| Linux x64 (glibc) | `@perryts/perry-linux-x64` |
+| Linux arm64 (glibc) | `@perryts/perry-linux-arm64` |
+| Linux x64 (musl / Alpine) | `@perryts/perry-linux-x64-musl` |
+| Linux arm64 (musl / Alpine) | `@perryts/perry-linux-arm64-musl` |
+| Windows x64 | `@perryts/perry-win32-x64` |
+
+### Homebrew (macOS)
+
+```bash
+brew install perryts/perry/perry
+```
+
+### winget (Windows)
+
+```bash
+winget install PerryTS.Perry
+```
+
+### APT (Debian / Ubuntu)
+
+```bash
+curl -fsSL https://perryts.github.io/perry-apt/perry.gpg.pub | sudo gpg --dearmor -o /usr/share/keyrings/perry.gpg
+echo "deb [signed-by=/usr/share/keyrings/perry.gpg] https://perryts.github.io/perry-apt stable main" | sudo tee /etc/apt/sources.list.d/perry.list
+sudo apt update && sudo apt install perry
+```
+
+### From Source
+
+```bash
+git clone https://github.com/PerryTS/perry.git
 cd perry
 cargo build --release
 ```

@@ -134,6 +134,25 @@ Perry automatically detects which parts of the runtime your program uses and onl
 
 ## Installation
 
+### npm / npx (any platform)
+
+Perry ships as a prebuilt-binary npm package — the fastest way to try it, and the only install path that works on all seven supported platforms (macOS arm64/x64, Linux x64/arm64 glibc + musl, Windows x64) with one command:
+
+```bash
+# Project-local (recommended — pins Perry's version alongside your deps)
+npm install @perryts/perry
+npx perry compile src/main.ts -o myapp && ./myapp
+
+# Global
+npm install -g @perryts/perry
+perry compile src/main.ts -o myapp
+
+# Zero-install, one-shot
+npx -y @perryts/perry compile src/main.ts -o myapp
+```
+
+[`@perryts/perry`](https://www.npmjs.com/package/@perryts/perry) is a thin launcher; npm automatically picks the matching prebuilt via `optionalDependencies` (`@perryts/perry-darwin-arm64`, `@perryts/perry-linux-x64-musl`, etc.) based on your `os` / `cpu` / `libc`. Requires Node.js ≥ 16 and a system C toolchain for linking (same as any Perry install — see [Requirements](#requirements)).
+
 ### macOS (Homebrew)
 
 ```bash
