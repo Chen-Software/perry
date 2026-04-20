@@ -1,10 +1,11 @@
-use super::types::{ContainerSpec, ContainerLogs, ComposeError};
-use super::verification;
-use super::get_global_backend_instance;
+use std::collections::HashMap;
+use crate::container::verification;
+use crate::container::types::{ContainerSpec, ContainerLogs};
+use crate::container::backend::detect_backend;
 
 pub struct CapabilityGrants {
     pub network: bool,
-    pub env: Option<std::collections::HashMap<String, String>>,
+    pub env: Option<HashMap<String, String>>,
 }
 
 pub async fn alloy_container_run_capability(
@@ -12,20 +13,26 @@ pub async fn alloy_container_run_capability(
     image: &str,
     cmd: &[&str],
     grants: &CapabilityGrants,
-) -> Result<ContainerLogs, ComposeError> {
+) -> Result<ContainerLogs, String> {
     let digest = verification::verify_image(image).await?;
+
     let spec = ContainerSpec {
         image: format!("{}@{}", image, digest),
-        name: Some(format!("alloy-cap-{}-{}", name, rand::random::<u32>())),
-        volumes: None,
+        name: Some(format!("perry-cap-{}-{}", name, rand::random::<u32>())),
         network: if grants.network { None } else { Some("none".to_string()) },
         rm: Some(true),
+        read_only: Some(true),
         env: grants.env.clone(),
         cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
-        read_only: Some(true),
         ..Default::default()
     };
-    let backend = get_global_backend_instance().await.map_err(|e| ComposeError::BackendNotAvailable { name: "global".into(), reason: e })?;
-    backend.run(&spec).await?;
-    backend.logs(spec.name.as_ref().unwrap(), None).await
+
+    let backend = detect_backend().await.map_err(|_| "No backend found")?;
+    let handle = backend.run(&spec).await.map_err(|e| e.to_string())?;
+
+    // Wait and get logs (simplified)
+    let logs = backend.logs(&handle.id, None).await.map_err(|e| e.to_string())?;
+    let _ = backend.remove(&handle.id, true).await;
+
+    Ok(logs)
 }

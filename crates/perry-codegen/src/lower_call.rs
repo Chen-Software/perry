@@ -37,7 +37,8 @@ fn is_integer_handle_arg(expr: &Expr) -> bool {
 use crate::lower_string_method::lower_string_method;
 use crate::nanbox::{double_literal, POINTER_MASK_I64};
 use crate::type_analysis::{is_array_expr, is_map_expr, is_promise_expr, is_set_expr, is_string_expr, receiver_class_name};
-use crate::types::{DOUBLE, I32, I64, I8, PTR, VOID};
+use crate::types::{DOUBLE, I32, I64, I8, PTR};
+use crate::codegen::{PERRY_CONTAINER_TABLE, PERRY_CONTAINER_COMPOSE_TABLE};
 
 /// Lower a `Call` expression. Two shapes are supported:
 /// 1. `FuncRef(id)(args...)` — direct call to a user function by HIR id.
@@ -224,6 +225,24 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
         // lowered to NativeMethodCall in the HIR.
         if let Some(sig) = perry_system_table_lookup(name) {
             return lower_perry_ui_table_call(ctx, sig, args);
+        }
+        if let Some(ffi_name) = PERRY_CONTAINER_TABLE.iter().find(|(ts, _)| ts == name).map(|(_, ffi)| ffi) {
+             let mut lowered: Vec<String> = Vec::with_capacity(args.len());
+             for a in args {
+                 lowered.push(lower_expr(ctx, a)?);
+             }
+             let arg_slices: Vec<(crate::types::LlvmType, &str)> =
+                 lowered.iter().map(|s| (DOUBLE, s.as_str())).collect();
+             return Ok(ctx.block().call(DOUBLE, ffi_name, &arg_slices));
+        }
+        if let Some(ffi_name) = PERRY_CONTAINER_COMPOSE_TABLE.iter().find(|(ts, _)| ts == name).map(|(_, ffi)| ffi) {
+             let mut lowered: Vec<String> = Vec::with_capacity(args.len());
+             for a in args {
+                 lowered.push(lower_expr(ctx, a)?);
+             }
+             let arg_slices: Vec<(crate::types::LlvmType, &str)> =
+                 lowered.iter().map(|s| (DOUBLE, s.as_str())).collect();
+             return Ok(ctx.block().call(DOUBLE, ffi_name, &arg_slices));
         }
         // Built-in runtime extern functions (`js_weakmap_set`,
         // `js_regexp_exec`, etc.) that start with `js_` are resolved
