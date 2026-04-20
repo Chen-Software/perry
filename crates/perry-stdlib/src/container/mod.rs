@@ -346,10 +346,10 @@ pub unsafe extern "C" fn js_container_getBackend() -> *const StringHeader {
 pub unsafe extern "C" fn js_container_detectBackend() -> *mut Promise {
     let promise = js_promise_new();
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        match detect_backend().await {
-            Ok(_b) => Ok(0u64), // Simplified for now
-            Err(probed) => Err(backend_err_to_js(format!("{:?}", probed))),
-        }
+        let results = backend::probe_all_backends().await;
+        let json = serde_json::to_string(&results).unwrap_or_default();
+        let handle = string_to_js(&json);
+        Ok(handle as usize as u64)
     });
     promise
 }

@@ -79,7 +79,18 @@ impl ComposeEngine {
 
             // Fresh container: build or pull
             if build || service::needs_build(svc) {
-                // Build logic... for now we assume build_args is called by caller or backend handles it
+                if let Some(build_spec) = &svc.build {
+                    let build_config = match build_spec {
+                        crate::types::BuildSpec::Context(ctx) => crate::types::ComposeServiceBuild {
+                            context: Some(ctx.clone()),
+                            ..Default::default()
+                        },
+                        crate::types::BuildSpec::Config(cfg) => cfg.clone(),
+                    };
+                    let context = build_config.context.clone().unwrap_or_else(|| ".".into());
+                    let tag = svc.image.clone().unwrap_or_else(|| format!("{}_{}", self.project_name, svc_name));
+                    self.backend.build(&context, &build_config, &tag).await?;
+                }
             } else if let Some(image) = &svc.image {
                 self.backend.pull_image(image).await.map_err(|e| ComposeError::ImagePullFailed {
                     service: svc_name.clone(),

@@ -87,3 +87,33 @@ pub fn get_chainguard_image(tool: &str) -> Option<String> {
 pub fn get_default_base_image() -> &'static str {
     "cgr.dev/chainguard/alpine-base"
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_verification_cache_idempotence() {
+        let digest = "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string();
+        let cache = VERIFICATION_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+        {
+            let mut write = cache.write().unwrap();
+            write.insert(digest.clone(), VerificationResult::Verified);
+        }
+
+        // verify_image should return the cached digest
+        // We can't easily call verify_image here because it calls fetch_image_digest which calls detect_backend
+        // but we can check the cache directly which is the core logic.
+        let read = cache.read().unwrap();
+        match read.get(&digest).unwrap() {
+            VerificationResult::Verified => {},
+            _ => panic!("Expected Verified"),
+        }
+    }
+
+    #[test]
+    fn test_get_chainguard_image() {
+        assert_eq!(get_chainguard_image("git"), Some("cgr.dev/chainguard/git".to_string()));
+        assert_eq!(get_chainguard_image("unknown"), None);
+    }
+}

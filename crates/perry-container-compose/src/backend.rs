@@ -41,6 +41,7 @@ pub trait ContainerBackend: Send + Sync {
     async fn remove_network(&self, name: &str) -> Result<()>;
     async fn create_volume(&self, name: &str, config: &VolumeConfig) -> Result<()>;
     async fn remove_volume(&self, name: &str) -> Result<()>;
+    async fn build(&self, context: &str, build: &ComposeServiceBuild, tag: &str) -> Result<()>;
 }
 
 pub trait CliProtocol: Send + Sync {
@@ -313,6 +314,10 @@ impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
     async fn remove_network(&self, name: &str) -> Result<()> { self.exec_ok(self.protocol.remove_network_args(name)).await?; Ok(()) }
     async fn create_volume(&self, name: &str, config: &VolumeConfig) -> Result<()> { self.exec_ok(self.protocol.create_volume_args(name, config)).await?; Ok(()) }
     async fn remove_volume(&self, name: &str) -> Result<()> { self.exec_ok(self.protocol.remove_volume_args(name)).await?; Ok(()) }
+    async fn build(&self, context: &str, build: &ComposeServiceBuild, tag: &str) -> Result<()> {
+        self.exec_ok(self.protocol.build_args(context, build, tag)).await?;
+        Ok(())
+    }
 }
 
 pub type DockerBackend = CliBackend<DockerProtocol>;
@@ -324,19 +329,94 @@ pub async fn detect_backend() -> std::result::Result<Box<dyn ContainerBackend>, 
         return probe_candidate(&name).await
             .map_err(|reason| vec![BackendProbeResult { name: name.clone(), available: false, reason }]);
     }
-    let candidates: &[&str] = match std::env::consts::OS {
-        "macos" | "ios" => &["apple/container", "orbstack", "colima", "rancher-desktop", "podman", "lima", "docker"],
-        _ => &["podman", "nerdctl", "docker"],
-    };
+    let candidates = get_platform_candidates();
     let mut results = Vec::new();
-    for &name in candidates {
+    for name in candidates {
         match timeout(Duration::from_secs(2), probe_candidate(name)).await {
             Ok(Ok(backend)) => return Ok(backend),
-            Ok(Err(reason)) => results.push(BackendProbeResult { name: name.into(), available: false, reason }),
-            Err(_) => results.push(BackendProbeResult { name: name.into(), available: false, reason: "timed out".into() }),
+            Ok(Err(reason)) => results.push(BackendProbeResult { name: (*name).into(), available: false, reason }),
+            Err(_) => results.push(BackendProbeResult { name: (*name).into(), available: false, reason: "timed out".into() }),
         }
     }
     Err(results)
+}
+
+pub async fn probe_all_backends() -> Vec<BackendProbeResult> {
+    let candidates = get_platform_candidates();
+    let mut results = Vec::new();
+    for name in candidates {
+        let res = match timeout(Duration::from_secs(2), probe_candidate(name)).await {
+            Ok(Ok(_)) => BackendProbeResult { name: (*name).into(), available: true, reason: "".into() },
+            Ok(Err(reason)) => BackendProbeResult { name: (*name).into(), available: false, reason },
+            Err(_) => BackendProbeResult { name: (*name).into(), available: false, reason: "timed out".into() },
+        };
+        results.push(res);
+    }
+    results
+}
+
+fn get_platform_candidates() -> &'static [&'static str] {
+    match std::env::consts::OS {
+        "macos" | "ios" => &["apple/container", "orbstack", "colima", "rancher-desktop", "podman", "lima", "docker"],
+        "linux" => &["podman", "nerdctl", "docker"],
+        _ => &["podman", "nerdctl", "docker"],
+    }
+}
+
+async fn check_podman_machine_running(bin: &Path) -> std::result::Result<(), String> {
+    if std::env::consts::OS != "macos" { return Ok(()); }
+    let output = Command::new(bin).args(["machine", "ls", "--format", "json"]).output().await
+        .map_err(|e| e.to_string())?;
+    let json: Value = serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
+    if let Some(arr) = json.as_array() {
+        if arr.iter().any(|m| m["Running"].as_bool().unwrap_or(false)) {
+            return Ok(());
+        }
+    }
+    Err("No podman machine running".into())
+}
+
+async fn check_colima_running() -> std::result::Result<(), String> {
+    let bin = which::which("colima").map_err(|_| "colima not found")?;
+    let output = Command::new(bin).arg("status").output().await.map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.contains("running") {
+        Ok(())
+    } else {
+        Err("colima not running".into())
+    }
+}
+
+async fn check_lima_running_instance() -> std::result::Result<String, String> {
+    let bin = which::which("limactl").map_err(|_| "limactl not found")?;
+    let output = Command::new(bin).args(["list", "--json"]).output().await.map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if let Ok(v) = serde_json::from_str::<Value>(line) {
+            if v["status"].as_str() == Some("Running") {
+                return Ok(v["name"].as_str().unwrap_or("default").to_string());
+            }
+        }
+    }
+    Err("No running lima instance found".into())
+}
+
+async fn check_orbstack_available() -> std::result::Result<(), String> {
+    if which::which("orb").is_ok() { return Ok(()); }
+    let home = std::env::var("HOME").map_err(|_| "HOME not set")?;
+    let socket = Path::new(&home).join(".orbstack/run/docker.sock");
+    if socket.exists() { Ok(()) } else { Err("OrbStack not found".into()) }
+}
+
+async fn check_rancher_desktop_available() -> std::result::Result<(), String> {
+    let bin = which::which("nerdctl").map_err(|_| "nerdctl not found")?;
+    let home = std::env::var("HOME").map_err(|_| "HOME not set")?;
+    let socket = Path::new(&home).join(".rd/run/containerd-shim.sock");
+    if socket.exists() { Ok(()) } else {
+        // fallback to just binary check
+        let _ = Command::new(bin).arg("--version").output().await.map_err(|e| e.to_string())?;
+        Ok(())
+    }
 }
 
 async fn probe_candidate(name: &str) -> std::result::Result<Box<dyn ContainerBackend>, String> {
@@ -347,23 +427,35 @@ async fn probe_candidate(name: &str) -> std::result::Result<Box<dyn ContainerBac
         }
         "podman" => {
             let bin = which::which("podman").map_err(|_| "not found")?;
+            check_podman_machine_running(&bin).await?;
             Ok(Box::new(DockerBackend::new(bin, DockerProtocol)))
         }
         "orbstack" => {
-            let bin = which::which("orb").or_else(|_| which::which("docker")).map_err(|_| "not found")?;
+            check_orbstack_available().await?;
+            let bin = which::which("orb").or_else(|_| which::which("docker")).unwrap_or_else(|_| PathBuf::from("docker"));
             Ok(Box::new(DockerBackend::new(bin, DockerProtocol)))
         }
         "colima" => {
-            let bin = which::which("docker").map_err(|_| "not found")?;
+            check_colima_running().await?;
+            let bin = which::which("docker").map_err(|_| "docker not found")?;
             Ok(Box::new(DockerBackend::new(bin, DockerProtocol)))
         }
         "lima" => {
-            let bin = which::which("limactl").map_err(|_| "not found")?;
-            Ok(Box::new(LimaBackend::new(bin, LimaProtocol { instance: "default".into() })))
+            let instance = check_lima_running_instance().await?;
+            let bin = which::which("limactl").unwrap();
+            Ok(Box::new(LimaBackend::new(bin, LimaProtocol { instance })))
         }
-        "nerdctl" | "docker" | "rancher-desktop" => {
-            let bin_name = if name == "rancher-desktop" { "nerdctl" } else { name };
-            let bin = which::which(bin_name).map_err(|_| "not found")?;
+        "rancher-desktop" => {
+            check_rancher_desktop_available().await?;
+            let bin = which::which("nerdctl").unwrap();
+            Ok(Box::new(DockerBackend::new(bin, DockerProtocol)))
+        }
+        "nerdctl" => {
+            let bin = which::which("nerdctl").map_err(|_| "not found")?;
+            Ok(Box::new(DockerBackend::new(bin, DockerProtocol)))
+        }
+        "docker" => {
+            let bin = which::which("docker").map_err(|_| "not found")?;
             Ok(Box::new(DockerBackend::new(bin, DockerProtocol)))
         }
         _ => Err("unknown".into()),
@@ -385,4 +477,39 @@ fn parse_container_info_from_json(json: &Value) -> Result<ContainerInfo> {
 fn parse_image_info_from_json(json: &Value) -> Result<ImageInfo> {
     let id = json["Id"].as_str().or(json["ID"].as_str()).unwrap_or("").to_string();
     Ok(ImageInfo { id, repository: json["Repository"].as_str().unwrap_or("").to_string(), tag: json["Tag"].as_str().unwrap_or("").to_string(), size: json["Size"].as_u64().unwrap_or(0), created: json["Created"].as_str().unwrap_or("").to_string() })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_detect_backend_override() {
+        std::env::set_var("PERRY_CONTAINER_BACKEND", "nonexistent");
+        let res = detect_backend().await;
+        match res {
+            Err(errs) => {
+                assert_eq!(errs[0].name, "nonexistent");
+            }
+            Ok(_) => panic!("Expected error for nonexistent backend"),
+        }
+        std::env::remove_var("PERRY_CONTAINER_BACKEND");
+    }
+
+    #[test]
+    fn test_docker_protocol_name() {
+        let p = DockerProtocol;
+        assert_eq!(p.protocol_name(), "docker-compatible");
+    }
+
+    #[test]
+    fn test_apple_protocol_args() {
+        let p = AppleContainerProtocol;
+        let spec = ContainerSpec {
+            image: "nginx".into(),
+            ..Default::default()
+        };
+        let args = p.run_args(&spec);
+        assert!(!args.contains(&"-d".to_string()));
+    }
 }
