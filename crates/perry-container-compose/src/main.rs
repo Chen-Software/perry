@@ -12,9 +12,7 @@ async fn main() {
         .with_target(false)
         .init();
 
-    let cli = Cli::parse();
-
-    if let Err(e) = run(cli).await {
+    if let Err(e) = run().await {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     }

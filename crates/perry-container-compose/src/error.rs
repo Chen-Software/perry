@@ -5,6 +5,7 @@ pub struct BackendProbeResult {
     pub name: String,
     pub available: bool,
     pub reason: String,
+    pub version: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -51,5 +52,22 @@ pub type Result<T> = std::result::Result<T, ComposeError>;
 impl ComposeError {
     pub fn validation(message: String) -> Self {
         ComposeError::ValidationError { message }
+    }
+
+    pub fn to_js_json(&self) -> String {
+        let code = match self {
+            ComposeError::NotFound(_) | ComposeError::FileNotFound { .. } => 404,
+            ComposeError::BackendError { code, .. } => *code,
+            ComposeError::DependencyCycle { .. } => 422,
+            ComposeError::ValidationError { .. } | ComposeError::ParseError(_) | ComposeError::JsonError(_) => 400,
+            ComposeError::VerificationFailed { .. } => 403,
+            ComposeError::NoBackendFound { .. } | ComposeError::BackendNotAvailable { .. } => 503,
+            _ => 500,
+        };
+        serde_json::json!({
+            "message": self.to_string(),
+            "code": code
+        })
+        .to_string()
     }
 }
