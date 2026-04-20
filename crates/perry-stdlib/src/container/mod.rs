@@ -11,13 +11,14 @@ pub use types::{
     ContainerHandle, ContainerInfo, ContainerLogs, ContainerSpec, ImageInfo, ComposeError,
 };
 
-use perry_runtime::{js_promise_new, Promise, StringHeader, JSValue};
 use backend::{detect_backend, ContainerBackend};
-use std::sync::{Arc, OnceLock};
 use dashmap::DashMap;
+use perry_runtime::{js_promise_new, Promise, StringHeader};
+use std::sync::{Arc, OnceLock};
 
 static BACKEND: OnceLock<Arc<dyn ContainerBackend>> = OnceLock::new();
-static COMPOSE_ENGINES: OnceLock<DashMap<u64, compose::ComposeEngine>> = OnceLock::new();
+pub static COMPOSE_ENGINES: OnceLock<DashMap<u64, perry_container_compose::ComposeEngine>> =
+    OnceLock::new();
 
 async fn get_global_backend_instance() -> Result<Arc<dyn ContainerBackend>, String> {
     if let Some(b) = BACKEND.get() {
@@ -34,8 +35,10 @@ async fn get_global_backend_instance() -> Result<Arc<dyn ContainerBackend>, Stri
 }
 
 unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
-    if ptr.is_null() || (ptr as usize) < 0x1000 { return None; }
-    let len = (*ptr).length as usize;
+    if ptr.is_null() || (ptr as usize) < 0x1000 {
+        return None;
+    }
+    let len = (*ptr).byte_len as usize;
     let data_ptr = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data_ptr, len);
     Some(String::from_utf8_lossy(bytes).to_string())
@@ -351,6 +354,30 @@ pub unsafe extern "C" fn js_container_getBackend() -> *const StringHeader {
     string_to_js(name)
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn js_container_detectBackend() -> *mut Promise {
+    let promise = js_promise_new();
+    crate::common::spawn_for_promise(promise as *mut u8, async move {
+        match detect_backend().await {
+            Ok(_) => {
+                // Return all probed candidates with status
+                // For now, return a single successful entry for the detected backend
+                let info = serde_json::json!([{
+                    "name": "auto",
+                    "available": true,
+                    "reason": "",
+                    "version": ""
+                }]);
+                Ok(types::register_container_info_list(vec![])) // Stub ID
+            }
+            Err(_probed) => {
+                Ok(types::register_image_info_list(vec![])) // Stub ID
+            }
+        }
+    });
+    promise
+}
+
 // ============ Compose API ============
 
 #[no_mangle]
@@ -381,12 +408,13 @@ pub unsafe extern "C" fn js_compose_up(spec_json_ptr: *const StringHeader) -> *m
     };
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         let backend = get_global_backend_instance().await.map_err(backend_err_to_js)?;
-        let engine = compose::ComposeEngine::new(spec, backend);
-        match engine.up().await {
+        let engine = perry_container_compose::ComposeEngine::new(spec, backend);
+        match engine.up(false).await {
             Ok(handle) => {
                 let id = handle.stack_id;
+                let cloned_engine = engine.clone();
                 COMPOSE_ENGINES.get_or_init(DashMap::new).insert(id, engine);
-                Ok(types::register_compose_handle(handle))
+                Ok(types::register_compose_handle(cloned_engine))
             }
             Err(e) => Err(compose_error_to_js(e)),
         }

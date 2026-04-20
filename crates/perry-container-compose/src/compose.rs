@@ -1,9 +1,9 @@
 use indexmap::IndexMap;
 use crate::error::{ComposeError, Result};
 use crate::types::{ComposeSpec, ContainerInfo, ContainerLogs, ContainerSpec, ComposeHandle, ContainerHandle, ListOrDict};
-use crate::backend::ContainerBackend;
-use crate::service::generate_name;
-use std::collections::{BTreeSet};
+use crate::backend::{ContainerBackend, NetworkConfig, VolumeConfig};
+use crate::service::{generate_name, needs_build};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -72,7 +72,7 @@ impl ComposeEngine {
         Ok(order)
     }
 
-    pub async fn up(&self) -> Result<ComposeHandle> {
+    pub async fn up(&self, build: bool) -> Result<ComposeHandle> {
         let order = Self::resolve_startup_order(&self.spec)?;
         let mut created_networks = Vec::new();
         let mut created_volumes = Vec::new();
@@ -81,7 +81,19 @@ impl ComposeEngine {
         if let Some(networks) = &self.spec.networks {
             for (name, config) in networks {
                 let config = config.clone().unwrap_or_default();
-                if let Err(e) = self.backend.create_network(name, &config).await {
+                let net_config = NetworkConfig {
+                    driver: config.driver,
+                    labels: match config.labels {
+                        Some(ListOrDict::Dict(d)) => d
+                            .iter()
+                            .map(|(k, v)| (k.clone(), format!("{:?}", v)))
+                            .collect(),
+                        _ => HashMap::new(),
+                    },
+                    internal: config.internal.unwrap_or(false),
+                    enable_ipv6: config.enable_ipv6.unwrap_or(false),
+                };
+                if let Err(e) = self.backend.create_network(name, &net_config).await {
                     self.rollback(&started_containers, &created_networks, &created_volumes).await;
                     return Err(e);
                 }
@@ -92,7 +104,14 @@ impl ComposeEngine {
         if let Some(volumes) = &self.spec.volumes {
             for (name, config) in volumes {
                 let config = config.clone().unwrap_or_default();
-                if let Err(e) = self.backend.create_volume(name, &config).await {
+                let vol_config = VolumeConfig {
+                    driver: config.driver,
+                    labels: match config.labels {
+                         Some(ListOrDict::Dict(d)) => d.iter().map(|(k, v)| (k.clone(), format!("{:?}", v))).collect(),
+                         _ => HashMap::new(),
+                    },
+                };
+                if let Err(e) = self.backend.create_volume(name, &vol_config).await {
                     self.rollback(&started_containers, &created_networks, &created_volumes).await;
                     return Err(e);
                 }
@@ -100,12 +119,40 @@ impl ComposeEngine {
             }
         }
 
+        let existing_containers = self.backend.list(true).await?;
+        let existing_map: HashMap<String, ContainerInfo> = existing_containers.into_iter().map(|c| (c.name.clone(), c)).collect();
+
         for service_name in order {
             let service = self.spec.services.get(&service_name).unwrap();
+            let container_name = generate_name(service)?;
+
+            if let Some(existing) = existing_map.get(&container_name) {
+                if existing.status == "running" {
+                    continue;
+                } else {
+                    self.backend.start(&existing.id).await?;
+                    started_containers.push((service_name, ContainerHandle { id: existing.id.clone(), name: Some(container_name) }));
+                    continue;
+                }
+            }
+
             let image = service.image.clone().unwrap_or_default();
+
+            if build || needs_build(service) {
+                 if let Some(build_spec) = &service.build {
+                      let (context, build_config) = match build_spec {
+                           crate::types::BuildSpec::Context(c) => (c.clone(), crate::types::ComposeServiceBuild::default()),
+                           crate::types::BuildSpec::Config(c) => (c.context.clone().unwrap_or_else(|| ".".into()), c.clone()),
+                      };
+                      self.backend.build_image(&context, &build_config, &image).await?;
+                 }
+            } else {
+                 self.backend.pull_image(&image).await?;
+            }
+
             let container_spec = ContainerSpec {
                 image: image.clone(),
-                name: Some(generate_name(&image, &service_name)),
+                name: Some(container_name.clone()),
                 ports: service.ports.as_ref().map(|p| p.iter().map(|ps| format!("{:?}", ps)).collect()),
                 volumes: service.volumes.as_ref().map(|v| v.iter().map(|vs| format!("{:?}", vs)).collect()),
                 env: match &service.environment {
@@ -129,10 +176,7 @@ impl ComposeEngine {
                 }
                 Err(e) => {
                     self.rollback(&started_containers, &created_networks, &created_volumes).await;
-                    return Err(ComposeError::ServiceStartupFailed {
-                        service: service_name,
-                        message: e.to_string(),
-                    });
+                    return Err(e);
                 }
             }
         }
