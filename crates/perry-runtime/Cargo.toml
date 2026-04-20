@@ -23,6 +23,9 @@ stdlib = []
 geisterhand = []
 # iOS/tvOS game loop: provides main() that spawns user code on game thread + UIApplicationMain
 ios-game-loop = []
+# watchOS game loop: provides main() that spawns user code on game thread + WKApplicationMain.
+# For Metal/wgpu engines that need to own the draw surface (see crates/perry-runtime/src/watchos_game_loop.rs).
+watchos-game-loop = []
 
 [dependencies]
 thiserror.workspace = true

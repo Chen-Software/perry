@@ -70,6 +70,8 @@ pub mod geisterhand_registry;
 pub mod proxy;
 #[cfg(all(any(target_os = "ios", target_os = "tvos"), feature = "ios-game-loop"))]
 pub mod ios_game_loop;
+#[cfg(all(target_os = "watchos", feature = "watchos-game-loop"))]
+pub mod watchos_game_loop;
 
 pub use value::JSValue;
 pub use promise::Promise;

@@ -1070,6 +1070,7 @@ impl OptimizedLibs {
 fn build_optimized_libs(
     ctx: &CompilationContext,
     target: Option<&str>,
+    cli_features: &[String],
     format: OutputFormat,
     verbose: u8,
 ) -> OptimizedLibs {
@@ -1174,6 +1175,15 @@ fn build_optimized_libs(
     ];
     for f in &features {
         cross_features.push(format!("perry-stdlib/{}", f));
+    }
+    // CLI `--features` values that target the runtime (game-loop entry-point
+    // shims gated behind `ios-game-loop` / `watchos-game-loop` in
+    // `perry-runtime/Cargo.toml`) need `perry-runtime/<f>` passed through, not
+    // `perry-stdlib/<f>` — they gate a Rust module, not an npm dep surface.
+    for f in cli_features {
+        if f == "ios-game-loop" || f == "watchos-game-loop" {
+            cross_features.push(format!("perry-runtime/{}", f));
+        }
     }
     if !cross_features.is_empty() {
         cargo_cmd.arg("--features").arg(cross_features.join(","));
@@ -4750,7 +4760,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
     let optimized_libs: OptimizedLibs = if args.no_auto_optimize {
         OptimizedLibs::empty()
     } else {
-        build_optimized_libs(&ctx, target.as_deref(), format, verbose)
+        build_optimized_libs(&ctx, target.as_deref(), &compiled_features, format, verbose)
     };
     let stdlib_lib_resolved: Option<PathBuf> = optimized_libs.stdlib.clone()
         .or_else(|| find_stdlib_library(target.as_deref()));
@@ -5158,11 +5168,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
 
     // For cross-compilation targets, use the appropriate toolchain
     let mut cmd = if is_watchos {
-        // watchOS uses swiftc to compile the PerryWatchApp.swift runtime alongside linking
+        let is_watchos_game_loop = compiled_features.iter().any(|f| f == "watchos-game-loop");
         let sdk = if target.as_deref() == Some("watchos-simulator") { "watchsimulator" } else { "watchos" };
-        let swiftc = String::from_utf8(
-            Command::new("xcrun").args(["--sdk", sdk, "--find", "swiftc"]).output()?.stdout
-        )?.trim().to_string();
         let sysroot = String::from_utf8(
             Command::new("xcrun").args(["--sdk", sdk, "--show-sdk-path"]).output()?.stdout
         )?.trim().to_string();
@@ -5172,16 +5179,14 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
             "arm64_32-apple-watchos10.0"
         };
 
-        let swift_runtime = find_watchos_swift_runtime()
-            .ok_or_else(|| anyhow!(
-                "PerryWatchApp.swift not found. Expected next to perry binary or in source tree."
-            ))?;
-
-        // Rename _main to _perry_main_init in the entry object file so it doesn't
-        // conflict with the SwiftUI @main entry point in PerryWatchApp.swift.
-        // The Swift runtime calls perry_main_init() to initialize the compiled TS code.
-        // The entry object is the one whose stem matches the user's input file stem
-        // (e.g. `test_ui_counter.ts` → `test_ui_counter_ts.o`).
+        // Find the entry object whose stem matches the user's input file stem
+        // (e.g. `test_ui_counter.ts` → `test_ui_counter_ts.o`). Two rename targets:
+        //   - Default (SwiftUI-tree app shell): `_main → _perry_main_init`, so the
+        //     Swift `@main struct PerryApp` entry wins and calls back into TS init.
+        //   - `--features watchos-game-loop`: `_main → _perry_user_main`, so the
+        //     Rust runtime's `main()` (watchos_game_loop.rs) takes over the process
+        //     entry, spawns the user's TS on a background thread, and calls
+        //     `WKApplicationMain` on the main thread for a Metal/wgpu surface.
         let input_stem = args.input.file_stem()
             .and_then(|s| s.to_str())
             .map(|s| format!("{}_ts", s))
@@ -5189,7 +5194,6 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
         if let Some(entry_obj) = obj_paths.iter().find(|f| {
             f.file_stem().and_then(|s| s.to_str()) == Some(input_stem.as_str())
         }) {
-            // Use rust-objcopy (newer Rust) or llvm-objcopy (older) to rename _main
             let objcopy = std::env::var("HOME").ok()
                 .map(|h| PathBuf::from(h).join(".rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/bin/rust-objcopy"))
                 .filter(|p| p.exists())
@@ -5197,18 +5201,43 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
                     .map(|h| PathBuf::from(h).join(".rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/bin/llvm-objcopy"))
                     .filter(|p| p.exists()))
                 .unwrap_or_else(|| PathBuf::from("rust-objcopy"));
+            let rename = if is_watchos_game_loop {
+                "_main=__perry_user_main"
+            } else {
+                "_main=_perry_main_init"
+            };
             let _ = Command::new(&objcopy)
-                .args(["--redefine-sym", "_main=_perry_main_init"])
+                .args(["--redefine-sym", rename])
                 .arg(entry_obj)
                 .status();
         }
 
-        let mut c = Command::new(swiftc);
-        c.arg("-target").arg(triple)
-         .arg("-sdk").arg(&sysroot)
-         .arg("-parse-as-library")
-         .arg(&swift_runtime);
-        c
+        if is_watchos_game_loop {
+            // Game-loop: no SwiftUI scene tree — the native lib owns a
+            // CAMetalLayer-backed view and `perry-runtime/watchos-game-loop`
+            // provides the C `main()`. Link with clang, not swiftc.
+            let clang = String::from_utf8(
+                Command::new("xcrun").args(["--sdk", sdk, "--find", "clang"]).output()?.stdout
+            )?.trim().to_string();
+            let mut c = Command::new(clang);
+            c.arg("-target").arg(triple)
+             .arg("-isysroot").arg(&sysroot);
+            c
+        } else {
+            let swiftc = String::from_utf8(
+                Command::new("xcrun").args(["--sdk", sdk, "--find", "swiftc"]).output()?.stdout
+            )?.trim().to_string();
+            let swift_runtime = find_watchos_swift_runtime()
+                .ok_or_else(|| anyhow!(
+                    "PerryWatchApp.swift not found. Expected next to perry binary or in source tree."
+                ))?;
+            let mut c = Command::new(swiftc);
+            c.arg("-target").arg(triple)
+             .arg("-sdk").arg(&sysroot)
+             .arg("-parse-as-library")
+             .arg(&swift_runtime);
+            c
+        }
     } else if is_ios && is_cross_ios {
         // Cross-compile iOS from Linux using ld64.lld + Apple SDK sysroot
         let ld64 = find_llvm_tool("ld64.lld")
@@ -5607,14 +5636,25 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
     }
 
     if is_watchos {
-        // watchOS frameworks (swiftc auto-links Swift stdlib)
-        cmd.arg("-framework").arg("SwiftUI")
-           .arg("-framework").arg("WatchKit")
+        // watchOS frameworks (swiftc auto-links Swift stdlib on the non-game-loop path)
+        let is_watchos_game_loop = compiled_features.iter().any(|f| f == "watchos-game-loop");
+        if !is_watchos_game_loop {
+            cmd.arg("-framework").arg("SwiftUI");
+        }
+        cmd.arg("-framework").arg("WatchKit")
            .arg("-framework").arg("Foundation")
            .arg("-framework").arg("CoreFoundation")
            .arg("-framework").arg("Security")
            .arg("-lSystem")
            .arg("-lresolv");
+        if is_watchos_game_loop {
+            // QuartzCore for CAMetalLayer-backed rendering (Metal.framework is NOT
+            // in the watchOS SDK — the native lib must dlopen it or supply its own
+            // path to the device's Metal dylib). -lobjc for the dynamic
+            // WKApplicationDelegate class registered from watchos_game_loop.rs.
+            cmd.arg("-framework").arg("QuartzCore")
+               .arg("-lobjc");
+        }
     } else if is_ios {
         // iOS frameworks
         cmd.arg("-framework").arg("UIKit")
