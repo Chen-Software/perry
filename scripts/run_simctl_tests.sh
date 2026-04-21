@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# Tier-2: run UI doc-examples inside the iOS Simulator via xcrun simctl.
+#
+# Requires Xcode + iOS SDK. Each UI example that lists `ios-simulator` in its
+# banner `targets:` line gets compiled with `perry compile --target
+# ios-simulator`, installed on the booted simulator, and launched with
+# `PERRY_UI_TEST_MODE=1 PERRY_UI_TEST_EXIT_AFTER_MS=500`. perry-ui-ios'
+# install_test_mode_exit_timer() exits(0) after the first frame; a timeout
+# wrapper kills the process if the exit never fires.
+#
+# Usage:
+#   DEVICE="iPhone 15" ./scripts/run_simctl_tests.sh
+#   ./scripts/run_simctl_tests.sh --filter ui/counter
+#
+# Env:
+#   DEVICE              — simulator device name (default: "iPhone 15")
+#   PERRY_BIN           — path to perry (default: target/release/perry)
+#   BUNDLE_ID_PREFIX    — bundle-id prefix (default: com.perry.doctests)
+#   KEEP_BOOTED         — if "1", don't shut the simulator down after run
+#   LAUNCH_TIMEOUT      — per-example launch timeout in seconds (default: 30)
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
+
+DEVICE="${DEVICE:-iPhone 15}"
+PERRY_BIN="${PERRY_BIN:-$REPO_ROOT/target/release/perry}"
+BUNDLE_ID_PREFIX="${BUNDLE_ID_PREFIX:-com.perry.doctests}"
+LAUNCH_TIMEOUT="${LAUNCH_TIMEOUT:-30}"
+
+FILTER=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --filter) FILTER="$2"; shift 2 ;;
+        *) echo "unknown arg: $1" >&2; exit 2 ;;
+    esac
+done
+
+if ! command -v xcrun >/dev/null 2>&1; then
+    echo "xcrun not found — install Xcode / command-line tools" >&2
+    exit 1
+fi
+if [ ! -x "$PERRY_BIN" ]; then
+    echo "perry binary not found at $PERRY_BIN (run \`cargo build --release -p perry\` first)" >&2
+    exit 1
+fi
+
+OUT_DIR="$REPO_ROOT/target/perry-simctl-tests"
+mkdir -p "$OUT_DIR"
+
+# Find or boot the target device.
+UDID=$(xcrun simctl list devices available -j \
+    | python3 -c "
+import json, sys, os
+target = os.environ['DEVICE']
+data = json.load(sys.stdin)
+for rt, devs in data['devices'].items():
+    for d in devs:
+        if d['name'] == target and d['isAvailable']:
+            print(d['udid'])
+            sys.exit(0)
+")
+
+if [ -z "$UDID" ]; then
+    echo "No available simulator device named '$DEVICE'. Try:" >&2
+    xcrun simctl list devices available | grep -E "iPhone|iPad" | head -10
+    exit 1
+fi
+
+echo "Using $DEVICE ($UDID)"
+
+# Boot if not already.
+STATE=$(xcrun simctl list devices | grep "$UDID" | grep -oE "\((Booted|Shutdown)\)" || true)
+if [ "$STATE" != "(Booted)" ]; then
+    echo "Booting $DEVICE ..."
+    xcrun simctl boot "$UDID"
+fi
+xcrun simctl bootstatus "$UDID" -b
+
+# Iterate UI examples whose banner includes ios-simulator.
+TOTAL=0; PASS=0; FAIL=0
+FAILURES=()
+
+while IFS= read -r -d '' src; do
+    rel="${src#$REPO_ROOT/}"
+    if [ -n "$FILTER" ] && [[ "$rel" != *"$FILTER"* ]]; then continue; fi
+    # Require `ios-simulator` in the targets banner.
+    if ! head -15 "$src" | grep -qE "^// *targets:.*ios-simulator"; then continue; fi
+
+    TOTAL=$((TOTAL+1))
+    stem=$(basename "${src%.ts}")
+    bin_out="$OUT_DIR/${stem}"
+    app_dir="${bin_out}.app"
+    bundle_id="${BUNDLE_ID_PREFIX}.${stem}"
+
+    rm -rf "$app_dir"
+
+    echo "=== $rel ==="
+    if ! "$PERRY_BIN" compile --target ios-simulator --app-bundle-id "$bundle_id" "$src" -o "$bin_out" >"$OUT_DIR/$stem.compile.log" 2>&1; then
+        echo "  COMPILE_FAIL (see $OUT_DIR/$stem.compile.log)"
+        FAIL=$((FAIL+1)); FAILURES+=("$rel COMPILE_FAIL"); continue
+    fi
+    if [ ! -d "$app_dir" ]; then
+        echo "  NO_BUNDLE ($app_dir missing after compile)"
+        FAIL=$((FAIL+1)); FAILURES+=("$rel NO_BUNDLE"); continue
+    fi
+
+    if ! xcrun simctl install "$UDID" "$app_dir" >/dev/null 2>&1; then
+        echo "  INSTALL_FAIL"
+        FAIL=$((FAIL+1)); FAILURES+=("$rel INSTALL_FAIL"); continue
+    fi
+
+    # Launch with PERRY_UI_TEST_MODE so the app self-exits after one frame.
+    # --console-pty captures the app's stdout/stderr; we wait for the launch
+    # command to return (happens when the app calls exit(0)).
+    if ! timeout "$LAUNCH_TIMEOUT" xcrun simctl launch --console-pty \
+        --terminate-running-process \
+        --setenv=PERRY_UI_TEST_MODE=1 \
+        --setenv=PERRY_UI_TEST_EXIT_AFTER_MS=500 \
+        "$UDID" "$bundle_id" >"$OUT_DIR/$stem.run.log" 2>&1
+    then
+        rc=$?
+        if [ "$rc" = "124" ]; then
+            echo "  TIMEOUT (> ${LAUNCH_TIMEOUT}s)"
+            FAIL=$((FAIL+1)); FAILURES+=("$rel TIMEOUT")
+        else
+            echo "  RUN_FAIL (exit $rc, see $OUT_DIR/$stem.run.log)"
+            FAIL=$((FAIL+1)); FAILURES+=("$rel RUN_FAIL")
+        fi
+        # Best-effort cleanup so the next iteration starts clean.
+        xcrun simctl terminate "$UDID" "$bundle_id" >/dev/null 2>&1 || true
+        continue
+    fi
+
+    echo "  PASS"
+    PASS=$((PASS+1))
+    xcrun simctl uninstall "$UDID" "$bundle_id" >/dev/null 2>&1 || true
+done < <(find "$REPO_ROOT/docs/examples" -name "*.ts" -print0)
+
+echo
+echo "simctl-tests: $PASS/$TOTAL passed, $FAIL failed"
+if [ "$FAIL" -gt 0 ]; then
+    printf '%s\n' "${FAILURES[@]}"
+fi
+
+if [ "${KEEP_BOOTED:-0}" != "1" ]; then
+    xcrun simctl shutdown "$UDID" || true
+fi
+
+[ "$FAIL" -eq 0 ]

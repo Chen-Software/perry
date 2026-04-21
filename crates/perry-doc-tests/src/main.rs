@@ -599,16 +599,28 @@ fn cross_compile_one(
     target: &str,
 ) -> ExampleReport {
     let stem = safe_stem(rel);
+    // Output-path extension: perry itself creates the .app bundle directory
+    // from a plain executable path (see crates/perry/src/commands/compile.rs
+    // where `exe_path.with_extension("app")` sets up the bundle). If we
+    // pass `foo.app` as -o, perry links a FILE at `foo.app`, then tries to
+    // mkdir at the same path and copy the file into it — ENOTDIR.
     let ext = match target {
         "web" => ".html",
         "wasm" => ".wasm",
         "windows" => ".exe",
         "android" => ".apk",
-        "ios" | "ios-simulator" | "tvos" | "tvos-simulator" | "watchos"
-        | "watchos-simulator" | "ios-widget" | "ios-widget-simulator" => ".app",
         _ => "",
     };
     let out = out_dir.join(format!("{stem}__{target}{ext}"));
+    // For Apple bundle targets, perry produces `<out>.app/` alongside (or
+    // replacing) the linked binary; check that directory for the artifact.
+    let artifact_check = match target {
+        "ios" | "ios-simulator" | "tvos" | "tvos-simulator" | "watchos"
+        | "watchos-simulator" | "ios-widget" | "ios-widget-simulator" => {
+            out.with_extension("app")
+        }
+        _ => out.clone(),
+    };
 
     let output = match Command::new(perry_bin)
         .arg("compile")
@@ -647,17 +659,17 @@ fn cross_compile_one(
 
     // Verify the artifact landed and has bytes. Apple .app targets produce
     // a directory bundle rather than a single file.
-    let ok = if out.is_dir() {
-        std::fs::read_dir(&out).map(|it| it.count() > 0).unwrap_or(false)
+    let ok = if artifact_check.is_dir() {
+        std::fs::read_dir(&artifact_check).map(|it| it.count() > 0).unwrap_or(false)
     } else {
-        out.metadata().map(|m| m.len() > 0).unwrap_or(false)
+        artifact_check.metadata().map(|m| m.len() > 0).unwrap_or(false)
     };
     if !ok {
         return ExampleReport {
             file: rel.to_string(),
             kind: ex.kind,
             status: Status::CrossCompileFail,
-            detail: format!("target=`{target}`: artifact missing or empty at {}", out.display()),
+            detail: format!("target=`{target}`: artifact missing or empty at {}", artifact_check.display()),
             duration_ms: 0,
         };
     }

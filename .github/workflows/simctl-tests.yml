@@ -1,0 +1,65 @@
+name: Simulator Tests (iOS)
+
+# Tier-2 UI doc-example verification: compile for --target ios-simulator,
+# install on a booted simulator, launch with PERRY_UI_TEST_MODE=1, check
+# for clean exit. Slower than the PR-gate doc-tests because the simulator
+# cold-boot takes 30-60s; run on tag pushes and manual dispatch, not on
+# every PR.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      device:
+        description: "Simulator device name (default: iPhone 15)"
+        required: false
+        default: "iPhone 15"
+
+concurrency:
+  group: simctl-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  MACOSX_DEPLOYMENT_TARGET: "13.0"
+
+jobs:
+  simctl:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install iOS simulator Rust target
+        run: rustup target add aarch64-apple-ios-sim
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build perry + iOS UI lib
+        run: |
+          cargo build --release -p perry -p perry-runtime -p perry-stdlib
+          cargo build --release -p perry-ui-ios --target aarch64-apple-ios-sim
+
+      - name: Run simctl doc-example verification
+        run: ./scripts/run_simctl_tests.sh
+        env:
+          DEVICE: ${{ github.event.inputs.device || 'iPhone 15' }}
+
+      - name: Upload simctl logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: simctl-logs
+          path: target/perry-simctl-tests/*.log
+          if-no-files-found: warn
