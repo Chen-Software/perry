@@ -53,6 +53,7 @@ pub trait ContainerBackend: Send + Sync {
         env: Option<&HashMap<String, String>>,
         workdir: Option<&str>,
     ) -> Result<ContainerLogs>;
+    async fn build(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Result<()>;
     async fn pull_image(&self, reference: &str) -> Result<()>;
     async fn list_images(&self) -> Result<Vec<ImageInfo>>;
     async fn remove_image(&self, reference: &str, force: bool) -> Result<()>;
@@ -60,32 +61,214 @@ pub trait ContainerBackend: Send + Sync {
     async fn remove_network(&self, name: &str) -> Result<()>;
     async fn create_volume(&self, name: &str, config: &VolumeConfig) -> Result<()>;
     async fn remove_volume(&self, name: &str) -> Result<()>;
+    async fn inspect_network(&self, name: &str) -> Result<()>;
+    async fn inspect_volume(&self, name: &str) -> Result<()>;
 }
 
 pub trait CliProtocol: Send + Sync {
+    fn protocol_name(&self) -> &str;
     fn subcommand_prefix(&self) -> Option<Vec<String>> { None }
 
-    fn run_args(&self, spec: &ContainerSpec) -> Vec<String>;
-    fn create_args(&self, spec: &ContainerSpec) -> Vec<String>;
-    fn start_args(&self, id: &str) -> Vec<String>;
-    fn stop_args(&self, id: &str, timeout: Option<u32>) -> Vec<String>;
-    fn remove_args(&self, id: &str, force: bool) -> Vec<String>;
-    fn list_args(&self, all: bool) -> Vec<String>;
-    fn inspect_args(&self, id: &str) -> Vec<String>;
-    fn logs_args(&self, id: &str, tail: Option<u32>) -> Vec<String>;
-    fn exec_args(&self, id: &str, cmd: &[String], env: Option<&HashMap<String, String>>, workdir: Option<&str>) -> Vec<String>;
-    fn pull_image_args(&self, reference: &str) -> Vec<String>;
-    fn list_images_args(&self) -> Vec<String>;
-    fn remove_image_args(&self, reference: &str, force: bool) -> Vec<String>;
-    fn create_network_args(&self, name: &str, config: &NetworkConfig) -> Vec<String>;
-    fn remove_network_args(&self, name: &str) -> Vec<String>;
-    fn create_volume_args(&self, name: &str, config: &VolumeConfig) -> Vec<String>;
-    fn remove_volume_args(&self, name: &str) -> Vec<String>;
+    fn run_args(&self, spec: &ContainerSpec) -> Vec<String> {
+        docker_run_flags(spec, true)
+    }
 
-    fn parse_list_output(&self, stdout: &str) -> Result<Vec<ContainerInfo>>;
-    fn parse_inspect_output(&self, stdout: &str) -> Result<ContainerInfo>;
-    fn parse_list_images_output(&self, stdout: &str) -> Result<Vec<ImageInfo>>;
-    fn parse_container_id(&self, stdout: &str) -> Result<String>;
+    fn create_args(&self, spec: &ContainerSpec) -> Vec<String> {
+        docker_run_flags(spec, false)
+    }
+
+    fn start_args(&self, id: &str) -> Vec<String> {
+        vec!["start".into(), id.into()]
+    }
+
+    fn stop_args(&self, id: &str, timeout: Option<u32>) -> Vec<String> {
+        let mut args = vec!["stop".into()];
+        if let Some(t) = timeout { args.extend(["--time".into(), t.to_string()]); }
+        args.push(id.into());
+        args
+    }
+
+    fn remove_args(&self, id: &str, force: bool) -> Vec<String> {
+        let mut args = vec!["rm".into()];
+        if force { args.push("-f".into()); }
+        args.push(id.into());
+        args
+    }
+
+    fn list_args(&self, all: bool) -> Vec<String> {
+        let mut args = vec!["ps".into(), "--format".into(), "json".into()];
+        if all { args.push("--all".into()); }
+        args
+    }
+
+    fn inspect_args(&self, id: &str) -> Vec<String> {
+        vec!["inspect".into(), "--format".into(), "json".into(), id.into()]
+    }
+
+    fn logs_args(&self, id: &str, tail: Option<u32>) -> Vec<String> {
+        let mut args = vec!["logs".into()];
+        if let Some(t) = tail { args.extend(["--tail".into(), t.to_string()]); }
+        args.push(id.into());
+        args
+    }
+
+    fn exec_args(&self, id: &str, cmd: &[String], env: Option<&HashMap<String, String>>, workdir: Option<&str>) -> Vec<String> {
+        let mut args = vec!["exec".into()];
+        if let Some(w) = workdir { args.extend(["--workdir".into(), w.into()]); }
+        if let Some(e) = env {
+            let mut sorted_keys: Vec<_> = e.keys().collect();
+            sorted_keys.sort();
+            for k in sorted_keys {
+                args.extend(["-e".into(), format!("{k}={}", e[k])]);
+            }
+        }
+        args.push(id.into());
+        args.extend(cmd.iter().cloned());
+        args
+    }
+
+    fn build_args(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Vec<String> {
+        let mut args = vec!["build".into(), "-t".into(), image_name.into()];
+        if let Some(df) = &spec.dockerfile { args.extend(["-f".into(), df.clone()]); }
+        if let Some(args_map) = &spec.args {
+            match args_map {
+                crate::types::ListOrDict::Dict(dict) => {
+                    for (k, v) in dict {
+                        if let Some(val) = v {
+                            args.extend(["--build-arg".into(), format!("{k}={}", val.as_str().unwrap_or(""))]);
+                        }
+                    }
+                }
+                crate::types::ListOrDict::List(list) => {
+                    for arg in list { args.extend(["--build-arg".into(), arg.clone()]); }
+                }
+            }
+        }
+        args.push(spec.context.as_deref().unwrap_or(".").into());
+        args
+    }
+
+    fn pull_image_args(&self, reference: &str) -> Vec<String> {
+        vec!["pull".into(), reference.into()]
+    }
+
+    fn list_images_args(&self) -> Vec<String> {
+        vec!["images".into(), "--format".into(), "json".into()]
+    }
+
+    fn remove_image_args(&self, reference: &str, force: bool) -> Vec<String> {
+        let mut args = vec!["rmi".into()];
+        if force { args.push("-f".into()); }
+        args.push(reference.into());
+        args
+    }
+
+    fn create_network_args(&self, name: &str, config: &NetworkConfig) -> Vec<String> {
+        let mut args = vec!["network".into(), "create".into()];
+        if let Some(d) = &config.driver { args.extend(["--driver".into(), d.clone()]); }
+        let mut sorted_keys: Vec<_> = config.labels.keys().collect();
+        sorted_keys.sort();
+        for k in sorted_keys {
+            args.extend(["--label".into(), format!("{k}={}", config.labels[k])]);
+        }
+        if config.internal { args.push("--internal".into()); }
+        if config.enable_ipv6 { args.push("--ipv6".into()); }
+        args.push(name.into());
+        args
+    }
+
+    fn remove_network_args(&self, name: &str) -> Vec<String> {
+        vec!["network".into(), "rm".into(), name.into()]
+    }
+
+    fn create_volume_args(&self, name: &str, config: &VolumeConfig) -> Vec<String> {
+        let mut args = vec!["volume".into(), "create".into()];
+        if let Some(d) = &config.driver { args.extend(["--driver".into(), d.clone()]); }
+        let mut sorted_keys: Vec<_> = config.labels.keys().collect();
+        sorted_keys.sort();
+        for k in sorted_keys {
+            args.extend(["--label".into(), format!("{k}={}", config.labels[k])]);
+        }
+        args.push(name.into());
+        args
+    }
+
+    fn remove_volume_args(&self, name: &str) -> Vec<String> {
+        vec!["volume".into(), "rm".into(), name.into()]
+    }
+
+    fn parse_list_output(&self, stdout: &str) -> Result<Vec<ContainerInfo>> {
+        let entries: Vec<DockerListEntry> = stdout.lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        Ok(entries.into_iter().map(|e| ContainerInfo {
+            id: e.id,
+            name: e.names.first().cloned().unwrap_or_default(),
+            image: e.image,
+            status: e.status,
+            ports: e.ports,
+            created: e.created,
+        }).collect())
+    }
+
+    fn parse_inspect_output(&self, stdout: &str) -> Result<ContainerInfo> {
+        let entries: Vec<DockerInspectOutput> = serde_json::from_str(stdout)?;
+        let e = entries.into_iter().next().ok_or_else(|| ComposeError::NotFound("Inspect output empty".into()))?;
+        Ok(ContainerInfo {
+            id: e.id,
+            name: e.name,
+            image: e.config.image,
+            status: e.state.status,
+            ports: vec![],
+            created: e.created,
+        })
+    }
+
+    fn parse_list_images_output(&self, stdout: &str) -> Result<Vec<ImageInfo>> {
+        let entries: Vec<DockerImageEntry> = stdout.lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        Ok(entries.into_iter().map(|e| ImageInfo {
+            id: e.id,
+            repository: e.repository,
+            tag: e.tag,
+            size: e.size,
+            created: e.created,
+        }).collect())
+    }
+
+    fn parse_container_id(&self, stdout: &str) -> Result<String> {
+        Ok(stdout.trim().to_string())
+    }
+}
+
+pub fn docker_run_flags(spec: &ContainerSpec, include_detach: bool) -> Vec<String> {
+    let mut args = if include_detach { vec!["run".into(), "--detach".into()] } else { vec!["create".into()] };
+    if let Some(name) = &spec.name { args.extend(["--name".into(), name.clone()]); }
+    if let Some(ports) = &spec.ports {
+        for port in ports { args.extend(["-p".into(), port.clone()]); }
+    }
+    if let Some(volumes) = &spec.volumes {
+        for vol in volumes { args.extend(["-v".into(), vol.clone()]); }
+    }
+    if let Some(env) = &spec.env {
+        let mut sorted_keys: Vec<_> = env.keys().collect();
+        sorted_keys.sort();
+        for k in sorted_keys {
+            args.extend(["-e".into(), format!("{k}={}", env[k])]);
+        }
+    }
+    if let Some(net) = &spec.network { args.extend(["--network".into(), net.clone()]); }
+    if spec.rm.unwrap_or(false) { args.push("--rm".into()); }
+    if let Some(ep) = &spec.entrypoint {
+        args.push("--entrypoint".into());
+        args.push(ep.join(" "));
+    }
+    args.push(spec.image.clone());
+    if let Some(cmd) = &spec.cmd {
+        for c in cmd { args.push(c.clone()); }
+    }
+    args
 }
 
 #[derive(Debug, Deserialize)]
@@ -144,213 +327,110 @@ struct DockerImageEntry {
     created: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct AppleContainerEntry {
+    configuration: AppleContainerConfiguration,
+    status: String,
+    #[serde(default)]
+    networks: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AppleContainerConfiguration {
+    id: String,
+    image: AppleContainerImage,
+    #[serde(default)]
+    labels: HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AppleContainerImage {
+    reference: String,
+}
+
 pub struct DockerProtocol;
 
 impl CliProtocol for DockerProtocol {
-    fn run_args(&self, spec: &ContainerSpec) -> Vec<String> {
-        let mut args = vec!["run".into(), "--detach".into()];
-        if let Some(name) = &spec.name { args.extend(["--name".into(), name.clone()]); }
-        for port in spec.ports.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["-p".into(), port.clone()]); }
-        for vol in spec.volumes.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["-v".into(), vol.clone()]); }
-        for (k, v) in spec.env.as_ref().iter().flat_map(|m| m.iter()) { args.extend(["-e".into(), format!("{k}={v}")]); }
-        if let Some(net) = &spec.network { args.extend(["--network".into(), net.clone()]); }
-        if spec.rm.unwrap_or(false) { args.push("--rm".into()); }
-        if let Some(ep) = &spec.entrypoint {
-            args.push("--entrypoint".into());
-            args.push(ep.join(" "));
-        }
-        args.push(spec.image.clone());
-        for c in spec.cmd.as_ref().iter().flat_map(|v| v.iter()) { args.push(c.clone()); }
-        args
-    }
-
-    fn create_args(&self, spec: &ContainerSpec) -> Vec<String> {
-        let mut args = vec!["create".into()];
-        if let Some(name) = &spec.name { args.extend(["--name".into(), name.clone()]); }
-        for port in spec.ports.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["-p".into(), port.clone()]); }
-        for vol in spec.volumes.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["-v".into(), vol.clone()]); }
-        for (k, v) in spec.env.as_ref().iter().flat_map(|m| m.iter()) { args.extend(["-e".into(), format!("{k}={v}")]); }
-        if let Some(net) = &spec.network { args.extend(["--network".into(), net.clone()]); }
-        if let Some(ep) = &spec.entrypoint {
-            args.push("--entrypoint".into());
-            args.push(ep.join(" "));
-        }
-        args.push(spec.image.clone());
-        for c in spec.cmd.as_ref().iter().flat_map(|v| v.iter()) { args.push(c.clone()); }
-        args
-    }
-
-    fn start_args(&self, id: &str) -> Vec<String> {
-        vec!["start".into(), id.into()]
-    }
-
-    fn stop_args(&self, id: &str, timeout: Option<u32>) -> Vec<String> {
-        let mut args = vec!["stop".into()];
-        if let Some(t) = timeout { args.extend(["--time".into(), t.to_string()]); }
-        args.push(id.into());
-        args
-    }
-
-    fn remove_args(&self, id: &str, force: bool) -> Vec<String> {
-        let mut args = vec!["rm".into()];
-        if force { args.push("-f".into()); }
-        args.push(id.into());
-        args
-    }
-
-    fn list_args(&self, all: bool) -> Vec<String> {
-        let mut args = vec!["ps".into(), "--format".into(), "json".into()];
-        if all { args.push("--all".into()); }
-        args
-    }
-
-    fn inspect_args(&self, id: &str) -> Vec<String> {
-        vec!["inspect".into(), "--format".into(), "json".into(), id.into()]
-    }
-
-    fn logs_args(&self, id: &str, tail: Option<u32>) -> Vec<String> {
-        let mut args = vec!["logs".into()];
-        if let Some(t) = tail { args.extend(["--tail".into(), t.to_string()]); }
-        args.push(id.into());
-        args
-    }
-
-    fn exec_args(&self, id: &str, cmd: &[String], env: Option<&HashMap<String, String>>, workdir: Option<&str>) -> Vec<String> {
-        let mut args = vec!["exec".into()];
-        if let Some(w) = workdir { args.extend(["--workdir".into(), w.into()]); }
-        if let Some(e) = env {
-            for (k, v) in e { args.extend(["-e".into(), format!("{k}={v}")]); }
-        }
-        args.push(id.into());
-        args.extend(cmd.iter().cloned());
-        args
-    }
-
-    fn pull_image_args(&self, reference: &str) -> Vec<String> {
-        vec!["pull".into(), reference.into()]
-    }
-
-    fn list_images_args(&self) -> Vec<String> {
-        vec!["images".into(), "--format".into(), "json".into()]
-    }
-
-    fn remove_image_args(&self, reference: &str, force: bool) -> Vec<String> {
-        let mut args = vec!["rmi".into()];
-        if force { args.push("-f".into()); }
-        args.push(reference.into());
-        args
-    }
-
-    fn create_network_args(&self, name: &str, config: &NetworkConfig) -> Vec<String> {
-        let mut args = vec!["network".into(), "create".into()];
-        if let Some(d) = &config.driver { args.extend(["--driver".into(), d.clone()]); }
-        for (k, v) in &config.labels {
-            args.extend(["--label".into(), format!("{k}={v}")]);
-        }
-        if config.internal { args.push("--internal".into()); }
-        if config.enable_ipv6 { args.push("--ipv6".into()); }
-        args.push(name.into());
-        args
-    }
-
-    fn remove_network_args(&self, name: &str) -> Vec<String> {
-        vec!["network".into(), "rm".into(), name.into()]
-    }
-
-    fn create_volume_args(&self, name: &str, config: &VolumeConfig) -> Vec<String> {
-        let mut args = vec!["volume".into(), "create".into()];
-        if let Some(d) = &config.driver { args.extend(["--driver".into(), d.clone()]); }
-        for (k, v) in &config.labels {
-            args.extend(["--label".into(), format!("{k}={v}")]);
-        }
-        args.push(name.into());
-        args
-    }
-
-    fn remove_volume_args(&self, name: &str) -> Vec<String> {
-        vec!["volume".into(), "rm".into(), name.into()]
-    }
-
-    fn parse_list_output(&self, stdout: &str) -> Result<Vec<ContainerInfo>> {
-        let entries: Vec<DockerListEntry> = stdout.lines()
-            .filter_map(|l| serde_json::from_str(l).ok())
-            .collect();
-        Ok(entries.into_iter().map(|e| ContainerInfo {
-            id: e.id,
-            name: e.names.first().cloned().unwrap_or_default(),
-            image: e.image,
-            status: e.status,
-            ports: e.ports,
-            created: e.created,
-        }).collect())
-    }
-
-    fn parse_inspect_output(&self, stdout: &str) -> Result<ContainerInfo> {
-        let entries: Vec<DockerInspectOutput> = serde_json::from_str(stdout)?;
-        let e = entries.into_iter().next().ok_or_else(|| ComposeError::NotFound("Inspect output empty".into()))?;
-        Ok(ContainerInfo {
-            id: e.id,
-            name: e.name,
-            image: e.config.image,
-            status: e.state.status,
-            ports: vec![],
-            created: e.created,
-        })
-    }
-
-    fn parse_list_images_output(&self, stdout: &str) -> Result<Vec<ImageInfo>> {
-        let entries: Vec<DockerImageEntry> = stdout.lines()
-            .filter_map(|l| serde_json::from_str(l).ok())
-            .collect();
-        Ok(entries.into_iter().map(|e| ImageInfo {
-            id: e.id,
-            repository: e.repository,
-            tag: e.tag,
-            size: e.size,
-            created: e.created,
-        }).collect())
-    }
-
-    fn parse_container_id(&self, stdout: &str) -> Result<String> {
-        Ok(stdout.trim().to_string())
-    }
+    fn protocol_name(&self) -> &str { "docker-compatible" }
 }
 
 pub struct AppleContainerProtocol;
 
 impl CliProtocol for AppleContainerProtocol {
+    fn protocol_name(&self) -> &str { "apple/container" }
+
     fn run_args(&self, spec: &ContainerSpec) -> Vec<String> {
         let mut args = vec!["run".into()];
         if spec.rm.unwrap_or(false) { args.push("--rm".into()); }
         if let Some(name) = &spec.name { args.extend(["--name".into(), name.clone()]); }
         if let Some(network) = &spec.network { args.extend(["--network".into(), network.clone()]); }
-        for port in spec.ports.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["-p".into(), port.clone()]); }
-        for vol in spec.volumes.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["-v".into(), vol.clone()]); }
-        for (k, v) in spec.env.as_ref().iter().flat_map(|m| m.iter()) { args.extend(["-e".into(), format!("{k}={v}")]); }
+        if let Some(ports) = &spec.ports {
+            for port in ports { args.extend(["-p".into(), port.clone()]); }
+        }
+        if let Some(volumes) = &spec.volumes {
+            for vol in volumes { args.extend(["-v".into(), vol.clone()]); }
+        }
+        if let Some(env) = &spec.env {
+            let mut sorted_keys: Vec<_> = env.keys().collect();
+            sorted_keys.sort();
+            for k in sorted_keys {
+                args.extend(["-e".into(), format!("{k}={}", env[k])]);
+            }
+        }
         args.push(spec.image.clone());
-        for c in spec.cmd.as_ref().iter().flat_map(|v| v.iter()) { args.push(c.clone()); }
+        if let Some(cmd) = &spec.cmd {
+            for c in cmd { args.push(c.clone()); }
+        }
         args
     }
 
-    fn create_args(&self, spec: &ContainerSpec) -> Vec<String> { DockerProtocol.create_args(spec) }
-    fn start_args(&self, id: &str) -> Vec<String> { DockerProtocol.start_args(id) }
-    fn stop_args(&self, id: &str, timeout: Option<u32>) -> Vec<String> { DockerProtocol.stop_args(id, timeout) }
-    fn remove_args(&self, id: &str, force: bool) -> Vec<String> { DockerProtocol.remove_args(id, force) }
-    fn list_args(&self, all: bool) -> Vec<String> { DockerProtocol.list_args(all) }
-    fn inspect_args(&self, id: &str) -> Vec<String> { DockerProtocol.inspect_args(id) }
-    fn logs_args(&self, id: &str, tail: Option<u32>) -> Vec<String> { DockerProtocol.logs_args(id, tail) }
-    fn exec_args(&self, id: &str, cmd: &[String], env: Option<&HashMap<String, String>>, workdir: Option<&str>) -> Vec<String> { DockerProtocol.exec_args(id, cmd, env, workdir) }
-    fn pull_image_args(&self, reference: &str) -> Vec<String> { DockerProtocol.pull_image_args(reference) }
-    fn list_images_args(&self) -> Vec<String> { DockerProtocol.list_images_args() }
-    fn remove_image_args(&self, reference: &str, force: bool) -> Vec<String> { DockerProtocol.remove_image_args(reference, force) }
-    fn create_network_args(&self, name: &str, config: &NetworkConfig) -> Vec<String> { DockerProtocol.create_network_args(name, config) }
-    fn remove_network_args(&self, name: &str) -> Vec<String> { DockerProtocol.remove_network_args(name) }
-    fn create_volume_args(&self, name: &str, config: &VolumeConfig) -> Vec<String> { DockerProtocol.create_volume_args(name, config) }
-    fn remove_volume_args(&self, name: &str) -> Vec<String> { DockerProtocol.remove_volume_args(name) }
-    fn parse_list_output(&self, stdout: &str) -> Result<Vec<ContainerInfo>> { DockerProtocol.parse_list_output(stdout) }
-    fn parse_inspect_output(&self, stdout: &str) -> Result<ContainerInfo> { DockerProtocol.parse_inspect_output(stdout) }
-    fn parse_list_images_output(&self, stdout: &str) -> Result<Vec<ImageInfo>> { DockerProtocol.parse_list_images_output(stdout) }
-    fn parse_container_id(&self, stdout: &str) -> Result<String> { DockerProtocol.parse_container_id(stdout) }
+    fn build_args(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Vec<String> {
+        let mut args = vec!["build".into(), "-t".into(), image_name.into()];
+        args.extend(["--cpus".into(), "2".into(), "--memory".into(), "2048MB".into(), "--arch".into(), "arm64".into(), "--os".into(), "linux".into()]);
+        if let Some(df) = &spec.dockerfile { args.extend(["-f".into(), df.clone()]); }
+        if let Some(args_map) = &spec.args {
+            match args_map {
+                crate::types::ListOrDict::Dict(dict) => {
+                    let mut sorted_keys: Vec<_> = dict.keys().collect();
+                    sorted_keys.sort();
+                    for k in sorted_keys {
+                        if let Some(val) = &dict[k] {
+                            args.extend(["--build-arg".into(), format!("{k}={}", val.as_str().unwrap_or(""))]);
+                        }
+                    }
+                }
+                crate::types::ListOrDict::List(list) => {
+                    for arg in list { args.extend(["--build-arg".into(), arg.clone()]); }
+                }
+            }
+        }
+        args.push(spec.context.as_deref().unwrap_or(".").into());
+        args
+    }
+
+    fn parse_list_output(&self, stdout: &str) -> Result<Vec<ContainerInfo>> {
+        let entries: Vec<AppleContainerEntry> = serde_json::from_str(stdout)?;
+        Ok(entries.into_iter().map(|e| ContainerInfo {
+            id: e.configuration.id,
+            name: String::new(),
+            image: e.configuration.image.reference,
+            status: e.status,
+            ports: vec![],
+            created: String::new(),
+        }).collect())
+    }
+    fn parse_inspect_output(&self, stdout: &str) -> Result<ContainerInfo> {
+        let entries: Vec<AppleContainerEntry> = serde_json::from_str(stdout)?;
+        let e = entries.into_iter().next().ok_or_else(|| ComposeError::NotFound("Inspect output empty".into()))?;
+        Ok(ContainerInfo {
+            id: e.configuration.id,
+            name: String::new(),
+            image: e.configuration.image.reference,
+            status: e.status,
+            ports: vec![],
+            created: String::new(),
+        })
+    }
 }
 
 pub struct LimaProtocol {
@@ -358,46 +438,35 @@ pub struct LimaProtocol {
 }
 
 impl CliProtocol for LimaProtocol {
+    fn protocol_name(&self) -> &str { "lima" }
+
     fn subcommand_prefix(&self) -> Option<Vec<String>> {
         Some(vec!["shell".into(), self.instance.clone(), "nerdctl".into()])
     }
-
-    fn run_args(&self, spec: &ContainerSpec) -> Vec<String> { DockerProtocol.run_args(spec) }
-    fn create_args(&self, spec: &ContainerSpec) -> Vec<String> { DockerProtocol.create_args(spec) }
-    fn start_args(&self, id: &str) -> Vec<String> { DockerProtocol.start_args(id) }
-    fn stop_args(&self, id: &str, timeout: Option<u32>) -> Vec<String> { DockerProtocol.stop_args(id, timeout) }
-    fn remove_args(&self, id: &str, force: bool) -> Vec<String> { DockerProtocol.remove_args(id, force) }
-    fn list_args(&self, all: bool) -> Vec<String> { DockerProtocol.list_args(all) }
-    fn inspect_args(&self, id: &str) -> Vec<String> { DockerProtocol.inspect_args(id) }
-    fn logs_args(&self, id: &str, tail: Option<u32>) -> Vec<String> { DockerProtocol.logs_args(id, tail) }
-    fn exec_args(&self, id: &str, cmd: &[String], env: Option<&HashMap<String, String>>, workdir: Option<&str>) -> Vec<String> { DockerProtocol.exec_args(id, cmd, env, workdir) }
-    fn pull_image_args(&self, reference: &str) -> Vec<String> { DockerProtocol.pull_image_args(reference) }
-    fn list_images_args(&self) -> Vec<String> { DockerProtocol.list_images_args() }
-    fn remove_image_args(&self, reference: &str, force: bool) -> Vec<String> { DockerProtocol.remove_image_args(reference, force) }
-    fn create_network_args(&self, name: &str, config: &NetworkConfig) -> Vec<String> { DockerProtocol.create_network_args(name, config) }
-    fn remove_network_args(&self, name: &str) -> Vec<String> { DockerProtocol.remove_network_args(name) }
-    fn create_volume_args(&self, name: &str, config: &VolumeConfig) -> Vec<String> { DockerProtocol.create_volume_args(name, config) }
-    fn remove_volume_args(&self, name: &str) -> Vec<String> { DockerProtocol.remove_volume_args(name) }
-    fn parse_list_output(&self, stdout: &str) -> Result<Vec<ContainerInfo>> { DockerProtocol.parse_list_output(stdout) }
-    fn parse_inspect_output(&self, stdout: &str) -> Result<ContainerInfo> { DockerProtocol.parse_inspect_output(stdout) }
-    fn parse_list_images_output(&self, stdout: &str) -> Result<Vec<ImageInfo>> { DockerProtocol.parse_list_images_output(stdout) }
-    fn parse_container_id(&self, stdout: &str) -> Result<String> { DockerProtocol.parse_container_id(stdout) }
 }
 
-pub struct CliBackend {
+pub struct CliBackend<P: CliProtocol> {
     pub bin: PathBuf,
-    pub protocol: Box<dyn CliProtocol>,
+    pub protocol: P,
 }
 
-impl CliBackend {
-    pub fn new(bin: PathBuf, protocol: Box<dyn CliProtocol>) -> Self {
+pub type DockerBackend = CliBackend<DockerProtocol>;
+pub type AppleBackend = CliBackend<AppleContainerProtocol>;
+pub type LimaBackend = CliBackend<LimaProtocol>;
+
+impl<P: CliProtocol> CliBackend<P> {
+    pub fn new(bin: PathBuf, protocol: P) -> Self {
         Self { bin, protocol }
     }
 
     async fn exec_raw(&self, args: &[String]) -> Result<(String, String)> {
-        let output = Command::new(&self.bin)
-            .args(args)
-            .output()
+        let mut cmd = Command::new(&self.bin);
+        if let Some(prefix) = self.protocol.subcommand_prefix() {
+            cmd.args(prefix);
+        }
+        cmd.args(args);
+
+        let output = cmd.output()
             .await
             .map_err(ComposeError::IoError)?;
 
@@ -416,15 +485,19 @@ impl CliBackend {
 }
 
 #[async_trait]
-impl ContainerBackend for CliBackend {
+impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
     fn backend_name(&self) -> &str {
         self.bin.file_name().and_then(|n| n.to_str()).unwrap_or("unknown")
     }
 
     async fn check_available(&self) -> Result<()> {
-        Command::new(&self.bin)
-            .arg("--version")
-            .output()
+        let mut cmd = Command::new(&self.bin);
+        if let Some(prefix) = self.protocol.subcommand_prefix() {
+            cmd.args(prefix);
+        }
+        cmd.arg("--version");
+
+        cmd.output()
             .await
             .map_err(ComposeError::IoError)
             .map(|_| ())
@@ -483,6 +556,11 @@ impl ContainerBackend for CliBackend {
         Ok(ContainerLogs { stdout, stderr })
     }
 
+    async fn build(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Result<()> {
+        let args = self.protocol.build_args(spec, image_name);
+        self.exec_raw(&args).await.map(|_| ())
+    }
+
     async fn pull_image(&self, reference: &str) -> Result<()> {
         let args = self.protocol.pull_image_args(reference);
         self.exec_raw(&args).await.map(|_| ())
@@ -518,6 +596,16 @@ impl ContainerBackend for CliBackend {
         let args = self.protocol.remove_volume_args(name);
         self.exec_raw(&args).await.map(|_| ())
     }
+
+    async fn inspect_network(&self, name: &str) -> Result<()> {
+        let args = vec!["network".into(), "inspect".into(), name.into()];
+        self.exec_raw(&args).await.map(|_| ())
+    }
+
+    async fn inspect_volume(&self, name: &str) -> Result<()> {
+        let args = vec!["volume".into(), "inspect".into(), name.into()];
+        self.exec_raw(&args).await.map(|_| ())
+    }
 }
 
 pub async fn probe_all_backends() -> Vec<BackendProbeResult> {
@@ -533,7 +621,7 @@ pub async fn probe_all_backends() -> Vec<BackendProbeResult> {
     results
 }
 
-pub async fn detect_backend() -> std::result::Result<CliBackend, Vec<BackendProbeResult>> {
+pub async fn detect_backend() -> std::result::Result<Box<dyn ContainerBackend>, Vec<BackendProbeResult>> {
     if let Ok(name) = std::env::var("PERRY_CONTAINER_BACKEND") {
         return probe_candidate(&name).await
             .map_err(|reason| vec![BackendProbeResult { name: name.clone(), available: false, reason }]);
@@ -561,15 +649,18 @@ fn platform_candidates() -> &'static [&'static str] {
     }
 }
 
-async fn probe_candidate(name: &str) -> std::result::Result<CliBackend, String> {
+async fn probe_candidate(name: &str) -> std::result::Result<Box<dyn ContainerBackend>, String> {
     let which_bin = |name: &str| -> std::result::Result<PathBuf, String> {
-        which::which(name).map_err(|_| format!("{} not found", name))
+        match which::which(name) {
+            Ok(p) => Ok(p),
+            Err(_) => Err(format!("{} not found", name))
+        }
     };
 
     match name {
         "apple/container" => {
             let bin = which_bin("container")?;
-            Ok(CliBackend::new(bin, Box::new(AppleContainerProtocol)))
+            Ok(Box::new(CliBackend::new(bin, AppleContainerProtocol)))
         }
         "podman" => {
             let bin = which_bin("podman")?;
@@ -580,11 +671,11 @@ async fn probe_candidate(name: &str) -> std::result::Result<CliBackend, String> 
                     return Err("no podman machine running".into());
                 }
             }
-            Ok(CliBackend::new(bin, Box::new(DockerProtocol)))
+            Ok(Box::new(CliBackend::new(bin, DockerProtocol)))
         }
         "orbstack" => {
             let bin = which_bin("orb").or_else(|_| which_bin("docker")).map_err(|_| "orbstack not found")?;
-            Ok(CliBackend::new(bin, Box::new(DockerProtocol)))
+            Ok(Box::new(CliBackend::new(bin, DockerProtocol)))
         }
         "colima" => {
             let bin = which_bin("colima")?;
@@ -593,7 +684,7 @@ async fn probe_candidate(name: &str) -> std::result::Result<CliBackend, String> 
                 return Err("colima not running".into());
             }
             let dbin = which_bin("docker").map_err(|_| "docker cli not found for colima")?;
-            Ok(CliBackend::new(dbin, Box::new(DockerProtocol)))
+            Ok(Box::new(CliBackend::new(dbin, DockerProtocol)))
         }
         "lima" => {
             let bin = which_bin("limactl")?;
@@ -603,15 +694,15 @@ async fn probe_candidate(name: &str) -> std::result::Result<CliBackend, String> 
                 .find(|v| v["status"] == "Running")
                 .and_then(|v| v["name"].as_str().map(|s| s.to_string()))
                 .ok_or("no running lima instance")?;
-            Ok(CliBackend::new(bin, Box::new(LimaProtocol { instance })))
+            Ok(Box::new(CliBackend::new(bin, LimaProtocol { instance })))
         }
         "nerdctl" => {
             let bin = which_bin("nerdctl")?;
-            Ok(CliBackend::new(bin, Box::new(DockerProtocol)))
+            Ok(Box::new(CliBackend::new(bin, DockerProtocol)))
         }
         "docker" => {
             let bin = which_bin("docker")?;
-            Ok(CliBackend::new(bin, Box::new(DockerProtocol)))
+            Ok(Box::new(CliBackend::new(bin, DockerProtocol)))
         }
         _ => Err("unknown backend".into()),
     }

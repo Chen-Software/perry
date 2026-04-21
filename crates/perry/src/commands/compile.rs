@@ -1044,6 +1044,7 @@ fn build_optimized_libs(
         &ctx.native_module_imports,
         ctx.uses_fetch,
         ctx.uses_crypto_builtins,
+        ctx.needs_container,
     );
     let feature_arg = features_to_cargo_arg(&features);
 
@@ -1062,7 +1063,8 @@ fn build_optimized_libs(
     let panic_abort_safe = !ctx.needs_ui
         && !ctx.needs_thread
         && !ctx.needs_plugins
-        && !ctx.needs_geisterhand;
+        && !ctx.needs_geisterhand
+        && !ctx.needs_container;
 
     // Locate the workspace. Without source we can't rebuild — fall back
     // to whatever's prebuilt next to perry on disk.
@@ -2209,6 +2211,9 @@ fn collect_modules(
                 // panic = "unwind" when this is set.
                 ctx.needs_thread = true;
             }
+            if import.source == "perry/container" || import.source == "perry/container-compose" {
+                ctx.needs_container = true;
+            }
             if perry_hir::requires_stdlib(&import.source) {
                 ctx.needs_stdlib = true;
                 // Track for `--minimal-stdlib` feature computation. Strip
@@ -2410,6 +2415,10 @@ fn collect_modules(
     if found_ioredis {
         ctx.needs_stdlib = true;
         ctx.native_module_imports.insert("ioredis".to_string());
+    }
+
+    if hir_module.needs_container {
+        ctx.needs_container = true;
     }
 
     ctx.native_modules.insert(canonical, hir_module);

@@ -60,7 +60,10 @@ proptest! {
 
         // Env keys preserved
         if let Some(env) = reparsed["env"].as_object() {
-            prop_assert_eq!(env.len(), env_keys.len());
+            let mut unique_keys = env_keys.clone();
+            unique_keys.sort();
+            unique_keys.dedup();
+            prop_assert_eq!(env.len(), unique_keys.len());
         }
     }
 }
@@ -131,11 +134,13 @@ proptest! {
 
     #[test]
     fn prop_list_or_dict_to_map_dict(
-        keys in proptest::collection::vec("[A-Z][A-Z0-9_]{1,8}", 1..=8),
+        mut keys in proptest::collection::vec("[A-Z][A-Z0-9_]{1,8}", 1..=8),
         int_val in 0i64..1000,
         bool_val in proptest::bool::ANY,
         str_val in "[a-z0-9_]{1,10}",
     ) {
+        keys.sort();
+        keys.dedup();
         let mut map = HashMap::new();
         // Mix different value types across keys
         for (i, key) in keys.iter().enumerate() {
@@ -224,8 +229,10 @@ proptest! {
 
     #[test]
     fn prop_depends_on_entry_service_names(
-        names in proptest::collection::vec("[a-z][a-z0-9_-]{1,10}", 1..=6),
+        mut names in proptest::collection::vec("[a-z][a-z0-9_-]{1,10}", 1..=6),
     ) {
+        names.sort();
+        names.dedup();
         // List variant
         let list_entry = ComposeDependsOnEntry::List(names.clone());
         let list_names = list_entry.service_names();

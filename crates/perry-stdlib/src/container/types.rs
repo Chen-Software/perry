@@ -159,6 +159,12 @@ impl From<perry_container_compose::types::ContainerInfo> for ContainerInfo {
     }
 }
 
+impl From<serde_json::Error> for ContainerError {
+    fn from(e: serde_json::Error) -> Self {
+        ContainerError::InvalidConfig(e.to_string())
+    }
+}
+
 /// Stdout + stderr captured from a container operation.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ContainerLogs {
@@ -703,6 +709,30 @@ pub enum ContainerError {
     NoBackendFound {
         probed: Vec<perry_container_compose::backend::BackendProbeResult>,
     },
+    ImagePullFailed {
+        service: String,
+        image: String,
+        message: String,
+    },
+}
+
+impl ContainerError {
+    pub fn to_json(&self) -> String {
+        let code = match self {
+            ContainerError::NotFound(_) => 404,
+            ContainerError::BackendError { code, .. } => *code,
+            ContainerError::VerificationFailed { .. } => 403,
+            ContainerError::DependencyCycle { .. } => 422,
+            ContainerError::NoBackendFound { .. } => 503,
+            ContainerError::InvalidConfig(_) => 400,
+            _ => 500,
+        };
+        serde_json::json!({
+            "message": self.to_string(),
+            "code": code
+        })
+        .to_string()
+    }
 }
 
 impl std::fmt::Display for ContainerError {
@@ -724,6 +754,9 @@ impl std::fmt::Display for ContainerError {
             ContainerError::InvalidConfig(msg) => write!(f, "Invalid configuration: {}", msg),
             ContainerError::NoBackendFound { probed } => {
                 write!(f, "No container backend found. Probed: {:?}", probed)
+            }
+            ContainerError::ImagePullFailed { service, image, message } => {
+                write!(f, "Image pull failed for service '{}' (image '{}'): {}", service, image, message)
             }
         }
     }
@@ -756,6 +789,15 @@ impl From<perry_container_compose::error::ComposeError> for ContainerError {
             perry_container_compose::error::ComposeError::NoBackendFound { probed } => {
                 ContainerError::NoBackendFound { probed }
             }
+            perry_container_compose::error::ComposeError::ImagePullFailed {
+                service,
+                image,
+                message,
+            } => ContainerError::ImagePullFailed {
+                service,
+                image,
+                message,
+            },
             other => ContainerError::BackendError {
                 code: -1,
                 message: other.to_string(),

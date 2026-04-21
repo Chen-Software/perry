@@ -12,6 +12,6 @@ use std::sync::Arc;
 /// stdlib-specific backend detection bridge.
 pub async fn get_backend() -> Result<Arc<dyn ContainerBackend>, ContainerError> {
     detect_backend().await
-        .map(|b| Arc::new(b) as Arc<dyn ContainerBackend>)
+        .map(Arc::from)
         .map_err(|probed| ContainerError::NoBackendFound { probed })
 }

@@ -4613,6 +4613,9 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
     NativeModSig { module: "perry/container", has_receiver: false, method: "composeUp",
         class_filter: None,
         runtime: "js_container_composeUp", args: &[NA_STR], ret: NR_PTR },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "detectBackend",
+        class_filter: None,
+        runtime: "js_container_detectBackend", args: &[], ret: NR_PTR },
 
     // ========== perry/container-compose ==========
     NativeModSig { module: "perry/container-compose", has_receiver: false, method: "up",

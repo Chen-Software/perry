@@ -2443,6 +2443,7 @@ fn lower_module_decl(
 
             // Special handling for perry/container and perry/container-compose
             if source == "perry/container" || source == "perry/container-compose" {
+                module.needs_container = true;
                 for spec in &import_decl.specifiers {
                     if let ast::ImportSpecifier::Named(named) = spec {
                         let local = named.local.sym.to_string();

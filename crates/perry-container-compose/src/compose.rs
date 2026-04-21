@@ -14,6 +14,7 @@ static COMPOSE_ENGINES: once_cell::sync::Lazy<std::sync::Mutex<IndexMap<u64, Arc
 
 static NEXT_STACK_ID: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Clone)]
 pub struct ComposeEngine {
     pub spec: ComposeSpec,
     pub project_name: String,
@@ -53,28 +54,36 @@ impl ComposeEngine {
         &self,
         services: &[String],
         _detach: bool,
-        _build: bool,
+        build_flag: bool,
         _remove_orphans: bool,
     ) -> Result<ComposeHandle> {
         // 1. Create networks
         if let Some(networks) = &self.spec.networks {
             for (name, config) in networks {
-                if let Some(cfg) = config {
-                    self.backend.create_network(name, cfg).await?;
-                } else {
-                    self.backend.create_network(name, &Default::default()).await?;
-                }
+                let cfg = match config {
+                    Some(c) => crate::backend::NetworkConfig {
+                        driver: c.driver.clone(),
+                        labels: c.labels.as_ref().map(|l| l.to_map()).unwrap_or_default(),
+                        internal: c.internal.unwrap_or(false),
+                        enable_ipv6: c.enable_ipv6.unwrap_or(false),
+                    },
+                    None => Default::default(),
+                };
+                self.backend.create_network(name, &cfg).await?;
             }
         }
 
         // 2. Create volumes
         if let Some(volumes) = &self.spec.volumes {
             for (name, config) in volumes {
-                if let Some(cfg) = config {
-                    self.backend.create_volume(name, cfg).await?;
-                } else {
-                    self.backend.create_volume(name, &Default::default()).await?;
-                }
+                let cfg = match config {
+                    Some(c) => crate::backend::VolumeConfig {
+                        driver: c.driver.clone(),
+                        labels: c.labels.as_ref().map(|l| l.to_map()).unwrap_or_default(),
+                    },
+                    None => Default::default(),
+                };
+                self.backend.create_volume(name, &cfg).await?;
             }
         }
 
@@ -86,10 +95,50 @@ impl ComposeEngine {
             order.iter().filter(|s| services.contains(s)).collect()
         };
 
-        let mut started = Vec::new();
+        let mut created: Vec<String> = Vec::new();
         for svc_name in target {
             let svc = self.spec.services.get(svc_name).unwrap();
-            let container_name = service::service_container_name(svc, svc_name);
+            let container_name = service::service_container_name(svc, svc_name)?;
+
+            // Idempotent flow: check if already running or exists
+            match self.backend.inspect(&container_name).await {
+                Ok(info) => {
+                    if info.status == "running" {
+                        continue;
+                    } else {
+                        self.backend.start(&container_name).await?;
+                        continue;
+                    }
+                }
+                Err(ComposeError::NotFound(_)) => {} // Continue to create
+                Err(e) => return Err(e),
+            }
+
+            // Fresh container: build or pull
+            if build_flag || service::needs_build(svc) {
+                if let Some(crate::types::BuildSpec::Config(bcfg)) = &svc.build {
+                    self.backend.build(bcfg, &svc.image.clone().unwrap_or_else(|| svc_name.clone())).await?;
+                } else if let Some(crate::types::BuildSpec::Context(ctx)) = &svc.build {
+                    let bcfg = crate::types::ComposeServiceBuild {
+                        context: Some(ctx.clone()),
+                        ..Default::default()
+                    };
+                    self.backend.build(&bcfg, &svc.image.clone().unwrap_or_else(|| svc_name.clone())).await?;
+                }
+            } else if let Some(image) = &svc.image {
+                if let Err(e) = self.backend.pull_image(image).await {
+                    // Rollback
+                    for name in created.iter().rev() {
+                        let _ = self.backend.stop(name, Some(10)).await;
+                        let _ = self.backend.remove(name, true).await;
+                    }
+                    return Err(ComposeError::ImagePullFailed {
+                        service: svc_name.clone(),
+                        image: image.clone(),
+                        message: e.to_string(),
+                    });
+                }
+            }
 
             // Extract primary network if any
             let network = match &svc.networks {
@@ -147,11 +196,11 @@ impl ComposeEngine {
 
             match self.backend.run(&container_spec).await {
                 Ok(_) => {
-                    started.push(container_name);
+                    created.push(container_name);
                 }
                 Err(e) => {
                     // Rollback
-                    for name in started.iter().rev() {
+                    for name in created.iter().rev() {
                         let _ = self.backend.stop(name, Some(10)).await;
                         let _ = self.backend.remove(name, true).await;
                     }
@@ -181,7 +230,7 @@ impl ComposeEngine {
 
         for svc_name in target.iter().rev() {
             let svc = self.spec.services.get(*svc_name).unwrap();
-            let container_name = service::service_container_name(svc, svc_name);
+            let container_name = service::service_container_name(svc, svc_name)?;
             let _ = self.backend.stop(&container_name, Some(10)).await;
             let _ = self.backend.remove(&container_name, true).await;
         }
@@ -206,7 +255,7 @@ impl ComposeEngine {
     pub async fn ps(&self) -> Result<Vec<ContainerInfo>> {
         let mut infos = Vec::new();
         for (svc_name, svc) in &self.spec.services {
-            let container_name = service::service_container_name(svc, svc_name);
+            let container_name = service::service_container_name(svc, svc_name)?;
             if let Ok(info) = self.backend.inspect(&container_name).await {
                 infos.push(info);
             }
@@ -228,7 +277,7 @@ impl ComposeEngine {
 
         for svc_name in target {
             let svc = self.spec.services.get(svc_name).unwrap();
-            let container_name = service::service_container_name(svc, svc_name);
+            let container_name = service::service_container_name(svc, svc_name)?;
             if let Ok(logs) = self.backend.logs(&container_name, tail).await {
                 all_logs.insert(svc_name.clone(), format!("STDOUT:\n{}\nSTDERR:\n{}", logs.stdout, logs.stderr));
             }
@@ -244,7 +293,7 @@ impl ComposeEngine {
         workdir: Option<&str>,
     ) -> Result<ContainerLogs> {
         let svc = self.spec.services.get(service).ok_or_else(|| ComposeError::NotFound(service.into()))?;
-        let container_name = service::service_container_name(svc, service);
+        let container_name = service::service_container_name(svc, service)?;
         self.backend.exec(&container_name, cmd, env, workdir).await
     }
 
@@ -260,7 +309,7 @@ impl ComposeEngine {
         };
         for svc_name in target {
             let svc = self.spec.services.get(svc_name).unwrap();
-            let container_name = service::service_container_name(svc, svc_name);
+            let container_name = service::service_container_name(svc, svc_name)?;
             self.backend.start(&container_name).await?;
         }
         Ok(())
@@ -274,7 +323,7 @@ impl ComposeEngine {
         };
         for svc_name in target {
             let svc = self.spec.services.get(svc_name).unwrap();
-            let container_name = service::service_container_name(svc, svc_name);
+            let container_name = service::service_container_name(svc, svc_name)?;
             self.backend.stop(&container_name, None).await?;
         }
         Ok(())

@@ -234,6 +234,8 @@ pub struct Module {
     pub widgets: Vec<WidgetDecl>,
     /// Whether this module uses fetch() — requires perry-stdlib for js_fetch_with_options
     pub uses_fetch: bool,
+    /// Whether this module uses perry/container or perry/container-compose
+    pub needs_container: bool,
     /// External FFI function declarations (name, param_types, return_type)
     /// Populated from `declare function` statements with no body.
     pub extern_funcs: Vec<(String, Vec<Type>, Type)>,
@@ -1874,6 +1876,7 @@ impl Module {
             exported_functions: Vec::new(),
             widgets: Vec::new(),
             uses_fetch: false,
+            needs_container: false,
             extern_funcs: Vec::new(),
         }
     }
