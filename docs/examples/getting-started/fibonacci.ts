@@ -1,6 +1,7 @@
 // demonstrates: recursive fib as a perf-vs-node talking point
 // docs: docs/src/getting-started/hello-world.md
 // platforms: macos, linux, windows
+// targets: wasm, web, android
 
 function fibonacci(n: number): number {
     if (n <= 1) return n

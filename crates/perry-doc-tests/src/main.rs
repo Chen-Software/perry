@@ -56,6 +56,14 @@ struct Cli {
     /// directives nor annotated with `,no-test`.
     #[arg(long)]
     lint: Option<PathBuf>,
+
+    /// Skip the host-platform run phase; only run the `targets:` cross-compile.
+    #[arg(long)]
+    xcompile_only: bool,
+
+    /// Skip the `targets:` cross-compile phase entirely.
+    #[arg(long)]
+    skip_xcompile: bool,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -78,6 +86,9 @@ enum Status {
     Timeout,
     Skip,
     Blessed,
+    CrossCompilePass,
+    CrossCompileFail,
+    CrossCompileSkip,
 }
 
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,38 +171,68 @@ fn run(cli: &Cli) -> Result<i32> {
             }
         }
 
-        if !ex.platforms.contains(host) {
-            results.push(ExampleReport {
-                file: rel,
-                kind: ex.kind,
-                status: Status::Skip,
-                detail: format!("platform `{host}` not listed in banner"),
-                duration_ms: 0,
-            });
+        if !cli.xcompile_only {
+            if !ex.platforms.contains(host) {
+                results.push(ExampleReport {
+                    file: rel.clone(),
+                    kind: ex.kind,
+                    status: Status::Skip,
+                    detail: format!("platform `{host}` not listed in banner"),
+                    duration_ms: 0,
+                });
+            } else {
+                let started = Instant::now();
+                if cli.verbose {
+                    eprintln!("[run] {rel}");
+                }
+                let mut report = run_one(
+                    &ex,
+                    &rel,
+                    &examples_dir,
+                    &perry_bin,
+                    &out_dir,
+                    cli.no_compile,
+                    host,
+                    cli.bless,
+                );
+                report.duration_ms = started.elapsed().as_millis();
+                if cli.verbose {
+                    eprintln!("   -> {:?} ({} ms)", report.status, report.duration_ms);
+                }
+                results.push(report);
+            }
+        }
+
+        if cli.skip_xcompile {
             continue;
         }
 
-        let started = Instant::now();
-        if cli.verbose {
-            eprintln!("[run] {rel}");
+        // Cross-compile phase: for each extra target listed in the banner,
+        // invoke `perry compile --target <t>` and check exit + artifact. No
+        // execution — this catches drift in platform-specific code paths.
+        for target in &ex.targets {
+            if let Some(reason) = target_buildable_reason(target, host) {
+                results.push(ExampleReport {
+                    file: rel.clone(),
+                    kind: ex.kind,
+                    status: Status::CrossCompileSkip,
+                    detail: format!("target=`{target}`: {reason}"),
+                    duration_ms: 0,
+                });
+                continue;
+            }
+            let started = Instant::now();
+            if cli.verbose {
+                eprintln!("[xcompile] {rel} --target {target}");
+            }
+            let mut report =
+                cross_compile_one(&ex, &rel, &perry_bin, &out_dir, target);
+            report.duration_ms = started.elapsed().as_millis();
+            if cli.verbose {
+                eprintln!("   -> {:?} ({} ms)", report.status, report.duration_ms);
+            }
+            results.push(report);
         }
-        let report = run_one(
-            &ex,
-            &rel,
-            &examples_dir,
-            &perry_bin,
-            &out_dir,
-            cli.no_compile,
-            host,
-            cli.bless,
-        );
-        let duration_ms = started.elapsed().as_millis();
-        let mut report = report;
-        report.duration_ms = duration_ms;
-        if cli.verbose {
-            eprintln!("   -> {:?} ({} ms)", report.status, report.duration_ms);
-        }
-        results.push(report);
     }
 
     let (passed, failed, skipped) = count(&results);
@@ -246,8 +287,8 @@ fn count(results: &[ExampleReport]) -> (usize, usize, usize) {
     let mut skipped = 0;
     for r in results {
         match r.status {
-            Status::Pass | Status::Blessed => passed += 1,
-            Status::Skip => skipped += 1,
+            Status::Pass | Status::Blessed | Status::CrossCompilePass => passed += 1,
+            Status::Skip | Status::CrossCompileSkip => skipped += 1,
             _ => failed += 1,
         }
     }
@@ -265,6 +306,9 @@ fn print_summary(total: usize, passed: usize, failed: usize, skipped: usize, res
             Status::ScreenshotDiff => "SCREENSHOT_DIFF",
             Status::Timeout => "TIMEOUT",
             Status::Skip => "SKIP",
+            Status::CrossCompilePass => "XCOMPILE_PASS",
+            Status::CrossCompileFail => "XCOMPILE_FAIL",
+            Status::CrossCompileSkip => "XCOMPILE_SKIP",
         };
         println!("{tag:<13} {} ({} ms)  {}", r.file, r.duration_ms, r.detail);
     }
@@ -279,6 +323,7 @@ struct Example {
     path: PathBuf,
     kind: ExampleKind,
     platforms: BTreeSet<String>,
+    targets: BTreeSet<String>,
 }
 
 fn discover_examples(root: &Path) -> Result<Vec<Example>> {
@@ -310,6 +355,7 @@ fn discover_examples(root: &Path) -> Result<Vec<Example>> {
             path: path.to_path_buf(),
             kind,
             platforms: banner.platforms,
+            targets: banner.targets,
         });
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
@@ -319,13 +365,14 @@ fn discover_examples(root: &Path) -> Result<Vec<Example>> {
 #[derive(Debug, Default)]
 struct Banner {
     platforms: BTreeSet<String>,
+    targets: BTreeSet<String>,
 }
 
 fn read_banner(path: &Path) -> Result<Banner> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading {}", path.display()))?;
     let mut b = Banner::default();
-    for line in text.lines().take(10) {
+    for line in text.lines().take(15) {
         let line = line.trim_start();
         if !line.starts_with("//") {
             break;
@@ -336,6 +383,13 @@ fn read_banner(path: &Path) -> Result<Banner> {
                 let t = item.trim();
                 if !t.is_empty() {
                     b.platforms.insert(t.to_string());
+                }
+            }
+        } else if let Some(rest) = body.strip_prefix("targets:") {
+            for item in rest.split(',') {
+                let t = item.trim();
+                if !t.is_empty() {
+                    b.targets.insert(t.to_string());
                 }
             }
         }
@@ -465,6 +519,144 @@ fn run_one(
             detail: trim_detail(&e.to_string()),
             duration_ms: 0,
         },
+    }
+}
+
+/// Whether a given `--target` value can be built from this host. Any
+/// other combination gets reported as `XCOMPILE_SKIP` with the reason so
+/// coverage stays visible without failing the job. Also checks whether
+/// the host has the toolchain installed (Xcode, Android NDK) so that
+/// local dev boxes don't hit false failures when they're simply missing
+/// the mobile SDKs.
+fn target_buildable_on_host(target: &str, host: &str) -> bool {
+    target_buildable_reason(target, host).is_none()
+}
+
+/// Reason the target can't be built from this host, or None if it can.
+fn target_buildable_reason(target: &str, host: &str) -> Option<String> {
+    match target {
+        "watchos" | "watchos-simulator" => {
+            // Rust Tier-3 — requires nightly + `-Zbuild-std`. Skip in the
+            // generic cross-compile until we wire up a dedicated job.
+            Some(format!("target=`{target}` is Rust Tier-3 (nightly + -Zbuild-std); not yet wired"))
+        }
+        "ios" | "ios-simulator" | "tvos" | "tvos-simulator" | "macos"
+        | "ios-widget" | "ios-widget-simulator" => {
+            if host != "macos" {
+                Some(format!("needs Xcode — host `{host}` can't build `{target}`"))
+            } else if !has_xcode() {
+                Some(format!("Xcode command-line tools not installed (target=`{target}`)"))
+            } else {
+                None
+            }
+        }
+        "android" => {
+            if host != "linux" && host != "macos" {
+                Some(format!("android cross-compile unsupported on host `{host}`"))
+            } else if std::env::var("ANDROID_NDK_HOME").is_err()
+                && std::env::var("ANDROID_NDK_ROOT").is_err()
+            {
+                Some("ANDROID_NDK_HOME/ROOT not set".to_string())
+            } else {
+                None
+            }
+        }
+        "linux" if host != "linux" => {
+            Some(format!("linux cross-compile unsupported on host `{host}`"))
+        }
+        "windows" if host != "windows" => {
+            Some(format!("windows cross-compile unsupported on host `{host}`"))
+        }
+        "linux" | "windows" | "web" | "wasm" => None,
+        other => Some(format!("unknown target `{other}`")),
+    }
+}
+
+fn has_xcode() -> bool {
+    Command::new("xcrun")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn cross_compile_one(
+    ex: &Example,
+    rel: &str,
+    perry_bin: &Path,
+    out_dir: &Path,
+    target: &str,
+) -> ExampleReport {
+    let stem = safe_stem(rel);
+    let ext = match target {
+        "web" => ".html",
+        "wasm" => ".wasm",
+        "windows" => ".exe",
+        "android" => ".apk",
+        "ios" | "ios-simulator" | "tvos" | "tvos-simulator" | "watchos"
+        | "watchos-simulator" | "ios-widget" | "ios-widget-simulator" => ".app",
+        _ => "",
+    };
+    let out = out_dir.join(format!("{stem}__{target}{ext}"));
+
+    let output = match Command::new(perry_bin)
+        .arg("compile")
+        .arg(&ex.path)
+        .arg("--target")
+        .arg(target)
+        .arg("-o")
+        .arg(&out)
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => {
+            return ExampleReport {
+                file: rel.to_string(),
+                kind: ex.kind,
+                status: Status::CrossCompileFail,
+                detail: format!("target=`{target}`: spawn failed: {e}"),
+                duration_ms: 0,
+            };
+        }
+    };
+
+    if !output.status.success() {
+        return ExampleReport {
+            file: rel.to_string(),
+            kind: ex.kind,
+            status: Status::CrossCompileFail,
+            detail: format!(
+                "target=`{target}`: perry exit {}: {}",
+                output.status.code().unwrap_or(-1),
+                trim_detail(&String::from_utf8_lossy(&output.stderr))
+            ),
+            duration_ms: 0,
+        };
+    }
+
+    // Verify the artifact landed and has bytes. Apple .app targets produce
+    // a directory bundle rather than a single file.
+    let ok = if out.is_dir() {
+        std::fs::read_dir(&out).map(|it| it.count() > 0).unwrap_or(false)
+    } else {
+        out.metadata().map(|m| m.len() > 0).unwrap_or(false)
+    };
+    if !ok {
+        return ExampleReport {
+            file: rel.to_string(),
+            kind: ex.kind,
+            status: Status::CrossCompileFail,
+            detail: format!("target=`{target}`: artifact missing or empty at {}", out.display()),
+            duration_ms: 0,
+        };
+    }
+
+    ExampleReport {
+        file: rel.to_string(),
+        kind: ex.kind,
+        status: Status::CrossCompilePass,
+        detail: format!("target=`{target}`"),
+        duration_ms: 0,
     }
 }
 

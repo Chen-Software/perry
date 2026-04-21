@@ -1,6 +1,7 @@
 // demonstrates: auto-reactive animateOpacity driven by a State toggle
 // docs: docs/src/ui/animation.md
 // platforms: macos, linux, windows
+// targets: ios-simulator, tvos-simulator, watchos-simulator, web, wasm
 
 import { App, Text, Button, VStack, State } from "perry/ui"
 

@@ -1,6 +1,7 @@
 // demonstrates: multiple Text widgets bound to the same State
 // docs: docs/src/ui/state.md
 // platforms: macos, linux, windows
+// targets: ios-simulator, tvos-simulator, watchos-simulator, web, wasm
 
 import { App, VStack, Text, Button, State, Spacer } from "perry/ui"
 

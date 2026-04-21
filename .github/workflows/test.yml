@@ -271,8 +271,9 @@ jobs:
           - os: macos-14
             ui_backend: perry-ui-macos
             shell: bash
-            cmd_exclude_gallery: "./scripts/run_doc_tests.sh --verbose --filter-exclude ui/gallery.ts"
-            cmd_gallery: "./scripts/run_doc_tests.sh --verbose --filter ui/gallery.ts"
+            cmd_exclude_gallery: "./scripts/run_doc_tests.sh --verbose --skip-xcompile --filter-exclude ui/gallery.ts"
+            cmd_gallery: "./scripts/run_doc_tests.sh --verbose --skip-xcompile --filter ui/gallery.ts"
+            cmd_xcompile: "./scripts/run_doc_tests.sh --verbose --xcompile-only"
             # Locally-blessed baseline didn't match the macOS-14 runner's
             # headless display (dev-box Retina 1800x2864 vs runner 900x970).
             # Advisory on all OSes until each baseline is captured from a
@@ -281,17 +282,16 @@ jobs:
           - os: ubuntu-24.04
             ui_backend: perry-ui-gtk4
             shell: bash
-            cmd_exclude_gallery: "xvfb-run -a ./scripts/run_doc_tests.sh --verbose --filter-exclude ui/gallery.ts"
-            cmd_gallery: "xvfb-run -a ./scripts/run_doc_tests.sh --verbose --filter ui/gallery.ts"
-            # Linux baseline not yet captured — advisory until a maintainer
-            # blesses it from the uploaded gallery artifact.
+            cmd_exclude_gallery: "xvfb-run -a ./scripts/run_doc_tests.sh --verbose --skip-xcompile --filter-exclude ui/gallery.ts"
+            cmd_gallery: "xvfb-run -a ./scripts/run_doc_tests.sh --verbose --skip-xcompile --filter ui/gallery.ts"
+            cmd_xcompile: "./scripts/run_doc_tests.sh --verbose --xcompile-only"
             gallery_advisory: true
           - os: windows-2022
             ui_backend: perry-ui-windows
             shell: pwsh
-            cmd_exclude_gallery: "./scripts/run_doc_tests.ps1 --verbose --filter-exclude ui/gallery.ts"
-            cmd_gallery: "./scripts/run_doc_tests.ps1 --verbose --filter ui/gallery.ts"
-            # Windows baseline not yet captured — same bootstrap flow as Linux.
+            cmd_exclude_gallery: "./scripts/run_doc_tests.ps1 --verbose --skip-xcompile --filter-exclude ui/gallery.ts"
+            cmd_gallery: "./scripts/run_doc_tests.ps1 --verbose --skip-xcompile --filter ui/gallery.ts"
+            cmd_xcompile: "./scripts/run_doc_tests.ps1 --verbose --xcompile-only"
             gallery_advisory: true
     runs-on: ${{ matrix.os }}
     defaults:
@@ -303,11 +303,31 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install GTK4 + Xvfb (Linux)
+      - name: Install GTK4 + Xvfb + PulseAudio headers (Linux)
         if: matrix.os == 'ubuntu-24.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev xvfb pkg-config
+          sudo apt-get install -y \
+            libgtk-4-dev libadwaita-1-dev xvfb pkg-config \
+            libpulse-dev
+
+      - name: Surface Android NDK location (for cross-compile)
+        if: matrix.os == 'macos-14' || matrix.os == 'ubuntu-24.04'
+        run: |
+          if [ -n "$ANDROID_NDK_HOME" ]; then
+            echo "Found ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          elif [ -d "$ANDROID_HOME/ndk-bundle" ]; then
+            echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk-bundle" >> "$GITHUB_ENV"
+          elif [ -d "$ANDROID_HOME/ndk" ]; then
+            # Pick the highest versioned NDK under $ANDROID_HOME/ndk/.
+            NDK=$(ls -1d "$ANDROID_HOME/ndk/"*/ 2>/dev/null | sort -V | tail -1)
+            [ -n "$NDK" ] && echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+          fi
+
+      - name: Install Apple SDK Rust targets (macOS only)
+        if: matrix.os == 'macos-14'
+        run: |
+          rustup target add aarch64-apple-ios-sim aarch64-apple-tvos-sim
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -322,6 +342,12 @@ jobs:
       - name: Build compiler + UI backend + harness
         run: cargo build --release -p perry -p perry-runtime -p perry-stdlib -p ${{ matrix.ui_backend }} -p perry-doc-tests
 
+      - name: Pre-build Apple UI libs for cross-compile (macOS only)
+        if: matrix.os == 'macos-14'
+        run: |
+          cargo build --release -p perry-ui-ios  --target aarch64-apple-ios-sim
+          cargo build --release -p perry-ui-tvos --target aarch64-apple-tvos-sim
+
       - name: Lint docs/src markdown fences (repo-wide)
         if: matrix.os == 'macos-14'
         run: cargo run --release --quiet -p perry-doc-tests -- --lint docs/src
@@ -333,6 +359,11 @@ jobs:
         id: gallery
         continue-on-error: ${{ matrix.gallery_advisory }}
         run: ${{ matrix.cmd_gallery }}
+
+      - name: Cross-compile examples for listed targets (advisory)
+        id: xcompile
+        continue-on-error: true
+        run: ${{ matrix.cmd_xcompile }}
 
       - name: Upload doc-tests report
         if: always()

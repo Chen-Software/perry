@@ -1,6 +1,7 @@
 // demonstrates: map / filter / reduce on arrays
 // docs: docs/src/stdlib/arrays.md
 // platforms: macos, linux, windows
+// targets: wasm, web, android
 
 const nums = [1, 2, 3, 4, 5]
 const doubled = nums.map((n) => n * 2)
