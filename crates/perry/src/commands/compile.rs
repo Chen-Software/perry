@@ -5901,6 +5901,17 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
             } else if is_linux {
                 // Allow multiple definitions from perry-runtime in both stdlib and UI lib
                 cmd.arg("-Wl,--allow-multiple-definition");
+                // libperry_ui_gtk4.a references perry-stdlib symbols
+                // (js_stdlib_process_pending, js_promise_run_microtasks, …).
+                // ld scans archives left-to-right; stdlib was already added
+                // above before any ui references were undefined, so those
+                // objects weren't pulled in. Re-link stdlib here so the
+                // UI-driven references resolve. Same trick GNU ld users
+                // call "archive twice" — or you could wrap both in
+                // --start-group/--end-group, but repeating is a one-liner.
+                if let Some(ref stdlib) = stdlib_lib {
+                    cmd.arg(stdlib);
+                }
                 // GTK4 libraries via pkg-config
                 if let Ok(output) = Command::new("pkg-config").args(["--libs", "gtk4"]).output() {
                     if output.status.success() {
