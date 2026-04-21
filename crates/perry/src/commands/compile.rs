@@ -134,6 +134,8 @@ pub struct CompilationContext {
     pub needs_js_runtime: bool,
     /// Whether perry/ui module is imported (needs UI library linking)
     pub needs_ui: bool,
+    /// Whether perry/container module is imported
+    pub needs_container: bool,
     /// Whether perry/plugin module is imported (needs -rdynamic for symbol export)
     pub needs_plugins: bool,
     /// Whether perry-stdlib is needed (heavy native modules like fastify, mysql2, etc.)
@@ -196,6 +198,7 @@ impl CompilationContext {
             import_map: BTreeMap::new(),
             needs_js_runtime: false,
             needs_ui: false,
+            needs_container: false,
             needs_plugins: false,
             needs_stdlib: false,
             project_root,
@@ -2206,6 +2209,9 @@ fn collect_modules(
                 // promise rejections via `catch_unwind` — auto-mode keeps
                 // panic = "unwind" when this is set.
                 ctx.needs_thread = true;
+            }
+            if import.source == "perry/container" || import.source == "perry/container-compose" || import.source == "perry/compose" {
+                ctx.needs_container = true;
             }
             if perry_hir::requires_stdlib(&import.source) {
                 ctx.needs_stdlib = true;

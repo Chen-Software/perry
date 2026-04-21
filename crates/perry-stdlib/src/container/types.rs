@@ -1,45 +1,65 @@
-//! Type re-exports for container module
-
+use std::sync::Arc;
+use dashmap::DashMap;
+use once_cell::sync::Lazy;
+use std::sync::atomic::{AtomicU64, Ordering};
 pub use perry_container_compose::types::*;
 pub use perry_container_compose::error::ComposeError;
+pub use perry_container_compose::error::ComposeError as ContainerError;
+pub use perry_container_compose::ComposeEngine;
 
-use perry_runtime::JSValue;
-use std::sync::atomic::{AtomicU64, Ordering};
+// ============ Global Handle Registries ============
 
-// ============ Handle Management ============
+pub static CONTAINER_HANDLES: Lazy<DashMap<u64, ContainerHandle>> = Lazy::new(DashMap::new);
+pub static COMPOSE_HANDLES: Lazy<DashMap<u64, Arc<ComposeEngine>>> = Lazy::new(DashMap::new);
 
-static NEXT_CONTAINER_HANDLE: AtomicU64 = AtomicU64::new(1);
+// Registries for JSON-serialized responses
+pub static CONTAINER_INFO_REGISTRY: Lazy<DashMap<u64, ContainerInfo>> = Lazy::new(DashMap::new);
+pub static CONTAINER_INFO_LIST_REGISTRY: Lazy<DashMap<u64, Vec<ContainerInfo>>> = Lazy::new(DashMap::new);
+pub static CONTAINER_LOGS_REGISTRY: Lazy<DashMap<u64, ContainerLogs>> = Lazy::new(DashMap::new);
+pub static IMAGE_INFO_LIST_REGISTRY: Lazy<DashMap<u64, Vec<ImageInfo>>> = Lazy::new(DashMap::new);
 
-pub fn register_container_handle(_handle: ContainerHandle) -> u64 {
-    NEXT_CONTAINER_HANDLE.fetch_add(1, Ordering::SeqCst)
+static NEXT_HANDLE_ID: AtomicU64 = AtomicU64::new(1);
+
+pub fn register_container_handle(handle: ContainerHandle) -> u64 {
+    let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
+    CONTAINER_HANDLES.insert(id, handle);
+    id
 }
 
-pub fn register_container_info(_info: ContainerInfo) -> u64 {
-    NEXT_CONTAINER_HANDLE.fetch_add(1, Ordering::SeqCst)
+pub fn register_compose_handle(handle: ComposeHandle) -> u64 {
+    // We already have a stack_id in handle, but we might want our own internal registry ID
+    // Actually, let's just use the stack_id from the handle.
+    handle.stack_id
 }
 
-pub fn register_container_info_list(_list: Vec<ContainerInfo>) -> u64 {
-    NEXT_CONTAINER_HANDLE.fetch_add(1, Ordering::SeqCst)
+pub fn register_container_info(info: ContainerInfo) -> u64 {
+    let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
+    CONTAINER_INFO_REGISTRY.insert(id, info);
+    id
 }
 
-pub fn register_compose_handle(_handle: ComposeHandle) -> u64 {
-    NEXT_CONTAINER_HANDLE.fetch_add(1, Ordering::SeqCst)
+pub fn register_container_info_list(list: Vec<ContainerInfo>) -> u64 {
+    let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
+    CONTAINER_INFO_LIST_REGISTRY.insert(id, list);
+    id
 }
 
-pub fn register_container_logs(_logs: ContainerLogs) -> u64 {
-    NEXT_CONTAINER_HANDLE.fetch_add(1, Ordering::SeqCst)
+pub fn register_container_logs(logs: ContainerLogs) -> u64 {
+    let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
+    CONTAINER_LOGS_REGISTRY.insert(id, logs);
+    id
 }
 
-pub fn register_image_info_list(_list: Vec<ImageInfo>) -> u64 {
-    NEXT_CONTAINER_HANDLE.fetch_add(1, Ordering::SeqCst)
+pub fn register_image_info_list(list: Vec<ImageInfo>) -> u64 {
+    let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
+    IMAGE_INFO_LIST_REGISTRY.insert(id, list);
+    id
 }
 
-// ============ JSValue Parsing Functions ============
-
-pub fn parse_container_spec(_spec_ptr: *const JSValue) -> Result<ContainerSpec, String> {
-    Err("ContainerSpec parsing must be done at compile time.".to_string())
+pub fn take_container_info_list(id: u64) -> Option<Vec<ContainerInfo>> {
+    CONTAINER_INFO_LIST_REGISTRY.remove(&id).map(|(_, v)| v)
 }
 
-pub fn parse_compose_spec(_spec_ptr: *const JSValue) -> Result<ComposeSpec, String> {
-    Err("ComposeSpec parsing must be done at compile time.".to_string())
+pub fn take_container_logs(id: u64) -> Option<ContainerLogs> {
+    CONTAINER_LOGS_REGISTRY.remove(&id).map(|(_, v)| v)
 }
