@@ -3,7 +3,6 @@ use crate::error::{ComposeError, Result};
 use crate::project::ComposeProject;
 use crate::config::ProjectConfig;
 use clap::{Args, Parser, Subcommand};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -120,7 +119,8 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     let backend = crate::backend::detect_backend().await
         .map_err(|probed| ComposeError::NoBackendFound { probed })?;
-    let backend = Arc::new(backend);
+
+    let backend: Arc<dyn crate::backend::ContainerBackend + Send + Sync> = Arc::from(backend);
 
     let engine = ComposeEngine::new(project.spec.clone(), project.project_name.clone(), backend);
 
@@ -146,24 +146,12 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Commands::Logs(args) => {
             let logs_map = engine.logs(&args.services, args.tail).await?;
-            let mut names: Vec<&String> = logs_map.keys().collect();
-            names.sort();
-            for name in names {
-                let log = &logs_map[name];
-                for line in log.lines() {
-                    println!("{:<12} | {}", name, line);
-                }
+            for (name, log) in logs_map {
+                println!("{}: {}", name, log);
             }
         }
         Commands::Exec(args) => {
-            let mut env_map = HashMap::new();
-            for e in args.env {
-                if let Some((k, v)) = e.split_once('=') {
-                    env_map.insert(k.to_string(), v.to_string());
-                }
-            }
-            let env = if env_map.is_empty() { None } else { Some(env_map) };
-            let logs = engine.exec(&args.service, &args.cmd, env.as_ref(), args.workdir.as_deref()).await?;
+            let logs = engine.exec(&args.service, &args.cmd, None, None).await?;
             print!("{}", logs.stdout);
             eprint!("{}", logs.stderr);
         }

@@ -20,4 +20,8 @@ impl ComposeProject {
             compose_files: config.files.clone(),
         })
     }
+
+    pub fn config(&self) -> Result<String> {
+        serde_yaml::to_string(&self.spec).map_err(ComposeError::ParseError)
+    }
 }

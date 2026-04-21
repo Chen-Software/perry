@@ -459,4 +459,7 @@ pub unsafe extern "C" fn js_stdlib_init_dispatch() {
     js_register_handle_method_dispatch(js_handle_method_dispatch);
     js_register_handle_property_dispatch(js_handle_property_dispatch);
     js_register_handle_property_set_dispatch(js_handle_property_set_dispatch);
+
+    #[cfg(feature = "container")]
+    crate::container::js_container_module_init();
 }
