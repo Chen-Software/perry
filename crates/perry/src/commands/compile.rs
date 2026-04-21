@@ -245,6 +245,10 @@ pub struct TargetNativeConfig {
     pub frameworks: Vec<String>,
     pub libs: Vec<String>,
     pub pkg_config: Vec<String>,
+    /// Swift sources (absolute paths) to compile via swiftc and link into the
+    /// final binary. Used by `--features watchos-swift-app` so a native lib
+    /// can ship its own `@main struct App: App` SwiftUI root.
+    pub swift_sources: Vec<PathBuf>,
 }
 
 /// Get the Rust target triple for a given perry target string
@@ -1534,6 +1538,12 @@ fn parse_native_library_manifest(
                 pkg_config: tc.get("pkgConfig")
                     .and_then(|p| p.as_array())
                     .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default(),
+                swift_sources: tc.get("swift_sources")
+                    .and_then(|s| s.as_array())
+                    .map(|a| a.iter()
+                        .filter_map(|v| v.as_str().map(|p| package_dir.join(p)))
+                        .collect())
                     .unwrap_or_default(),
             }
         });
@@ -5170,6 +5180,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
     // For cross-compilation targets, use the appropriate toolchain
     let mut cmd = if is_watchos {
         let is_watchos_game_loop = compiled_features.iter().any(|f| f == "watchos-game-loop");
+        let is_watchos_swift_app = compiled_features.iter().any(|f| f == "watchos-swift-app");
         let sdk = if target.as_deref() == Some("watchos-simulator") { "watchsimulator" } else { "watchos" };
         let sysroot = String::from_utf8(
             Command::new("xcrun").args(["--sdk", sdk, "--show-sdk-path"]).output()?.stdout
@@ -5181,13 +5192,16 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
         };
 
         // Find the entry object whose stem matches the user's input file stem
-        // (e.g. `test_ui_counter.ts` → `test_ui_counter_ts.o`). Two rename targets:
+        // (e.g. `test_ui_counter.ts` → `test_ui_counter_ts.o`). Three rename targets:
         //   - Default (SwiftUI-tree app shell): `_main → _perry_main_init`, so the
         //     Swift `@main struct PerryApp` entry wins and calls back into TS init.
         //   - `--features watchos-game-loop`: `_main → _perry_user_main`, so the
         //     Rust runtime's `main()` (watchos_game_loop.rs) takes over the process
         //     entry, spawns the user's TS on a background thread, and calls
         //     `WKApplicationMain` on the main thread for a Metal/wgpu surface.
+        //   - `--features watchos-swift-app`: `_main → _perry_user_main`, so the
+        //     native lib's own `@main struct App: App` is the process entry.
+        //     It spawns TS on a background thread from its `init()`/`.task {}`.
         let input_stem = args.input.file_stem()
             .and_then(|s| s.to_str())
             .map(|s| format!("{}_ts", s))
@@ -5202,7 +5216,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
                     .map(|h| PathBuf::from(h).join(".rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/bin/llvm-objcopy"))
                     .filter(|p| p.exists()))
                 .unwrap_or_else(|| PathBuf::from("rust-objcopy"));
-            let rename = if is_watchos_game_loop {
+            let rename = if is_watchos_game_loop || is_watchos_swift_app {
                 "_main=__perry_user_main"
             } else {
                 "_main=_perry_main_init"
@@ -5223,6 +5237,19 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
             let mut c = Command::new(clang);
             c.arg("-target").arg(triple)
              .arg("-isysroot").arg(&sysroot);
+            c
+        } else if is_watchos_swift_app {
+            // Swift-app: the native lib ships its own `@main struct App: App`
+            // (compiled separately in the native-lib loop below). Perry does
+            // not emit PerryWatchApp.swift and does not provide a C main.
+            // Use swiftc as the linker so Swift stdlib auto-links.
+            let swiftc = String::from_utf8(
+                Command::new("xcrun").args(["--sdk", sdk, "--find", "swiftc"]).output()?.stdout
+            )?.trim().to_string();
+            let mut c = Command::new(swiftc);
+            c.arg("-target").arg(triple)
+             .arg("-sdk").arg(&sysroot)
+             .arg("-parse-as-library");
             c
         } else {
             let swiftc = String::from_utf8(
@@ -5646,6 +5673,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
     if is_watchos {
         // watchOS frameworks (swiftc auto-links Swift stdlib on the non-game-loop path)
         let is_watchos_game_loop = compiled_features.iter().any(|f| f == "watchos-game-loop");
+        let is_watchos_swift_app = compiled_features.iter().any(|f| f == "watchos-swift-app");
         if !is_watchos_game_loop {
             cmd.arg("-framework").arg("SwiftUI");
         }
@@ -5662,6 +5690,13 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
             // WKApplicationDelegate class registered from watchos_game_loop.rs.
             cmd.arg("-framework").arg("QuartzCore")
                .arg("-lobjc");
+        }
+        if is_watchos_swift_app {
+            // SceneKit for SceneView-backed 3D rendering from the native lib's
+            // `@main struct App: App`. The lib may additionally use Canvas (2D,
+            // already covered by SwiftUI) or SpriteKit (opt-in via the
+            // manifest's `frameworks` list).
+            cmd.arg("-framework").arg("SceneKit");
         }
     } else if is_ios {
         // iOS frameworks
@@ -6096,6 +6131,82 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
                         for flag in libs.trim().split_whitespace() {
                             cmd.arg(flag);
                         }
+                    }
+                }
+            }
+
+            // Compile manifest-declared Swift sources to object files and
+            // append them to the link line. Used by `--features watchos-swift-app`
+            // so a native lib can ship its own `@main struct App: App`.
+            if !target_config.swift_sources.is_empty() {
+                if !is_watchos {
+                    return Err(anyhow!(
+                        "perry.nativeLibrary.targets.<target>.swift_sources is only supported on watchos/watchos-simulator"
+                    ));
+                }
+                let swift_sdk = if target.as_deref() == Some("watchos-simulator") {
+                    "watchsimulator"
+                } else {
+                    "watchos"
+                };
+                let swift_triple = if target.as_deref() == Some("watchos-simulator") {
+                    "arm64-apple-watchos10.0-simulator"
+                } else {
+                    "arm64_32-apple-watchos10.0"
+                };
+                let swift_sysroot = String::from_utf8(
+                    Command::new("xcrun")
+                        .args(["--sdk", swift_sdk, "--show-sdk-path"])
+                        .output()?
+                        .stdout,
+                )?
+                .trim()
+                .to_string();
+                let swiftc = String::from_utf8(
+                    Command::new("xcrun")
+                        .args(["--sdk", swift_sdk, "--find", "swiftc"])
+                        .output()?
+                        .stdout,
+                )?
+                .trim()
+                .to_string();
+
+                let swift_obj_dir = std::env::temp_dir()
+                    .join(format!("perry_swift_{}", std::process::id()));
+                std::fs::create_dir_all(&swift_obj_dir).ok();
+
+                for swift_src in &target_config.swift_sources {
+                    if !swift_src.exists() {
+                        return Err(anyhow!(
+                            "Swift source not found: {} (declared in {}'s nativeLibrary.swift_sources)",
+                            swift_src.display(),
+                            native_lib.module
+                        ));
+                    }
+                    let stem = swift_src
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("swift_src");
+                    let obj_out = swift_obj_dir.join(format!("{}.o", stem));
+                    let status = Command::new(&swiftc)
+                        .arg("-target").arg(swift_triple)
+                        .arg("-sdk").arg(&swift_sysroot)
+                        .arg("-parse-as-library")
+                        .arg("-emit-object")
+                        .arg("-O")
+                        .arg("-o").arg(&obj_out)
+                        .arg(swift_src)
+                        .status()?;
+                    if !status.success() {
+                        return Err(anyhow!(
+                            "Failed to compile Swift source: {}",
+                            swift_src.display()
+                        ));
+                    }
+                    cmd.arg(&obj_out);
+                    match format {
+                        OutputFormat::Text => println!("Linking Swift object: {}", obj_out.display()),
+                        OutputFormat::Json => {}
                     }
                 }
             }
