@@ -2,8 +2,9 @@
 
 use proptest::prelude::*;
 use serde_json::{json, Value};
-use perry_container_compose::indexmap::IndexMap;
-use perry_container_compose::types::DependsOnCondition;
+use indexmap::IndexMap;
+use perry_container_compose::types::{DependsOnCondition, ListOrDict};
+use perry_stdlib::container::types::ContainerError;
 
 // ============ Property 2: ContainerSpec CLI argument round-trip ============
 // Feature: perry-container, Property 2: ContainerSpec CLI argument round-trip
@@ -139,7 +140,7 @@ proptest! {
         }
 
         let expected_len = map.len();
-        let lod = perry_stdlib::container::ListOrDict::Dict(map);
+        let lod = ListOrDict::Dict(map);
         let result = lod.to_map();
 
         // All unique keys should be preserved
@@ -161,7 +162,7 @@ proptest! {
         entries in proptest::collection::vec("[A-Z][A-Z0-9_]{1,8}=[a-z0-9_]{0,10}", 1..=8),
     ) {
         let list: Vec<String> = entries.clone();
-        let lod = perry_stdlib::container::ListOrDict::List(list);
+        let lod = ListOrDict::List(list);
         let result = lod.to_map();
 
         // All unique keys should be present with non-None values
@@ -191,14 +192,14 @@ proptest! {
         keys in proptest::collection::vec("[A-Z][A-Z0-9_]{1,8}", 1..=5),
     ) {
         let list: Vec<String> = keys.clone();
-        let lod = perry_stdlib::container::ListOrDict::List(list);
+        let lod = ListOrDict::List(list);
         let result = lod.to_map();
 
         // All unique keys should be present with empty values
         // (HashMap deduplicates keys, so len may be <= keys.len())
         for key in &keys {
             prop_assert_eq!(
-                result.get(key).map(|s| s.as_str()),
+                result.get(key).map(|s: &String| s.as_str()),
                 Some(""),
                 "key {} without '=' should have empty value",
                 key
@@ -259,23 +260,23 @@ proptest! {
         msg in "[a-z A-Z0-9_]{1,40}",
     ) {
         let error = match variant {
-            0 => perry_stdlib::container::ContainerError::NotFound(msg.clone()),
-            1 => perry_stdlib::container::ContainerError::BackendError {
+            0 => ContainerError::NotFound(msg.clone()),
+            1 => ContainerError::BackendError {
                 code: 1,
                 message: msg.clone(),
             },
-            2 => perry_stdlib::container::ContainerError::VerificationFailed {
+            2 => ContainerError::VerificationFailed {
                 image: msg.clone(),
                 reason: "test reason".to_string(),
             },
-            3 => perry_stdlib::container::ContainerError::DependencyCycle {
-                cycle: vec![msg.clone()],
+            3 => ContainerError::DependencyCycle {
+                services: vec![msg.clone()],
             },
-            4 => perry_stdlib::container::ContainerError::ServiceStartupFailed {
+            4 => ContainerError::ServiceStartupFailed {
                 service: msg.clone(),
-                error: "test error".to_string(),
+                message: "test error".to_string(),
             },
-            _ => perry_stdlib::container::ContainerError::InvalidConfig(msg.clone()),
+            _ => ContainerError::ValidationError { message: msg.clone() },
         };
 
         let display = format!("{}", error);
@@ -285,7 +286,7 @@ proptest! {
             2 => "verification failed",
             3 => "Dependency cycle",
             4 => "failed to start",
-            _ => "Invalid configuration",
+            _ => "Validation error",
         };
 
         prop_assert!(

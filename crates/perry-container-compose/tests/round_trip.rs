@@ -17,7 +17,8 @@ proptest! {
 proptest! {
     #[test]
     fn prop_topological_sort_respects_deps(spec in arb_compose_spec_with_dag()) {
-        let order = ComposeEngine::resolve_startup_order(&spec).unwrap();
+        let engine = ComposeEngine::new(spec.clone(), "test".into(), std::sync::Arc::new(perry_container_compose::backend::MockBackend));
+        let order = engine.resolve_startup_order().unwrap();
         let pos: std::collections::HashMap<&str, usize> = order.iter().enumerate()
             .map(|(i, s)| (s.as_str(), i)).collect();
         for (name, service) in &spec.services {
@@ -35,7 +36,8 @@ proptest! {
 proptest! {
     #[test]
     fn prop_cycle_detection(spec in arb_compose_spec_with_cycle()) {
-        let result = ComposeEngine::resolve_startup_order(&spec);
+        let engine = ComposeEngine::new(spec, "test".into(), std::sync::Arc::new(perry_container_compose::backend::MockBackend));
+        let result = engine.resolve_startup_order();
         match result {
             Err(perry_container_compose::error::ComposeError::DependencyCycle { services }) => {
                 prop_assert!(!services.is_empty());

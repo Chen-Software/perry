@@ -2459,7 +2459,11 @@ fn lower_module_decl(
                         if is_native {
                             // Register as native module function with the original method name
                             // e.g., import { v4 as uuid } from 'uuid' -> uuid maps to uuid.v4
-                            ctx.register_native_module(local.clone(), source.clone(), Some(imported.clone()));
+                            let mut imported_name = imported.clone();
+                            if source == "perry/container" && imported_name == "composeUp" {
+                                imported_name = "composeUp".to_string();
+                            }
+                            ctx.register_native_module(local.clone(), source.clone(), Some(imported_name));
                             // Auto-register parentPort from worker_threads as a native instance
                             // (it's a singleton, not created via `new`)
                             if source == "worker_threads" && imported == "parentPort" {

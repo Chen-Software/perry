@@ -335,6 +335,35 @@ pub struct ComposeSpec {
     pub extensions: IndexMap<String, serde_yaml::Value>,
 }
 
+impl ListOrDict {
+    pub fn to_map(&self) -> std::collections::HashMap<String, String> {
+        let mut map = std::collections::HashMap::new();
+        match self {
+            ListOrDict::Dict(d) => {
+                for (k, v) in d {
+                    let val_str = match v {
+                        Some(serde_yaml::Value::String(s)) => s.clone(),
+                        Some(serde_yaml::Value::Number(n)) => n.to_string(),
+                        Some(serde_yaml::Value::Bool(b)) => b.to_string(),
+                        _ => "".to_string(),
+                    };
+                    map.insert(k.clone(), val_str);
+                }
+            }
+            ListOrDict::List(l) => {
+                for entry in l {
+                    if let Some((k, v)) = entry.split_once('=') {
+                        map.insert(k.to_string(), v.to_string());
+                    } else {
+                        map.insert(entry.clone(), "".to_string());
+                    }
+                }
+            }
+        }
+        map
+    }
+}
+
 impl ComposeSpec {
     pub fn merge(&mut self, other: ComposeSpec) {
         if other.name.is_some() { self.name = other.name; }

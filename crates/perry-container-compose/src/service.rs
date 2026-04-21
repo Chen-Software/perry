@@ -1,29 +1,22 @@
 use crate::error::Result;
-use md5::{Digest, Md5};
+use crate::types::ComposeService;
+use md5::{Md5, Digest};
+use rand::Rng;
 
-pub fn service_container_name(service: &crate::types::ComposeService, service_name: &str) -> String {
-    if let Some(name) = service.container_name.as_ref() {
-        return name.clone();
-    }
-
-    let image = service.image.as_deref().unwrap_or("unknown");
+pub fn generate_name(service_name: &str, service: &ComposeService) -> Result<String> {
+    let yaml = serde_yaml::to_string(service)?;
     let mut hasher = Md5::new();
-    hasher.update(image.as_bytes());
-    let hash = hex::encode(hasher.finalize());
-    let short_hash = &hash[..8];
+    hasher.update(yaml.as_bytes());
+    let hash = hasher.finalize();
+    let hash_str = hex::encode(&hash[..4]); // 8 chars
 
-    let random_suffix: u32 = rand::random();
+    let mut rng = rand::thread_rng();
+    let random_suffix: u32 = rng.gen();
+    let random_str = hex::encode(random_suffix.to_be_bytes());
 
-    let safe_name: String = service_name
-        .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
-        .collect();
-
-    format!("{}-{}-{:08x}", safe_name, short_hash, random_suffix)
+    Ok(format!("{}-{}-{}", service_name, hash_str, random_str))
 }
 
-pub struct ServiceState {
-    pub id: String,
-    pub name: String,
-    pub running: bool,
+pub fn needs_build(service: &ComposeService) -> bool {
+    service.build.is_some() && service.image.is_none()
 }
