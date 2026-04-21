@@ -4672,6 +4672,9 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
     NativeModSig { module: "perry/container-compose", has_receiver: false, method: "config",
         class_filter: None,
         runtime: "js_compose_config", args: &[NA_STR], ret: NR_PTR },
+    NativeModSig { module: "perry/container-compose", has_receiver: false, method: "up",
+        class_filter: None,
+        runtime: "js_compose_up", args: &[NA_STR], ret: NR_PTR },
 ];
 
 /// Look up a native module method in the static dispatch table.

@@ -15,4 +15,8 @@ pub use error::{ComposeError, Result, BackendProbeResult};
 pub use types::{ComposeSpec, ComposeService, ComposeHandle};
 pub use compose::ComposeEngine;
 pub use project::ComposeProject;
-pub use backend::{ContainerBackend, OciBackend, BackendDriver, OciCommandBuilder, detect_backend};
+pub use backend::{ContainerBackend, CliBackend, CliProtocol, DockerProtocol,
+                  AppleContainerProtocol, LimaProtocol,
+                  detect_backend, NetworkConfig, VolumeConfig};
+pub use backend::{DockerBackend, AppleBackend, LimaBackend};
+pub use indexmap;

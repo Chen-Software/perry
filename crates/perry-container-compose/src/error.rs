@@ -44,6 +44,9 @@ pub enum ComposeError {
 
     #[error("Specified backend '{name}' is not available: {reason}")]
     BackendNotAvailable { name: String, reason: String },
+
+    #[error("Image pull failed for service '{service}' (image '{image}'): {message}")]
+    ImagePullFailed { service: String, image: String, message: String },
 }
 
 pub type Result<T> = std::result::Result<T, ComposeError>;
@@ -52,4 +55,30 @@ impl ComposeError {
     pub fn validation(message: String) -> Self {
         ComposeError::ValidationError { message }
     }
+
+    pub fn to_js_json(&self) -> serde_json::Value {
+        let (message, code) = match self {
+            ComposeError::DependencyCycle { .. } => (self.to_string(), 422),
+            ComposeError::ServiceStartupFailed { .. } => (self.to_string(), 500),
+            ComposeError::ImagePullFailed { .. } => (self.to_string(), 500),
+            ComposeError::BackendError { code, .. } => (self.to_string(), *code),
+            ComposeError::NotFound(_) => (self.to_string(), 404),
+            ComposeError::ParseError(_) => (self.to_string(), 400),
+            ComposeError::JsonError(_) => (self.to_string(), 400),
+            ComposeError::IoError(_) => (self.to_string(), 500),
+            ComposeError::ValidationError { .. } => (self.to_string(), 400),
+            ComposeError::VerificationFailed { .. } => (self.to_string(), 403),
+            ComposeError::FileNotFound { .. } => (self.to_string(), 404),
+            ComposeError::NoBackendFound { .. } => (self.to_string(), 503),
+            ComposeError::BackendNotAvailable { .. } => (self.to_string(), 503),
+        };
+        serde_json::json!({
+            "message": message,
+            "code": code
+        })
+    }
+}
+
+pub fn compose_error_to_js(err: ComposeError) -> String {
+    err.to_js_json().to_string()
 }

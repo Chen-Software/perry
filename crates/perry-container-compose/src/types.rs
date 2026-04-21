@@ -1,5 +1,7 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use crate::error::Result;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -16,8 +18,13 @@ pub enum DependsOnCondition {
     ServiceCompletedSuccessfully,
 }
 
+fn default_depends_on_condition() -> DependsOnCondition {
+    DependsOnCondition::ServiceStarted
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComposeDependsOn {
+    #[serde(default = "default_depends_on_condition")]
     pub condition: DependsOnCondition,
     #[serde(default)]
     pub required: Option<bool>,
@@ -41,6 +48,34 @@ impl DependsOnSpec {
     }
 }
 
+impl ListOrDict {
+    pub fn to_map(&self) -> HashMap<String, String> {
+        let mut map = HashMap::new();
+        match self {
+            ListOrDict::Dict(d) => {
+                for (k, v) in d {
+                    let val = match v {
+                        Some(serde_yaml::Value::String(s)) => s.clone(),
+                        Some(v) => format!("{:?}", v),
+                        None => "".to_string(),
+                    };
+                    map.insert(k.clone(), val);
+                }
+            }
+            ListOrDict::List(l) => {
+                for entry in l {
+                    if let Some((k, v)) = entry.split_once('=') {
+                        map.insert(k.to_string(), v.to_string());
+                    } else {
+                        map.insert(entry.clone(), "".to_string());
+                    }
+                }
+            }
+        }
+        map
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum VolumeType {
@@ -53,6 +88,7 @@ pub enum VolumeType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeServiceVolume {
     #[serde(rename = "type")]
     pub volume_type: VolumeType,
@@ -67,6 +103,7 @@ pub struct ComposeServiceVolume {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeServiceVolumeBind {
     pub propagation: Option<String>,
     pub create_host_path: Option<bool>,
@@ -75,6 +112,7 @@ pub struct ComposeServiceVolumeBind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeServiceVolumeOpts {
     pub labels: Option<ListOrDict>,
     pub nocopy: Option<bool>,
@@ -82,17 +120,20 @@ pub struct ComposeServiceVolumeOpts {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeServiceVolumeTmpfs {
     pub size: Option<serde_yaml::Value>,
     pub mode: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeServiceVolumeImage {
     pub subpath: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeServicePort {
     pub name: Option<String>,
     pub mode: Option<String>,
@@ -111,6 +152,7 @@ pub enum PortSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeServiceNetworkConfig {
     pub aliases: Option<Vec<String>>,
     pub ipv4_address: Option<String>,
@@ -133,6 +175,7 @@ pub enum BuildSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeServiceBuild {
     pub context: Option<String>,
     pub dockerfile: Option<String>,
@@ -161,6 +204,7 @@ pub struct ComposeServiceBuild {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeHealthcheck {
     pub test: serde_yaml::Value,
     pub interval: Option<String>,
@@ -172,6 +216,7 @@ pub struct ComposeHealthcheck {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeDeployment {
     pub mode: Option<String>,
     pub replicas: Option<u32>,
@@ -184,12 +229,14 @@ pub struct ComposeDeployment {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeDeploymentResources {
     pub limits: Option<ComposeResourceSpec>,
     pub reservations: Option<ComposeResourceSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeResourceSpec {
     pub cpus: Option<serde_yaml::Value>,
     pub memory: Option<String>,
@@ -197,12 +244,14 @@ pub struct ComposeResourceSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeLogging {
     pub driver: Option<String>,
     pub options: Option<IndexMap<String, serde_yaml::Value>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeNetworkIpam {
     pub driver: Option<String>,
     pub config: Option<Vec<ComposeNetworkIpamConfig>>,
@@ -210,6 +259,7 @@ pub struct ComposeNetworkIpam {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeNetworkIpamConfig {
     pub subnet: Option<String>,
     pub ip_range: Option<String>,
@@ -218,6 +268,7 @@ pub struct ComposeNetworkIpamConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeNetwork {
     pub name: Option<String>,
     pub driver: Option<String>,
@@ -232,6 +283,7 @@ pub struct ComposeNetwork {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeVolume {
     pub name: Option<String>,
     pub driver: Option<String>,
@@ -241,6 +293,7 @@ pub struct ComposeVolume {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeSecret {
     pub name: Option<String>,
     pub environment: Option<String>,
@@ -253,6 +306,7 @@ pub struct ComposeSecret {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeConfig {
     pub name: Option<String>,
     pub content: Option<String>,
@@ -264,6 +318,7 @@ pub struct ComposeConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeService {
     pub image: Option<String>,
     pub build: Option<BuildSpec>,
@@ -320,6 +375,7 @@ pub struct ComposeService {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeSpec {
     pub name: Option<String>,
     pub version: Option<String>,
@@ -336,6 +392,10 @@ pub struct ComposeSpec {
 }
 
 impl ComposeSpec {
+    pub fn parse_str(s: &str) -> Result<Self> {
+        serde_yaml::from_str(s).map_err(Into::into)
+    }
+
     pub fn merge(&mut self, other: ComposeSpec) {
         if other.name.is_some() { self.name = other.name; }
         for (k, v) in other.services { self.services.insert(k, v); }
@@ -359,6 +419,7 @@ impl ComposeSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposeHandle {
     pub stack_id: u64,
     pub project_name: String,
@@ -366,6 +427,7 @@ pub struct ComposeHandle {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ContainerSpec {
     pub image: String,
     pub name: Option<String>,
@@ -380,18 +442,22 @@ pub struct ContainerSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ContainerHandle { pub id: String, pub name: Option<String> }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ContainerInfo {
     pub id: String, pub name: String, pub image: String,
     pub status: String, pub ports: Vec<String>, pub created: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ContainerLogs { pub stdout: String, pub stderr: String }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ImageInfo {
     pub id: String, pub repository: String, pub tag: String,
     pub size: u64, pub created: String,

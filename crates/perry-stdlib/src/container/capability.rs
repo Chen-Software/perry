@@ -1,10 +1,14 @@
-use super::types::{ContainerSpec, ContainerLogs, ComposeError};
-use super::verification;
-use super::get_global_backend_instance;
+//! OCI isolation for sandboxed shellCapabilities
+
+use crate::container::types::{ComposeError, Result};
+use crate::container::types::{ContainerSpec, ContainerLogs};
+use crate::container::verification::verify_image;
+use crate::container::get_global_backend_instance;
+use std::collections::HashMap;
 
 pub struct CapabilityGrants {
     pub network: bool,
-    pub env: Option<std::collections::HashMap<String, String>>,
+    pub env: Option<HashMap<String, String>>,
 }
 
 pub async fn alloy_container_run_capability(
@@ -12,20 +16,29 @@ pub async fn alloy_container_run_capability(
     image: &str,
     cmd: &[&str],
     grants: &CapabilityGrants,
-) -> Result<ContainerLogs, ComposeError> {
-    let digest = verification::verify_image(image).await?;
+) -> Result<ContainerLogs> {
+    // 1. Image verification
+    verify_image(image).await?;
+
+    // 2. Build ContainerSpec with strict security profile
     let spec = ContainerSpec {
-        image: format!("{}@{}", image, digest),
-        name: Some(format!("alloy-cap-{}-{}", name, rand::random::<u32>())),
-        volumes: None,
-        network: if grants.network { None } else { Some("none".to_string()) },
-        rm: Some(true),
-        env: grants.env.clone(),
+        image: image.to_string(),
+        name: Some(format!("perry-cap-{}", name)),
         cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
+        network: if grants.network { None } else { Some("none".into()) },
+        rm: Some(true),
         read_only: Some(true),
+        env: grants.env.clone(),
         ..Default::default()
     };
+
+    // 3. Run ephemeral container
     let backend = get_global_backend_instance().await.map_err(|e| ComposeError::BackendNotAvailable { name: "global".into(), reason: e })?;
-    backend.run(&spec).await?;
-    backend.logs(spec.name.as_ref().unwrap(), None).await
+    let handle = backend.run(&spec).await?;
+
+    // 4. Collect logs and wait
+    let logs = backend.logs(&handle.id, None).await?;
+    let _ = backend.wait(&handle.id).await?;
+
+    Ok(logs)
 }

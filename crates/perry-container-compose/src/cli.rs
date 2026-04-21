@@ -2,8 +2,8 @@ use crate::compose::ComposeEngine;
 use crate::error::{ComposeError, Result};
 use crate::project::ComposeProject;
 use crate::config::ProjectConfig;
+use crate::backend::ContainerBackend;
 use clap::{Args, Parser, Subcommand};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -120,16 +120,16 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     let backend = crate::backend::detect_backend().await
         .map_err(|probed| ComposeError::NoBackendFound { probed })?;
-    let backend = Arc::new(backend);
+    let backend: Arc<dyn ContainerBackend> = Arc::from(backend);
 
     let engine = ComposeEngine::new(project.spec.clone(), project.project_name.clone(), backend);
 
     match cli.command {
         Commands::Up(args) => {
-            engine.up(&args.services, args.detach, args.build, args.remove_orphans).await?;
+            engine.up(&args.services, args.detach, args.build).await?;
         }
         Commands::Down(args) => {
-            engine.down(&args.services, args.remove_orphans, args.volumes).await?;
+            engine.down(&args.services, args.volumes).await?;
         }
         Commands::Start(args) => {
             engine.start(&args.services).await?;
@@ -145,25 +145,24 @@ pub async fn run(cli: Cli) -> Result<()> {
             print_ps_table(&infos);
         }
         Commands::Logs(args) => {
-            let logs_map = engine.logs(&args.services, args.tail).await?;
-            let mut names: Vec<&String> = logs_map.keys().collect();
-            names.sort();
-            for name in names {
-                let log = &logs_map[name];
-                for line in log.lines() {
-                    println!("{:<12} | {}", name, line);
+            if args.services.is_empty() {
+                let logs = engine.logs(None, args.tail).await?;
+                print!("{}", logs.stdout);
+                eprint!("{}", logs.stderr);
+            } else {
+                for svc in &args.services {
+                    let logs = engine.logs(Some(svc), args.tail).await?;
+                    for line in logs.stdout.lines() {
+                        println!("{:<12} | {}", svc, line);
+                    }
+                    for line in logs.stderr.lines() {
+                        eprintln!("{:<12} | {}", svc, line);
+                    }
                 }
             }
         }
         Commands::Exec(args) => {
-            let mut env_map = HashMap::new();
-            for e in args.env {
-                if let Some((k, v)) = e.split_once('=') {
-                    env_map.insert(k.to_string(), v.to_string());
-                }
-            }
-            let env = if env_map.is_empty() { None } else { Some(env_map) };
-            let logs = engine.exec(&args.service, &args.cmd, env.as_ref(), args.workdir.as_deref()).await?;
+            let logs = engine.exec(&args.service, &args.cmd).await?;
             print!("{}", logs.stdout);
             eprint!("{}", logs.stderr);
         }

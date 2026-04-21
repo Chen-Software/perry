@@ -1,8 +1,10 @@
 use crate::error::{ComposeError, Result};
-use crate::config::ProjectConfig;
+use crate::config::{ProjectConfig, resolve_project_name, resolve_compose_files};
 use crate::types::ComposeSpec;
+use crate::yaml::{load_env, parse_and_merge_files};
 use std::path::PathBuf;
 
+#[derive(Debug, Clone)]
 pub struct ComposeProject {
     pub spec: ComposeSpec,
     pub project_name: String,
@@ -12,12 +14,22 @@ pub struct ComposeProject {
 
 impl ComposeProject {
     pub fn load(config: &ProjectConfig) -> Result<Self> {
-        // TODO: Implement full project loading
+        let project_dir = std::env::current_dir().map_err(ComposeError::IoError)?;
+        let compose_files = resolve_compose_files(&config.files);
+
+        if compose_files.is_empty() {
+             return Err(ComposeError::FileNotFound { path: "compose.yaml".into() });
+        }
+
+        let project_name = resolve_project_name(config.project_name.as_deref(), &project_dir);
+        let env = load_env(&project_dir, &config.env_files);
+        let spec = parse_and_merge_files(&compose_files, &env)?;
+
         Ok(Self {
-            spec: ComposeSpec::default(),
-            project_name: config.project_name.clone().unwrap_or_default(),
-            project_dir: PathBuf::from("."),
-            compose_files: config.files.clone(),
+            spec,
+            project_name,
+            project_dir,
+            compose_files,
         })
     }
 }
