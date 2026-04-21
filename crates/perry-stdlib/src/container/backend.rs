@@ -1,8 +1,5 @@
-//! Container backend re-exports and detection.
-
 pub use perry_container_compose::backend::{
-    AppleContainerProtocol, CliBackend, CliProtocol, ContainerBackend,
-    DockerProtocol, LimaProtocol, detect_backend,
-    AppleBackend, DockerBackend, LimaBackend, NetworkConfig, VolumeConfig,
+    OciBackend, BackendDriver, OciCommandBuilder, BackendProbeResult, detect_backend,
 };
-pub use perry_container_compose::error::BackendProbeResult;
+pub use perry_container_compose::backend::ContainerBackend;
+pub use perry_container_compose::types::ContainerLogs;

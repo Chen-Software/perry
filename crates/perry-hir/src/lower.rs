@@ -2457,9 +2457,48 @@ fn lower_module_decl(
                             })
                             .unwrap_or_else(|| local.clone());
                         if is_native {
-                            // Register as native module function with the original method name
-                            // e.g., import { v4 as uuid } from 'uuid' -> uuid maps to uuid.v4
-                            ctx.register_native_module(local.clone(), source.clone(), Some(imported.clone()));
+                            // Map perry/container and perry/compose imports to their FFI symbols
+                            let ffi_name = match source.as_str() {
+                                "perry/container" => match imported.as_str() {
+                                    "run" => Some("js_container_run"),
+                                    "create" => Some("js_container_create"),
+                                    "start" => Some("js_container_start"),
+                                    "stop" => Some("js_container_stop"),
+                                    "remove" => Some("js_container_remove"),
+                                    "list" => Some("js_container_list"),
+                                    "inspect" => Some("js_container_inspect"),
+                                    "logs" => Some("js_container_logs"),
+                                    "exec" => Some("js_container_exec"),
+                                    "pullImage" => Some("js_container_pullImage"),
+                                    "listImages" => Some("js_container_listImages"),
+                                    "removeImage" => Some("js_container_removeImage"),
+                                    "getBackend" => Some("js_container_getBackend"),
+                                    "composeUp" => Some("js_container_composeUp"),
+                                    _ => None,
+                                },
+                                "perry/compose" => match imported.as_str() {
+                                    "up" => Some("js_compose_up"),
+                                    "down" => Some("js_compose_down"),
+                                    "ps" => Some("js_compose_ps"),
+                                    "logs" => Some("js_compose_logs"),
+                                    "exec" => Some("js_compose_exec"),
+                                    "config" => Some("js_compose_config"),
+                                    "start" => Some("js_compose_start"),
+                                    "stop" => Some("js_compose_stop"),
+                                    "restart" => Some("js_compose_restart"),
+                                    _ => None,
+                                },
+                                _ => None,
+                            };
+
+                            if let Some(ffi) = ffi_name {
+                                ctx.register_imported_func(local.clone(), ffi.to_string());
+                            } else {
+                                // Register as native module function with the original method name
+                                // e.g., import { v4 as uuid } from 'uuid' -> uuid maps to uuid.v4
+                                ctx.register_native_module(local.clone(), source.clone(), Some(imported.clone()));
+                            }
+
                             // Auto-register parentPort from worker_threads as a native instance
                             // (it's a singleton, not created via `new`)
                             if source == "worker_threads" && imported == "parentPort" {
@@ -4607,17 +4646,6 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
             } else if let Some(id) = ctx.lookup_func(&name) {
                 Ok(Expr::FuncRef(id))
             } else if let Some((module_name, method_name)) = ctx.lookup_native_module(&name) {
-                if module_name == "perry/container" || module_name == "perry/compose" || module_name == "perry/container-compose" {
-                    if let Some(method) = method_name {
-                        return Ok(Expr::NativeMethodCall {
-                            module: module_name.to_string(),
-                            class_name: None,
-                            object: None,
-                            method: method.to_string(),
-                            args: Vec::new(),
-                        });
-                    }
-                }
                 // Special handling for worker_threads named imports
                 if module_name == "worker_threads" {
                     if let Some(method) = method_name {

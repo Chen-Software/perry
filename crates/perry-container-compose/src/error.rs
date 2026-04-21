@@ -1,5 +1,11 @@
-use serde::{Deserialize, Serialize};
+//! Error types for perry-container-compose.
+//!
+//! Defines the canonical `ComposeError` enum and FFI error mapping.
 
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+/// Result of probing a single container backend candidate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackendProbeResult {
     pub name: String,
@@ -7,7 +13,8 @@ pub struct BackendProbeResult {
     pub reason: String,
 }
 
-#[derive(Debug, thiserror::Error)]
+/// Top-level crate error
+#[derive(Debug, Error)]
 pub enum ComposeError {
     #[error("Dependency cycle detected in services: {services:?}")]
     DependencyCycle { services: Vec<String> },
@@ -42,14 +49,85 @@ pub enum ComposeError {
     #[error("No container backend found. Probed: {probed:?}")]
     NoBackendFound { probed: Vec<BackendProbeResult> },
 
-    #[error("Specified backend '{name}' is not available: {reason}")]
+    #[error("Backend '{name}' is not available: {reason}")]
     BackendNotAvailable { name: String, reason: String },
+}
+
+impl ComposeError {
+    pub fn validation(msg: impl Into<String>) -> Self {
+        ComposeError::ValidationError {
+            message: msg.into(),
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, ComposeError>;
 
-impl ComposeError {
-    pub fn validation(message: String) -> Self {
-        ComposeError::ValidationError { message }
+/// Convert a `ComposeError` to a JSON string `{ "message": "...", "code": N }`
+/// suitable for passing across the FFI boundary.
+pub fn compose_error_to_js(e: &ComposeError) -> String {
+    let code = match e {
+        ComposeError::NotFound(_) => 404,
+        ComposeError::FileNotFound { .. } => 404,
+        ComposeError::BackendError { code, .. } => *code,
+        ComposeError::DependencyCycle { .. } => 422,
+        ComposeError::ValidationError { .. } => 400,
+        ComposeError::ParseError(_) => 400,
+        ComposeError::JsonError(_) => 400,
+        ComposeError::VerificationFailed { .. } => 403,
+        ComposeError::NoBackendFound { .. } => 503,
+        ComposeError::BackendNotAvailable { .. } => 503,
+        ComposeError::ServiceStartupFailed { .. } => 500,
+        ComposeError::IoError(_) => 500,
+    };
+    serde_json::json!({
+        "message": e.to_string(),
+        "code": code
+    })
+    .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_codes() {
+        let err = ComposeError::NotFound("foo".into());
+        assert_eq!(compose_error_to_js(&err).contains("\"code\":404"), true);
+
+        let err = ComposeError::DependencyCycle {
+            services: vec!["a".into()],
+        };
+        assert_eq!(compose_error_to_js(&err).contains("\"code\":422"), true);
+
+        let err = ComposeError::ValidationError {
+            message: "bad".into(),
+        };
+        assert_eq!(compose_error_to_js(&err).contains("\"code\":400"), true);
+
+        let err = ComposeError::VerificationFailed {
+            image: "img".into(),
+            reason: "fail".into(),
+        };
+        assert_eq!(compose_error_to_js(&err).contains("\"code\":403"), true);
+
+        let err = ComposeError::ParseError(serde_yaml::from_str::<serde_yaml::Value>("bad: [1,2").unwrap_err());
+        assert_eq!(compose_error_to_js(&err).contains("\"code\":400"), true);
+
+        let err = ComposeError::NoBackendFound {
+            probed: vec![BackendProbeResult {
+                name: "docker".into(),
+                available: false,
+                reason: "not found".into(),
+            }],
+        };
+        assert_eq!(compose_error_to_js(&err).contains("\"code\":503"), true);
+
+        let err = ComposeError::BackendNotAvailable {
+            name: "podman".into(),
+            reason: "machine not running".into(),
+        };
+        assert_eq!(compose_error_to_js(&err).contains("\"code\":503"), true);
     }
 }
