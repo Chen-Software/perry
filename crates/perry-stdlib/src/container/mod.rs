@@ -16,7 +16,6 @@ use std::sync::{Arc, OnceLock};
 use dashmap::DashMap;
 
 pub(crate) static BACKEND: OnceLock<Arc<dyn ContainerBackend>> = OnceLock::new();
-pub(crate) static COMPOSE_ENGINES: OnceLock<DashMap<u64, Arc<perry_container_compose::ComposeEngine>>> = OnceLock::new();
 
 pub(crate) async fn get_global_backend_instance() -> Result<Arc<dyn ContainerBackend>, String> {
     if let Some(b) = BACKEND.get() {
@@ -346,25 +345,7 @@ pub unsafe extern "C" fn js_container_getBackend() -> *const StringHeader {
 pub unsafe extern "C" fn js_container_detectBackend() -> *mut Promise {
     let promise = js_promise_new();
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        // Run all probes and return as JSON string.
-        // We use detect_backend()'s error path to get all probe results if none found,
-        // or we manually probe all if one IS found.
-        let candidates: &[&str] = match std::env::consts::OS {
-            "macos" | "ios" => &["apple/container", "orbstack", "colima", "rancher-desktop", "podman", "lima", "docker"],
-            _ => &["podman", "nerdctl", "docker"],
-        };
-
-        let mut results = Vec::new();
-        for &name in candidates {
-             // In a full implementation we'd call a probe_all in perry-container-compose.
-             // For now, we return a minimal informative list.
-             results.push(serde_json::json!({
-                 "name": name,
-                 "available": false, // simplified
-                 "reason": "probed"
-             }));
-        }
-
+        let results = backend::probe_all_backends().await;
         let json = serde_json::to_string(&results).unwrap_or_else(|_| "[]".into());
         Ok(types::register_container_logs(ContainerLogs { stdout: json, stderr: "".into() }))
     });
@@ -400,8 +381,7 @@ pub unsafe extern "C" fn js_compose_up(spec_json_ptr: *const StringHeader) -> *m
         let project_name = spec.name.clone().unwrap_or_else(|| "perry-stack".into());
         let engine = perry_container_compose::ComposeEngine::new(spec, project_name, backend);
         match engine.clone().up(&[], false, false).await {
-            Ok(handle) => {
-                COMPOSE_ENGINES.get_or_init(DashMap::new).insert(handle.stack_id, engine.clone());
+            Ok(_handle) => {
                 Ok(types::register_compose_handle(engine))
             }
             Err(e) => Err(compose_error_to_js(e)),
@@ -415,10 +395,10 @@ pub unsafe extern "C" fn js_compose_down(stack_id: i64, volumes: i32) -> *mut Pr
     let promise = js_promise_new();
     let id = stack_id as u64;
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let engine = COMPOSE_ENGINES.get().and_then(|m| m.get(&id).map(|e| e.clone())).ok_or_else(|| backend_err_to_js("Stack not found".into()))?;
+        let engine = types::COMPOSE_HANDLES.get().and_then(|m| m.get(&id).map(|e| e.clone())).ok_or_else(|| backend_err_to_js("Stack not found".into()))?;
         match engine.down(&[], volumes != 0).await {
             Ok(()) => {
-                COMPOSE_ENGINES.get().map(|m| m.remove(&id));
+                types::COMPOSE_HANDLES.get().map(|m| m.remove(&id));
                 Ok(0u64)
             }
             Err(e) => Err(compose_error_to_js(e)),
@@ -432,7 +412,7 @@ pub unsafe extern "C" fn js_compose_ps(stack_id: i64) -> *mut Promise {
     let promise = js_promise_new();
     let id = stack_id as u64;
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let engine = COMPOSE_ENGINES.get().and_then(|m| m.get(&id).map(|e| e.clone())).ok_or_else(|| backend_err_to_js("Stack not found".into()))?;
+        let engine = types::COMPOSE_HANDLES.get().and_then(|m| m.get(&id).map(|e| e.clone())).ok_or_else(|| backend_err_to_js("Stack not found".into()))?;
         match engine.ps().await {
             Ok(list) => Ok(types::register_container_info_list(list)),
             Err(e) => Err(compose_error_to_js(e)),
@@ -447,7 +427,7 @@ pub unsafe extern "C" fn js_compose_logs(stack_id: i64, service_ptr: *const Stri
     let id = stack_id as u64;
     let service = if service_ptr.is_null() { None } else { string_from_header(service_ptr) };
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let engine = COMPOSE_ENGINES.get().and_then(|m| m.get(&id).map(|e| e.clone())).ok_or_else(|| backend_err_to_js("Stack not found".into()))?;
+        let engine = types::COMPOSE_HANDLES.get().and_then(|m| m.get(&id).map(|e| e.clone())).ok_or_else(|| backend_err_to_js("Stack not found".into()))?;
         match engine.logs(service.as_deref(), if tail >= 0 { Some(tail as u32) } else { None }).await {
             Ok(logs) => Ok(types::register_container_logs(logs)),
             Err(e) => Err(compose_error_to_js(e)),
@@ -471,7 +451,7 @@ pub unsafe extern "C" fn js_compose_exec(stack_id: i64, service_ptr: *const Stri
     let cmd: Vec<String> = serde_json::from_str(&cmd_json).unwrap_or_default();
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let engine = COMPOSE_ENGINES.get().and_then(|m| m.get(&id).map(|e| e.clone())).ok_or_else(|| backend_err_to_js("Stack not found".into()))?;
+        let engine = types::COMPOSE_HANDLES.get().and_then(|m| m.get(&id).map(|e| e.clone())).ok_or_else(|| backend_err_to_js("Stack not found".into()))?;
         match engine.exec(&service, &cmd).await {
             Ok(logs) => Ok(types::register_container_logs(logs)),
             Err(e) => Err(compose_error_to_js(e)),
@@ -497,7 +477,7 @@ pub unsafe extern "C" fn js_compose_start(stack_id: i64, services_json_ptr: *con
     let services_json = if services_json_ptr.is_null() { "[]".into() } else { string_from_header(services_json_ptr).unwrap_or_else(|| "[]".into()) };
     let services: Vec<String> = serde_json::from_str(&services_json).unwrap_or_default();
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let engine = COMPOSE_ENGINES.get().and_then(|m| m.get(&id).map(|e| e.clone())).ok_or_else(|| backend_err_to_js("Stack not found".into()))?;
+        let engine = types::COMPOSE_HANDLES.get().and_then(|m| m.get(&id).map(|e| e.clone())).ok_or_else(|| backend_err_to_js("Stack not found".into()))?;
         match engine.start(&services).await {
             Ok(()) => Ok(0u64),
             Err(e) => Err(compose_error_to_js(e)),
@@ -513,7 +493,7 @@ pub unsafe extern "C" fn js_compose_stop(stack_id: i64, services_json_ptr: *cons
     let services_json = if services_json_ptr.is_null() { "[]".into() } else { string_from_header(services_json_ptr).unwrap_or_else(|| "[]".into()) };
     let services: Vec<String> = serde_json::from_str(&services_json).unwrap_or_default();
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let engine = COMPOSE_ENGINES.get().and_then(|m| m.get(&id).map(|e| e.clone())).ok_or_else(|| backend_err_to_js("Stack not found".into()))?;
+        let engine = types::COMPOSE_HANDLES.get().and_then(|m| m.get(&id).map(|e| e.clone())).ok_or_else(|| backend_err_to_js("Stack not found".into()))?;
         match engine.stop(&services).await {
             Ok(()) => Ok(0u64),
             Err(e) => Err(compose_error_to_js(e)),
@@ -529,7 +509,7 @@ pub unsafe extern "C" fn js_compose_restart(stack_id: i64, services_json_ptr: *c
     let services_json = if services_json_ptr.is_null() { "[]".into() } else { string_from_header(services_json_ptr).unwrap_or_else(|| "[]".into()) };
     let services: Vec<String> = serde_json::from_str(&services_json).unwrap_or_default();
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let engine = COMPOSE_ENGINES.get().and_then(|m| m.get(&id).map(|e| e.clone())).ok_or_else(|| backend_err_to_js("Stack not found".into()))?;
+        let engine = types::COMPOSE_HANDLES.get().and_then(|m| m.get(&id).map(|e| e.clone())).ok_or_else(|| backend_err_to_js("Stack not found".into()))?;
         match engine.restart(&services).await {
             Ok(()) => Ok(0u64),
             Err(e) => Err(compose_error_to_js(e)),
@@ -540,9 +520,6 @@ pub unsafe extern "C" fn js_compose_restart(stack_id: i64, services_json_ptr: *c
 
 #[no_mangle]
 pub unsafe extern "C" fn js_container_module_init() {
-    // Force backend detection synchronously to ensure getBackend() works on first call.
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    let _ = rt.block_on(async {
-        get_global_backend_instance().await
-    });
+    // We used to block_on here, but that's bad for initialization performance.
+    // Detection will happen lazily on first use.
 }

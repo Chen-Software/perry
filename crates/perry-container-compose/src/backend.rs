@@ -43,6 +43,7 @@ pub trait ContainerBackend: Send + Sync {
     async fn create_volume(&self, name: &str, config: &VolumeConfig) -> Result<()>;
     async fn remove_volume(&self, name: &str) -> Result<()>;
     async fn wait(&self, id: &str) -> Result<i32>;
+    async fn build(&self, context: &str, dockerfile: Option<&str>, tags: &[String]) -> Result<()>;
 }
 
 pub trait CliProtocol: Send + Sync {
@@ -297,6 +298,10 @@ impl<P: CliProtocol> ContainerBackend for CliBackend<P> {
         let code = String::from_utf8_lossy(&output.stdout).trim().parse().unwrap_or(0);
         Ok(code)
     }
+    async fn build(&self, context: &str, dockerfile: Option<&str>, tags: &[String]) -> Result<()> {
+        self.exec_ok(&self.protocol.build_args(context, dockerfile, tags)).await?;
+        Ok(())
+    }
 }
 
 pub type DockerBackend = CliBackend<DockerProtocol>;
@@ -309,6 +314,17 @@ pub async fn detect_backend() -> std::result::Result<Box<dyn ContainerBackend>, 
         if res.available { return Ok(make_backend(&name, PathBuf::from(res.reason))); }
         return Err(vec![res]);
     }
+
+    let results = probe_all_backends().await;
+    for res in &results {
+        if res.available {
+            return Ok(make_backend(&res.name, PathBuf::from(&res.reason)));
+        }
+    }
+    Err(results)
+}
+
+pub async fn probe_all_backends() -> Vec<BackendProbeResult> {
     let candidates: &[&str] = match std::env::consts::OS {
         "macos" | "ios" => &["apple/container", "orbstack", "colima", "rancher-desktop", "podman", "lima", "docker"],
         "linux" => &["podman", "nerdctl", "docker"],
@@ -316,14 +332,12 @@ pub async fn detect_backend() -> std::result::Result<Box<dyn ContainerBackend>, 
     };
     let mut results = Vec::new();
     for &name in candidates {
-        let result = probe_candidate(name).await;
-        if result.available { return Ok(make_backend(name, PathBuf::from(result.reason))); }
-        results.push(result);
+        results.push(probe_candidate(name).await);
     }
-    Err(results)
+    results
 }
 
-async fn probe_candidate(name: &str) -> BackendProbeResult {
+pub async fn probe_candidate(name: &str) -> BackendProbeResult {
     let check = match name {
         "apple/container" => ("container", vec!["--version"]),
         "orbstack" => ("orb", vec!["--version"]),
@@ -436,4 +450,5 @@ impl ContainerBackend for MockBackend {
     async fn create_volume(&self, _name: &str, _config: &VolumeConfig) -> Result<()> { Ok(()) }
     async fn remove_volume(&self, _name: &str) -> Result<()> { Ok(()) }
     async fn wait(&self, _id: &str) -> Result<i32> { Ok(0) }
+    async fn build(&self, _context: &str, _dockerfile: Option<&str>, _tags: &[String]) -> Result<()> { Ok(()) }
 }

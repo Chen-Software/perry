@@ -6,10 +6,6 @@ use crate::service::{service_container_name, needs_build};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use dashmap::DashMap;
-use once_cell::sync::Lazy;
-
-static ENGINES: Lazy<DashMap<u64, Arc<ComposeEngine>>> = Lazy::new(DashMap::new);
-
 #[derive(Clone)]
 pub struct ComposeEngine {
     pub spec: ComposeSpec,
@@ -21,10 +17,6 @@ impl ComposeEngine {
     pub fn new(spec: ComposeSpec, project_name: String, backend: Arc<dyn ContainerBackend>) -> Arc<Self> {
         let engine = Arc::new(Self { spec, project_name, backend });
         engine
-    }
-
-    pub fn get_engine(stack_id: u64) -> Option<Arc<Self>> {
-        ENGINES.get(&stack_id).map(|e| e.clone())
     }
 
     pub fn resolve_startup_order(spec: &ComposeSpec) -> Result<Vec<String>> {
@@ -163,11 +155,18 @@ impl ComposeEngine {
             }
 
             // Fresh container
+            let mut image_name = service.image.clone().unwrap_or_else(|| format!("{}_{}", self.project_name, service_name));
             if build || needs_build(service) {
                 if let Some(build_spec) = &service.build {
-                     // Build logic... for now we assume image exists or built externally
-                     // In a full implementation we'd call backend.build()
-                     let _ = build_spec;
+                     use crate::types::BuildSpec;
+                     let (context, dockerfile) = match build_spec {
+                         BuildSpec::Context(ctx) => (ctx.clone(), None),
+                         BuildSpec::Config(cfg) => (cfg.context.clone().unwrap_or_else(|| ".".into()), cfg.dockerfile.clone()),
+                     };
+                     if let Err(e) = self.backend.build(&context, dockerfile.as_deref(), &[image_name.clone()]).await {
+                         self.rollback(&started_containers, &created_networks, &created_volumes).await;
+                         return Err(e);
+                     }
                 }
             } else if let Some(image) = &service.image {
                 if let Err(e) = self.backend.pull_image(image).await {
@@ -181,7 +180,7 @@ impl ComposeEngine {
             }
 
             let container_spec = ContainerSpec {
-                image: service.image.clone().unwrap_or_else(|| service_name.clone()),
+                image: image_name,
                 name: Some(container_name),
                 ports: service.ports.as_ref().map(|p| p.iter().map(|ps| format!("{:?}", ps)).collect()),
                 volumes: service.volumes.as_ref().map(|v| v.iter().map(|vs| format!("{:?}", vs)).collect()),
@@ -214,11 +213,8 @@ impl ComposeEngine {
             }
         }
 
-        let stack_id = rand::random();
-        ENGINES.insert(stack_id, self.clone());
-
         Ok(ComposeHandle {
-            stack_id,
+            stack_id: 0, // Assigned by stdlib registry
             project_name: self.project_name.clone(),
             services: started_containers,
         })
