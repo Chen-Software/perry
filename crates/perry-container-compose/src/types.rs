@@ -92,7 +92,7 @@ pub struct ComposeServiceVolumeImage {
     pub subpath: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeServicePort {
     pub name: Option<String>,
     pub mode: Option<String>,

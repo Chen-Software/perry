@@ -112,7 +112,7 @@ pub extern "C" fn js_set_new_from_handle_v8(func: JsNewFromHandleV8Fn) {
 /// Get element from a JS handle array. Dispatches through the function pointer
 /// set by perry-jsruntime, or returns TAG_UNDEFINED if JS runtime not loaded.
 #[no_mangle]
-pub extern "C" fn js_handle_array_get(array_handle: f64, index: i32) -> f64 {
+#[cfg(not(feature = "jsruntime"))] pub extern "C" fn js_handle_array_get(array_handle: f64, index: i32) -> f64 {
     let ptr = JS_HANDLE_ARRAY_GET.load(Ordering::Relaxed);
     if ptr.is_null() {
         return f64::from_bits(TAG_UNDEFINED);
@@ -124,7 +124,7 @@ pub extern "C" fn js_handle_array_get(array_handle: f64, index: i32) -> f64 {
 /// Get length of a JS handle array. Dispatches through the function pointer
 /// set by perry-jsruntime, or returns 0 if JS runtime not loaded.
 #[no_mangle]
-pub extern "C" fn js_handle_array_length(array_handle: f64) -> i32 {
+#[cfg(not(feature = "jsruntime"))] pub extern "C" fn js_handle_array_length(array_handle: f64) -> i32 {
     let ptr = JS_HANDLE_ARRAY_LENGTH.load(Ordering::Relaxed);
     if ptr.is_null() {
         return 0;

@@ -16,13 +16,13 @@ pub const PERRY_CONTAINER_TABLE: &[(&str, &str)] = &[
 ];
 
 pub const PERRY_COMPOSE_TABLE: &[(&str, &str)] = &[
-    ("up",      "js_container_compose_up"),
-    ("down",    "js_container_compose_down"),
-    ("ps",      "js_container_compose_ps"),
-    ("logs",    "js_container_compose_logs"),
-    ("exec",    "js_container_compose_exec"),
-    ("config",  "js_container_compose_config"),
-    ("start",   "js_container_compose_start"),
-    ("stop",    "js_container_compose_stop"),
-    ("restart", "js_container_compose_restart"),
+    ("up",      "js_compose_up"),
+    ("down",    "js_compose_down"),
+    ("ps",      "js_compose_ps"),
+    ("logs",    "js_compose_logs"),
+    ("exec",    "js_compose_exec"),
+    ("config",  "js_compose_config"),
+    ("start",   "js_compose_start"),
+    ("stop",    "js_compose_stop"),
+    ("restart", "js_compose_restart"),
 ];

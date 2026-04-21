@@ -2422,7 +2422,7 @@ fn lower_module_decl(
                                 if let Some((_, ffi)) = PERRY_CONTAINER_TABLE.iter().find(|(ts, _)| ts == &imported) {
                                     ffi_name = Some(ffi.to_string());
                                 }
-                            } else if source == "perry/container-compose" {
+                            } else if source == "perry/compose" {
                                 if let Some((_, ffi)) = PERRY_COMPOSE_TABLE.iter().find(|(ts, _)| ts == &imported) {
                                     ffi_name = Some(ffi.to_string());
                                 }

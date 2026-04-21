@@ -234,7 +234,7 @@ pub unsafe extern "C" fn js_container_inspect(id_ptr: *const StringHeader) -> *m
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_logs(id_ptr: *const StringHeader, tail: i32) -> *mut Promise {
+pub unsafe extern "C" fn js_container_logs(id_ptr: *const StringHeader, tail: i32, follow: i32) -> *mut Promise {
     let promise = js_promise_new();
     let id = match string_from_header(id_ptr) {
         Some(s) => s,
@@ -245,6 +245,8 @@ pub unsafe extern "C" fn js_container_logs(id_ptr: *const StringHeader, tail: i3
     };
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         let backend = get_global_backend_instance().await.map_err(backend_err_to_js)?;
+        // follow is not yet fully implemented in the backend trait but is required for FFI compatibility
+        let _ = follow;
         match backend.logs(&id, if tail >= 0 { Some(tail as u32) } else { None }).await {
             Ok(logs) => Ok(types::register_container_logs(logs)),
             Err(e) => Err(compose_error_to_js(e)),
@@ -426,12 +428,13 @@ pub unsafe extern "C" fn js_compose_ps(stack_id: i64) -> *mut Promise {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_logs(stack_id: i64, service_ptr: *const StringHeader, tail: i32) -> *mut Promise {
+pub unsafe extern "C" fn js_compose_logs(stack_id: i64, service_ptr: *const StringHeader, tail: i32, follow: i32) -> *mut Promise {
     let promise = js_promise_new();
     let id = stack_id as u64;
     let service = if service_ptr.is_null() { None } else { string_from_header(service_ptr) };
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         let engine = COMPOSE_ENGINES.get().and_then(|m| m.get(&id).map(|e| e.clone())).ok_or_else(|| backend_err_to_js("Stack not found".into()))?;
+        let _ = follow;
         match engine.logs(service.as_deref(), if tail >= 0 { Some(tail as u32) } else { None }).await {
             Ok(logs) => Ok(types::register_container_logs(logs)),
             Err(e) => Err(compose_error_to_js(e)),

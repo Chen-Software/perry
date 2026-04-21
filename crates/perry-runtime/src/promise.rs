@@ -925,7 +925,7 @@ extern "C" fn promise_race_reject_handler(closure: *const crate::closure::Closur
 /// In V8 mode (perry-jsruntime), this function is overridden by the V8-aware
 /// version that can also handle JS_HANDLE_TAG promises.
 #[no_mangle]
-pub extern "C" fn js_await_any_promise(value: f64) -> f64 {
+#[cfg(not(feature = "jsruntime"))] pub extern "C" fn js_await_any_promise(value: f64) -> f64 {
     value
 }
 
