@@ -359,11 +359,12 @@ pub unsafe extern "C" fn js_container_removeImage(ref_ptr: *const StringHeader, 
 
 #[no_mangle]
 pub unsafe extern "C" fn js_container_getBackend() -> *const StringHeader {
-    if let Some(backend) = mod_private::BACKEND.get() {
-        let name = backend.backend_name();
-        return perry_runtime::js_string_from_bytes(name.as_ptr(), name.len() as u32);
-    }
-    std::ptr::null()
+    let name = if let Some(backend) = mod_private::BACKEND.get() {
+        backend.backend_name()
+    } else {
+        "unknown"
+    };
+    perry_runtime::js_string_from_bytes(name.as_ptr(), name.len() as u32)
 }
 
 #[no_mangle]

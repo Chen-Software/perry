@@ -16,15 +16,19 @@ pub async fn alloy_container_run_capability(
     cmd: &[&str],
     grants: &CapabilityGrants,
 ) -> Result<ContainerLogs, String> {
-    // 1. Verify image
-    let _digest = verification::verify_image(image).await?;
+    // 1. Verify image signature before running
+    let digest = verification::verify_image(image).await?;
 
-    // 2. Build spec
+    // 2. Build ephemeral ContainerSpec with security constraints
     let spec = ContainerSpec {
-        image: image.to_string(),
+        image: format!("{}@{}", image, digest),
         name: Some(format!("alloy-cap-{}-{}", name, rand::random::<u32>())),
+        // No persistent volumes
+        volumes: None,
+        // No network access by default (unless grants.network == true)
         network: if grants.network { None } else { Some("none".to_string()) },
-        rm: Some(true),
+        // Read-only root filesystem
+        rm: Some(true),  // Always remove on exit
         read_only: Some(true),
         env: grants.env.clone(),
         cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
@@ -46,9 +50,11 @@ pub async fn alloy_container_run_capability(
         read_only: spec.read_only,
     }).await.map_err(|e| e.to_string())?;
 
-    // 4. Logs (simplified: wait for completion should be here)
+    // 4. Wait for completion and collect output
+    let _ = backend.wait(&handle.id).await.map_err(|e| e.to_string())?;
     let logs = backend.logs(&handle.id, None).await.map_err(|e| e.to_string())?;
 
+    // 5. Container is auto-removed (rm: true)
     Ok(ContainerLogs {
         stdout: logs.stdout,
         stderr: logs.stderr,
