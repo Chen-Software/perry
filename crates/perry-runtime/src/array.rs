@@ -31,7 +31,14 @@ use crate::arena::arena_alloc_gc;
 /// <= capacity <= 16M (same bound as the GC tracer's sanity guard).
 #[inline(always)]
 fn clean_arr_ptr(arr: *const ArrayHeader) -> *const ArrayHeader {
-    const HEAP_MIN: u64 = 0x200_0000_0000; // 2 TB — above observed corrupt handles
+    // Heap window varies by OS: Darwin mimalloc lands in the 3-5 TB range;
+    // Android scudo + Linux glibc allocate MUCH lower (often < 1 TB). Using
+    // the Darwin-tight 2 TB floor on Android silently null-s every real
+    // array pointer, turning js_array_set_f64 into a no-op.
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    const HEAP_MIN: u64 = 0x1000; // 4 KB (classic user-space floor)
+    #[cfg(not(any(target_os = "android", target_os = "linux")))]
+    const HEAP_MIN: u64 = 0x200_0000_0000; // 2 TB — above observed corrupt handles on Darwin
     const HEAP_MAX: u64 = 0x8000_0000_0000; // 47-bit userspace cap
     let bits = arr as u64;
     let top16 = bits >> 48;

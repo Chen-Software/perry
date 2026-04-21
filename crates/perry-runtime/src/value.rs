@@ -1517,12 +1517,15 @@ pub extern "C" fn js_value_length_f64(value: f64) -> f64 {
     // nonsense.
     if top16 == 0x7FFD {
         let handle = (bits & POINTER_MASK) as usize;
-        // Constrain to the observed mimalloc heap window on Darwin
-        // (2 TB < h < 128 TB). Empirically, macOS ARM64 mimalloc
-        // allocations land in 3-5 TB; anything below 2 TB is a
-        // corrupted NaN-box (e.g. `BufferHeader { length: 0,
-        // capacity: 255 }` read as u64 produces handle 1 TB).
-        if handle < 0x200_0000_0000 || handle >= 0x8000_0000_0000 {
+        // Heap window: Darwin mimalloc lands in 3-5 TB, but Android scudo
+        // and Linux glibc allocate much lower (often hundreds of GB or
+        // less). Using the Darwin-tight 2 TB floor on Android null-s every
+        // real pointer. See clean_arr_ptr for the same platform split.
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        let heap_min: usize = 0x1000;
+        #[cfg(not(any(target_os = "android", target_os = "linux")))]
+        let heap_min: usize = 0x200_0000_0000;
+        if handle < heap_min || handle >= 0x8000_0000_0000 {
             return 0.0;
         }
         if crate::buffer::is_registered_buffer(handle) {
@@ -1553,7 +1556,11 @@ pub extern "C" fn js_value_length_f64(value: f64) -> f64 {
     // sometimes hands their pointer through as `bitcast i64 → double`
     // without a POINTER_TAG. Without this path, `Int32Array.length`
     // returned 0 because the value's top16 was 0, not 0x7FFD.
-    if top16 == 0 && bits >= 0x200_0000_0000 && bits < 0x8000_0000_0000 {
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    let raw_heap_min: u64 = 0x1000;
+    #[cfg(not(any(target_os = "android", target_os = "linux")))]
+    let raw_heap_min: u64 = 0x200_0000_0000;
+    if top16 == 0 && bits >= raw_heap_min && bits < 0x8000_0000_0000 {
         let handle = bits as usize;
         if crate::buffer::is_registered_buffer(handle) {
             let buf = handle as *const crate::buffer::BufferHeader;
