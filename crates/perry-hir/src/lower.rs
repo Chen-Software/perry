@@ -2652,6 +2652,8 @@ fn lower_module_decl(
                                                         // `job.stop()` falls through to dynamic dispatch and the
                                                         // stop never reaches js_cron_job_stop.
                                                         ("node-cron", "schedule") => Some("CronJob"),
+                                                        ("perry/container", "run" | "create" | "list" | "inspect" | "logs" | "exec" | "listImages" | "detectBackend") => Some("Promise"),
+                                                        ("perry/container-compose", "up" | "down" | "ps" | "logs" | "exec" | "config" | "start" | "stop" | "restart") => Some("Promise"),
                                                         _ => None,
                                                     };
                                                     if let Some(class_name) = class_name {
@@ -2708,6 +2710,8 @@ fn lower_module_decl(
                                                             ("pg", "connect") => Some("Client"),
                                                             ("http" | "https", "request" | "get") => Some("ClientRequest"),
                                                             ("axios", "get" | "post" | "put" | "delete" | "patch" | "request") => Some("Response"),
+                                                            ("perry/container", "run" | "create" | "list" | "inspect" | "logs" | "exec" | "listImages" | "detectBackend") => Some("Promise"),
+                                                            ("perry/container-compose", "up" | "down" | "ps" | "logs" | "exec" | "config" | "start" | "stop" | "restart") => Some("Promise"),
                                                             _ => None,
                                                         };
                                                         if let Some(class_name) = class_name {
@@ -3628,6 +3632,8 @@ fn lower_stmt(
                                         ("axios", "get" | "post" | "put" | "delete" | "patch" | "request") => Some("Response"),
                                         ("mongodb", "connect") => Some("MongoClient"),
                                         ("pg", "connect") => Some("Client"),
+                                        ("perry/container", "run" | "create" | "list" | "inspect" | "logs" | "exec" | "listImages" | "detectBackend") => Some("Promise"),
+                                        ("perry/container-compose", "up" | "down" | "ps" | "logs" | "exec" | "config" | "start" | "stop" | "restart") => Some("Promise"),
                                         _ => None,
                                     };
                                     if let Some(cn) = class_name {

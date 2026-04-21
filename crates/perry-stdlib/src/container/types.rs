@@ -8,7 +8,8 @@ use crate::common::handle::{self, Handle};
 // Re-export core types from the compose crate to avoid duplication and mismatch.
 pub use perry_container_compose::types::{
     ComposeHandle, ComposeSpec, ContainerHandle, ContainerInfo, ContainerLogs, ContainerSpec,
-    ImageInfo, ListOrDict,
+    DownOptions, ExecOptions, ImageInfo, ListOptions, ListOrDict, LogOptions, RemoveOptions,
+    StopOptions,
 };
 
 // ============ Handle Registry ============

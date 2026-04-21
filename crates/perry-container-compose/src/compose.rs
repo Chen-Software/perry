@@ -348,6 +348,8 @@ impl ComposeEngine {
         &self,
         service: &str,
         cmd: &[String],
+        env: Option<&HashMap<String, String>>,
+        workdir: Option<&str>,
     ) -> Result<ContainerLogs> {
         let svc = self
             .spec
@@ -366,7 +368,7 @@ impl ComposeEngine {
         }
 
         self.backend
-            .exec(&container_name, cmd, None, None)
+            .exec(&container_name, cmd, env, workdir)
             .await
     }
 

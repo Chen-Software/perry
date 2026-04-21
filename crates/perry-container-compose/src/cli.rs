@@ -186,28 +186,14 @@ pub async fn run(cli: Cli) -> Result<()> {
                 .collect();
 
             let cmd = args.cmd.clone();
-            let result = if !env.is_empty() || args.workdir.is_some() {
-                // Use backend directly for workdir/env support
-                let svc = engine
-                    .spec
-                    .services
-                    .get(&args.service)
-                    .ok_or_else(|| crate::error::ComposeError::NotFound(args.service.clone()))?;
-                let container_name =
-                    crate::service::service_container_name(svc, &args.service);
-
-                engine
-                    .backend
-                    .exec(
-                        &container_name,
-                        &cmd,
-                        if env.is_empty() { None } else { Some(&env) },
-                        args.workdir.as_deref(),
-                    )
-                    .await?
-            } else {
-                engine.exec(&args.service, &cmd).await?
-            };
+            let result = engine
+                .exec(
+                    &args.service,
+                    &cmd,
+                    if env.is_empty() { None } else { Some(&env) },
+                    args.workdir.as_deref(),
+                )
+                .await?;
 
             print!("{}", result.stdout);
             eprint!("{}", result.stderr);

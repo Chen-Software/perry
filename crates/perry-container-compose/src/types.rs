@@ -672,6 +672,41 @@ pub struct ComposeHandle {
     pub services: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StopOptions {
+    pub timeout: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RemoveOptions {
+    pub force: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ListOptions {
+    pub all: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LogOptions {
+    pub follow: Option<bool>,
+    pub tail: Option<u32>,
+    pub service: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ExecOptions {
+    pub env: Option<std::collections::HashMap<String, String>>,
+    pub workdir: Option<String>,
+    pub user: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DownOptions {
+    pub volumes: Option<bool>,
+    pub remove_orphans: Option<bool>,
+}
+
 // ============ Container types (for single-container API) ============
 
 /// Specification for running a single container.

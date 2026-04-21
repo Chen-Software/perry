@@ -29,7 +29,6 @@ pub async fn alloy_container_run_capability(
         env: grants.env.clone(),
         cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
         entrypoint: None,
-        ..Default::default()
     };
 
     let backend = Arc::clone(get_global_backend().await?);
