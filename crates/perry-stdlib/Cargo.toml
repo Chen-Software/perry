@@ -13,7 +13,7 @@ crate-type = ["rlib", "staticlib"]
 default = ["full"]
 
 # Full stdlib - everything included
-full = ["http-server", "http-client", "database", "crypto", "compression", "email", "websocket", "image", "scheduler", "ids", "html-parser", "rate-limit", "validation", "net", "tls"]
+full = ["http-server", "http-client", "database", "crypto", "compression", "email", "websocket", "image", "scheduler", "ids", "html-parser", "rate-limit", "validation", "net", "tls", "container"]
 
 # Minimal core - just what's needed for basic programs
 core = []
@@ -74,11 +74,15 @@ validation = ["dep:validator", "dep:regex"]
 # UUID/nanoid
 ids = ["dep:uuid", "dep:nanoid"]
 
+# Container and Compose
+container = ["dep:perry-container-compose", "async-runtime"]
+
 # Async runtime (tokio) - internal feature
 async-runtime = ["dep:tokio"]
 
 [dependencies]
 perry-runtime = { workspace = true, features = ["stdlib"] }
+perry-container-compose = { path = "../perry-container-compose", optional = true }
 
 thiserror.workspace = true
 anyhow.workspace = true
