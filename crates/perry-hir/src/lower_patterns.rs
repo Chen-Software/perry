@@ -5,6 +5,7 @@
 
 use anyhow::{anyhow, Result};
 use perry_types::{LocalId, Type};
+use swc_common::Spanned;
 use swc_ecma_ast as ast;
 use crate::ir::*;
 use crate::lower::{LoweringContext, lower_expr};
@@ -131,7 +132,9 @@ pub(crate) fn lower_assign_target_to_expr(ctx: &mut LoweringContext, target: &as
 pub(crate) fn get_binding_name(pat: &ast::Pat) -> Result<String> {
     match pat {
         ast::Pat::Ident(ident) => Ok(ident.id.sym.to_string()),
-        _ => Err(anyhow!("Unsupported binding pattern")),
+        _ => {
+            crate::lower_bail!(pat.span(), "Unsupported binding pattern");
+        }
     }
 }
 

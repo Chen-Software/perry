@@ -3,7 +3,7 @@
 use anyhow::{anyhow, Result};
 use clap::Args;
 use perry_diagnostics::{
-    Diagnostic, DiagnosticCode, DiagnosticEmitter, Diagnostics, JsonEmitter, SourceCache,
+    Diagnostic, DiagnosticCode, DiagnosticEmitter, Diagnostics, JsonEmitter, SourceCache, Span,
     TerminalEmitter,
 };
 use std::collections::HashSet;
@@ -226,15 +226,39 @@ pub fn run(args: CheckArgs, format: OutputFormat, use_color: bool, verbose: u8) 
         }
 
         // Try to lower to HIR to catch more errors
+        let file_id = parse_result.file_id;
         match perry_hir::lower_module(&parse_result.module, &filename, &filename) {
             Ok(_hir_module) => {
                 // Successfully lowered
             }
             Err(e) => {
-                all_diagnostics.push(
-                    Diagnostic::error(DiagnosticCode::UnsupportedFeature, format!("{}", e))
-                        .build(),
-                );
+                // If the lowering error carried a span, attach it so the
+                // diagnostic emitter can print file:line:column and the
+                // offending source snippet. Otherwise fall back to a
+                // location-less message (but still tag it with the file_id
+                // so the emitter can at least show the filename).
+                let (message, span) = if let Some(lower_err) =
+                    e.downcast_ref::<perry_hir::error::LowerError>()
+                {
+                    let span = match lower_err.span {
+                        Some(swc_span) => {
+                            Span::new(file_id, swc_span.lo.0, swc_span.hi.0)
+                        }
+                        None => Span::DUMMY,
+                    };
+                    (lower_err.message.clone(), span)
+                } else {
+                    // No span info — prefix the filename so the user at
+                    // least knows which file produced the error.
+                    (format!("{}: {}", filename, e), Span::DUMMY)
+                };
+
+                let mut builder =
+                    Diagnostic::error(DiagnosticCode::UnsupportedFeature, message);
+                if !span.is_dummy() {
+                    builder = builder.with_span(span);
+                }
+                all_diagnostics.push(builder.build());
             }
         }
 
