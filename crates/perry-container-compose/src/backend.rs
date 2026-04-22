@@ -606,7 +606,16 @@ pub async fn detect_backend() -> std::result::Result<CliBackend, Vec<BackendProb
 
 pub fn platform_candidates() -> &'static [&'static str] {
     if cfg!(target_os = "macos") || cfg!(target_os = "ios") {
-        &["apple/container", "orbstack", "colima", "rancher-desktop", "podman", "lima", "docker"]
+        &[
+            "apple/container",
+            "orbstack",
+            "colima",
+            "rancher-desktop",
+            "lima",
+            "podman",
+            "nerdctl",
+            "docker",
+        ]
     } else {
         &["podman", "nerdctl", "docker"]
     }
@@ -634,7 +643,13 @@ async fn probe_candidate(name: &str) -> std::result::Result<CliBackend, String> 
             Ok(CliBackend::new(bin, Box::new(DockerProtocol)))
         }
         "orbstack" => {
-            let bin = which_bin("orb").or_else(|_| which_bin("docker")).map_err(|_| "orbstack not found")?;
+            let bin = which_bin("orb")
+                .or_else(|_| which_bin("docker"))
+                .map_err(|_| "orbstack not found")?;
+            Ok(CliBackend::new(bin, Box::new(DockerProtocol)))
+        }
+        "rancher-desktop" => {
+            let bin = which_bin("nerdctl").map_err(|_| "rancher-desktop (nerdctl) not found")?;
             Ok(CliBackend::new(bin, Box::new(DockerProtocol)))
         }
         "colima" => {
