@@ -330,21 +330,11 @@ pub unsafe extern "C" fn js_fastify_req_body(ctx_handle: Handle) -> *mut StringH
 #[no_mangle]
 pub unsafe extern "C" fn js_fastify_req_json(ctx_handle: Handle) -> f64 {
     if let Some(ctx) = get_handle::<FastifyContext>(ctx_handle) {
-        eprintln!("[req_json] body present: {}", ctx.body.is_some());
         if let Some(body) = ctx.body_string() {
-            eprintln!("[req_json] body = {}", &body[..body.len().min(200)]);
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
-                let result = json_value_to_jsvalue(&value);
-                eprintln!("[req_json] parsed result bits = 0x{:016X}", result.to_bits());
-                return result;
-            } else {
-                eprintln!("[req_json] JSON parse failed");
+                return json_value_to_jsvalue(&value);
             }
-        } else {
-            eprintln!("[req_json] no body");
         }
-    } else {
-        eprintln!("[req_json] invalid ctx handle: {}", ctx_handle);
     }
     f64::from_bits(JSValue::undefined().bits())
 }
@@ -629,22 +619,13 @@ unsafe fn json_value_to_jsvalue(value: &serde_json::Value) -> f64 {
         }
         serde_json::Value::Object(obj) => {
             let field_count = obj.len();
-            eprintln!("[json_value_to_jsvalue] Building object with {} fields", field_count);
             let js_obj = perry_runtime::js_object_alloc(0, field_count as u32);
             for (key, val) in obj {
-                eprintln!("[json_value_to_jsvalue] Setting field: {}", key);
                 let js_key = js_string_from_bytes(key.as_ptr(), key.len() as u32);
                 let js_val = json_value_to_jsvalue(val);
                 perry_runtime::js_object_set_field_by_name(js_obj, js_key, js_val);
             }
-            // Debug: verify "email" field is accessible right after construction
-            let email_key = js_string_from_bytes(b"email".as_ptr(), 5);
-            let email_val = perry_runtime::js_object_get_field_by_name(js_obj, email_key);
-            eprintln!("[json_value_to_jsvalue] Post-build 'email' lookup: bits=0x{:016X} is_string={} is_undefined={}",
-                email_val.bits(), email_val.is_string(), email_val.is_undefined());
-            let result = f64::from_bits(JSValue::pointer(js_obj as *const u8).bits());
-            eprintln!("[json_value_to_jsvalue] Object bits: 0x{:016X}", result.to_bits());
-            result
+            f64::from_bits(JSValue::pointer(js_obj as *const u8).bits())
         }
     }
 }

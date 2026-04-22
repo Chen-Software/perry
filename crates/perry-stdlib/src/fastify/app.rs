@@ -146,12 +146,9 @@ unsafe fn register_route(app_handle: Handle, method: &str, path: i64, handler: i
     };
 
     if let Some(app) = get_handle_mut::<FastifyApp>(app_handle) {
-        let full = if app.prefix.is_empty() { path_str.clone() } else { format!("{}{}", app.prefix, path_str) };
-        eprintln!("[ROUTE] {} {} (handle={})", method, full, app_handle);
         app.add_route(method, &path_str, raw_handler);
         return true;
     }
-    eprintln!("[ROUTE] handle {} not found", app_handle);
     false
 }
 

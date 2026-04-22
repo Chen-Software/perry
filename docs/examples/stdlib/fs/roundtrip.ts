@@ -3,15 +3,18 @@
 // platforms: macos, linux, windows
 
 import { writeFileSync, readFileSync, existsSync, statSync, unlinkSync } from "fs"
+import { tmpdir } from "os"
+import { join } from "path"
 
-const path = "/tmp/perry_fs_demo.txt"
+// Use os.tmpdir() so the example works on Windows (no /tmp there).
+const path = join(tmpdir(), "perry_fs_demo.txt")
 const payload = "hello from perry\n"
 
 writeFileSync(path, payload)
 
 if (existsSync(path)) {
     const stat = statSync(path)
-    console.log(`wrote ${stat.size} bytes to ${path}`)
+    console.log(`wrote ${stat.size} bytes`)
 }
 
 const readBack = readFileSync(path, "utf-8")
