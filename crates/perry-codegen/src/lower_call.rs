@@ -2408,6 +2408,24 @@ pub(crate) fn lower_native_method_call(
     // arms BELOW so they short-circuit before this table is consulted.
     //
     // Extending: add a row to PERRY_UI_TABLE matching the TS method name
+    if module == "perry/container" || module == "perry/container-compose" || module == "perry/compose" {
+        let handle_id = if let Some(recv) = object {
+            let recv_val = lower_expr(ctx, recv)?;
+            let blk = ctx.block();
+            Some(unbox_to_i64(blk, &recv_val))
+        } else {
+            None
+        };
+
+        if let Some((_, ffi_symbol)) = PERRY_CONTAINER_TABLE
+            .iter()
+            .chain(PERRY_CONTAINER_COMPOSE_TABLE.iter())
+            .find(|(m, _)| *m == method)
+        {
+            return lower_perry_container_compose_call(ctx, ffi_symbol, handle_id, args);
+        }
+    }
+
     // to the perry_ui_* runtime function and arg shape. Most setters
     // follow `(widget, …number args)` and most constructors return a
     // widget handle that gets NaN-boxed as POINTER on the way out.
@@ -3531,6 +3549,39 @@ struct UiSig {
 /// constructors + setters mango uses, plus the most common widgets from
 /// the cross-cutting "any perry/ui app" surface. Keep alphabetized by
 /// `method` for easy scanning.
+/// Maps perry/container TypeScript function names to their FFI symbols.
+const PERRY_CONTAINER_TABLE: &[(&str, &str)] = &[
+    ("run", "js_container_run"),
+    ("create", "js_container_create"),
+    ("start", "js_container_start"),
+    ("stop", "js_container_stop"),
+    ("remove", "js_container_remove"),
+    ("list", "js_container_list"),
+    ("inspect", "js_container_inspect"),
+    ("logs", "js_container_logs"),
+    ("exec", "js_container_exec"),
+    ("pullImage", "js_container_pullImage"),
+    ("listImages", "js_container_listImages"),
+    ("removeImage", "js_container_removeImage"),
+    ("inspectImage", "js_container_inspectImage"),
+    ("imageExists", "js_container_imageExists"),
+    ("getBackend", "js_container_getBackend"),
+    ("composeUp", "js_container_compose_up"),
+];
+
+/// Maps perry/container-compose TypeScript function names to their FFI symbols.
+const PERRY_CONTAINER_COMPOSE_TABLE: &[(&str, &str)] = &[
+    ("up", "js_container_compose_up"),
+    ("down", "js_container_compose_down"),
+    ("ps", "js_container_compose_ps"),
+    ("logs", "js_container_compose_logs"),
+    ("exec", "js_container_compose_exec"),
+    ("config", "js_container_compose_config"),
+    ("start", "js_container_compose_start"),
+    ("stop", "js_container_compose_stop"),
+    ("restart", "js_container_compose_restart"),
+];
+
 ///
 /// Entries NOT in this table fall through to the receiver-less early-out
 /// in `lower_native_method_call` (which lowers args for side effects and
@@ -4923,4 +4974,56 @@ fn lower_native_module_dispatch(
             Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
         }
     }
+}
+
+fn lower_perry_container_compose_call(
+    ctx: &mut FnCtx<'_>,
+    symbol: &str,
+    handle_id: Option<String>,
+    args: &[Expr],
+) -> Result<String> {
+    let mut lowered: Vec<String> = Vec::with_capacity(args.len());
+    let mut arg_types: Vec<crate::types::LlvmType> = Vec::with_capacity(args.len() + 1);
+    let mut llvm_args: Vec<(crate::types::LlvmType, &str)> = Vec::with_capacity(args.len() + 1);
+
+    if let Some(ref h) = handle_id {
+        arg_types.push(I64);
+        llvm_args.push((I64, h.as_str()));
+    }
+
+    for a in args {
+        let val = lower_expr(ctx, a)?;
+        if is_string_expr(ctx, a) {
+            let blk = ctx.block();
+            let raw_ptr = blk.call(I64, "js_get_string_pointer_unified", &[(DOUBLE, &val)]);
+            let casted = blk.inttoptr(I64, &raw_ptr);
+            lowered.push(casted);
+            arg_types.push(PTR);
+        } else if matches!(a, Expr::Integer(_) | Expr::Number(_)) || matches!(crate::type_analysis::static_type_of(ctx, a), Some(perry_types::Type::Number) | Some(perry_types::Type::Boolean)) {
+            let blk = ctx.block();
+            let i = blk.fptosi(DOUBLE, &val, I64);
+            lowered.push(i);
+            arg_types.push(I64);
+        } else {
+            let blk = ctx.block();
+            let zero_i = "0".to_string();
+            let json_str_box = blk.call(DOUBLE, "js_json_stringify", &[(DOUBLE, &val), (I32, &zero_i)]);
+            let bits = blk.bitcast_double_to_i64(&json_str_box);
+            let raw_i64 = blk.and(I64, &bits, crate::nanbox::POINTER_MASK_I64);
+            let raw_ptr = blk.inttoptr(I64, &raw_i64);
+            lowered.push(raw_ptr);
+            arg_types.push(PTR);
+        }
+    }
+
+    for (idx, v) in lowered.iter().enumerate() {
+        let t_idx = idx + (if handle_id.is_some() { 1 } else { 0 });
+        llvm_args.push((arg_types[t_idx], v.as_str()));
+    }
+
+    ctx.pending_declares.push((symbol.to_string(), PTR, arg_types));
+    let blk = ctx.block();
+    let promise_ptr = blk.call(PTR, symbol, &llvm_args);
+    let ptr_i64 = blk.ptrtoint(&promise_ptr, I64);
+    Ok(nanbox_pointer_inline(blk, &ptr_i64))
 }
