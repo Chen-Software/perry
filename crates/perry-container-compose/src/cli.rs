@@ -7,6 +7,7 @@ use crate::error::Result;
 use crate::project::ComposeProject;
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// perry-compose: Docker Compose-like experience for Apple Container / Podman
 #[derive(Parser, Debug)]
@@ -128,9 +129,8 @@ pub async fn run(cli: Cli) -> Result<()> {
     );
     let project = ComposeProject::load(&config)?;
     let backend = crate::backend::detect_backend()
-        .await
-        .map_err(|probed| crate::error::ComposeError::NoBackendFound { probed })?;
-    let engine = ComposeEngine::new(project.spec.clone(), project.project_name.clone(), backend);
+        .await?;
+    let engine = ComposeEngine::new(project.spec.clone(), project.project_name.clone(), Arc::from(backend));
 
     match cli.command {
         Commands::Up(args) => {
@@ -196,20 +196,14 @@ pub async fn run(cli: Cli) -> Result<()> {
 
             let cmd = args.cmd.clone();
 
-            let svc = engine
-                .spec
-                .services
-                .get(&args.service)
-                .ok_or_else(|| crate::error::ComposeError::NotFound(args.service.clone()))?;
-            let container_name = crate::service::service_container_name(svc, &args.service);
-
             let result = engine
                 .backend
                 .exec(
-                    &container_name,
+                    &args.service,
                     &cmd,
                     if env.is_empty() { None } else { Some(&env) },
                     args.workdir.as_deref(),
+                    args.user.as_deref(),
                 )
                 .await?;
 

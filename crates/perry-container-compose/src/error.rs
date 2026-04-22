@@ -65,7 +65,7 @@ pub type Result<T> = std::result::Result<T, ComposeError>;
 
 /// Convert a `ComposeError` to a JSON string `{ "message": "...", "code": N }`
 /// suitable for passing across the FFI boundary.
-pub fn compose_error_to_js(e: &ComposeError) -> String {
+pub fn compose_error_to_json(e: &ComposeError) -> String {
     let code = match e {
         ComposeError::NotFound(_) => 404,
         ComposeError::FileNotFound { .. } => 404,
@@ -94,26 +94,26 @@ mod tests {
     #[test]
     fn test_error_codes() {
         let err = ComposeError::NotFound("foo".into());
-        assert_eq!(compose_error_to_js(&err).contains("\"code\":404"), true);
+        assert_eq!(compose_error_to_json(&err).contains("\"code\":404"), true);
 
         let err = ComposeError::DependencyCycle {
             services: vec!["a".into()],
         };
-        assert_eq!(compose_error_to_js(&err).contains("\"code\":422"), true);
+        assert_eq!(compose_error_to_json(&err).contains("\"code\":422"), true);
 
         let err = ComposeError::ValidationError {
             message: "bad".into(),
         };
-        assert_eq!(compose_error_to_js(&err).contains("\"code\":400"), true);
+        assert_eq!(compose_error_to_json(&err).contains("\"code\":400"), true);
 
         let err = ComposeError::VerificationFailed {
             image: "img".into(),
             reason: "fail".into(),
         };
-        assert_eq!(compose_error_to_js(&err).contains("\"code\":403"), true);
+        assert_eq!(compose_error_to_json(&err).contains("\"code\":403"), true);
 
         let err = ComposeError::ParseError(serde_yaml::from_str::<serde_yaml::Value>("bad: [1,2").unwrap_err());
-        assert_eq!(compose_error_to_js(&err).contains("\"code\":400"), true);
+        assert_eq!(compose_error_to_json(&err).contains("\"code\":400"), true);
 
         let err = ComposeError::NoBackendFound {
             probed: vec![BackendProbeResult {
@@ -122,12 +122,12 @@ mod tests {
                 reason: "not found".into(),
             }],
         };
-        assert_eq!(compose_error_to_js(&err).contains("\"code\":503"), true);
+        assert_eq!(compose_error_to_json(&err).contains("\"code\":503"), true);
 
         let err = ComposeError::BackendNotAvailable {
             name: "podman".into(),
             reason: "machine not running".into(),
         };
-        assert_eq!(compose_error_to_js(&err).contains("\"code\":503"), true);
+        assert_eq!(compose_error_to_json(&err).contains("\"code\":503"), true);
     }
 }

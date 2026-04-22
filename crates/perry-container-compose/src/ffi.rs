@@ -1,200 +1,126 @@
-//! FFI exports for Perry TypeScript integration.
+//! Standalone FFI entry points for perry-container-compose.
 //!
-//! Each function follows the Perry FFI convention:
-//! - String arguments arrive as `*const StringHeader` (Perry runtime layout)
-//! - Results are serialised to JSON strings before being handed back to JS
+//! Provides `js_container_compose_*` symbols for linking scenarios
+//! where `perry-stdlib` is not present.
 
-use crate::compose::ComposeEngine;
-use std::path::PathBuf;
+use crate::compose::{self, ComposeEngine};
+use crate::error::compose_error_to_js;
+use crate::types::{ComposeSpec, ContainerLogs};
 use std::sync::Arc;
 
-// ──────────────────────────────────────────────────────────────
-// Minimal re-implementation of the Perry runtime string types
-// ──────────────────────────────────────────────────────────────
-
-#[repr(C)]
-pub struct StringHeader {
-    pub length: u32,
+fn block<F: std::future::Future>(f: F) -> F::Output {
+    tokio::runtime::Handle::current().block_on(f)
 }
 
-unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
-    if ptr.is_null() || (ptr as usize) < 0x1000 {
-        return None;
-    }
-    let len = (*ptr).length as usize;
-    let data_ptr = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
-    let bytes = std::slice::from_raw_parts(data_ptr, len);
-    Some(String::from_utf8_lossy(bytes).into_owned())
-}
-
-// ──────────────────────────────────────────────────────────────
-// Helpers
-// ──────────────────────────────────────────────────────────────
-
-fn json_ok(value: &str) -> *const StringHeader {
-    let payload = format!("{{\"ok\":true,\"result\":{}}}", value);
-    heap_string(payload)
-}
-
-fn json_err(message: &str) -> *const StringHeader {
-    let escaped = message.replace('"', "\\\"");
-    let payload = format!("{{\"ok\":false,\"error\":\"{}\"}}", escaped);
-    heap_string(payload)
-}
-
-fn heap_string(s: String) -> *const StringHeader {
-    let bytes = s.into_bytes();
-    let total = std::mem::size_of::<StringHeader>() + bytes.len();
-    let layout = std::alloc::Layout::from_size_align(total, std::mem::align_of::<StringHeader>())
-        .expect("layout");
-    unsafe {
-        let ptr = std::alloc::alloc(layout) as *mut StringHeader;
-        (*ptr).length = bytes.len() as u32;
-        let data_ptr = (ptr as *mut u8).add(std::mem::size_of::<StringHeader>());
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr, bytes.len());
-        ptr as *const StringHeader
-    }
-}
-
-fn block<F: std::future::Future<Output = T>, T>(fut: F) -> T {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime")
-        .block_on(fut)
-}
-
-fn parse_compose_file(file_ptr: *const StringHeader) -> Option<PathBuf> {
-    unsafe { string_from_header(file_ptr) }.map(PathBuf::from)
-}
-
-fn make_engine(files: Vec<PathBuf>) -> Result<Arc<ComposeEngine>, String> {
-    let proj = crate::project::ComposeProject::load_from_files(&files, None, &[])
-        .map_err(|e| e.to_string())?;
-    let backend: Arc<dyn crate::backend::ContainerBackend> = block(crate::backend::detect_backend())
-        .map(Arc::from)
-        .map_err(|e| e.to_string())?;
-    Ok(Arc::new(ComposeEngine::new(proj.spec, proj.project_name, backend)))
-}
-
-// ──────────────────────────────────────────────────────────────
-// Exported FFI functions
-// ──────────────────────────────────────────────────────────────
-
-#[no_mangle]
-pub unsafe extern "C" fn js_compose_start(file_ptr: *const StringHeader) -> *const StringHeader {
-    let files: Vec<PathBuf> = parse_compose_file(file_ptr).into_iter().collect();
-    match make_engine(files) {
-        Err(e) => json_err(&e),
-        Ok(engine) => match block(engine.up(&[], true, false, false)) {
-            Ok(_) => json_ok("null"),
-            Err(e) => json_err(&e.to_string()),
-        },
-    }
+fn json_err(msg: &str) -> String {
+    serde_json::json!({ "message": msg, "code": 500 }).to_string()
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_stop(file_ptr: *const StringHeader) -> *const StringHeader {
-    let files: Vec<PathBuf> = parse_compose_file(file_ptr).into_iter().collect();
-    match make_engine(files) {
-        Err(e) => json_err(&e),
-        Ok(engine) => match block(engine.down(false, false)) {
-            Ok(_) => json_ok("null"),
-            Err(e) => json_err(&e.to_string()),
-        },
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn js_compose_ps(file_ptr: *const StringHeader) -> *const StringHeader {
-    let files: Vec<PathBuf> = parse_compose_file(file_ptr).into_iter().collect();
-    match make_engine(files) {
-        Err(e) => json_err(&e),
-        Ok(engine) => match block(engine.ps()) {
-            Err(e) => json_err(&e.to_string()),
-            Ok(infos) => {
-                let items: Vec<String> = infos
-                    .iter()
-                    .map(|i| {
-                        format!(
-                            "{{\"service\":\"{}\",\"container\":\"{}\",\"status\":\"{}\"}}",
-                            i.name, i.id, i.status
-                        )
-                    })
-                    .collect();
-                let array = format!("[{}]", items.join(","));
-                json_ok(&array)
-            }
-        },
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn js_compose_logs(
-    file_ptr: *const StringHeader,
-    services_ptr: *const StringHeader,
-    _follow: bool,
-) -> *const StringHeader {
-    let files: Vec<PathBuf> = parse_compose_file(file_ptr).into_iter().collect();
-    let service: Option<String> = string_from_header(services_ptr)
-        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
-        .and_then(|v| v.into_iter().next());
-
-    match make_engine(files) {
-        Err(e) => json_err(&e),
-        Ok(engine) => match block(engine.logs(service.as_deref(), None)) {
-            Err(e) => json_err(&e.to_string()),
-            Ok(logs) => {
-                let stdout = logs.stdout.replace('"', "\\\"").replace('\n', "\\n");
-                let stderr = logs.stderr.replace('"', "\\\"").replace('\n', "\\n");
-                let payload = format!("{{\"stdout\":\"{}\",\"stderr\":\"{}\"}}", stdout, stderr);
-                json_ok(&payload)
-            }
-        },
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn js_compose_exec(
-    file_ptr: *const StringHeader,
-    service_ptr: *const StringHeader,
-    cmd_ptr: *const StringHeader,
-) -> *const StringHeader {
-    let files: Vec<PathBuf> = parse_compose_file(file_ptr).into_iter().collect();
-    let service = match string_from_header(service_ptr) {
-        Some(s) => s,
-        None => return json_err("service name is required"),
+pub extern "C" fn js_container_compose_up(spec_json: *const i8) -> u64 {
+    let spec_str = unsafe { std::ffi::CStr::from_ptr(spec_json) }.to_str().unwrap_or("{}");
+    let spec: ComposeSpec = match serde_json::from_str(spec_str) {
+        Ok(s) => s,
+        Err(_) => return 0,
     };
-    let cmd: Vec<String> = string_from_header(cmd_ptr)
-        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
-        .unwrap_or_default();
 
-    match make_engine(files) {
-        Err(e) => json_err(&e),
-        Ok(engine) => match block(engine.exec(&service, &cmd)) {
-            Err(e) => json_err(&e.to_string()),
-            Ok(result) => {
-                let stdout = result.stdout.replace('"', "\\\"").replace('\n', "\\n");
-                let stderr = result.stderr.replace('"', "\\\"").replace('\n', "\\n");
-                let payload = format!(
-                    "{{\"stdout\":\"{}\",\"stderr\":\"{}\"}}",
-                    stdout, stderr
-                );
-                json_ok(&payload)
-            }
-        },
+    let res = block(async move {
+        let backend = crate::backend::detect_backend().await.map_err(|_| "No backend found")?;
+        let engine = ComposeEngine::new(spec, "perry-stack".into(), Arc::from(backend));
+        engine.up(&[], true, false, false).await.map_err(|e| e.to_string())
+    });
+
+    match res {
+        Ok(h) => h.stack_id,
+        Err(_) => 0,
     }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_config(file_ptr: *const StringHeader) -> *const StringHeader {
-    let files: Vec<PathBuf> = parse_compose_file(file_ptr).into_iter().collect();
-    match crate::project::ComposeProject::load_from_files(&files, None, &[]) {
-        Err(e) => json_err(&e.to_string()),
-        Ok(proj) => {
-            let yaml = proj.spec.to_yaml().unwrap_or_default();
-            let escaped = yaml.replace('"', "\\\"").replace('\n', "\\n");
-            json_ok(&format!("\"{}\"", escaped))
+pub extern "C" fn js_container_compose_down(handle_id: u64, volumes: i32) -> i32 {
+    let engine = match ComposeEngine::get_engine(handle_id) {
+        Some(e) => e,
+        None => return -1,
+    };
+    match block(engine.down(&[], false, volumes != 0)) {
+        Ok(_) => 0,
+        Err(_) => -1,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn js_container_compose_ps(handle_id: u64) -> *mut i8 {
+    let engine = match ComposeEngine::get_engine(handle_id) {
+        Some(e) => e,
+        None => return std::ptr::null_mut(),
+    };
+    match block(engine.ps()) {
+        Ok(list) => {
+            let json = serde_json::to_string(&list).unwrap_or_default();
+            std::ffi::CString::new(json).unwrap().into_raw()
         }
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn js_container_compose_logs(handle_id: u64, service: *const i8, tail: i32) -> *mut i8 {
+    let engine = match ComposeEngine::get_engine(handle_id) {
+        Some(e) => e,
+        None => return std::ptr::null_mut(),
+    };
+    let svc_str = if service.is_null() { None } else { unsafe { std::ffi::CStr::from_ptr(service) }.to_str().ok() };
+    let svcs = svc_str.map(|s| vec![s.to_string()]).unwrap_or_default();
+    let t = if tail < 0 { None } else { Some(tail as u32) };
+
+    match block(engine.logs(&svcs, t)) {
+        Ok(logs_map) => {
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            for (name, logs) in logs_map {
+                stdout.push_str(&format!("--- {} ---\n{}", name, logs.stdout));
+                stderr.push_str(&format!("--- {} ---\n{}", name, logs.stderr));
+            }
+            let json = serde_json::to_string(&ContainerLogs { stdout, stderr }).unwrap_or_default();
+            std::ffi::CString::new(json).unwrap().into_raw()
+        }
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn js_container_compose_exec(handle_id: u64, service: *const i8, cmd_json: *const i8) -> *mut i8 {
+    let engine = match ComposeEngine::get_engine(handle_id) {
+        Some(e) => e,
+        None => return std::ptr::null_mut(),
+    };
+    let svc = unsafe { std::ffi::CStr::from_ptr(service) }.to_str().unwrap_or_default();
+    let cmd_str = unsafe { std::ffi::CStr::from_ptr(cmd_json) }.to_str().unwrap_or("[]");
+    let cmd: Vec<String> = serde_json::from_str(cmd_str).unwrap_or_default();
+
+    match block(engine.exec(svc, &cmd)) {
+        Ok(logs) => {
+            let json = serde_json::to_string(&logs).unwrap_or_default();
+            std::ffi::CString::new(json).unwrap().into_raw()
+        }
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn js_container_compose_config(spec_json: *const i8) -> *mut i8 {
+    let spec_str = unsafe { std::ffi::CStr::from_ptr(spec_json) }.to_str().unwrap_or("{}");
+    let spec: ComposeSpec = match serde_json::from_str(spec_str) {
+        Ok(s) => s,
+        Err(e) => return std::ffi::CString::new(json_err(&e.to_string())).unwrap().into_raw(),
+    };
+    let res = block(async move {
+        let backend = crate::backend::detect_backend().await.map_err(|_| "No backend found")?;
+        let engine = ComposeEngine::new(spec, "perry-stack".into(), Arc::from(backend));
+        engine.config().map_err(|e| e.to_string())
+    });
+    match res {
+        Ok(yaml) => std::ffi::CString::new(yaml).unwrap().into_raw(),
+        Err(e) => std::ffi::CString::new(json_err(&e)).unwrap().into_raw(),
     }
 }
