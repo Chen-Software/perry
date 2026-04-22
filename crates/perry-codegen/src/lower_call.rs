@@ -2357,6 +2357,13 @@ pub(crate) fn lower_native_method_call(
     //
     // Extending: add a row to PERRY_UI_TABLE matching the TS method name
     if module == "perry/container" || module == "perry/container-compose" || module == "perry/compose" {
+        if method == "getBackend" && object.is_none() && args.is_empty() {
+            ctx.pending_declares.push(("js_container_getBackend".to_string(), I64, vec![]));
+            let blk = ctx.block();
+            let raw_ptr = blk.call(I64, "js_container_getBackend", &[]);
+            return Ok(nanbox_string_inline(blk, &raw_ptr));
+        }
+
         let handle_id = if let Some(recv) = object {
             let recv_val = lower_expr(ctx, recv)?;
             let blk = ctx.block();
