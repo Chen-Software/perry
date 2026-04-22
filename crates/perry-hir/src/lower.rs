@@ -2442,7 +2442,7 @@ fn lower_module_decl(
             let is_native = is_native_module(&source);
 
             // Special handling for perry/container and perry/container-compose
-            if source == "perry/container" || source == "perry/container-compose" {
+            if source == "perry/container" || source == "perry/compose" || source == "perry/container-compose" {
                 for spec in &import_decl.specifiers {
                     if let ast::ImportSpecifier::Named(named) = spec {
                         let local = named.local.sym.to_string();

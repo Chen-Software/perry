@@ -53,32 +53,50 @@ impl ComposeEngine {
         &self,
         services: &[String],
         _detach: bool,
-        _build: bool,
+        build: bool,
         _remove_orphans: bool,
     ) -> Result<ComposeHandle> {
-        // 1. Create networks
+        // 1. Build images if requested
+        if build {
+            for (name, svc) in &self.spec.services {
+                if let Some(build_spec) = &svc.build {
+                    let image_name = svc.image_ref(name);
+                    self.backend.build(&build_spec.as_build(), &image_name).await?;
+                }
+            }
+        }
+
+        // 2. Create networks
         if let Some(networks) = &self.spec.networks {
             for (name, config) in networks {
+                let mut net_config = crate::backend::NetworkConfig::default();
                 if let Some(cfg) = config {
-                    self.backend.create_network(name, cfg).await?;
-                } else {
-                    self.backend.create_network(name, &Default::default()).await?;
+                    net_config.driver = cfg.driver.clone();
+                    net_config.internal = cfg.internal.unwrap_or(false);
+                    net_config.enable_ipv6 = cfg.enable_ipv6.unwrap_or(false);
+                    if let Some(labels) = &cfg.labels {
+                        net_config.labels = labels.to_map();
+                    }
                 }
+                self.backend.create_network(name, &net_config).await?;
             }
         }
 
-        // 2. Create volumes
+        // 3. Create volumes
         if let Some(volumes) = &self.spec.volumes {
             for (name, config) in volumes {
+                let mut vol_config = crate::backend::VolumeConfig::default();
                 if let Some(cfg) = config {
-                    self.backend.create_volume(name, cfg).await?;
-                } else {
-                    self.backend.create_volume(name, &Default::default()).await?;
+                    vol_config.driver = cfg.driver.clone();
+                    if let Some(labels) = &cfg.labels {
+                        vol_config.labels = labels.to_map();
+                    }
                 }
+                self.backend.create_volume(name, &vol_config).await?;
             }
         }
 
-        // 3. Resolve order and start services
+        // 4. Resolve order and start services
         let order = resolve_startup_order(&self.spec)?;
         let target: Vec<&String> = if services.is_empty() {
             order.iter().collect()
@@ -207,11 +225,21 @@ impl ComposeEngine {
         let mut infos = Vec::new();
         for (svc_name, svc) in &self.spec.services {
             let container_name = service::service_container_name(svc, svc_name);
-            if let Ok(info) = self.backend.inspect(&container_name).await {
-                infos.push(info);
+            match self.backend.inspect(&container_name).await {
+                Ok(info) => infos.push(info),
+                Err(e) => {
+                    // If not found, skip but don't fail the whole ps
+                    if !matches!(e, ComposeError::NotFound(_)) {
+                        return Err(e);
+                    }
+                }
             }
         }
         Ok(infos)
+    }
+
+    pub fn resolve_startup_order(&self) -> Result<Vec<String>> {
+        resolve_startup_order(&self.spec)
     }
 
     pub async fn logs(

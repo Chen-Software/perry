@@ -2366,29 +2366,6 @@ pub(crate) fn lower_native_method_call(
         }
     }
 
-    // perry/container dispatch
-    if module == "perry/container" {
-        if let Some(sig) = perry_container_table_lookup(method) {
-            if let Some(recv) = object {
-                let mut instance_args = vec![recv.clone()];
-                instance_args.extend_from_slice(args);
-                return lower_perry_ui_table_call(ctx, sig, &instance_args);
-            }
-            return lower_perry_ui_table_call(ctx, sig, args);
-        }
-    }
-
-    // perry/container-compose dispatch
-    if module == "perry/container-compose" {
-        if let Some(sig) = perry_container_compose_table_lookup(method) {
-            if let Some(recv) = object {
-                let mut instance_args = vec![recv.clone()];
-                instance_args.extend_from_slice(args);
-                return lower_perry_ui_table_call(ctx, sig, &instance_args);
-            }
-            return lower_perry_ui_table_call(ctx, sig, args);
-        }
-    }
 
     if module == "perry/ui"
         && object.is_none()
@@ -3935,69 +3912,6 @@ fn perry_system_table_lookup(method: &str) -> Option<&'static UiSig> {
     PERRY_SYSTEM_TABLE.iter().find(|s| s.method == method)
 }
 
-/// Dispatch table for perry/container module.
-static PERRY_CONTAINER_TABLE: &[UiSig] = &[
-    UiSig { method: "run", runtime: "js_container_run",
-            args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "create", runtime: "js_container_create",
-            args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "start", runtime: "js_container_start",
-            args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "stop", runtime: "js_container_stop",
-            args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "remove", runtime: "js_container_remove",
-            args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "list", runtime: "js_container_list",
-            args: &[UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "inspect", runtime: "js_container_inspect",
-            args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "logs", runtime: "js_container_logs",
-            args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "exec", runtime: "js_container_exec",
-            args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "pullImage", runtime: "js_container_pullImage",
-            args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "listImages", runtime: "js_container_listImages",
-            args: &[], ret: UiReturnKind::Promise },
-    UiSig { method: "removeImage", runtime: "js_container_removeImage",
-            args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "getBackend", runtime: "js_container_getBackend",
-            args: &[], ret: UiReturnKind::Str },
-    UiSig { method: "composeUp", runtime: "js_container_composeUp",
-            args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "detectBackend", runtime: "js_container_detectBackend",
-            args: &[], ret: UiReturnKind::Promise },
-];
-
-/// Dispatch table for perry/container-compose module.
-static PERRY_CONTAINER_COMPOSE_TABLE: &[UiSig] = &[
-    UiSig { method: "up", runtime: "js_container_composeUp",
-            args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "down", runtime: "js_container_compose_down",
-            args: &[UiArgKind::I64Raw, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "ps", runtime: "js_container_compose_ps",
-            args: &[UiArgKind::I64Raw], ret: UiReturnKind::Promise },
-    UiSig { method: "logs", runtime: "js_container_compose_logs",
-            args: &[UiArgKind::I64Raw, UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "exec", runtime: "js_container_compose_exec",
-            args: &[UiArgKind::I64Raw, UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "config", runtime: "js_container_compose_config",
-            args: &[UiArgKind::I64Raw], ret: UiReturnKind::Promise },
-    UiSig { method: "start", runtime: "js_container_compose_start",
-            args: &[UiArgKind::I64Raw, UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "stop", runtime: "js_container_compose_stop",
-            args: &[UiArgKind::I64Raw, UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "restart", runtime: "js_container_compose_restart",
-            args: &[UiArgKind::I64Raw, UiArgKind::Str], ret: UiReturnKind::Promise },
-];
-
-fn perry_container_table_lookup(method: &str) -> Option<&'static UiSig> {
-    PERRY_CONTAINER_TABLE.iter().find(|s| s.method == method)
-}
-
-fn perry_container_compose_table_lookup(method: &str) -> Option<&'static UiSig> {
-    PERRY_CONTAINER_COMPOSE_TABLE.iter().find(|s| s.method == method)
-}
 
 /// Lower a perry/ui call described by `sig`. Walks each arg, applies
 /// the per-kind coercion to produce an LLVM SSA value of the right type,
@@ -4137,6 +4051,10 @@ enum NativeArgKind {
     /// similar — the callee expects the full NaN-boxed value, not an
     /// unboxed raw pointer. Common pattern in fastify context methods.
     JsvalI64,
+    /// Numeric arg the runtime wants as i32. `fptosi` converts.
+    I32,
+    /// Numeric arg the runtime wants as i64 (unboxed). `fptosi` converts.
+    I64,
 }
 
 /// What the runtime function returns.
@@ -4155,6 +4073,8 @@ enum NativeRetKind {
     I32Void,
     /// Returns void → return TAG_UNDEFINED.
     Void,
+    /// Returns i64 promise handle → NaN-box as POINTER.
+    Promise,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -4177,11 +4097,14 @@ const NA_F64: NativeArgKind = NativeArgKind::F64;
 const NA_STR: NativeArgKind = NativeArgKind::StrPtr;
 const NA_PTR: NativeArgKind = NativeArgKind::PtrI64;
 const NA_JSV: NativeArgKind = NativeArgKind::JsvalI64;
+const NA_I32: NativeArgKind = NativeArgKind::I32;
+const NA_I64: NativeArgKind = NativeArgKind::I64;
 const NR_PTR: NativeRetKind = NativeRetKind::Ptr;
 const NR_STR: NativeRetKind = NativeRetKind::Str;
 const NR_F64: NativeRetKind = NativeRetKind::F64;
 const NR_I32: NativeRetKind = NativeRetKind::I32Void;
 const NR_VOID: NativeRetKind = NativeRetKind::Void;
+const NR_PROM: NativeRetKind = NativeRetKind::Promise;
 
 /// Static dispatch table for native stdlib modules. Each entry maps
 /// `(module, has_receiver, method)` → runtime function, with per-arg
@@ -4678,6 +4601,127 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
     NativeModSig { module: "bcrypt", has_receiver: false, method: "compare",
         class_filter: None,
         runtime: "js_bcrypt_compare", args: &[NA_F64, NA_F64], ret: NR_PTR },
+
+    // ========== perry/container ==========
+    NativeModSig { module: "perry/container", has_receiver: false, method: "run",
+        class_filter: None,
+        runtime: "js_container_run", args: &[NA_STR], ret: NR_PROM },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "create",
+        class_filter: None,
+        runtime: "js_container_create", args: &[NA_STR], ret: NR_PROM },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "start",
+        class_filter: None,
+        runtime: "js_container_start", args: &[NA_STR], ret: NR_PROM },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "stop",
+        class_filter: None,
+        runtime: "js_container_stop", args: &[NA_STR, NA_STR], ret: NR_PROM },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "remove",
+        class_filter: None,
+        runtime: "js_container_remove", args: &[NA_STR, NA_STR], ret: NR_PROM },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "list",
+        class_filter: None,
+        runtime: "js_container_list", args: &[NA_STR], ret: NR_PROM },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "inspect",
+        class_filter: None,
+        runtime: "js_container_inspect", args: &[NA_STR], ret: NR_PROM },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "logs",
+        class_filter: None,
+        runtime: "js_container_logs", args: &[NA_STR, NA_STR], ret: NR_PROM },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "exec",
+        class_filter: None,
+        runtime: "js_container_exec", args: &[NA_STR, NA_STR, NA_STR, NA_STR], ret: NR_PROM },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "pullImage",
+        class_filter: None,
+        runtime: "js_container_pullImage", args: &[NA_STR], ret: NR_PROM },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "listImages",
+        class_filter: None,
+        runtime: "js_container_listImages", args: &[], ret: NR_PROM },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "removeImage",
+        class_filter: None,
+        runtime: "js_container_removeImage", args: &[NA_STR, NA_I32], ret: NR_PROM },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "getBackend",
+        class_filter: None,
+        runtime: "js_container_getBackend", args: &[], ret: NR_STR },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "detectBackend",
+        class_filter: None,
+        runtime: "js_container_detectBackend", args: &[], ret: NR_PROM },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "composeUp",
+        class_filter: None,
+        runtime: "js_container_composeUp", args: &[NA_STR], ret: NR_PROM },
+    NativeModSig { module: "perry/compose", has_receiver: false, method: "run",
+        class_filter: None,
+        runtime: "js_container_run", args: &[NA_STR], ret: NR_PROM },
+    NativeModSig { module: "perry/compose", has_receiver: false, method: "create",
+        class_filter: None,
+        runtime: "js_container_create", args: &[NA_STR], ret: NR_PROM },
+    NativeModSig { module: "perry/compose", has_receiver: false, method: "start",
+        class_filter: None,
+        runtime: "js_container_start", args: &[NA_STR], ret: NR_PROM },
+    NativeModSig { module: "perry/compose", has_receiver: false, method: "stop",
+        class_filter: None,
+        runtime: "js_container_stop", args: &[NA_STR, NA_STR], ret: NR_PROM },
+    NativeModSig { module: "perry/compose", has_receiver: false, method: "remove",
+        class_filter: None,
+        runtime: "js_container_remove", args: &[NA_STR, NA_STR], ret: NR_PROM },
+    NativeModSig { module: "perry/compose", has_receiver: false, method: "list",
+        class_filter: None,
+        runtime: "js_container_list", args: &[NA_STR], ret: NR_PROM },
+    NativeModSig { module: "perry/compose", has_receiver: false, method: "inspect",
+        class_filter: None,
+        runtime: "js_container_inspect", args: &[NA_STR], ret: NR_PROM },
+    NativeModSig { module: "perry/compose", has_receiver: false, method: "logs",
+        class_filter: None,
+        runtime: "js_container_logs", args: &[NA_STR, NA_STR], ret: NR_PROM },
+    NativeModSig { module: "perry/compose", has_receiver: false, method: "exec",
+        class_filter: None,
+        runtime: "js_container_exec", args: &[NA_STR, NA_STR, NA_STR, NA_STR], ret: NR_PROM },
+    NativeModSig { module: "perry/compose", has_receiver: false, method: "pullImage",
+        class_filter: None,
+        runtime: "js_container_pullImage", args: &[NA_STR], ret: NR_PROM },
+    NativeModSig { module: "perry/compose", has_receiver: false, method: "listImages",
+        class_filter: None,
+        runtime: "js_container_listImages", args: &[], ret: NR_PROM },
+    NativeModSig { module: "perry/compose", has_receiver: false, method: "removeImage",
+        class_filter: None,
+        runtime: "js_container_removeImage", args: &[NA_STR, NA_I32], ret: NR_PROM },
+    NativeModSig { module: "perry/compose", has_receiver: false, method: "getBackend",
+        class_filter: None,
+        runtime: "js_container_getBackend", args: &[], ret: NR_STR },
+    NativeModSig { module: "perry/compose", has_receiver: false, method: "detectBackend",
+        class_filter: None,
+        runtime: "js_container_detectBackend", args: &[], ret: NR_PROM },
+    NativeModSig { module: "perry/compose", has_receiver: false, method: "composeUp",
+        class_filter: None,
+        runtime: "js_container_composeUp", args: &[NA_STR], ret: NR_PROM },
+
+    // ========== perry/container-compose ==========
+    NativeModSig { module: "perry/container-compose", has_receiver: false, method: "up",
+        class_filter: None,
+        runtime: "js_container_composeUp", args: &[NA_STR], ret: NR_PROM },
+    NativeModSig { module: "perry/container-compose", has_receiver: false, method: "down",
+        class_filter: None,
+        runtime: "js_container_compose_down", args: &[NA_I64, NA_I32], ret: NR_PROM },
+    NativeModSig { module: "perry/container-compose", has_receiver: false, method: "ps",
+        class_filter: None,
+        runtime: "js_container_compose_ps", args: &[NA_I64], ret: NR_PROM },
+    NativeModSig { module: "perry/container-compose", has_receiver: false, method: "logs",
+        class_filter: None,
+        runtime: "js_container_compose_logs", args: &[NA_I64, NA_STR], ret: NR_PROM },
+    NativeModSig { module: "perry/container-compose", has_receiver: false, method: "exec",
+        class_filter: None,
+        runtime: "js_container_compose_exec", args: &[NA_I64, NA_STR, NA_STR, NA_STR], ret: NR_PROM },
+    NativeModSig { module: "perry/container-compose", has_receiver: false, method: "config",
+        class_filter: None,
+        runtime: "js_container_compose_config", args: &[NA_I64], ret: NR_PROM },
+    NativeModSig { module: "perry/container-compose", has_receiver: false, method: "start",
+        class_filter: None,
+        runtime: "js_container_compose_start", args: &[NA_I64, NA_STR], ret: NR_PROM },
+    NativeModSig { module: "perry/container-compose", has_receiver: false, method: "stop",
+        class_filter: None,
+        runtime: "js_container_compose_stop", args: &[NA_I64, NA_STR], ret: NR_PROM },
+    NativeModSig { module: "perry/container-compose", has_receiver: false, method: "restart",
+        class_filter: None,
+        runtime: "js_container_compose_restart", args: &[NA_I64, NA_STR], ret: NR_PROM },
 ];
 
 /// Look up a native module method in the static dispatch table.
@@ -4750,6 +4794,18 @@ fn lower_native_module_dispatch(
                 llvm_args.push((I64, bits));
                 arg_types.push(I64);
             }
+            NativeArgKind::I32 => {
+                let blk = ctx.block();
+                let i = blk.fptosi(DOUBLE, &lowered, I32);
+                llvm_args.push((I32, i));
+                arg_types.push(I32);
+            }
+            NativeArgKind::I64 => {
+                let blk = ctx.block();
+                let i = blk.fptosi(DOUBLE, &lowered, I64);
+                llvm_args.push((I64, i));
+                arg_types.push(I64);
+            }
         }
     }
     // If fewer args than sig expects, pad with undefined / 0.
@@ -4759,16 +4815,20 @@ fn lower_native_module_dispatch(
                 llvm_args.push((DOUBLE, double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED))));
                 arg_types.push(DOUBLE);
             }
-            NativeArgKind::StrPtr | NativeArgKind::PtrI64 | NativeArgKind::JsvalI64 => {
+            NativeArgKind::StrPtr | NativeArgKind::PtrI64 | NativeArgKind::JsvalI64 | NativeArgKind::I64 => {
                 llvm_args.push((I64, "0".to_string()));
                 arg_types.push(I64);
+            }
+            NativeArgKind::I32 => {
+                llvm_args.push((I32, "0".to_string()));
+                arg_types.push(I32);
             }
         }
     }
 
     // Determine return type for the declare
     let ret_type = match sig.ret {
-        NativeRetKind::Ptr | NativeRetKind::Str => I64,
+        NativeRetKind::Ptr | NativeRetKind::Str | NativeRetKind::Promise => I64,
         NativeRetKind::F64 => DOUBLE,
         NativeRetKind::I32Void => I32,
         NativeRetKind::Void => crate::types::VOID,
@@ -4780,7 +4840,7 @@ fn lower_native_module_dispatch(
         llvm_args.iter().map(|(t, s)| (*t, s.as_str())).collect();
 
     match sig.ret {
-        NativeRetKind::Ptr => {
+        NativeRetKind::Ptr | NativeRetKind::Promise => {
             let blk = ctx.block();
             let raw = blk.call(I64, sig.runtime, &arg_slices);
             Ok(nanbox_pointer_inline(blk, &raw))
