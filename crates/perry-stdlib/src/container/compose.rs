@@ -34,49 +34,30 @@ impl ComposeWrapper {
     }
 
     pub async fn logs(&self, _handle: &ComposeHandle, service: Option<&str>, tail: Option<u32>) -> Result<ContainerLogs, ContainerError> {
-        let services = match service {
-            Some(s) => vec![s.to_string()],
-            None => vec![],
-        };
-        let logs_map = self.engine.logs(&services, tail).await.map_err(ContainerError::from)?;
-
-        let mut stdout = String::new();
-        let mut stderr = String::new();
-
-        // Sort services for deterministic output if no specific service requested
-        let mut keys: Vec<_> = logs_map.keys().collect();
-        keys.sort();
-
-        for svc in keys {
-            if let Some(content) = logs_map.get(svc) {
-                stdout.push_str(&format!("[{}] {}\n", svc, content));
-            }
-        }
-
-        Ok(ContainerLogs { stdout, stderr })
+        self.engine.logs(service, tail).await.map_err(ContainerError::from)
     }
 
     pub async fn exec(&self, _handle: &ComposeHandle, service: &str, cmd: &[String]) -> Result<ContainerLogs, ContainerError> {
-        self.engine.exec(service, cmd, None, None).await.map_err(ContainerError::from)
+        self.engine.exec(service, cmd).await.map_err(ContainerError::from)
     }
 
     pub fn config(&self) -> Result<String, ContainerError> {
         self.engine.config().map_err(ContainerError::from)
     }
 
-    pub async fn start(&self, _handle: &ComposeHandle, services: &[String]) -> Result<(), ContainerError> {
+    pub async fn start(&self, services: &[String]) -> Result<(), ContainerError> {
         self.engine.start(services).await.map_err(ContainerError::from)
     }
 
-    pub async fn stop(&self, _handle: &ComposeHandle, services: &[String]) -> Result<(), ContainerError> {
+    pub async fn stop(&self, services: &[String]) -> Result<(), ContainerError> {
         self.engine.stop(services).await.map_err(ContainerError::from)
     }
 
-    pub async fn restart(&self, _handle: &ComposeHandle, services: &[String]) -> Result<(), ContainerError> {
+    pub async fn restart(&self, services: &[String]) -> Result<(), ContainerError> {
         self.engine.restart(services).await.map_err(ContainerError::from)
     }
+}
 
-    pub fn config(&self) -> Result<String, ContainerError> {
-        self.engine.config().map_err(Into::into)
-    }
+pub fn get_engine_wrapper(stack_id: u64) -> Option<ComposeWrapper> {
+    ComposeEngine::get_engine(stack_id).map(|engine| ComposeWrapper { engine })
 }

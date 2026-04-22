@@ -415,6 +415,11 @@ impl ComposeEngine {
         self.spec.to_yaml()
     }
 
+    /// Resolve the startup order of services using Kahn's algorithm (BFS topological sort).
+    pub fn resolve_startup_order(&self) -> Result<Vec<String>> {
+        resolve_startup_order(&self.spec)
+    }
+
     // ============ start / stop / restart ============
 
     /// Start existing stopped services.

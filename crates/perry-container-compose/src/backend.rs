@@ -73,7 +73,9 @@ pub trait ContainerBackend: Send + Sync {
         env: Option<&HashMap<String, String>>,
         workdir: Option<&str>,
     ) -> Result<ContainerLogs>;
+    async fn build(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Result<()>;
     async fn pull_image(&self, reference: &str) -> Result<()>;
+    async fn inspect_image(&self, reference: &str) -> Result<ImageInfo>;
     async fn list_images(&self) -> Result<Vec<ImageInfo>>;
     async fn remove_image(&self, reference: &str, force: bool) -> Result<()>;
     async fn create_network(&self, name: &str, config: &NetworkConfig) -> Result<()>;
@@ -102,7 +104,11 @@ pub trait CliProtocol: Send + Sync {
     }
     fn logs_args(&self, id: &str, tail: Option<u32>) -> Vec<String>;
     fn exec_args(&self, id: &str, cmd: &[String], env: Option<&HashMap<String, String>>, workdir: Option<&str>) -> Vec<String>;
+    fn build_args(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Vec<String>;
     fn pull_image_args(&self, reference: &str) -> Vec<String> { vec!["pull".into(), reference.into()] }
+    fn inspect_image_args(&self, reference: &str) -> Vec<String> {
+        vec!["inspect".into(), "--format".into(), "json".into(), reference.into()]
+    }
     fn list_images_args(&self) -> Vec<String> { vec!["images".into(), "--format".into(), "json".into()] }
     fn remove_image_args(&self, reference: &str, force: bool) -> Vec<String>;
     fn create_network_args(&self, name: &str, config: &NetworkConfig) -> Vec<String>;
@@ -115,6 +121,7 @@ pub trait CliProtocol: Send + Sync {
     fn parse_list_output(&self, stdout: &str) -> Result<Vec<ContainerInfo>>;
     fn parse_inspect_output(&self, id: &str, stdout: &str) -> Result<ContainerInfo>;
     fn parse_list_images_output(&self, stdout: &str) -> Result<Vec<ImageInfo>>;
+    fn parse_inspect_image_output(&self, stdout: &str) -> Result<ImageInfo>;
     fn parse_container_id(&self, stdout: &str) -> Result<String> { Ok(stdout.trim().to_string()) }
     fn security_args(&self, _profile: &SecurityProfile) -> Vec<String> { vec![] }
 }
@@ -243,6 +250,25 @@ impl CliProtocol for DockerProtocol {
         args
     }
 
+    fn build_args(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Vec<String> {
+        let mut args = vec!["build".into(), "-t".into(), image_name.into()];
+        if let Some(df) = &spec.containerfile {
+            args.extend(["-f".into(), df.clone()]);
+        }
+        if let Some(build_args) = &spec.args {
+            for (k, v) in build_args.to_map() {
+                args.extend(["--build-arg".into(), format!("{k}={v}")]);
+            }
+        }
+        if let Some(labels) = &spec.labels {
+            for (k, v) in labels.to_map() {
+                args.extend(["--label".into(), format!("{k}={v}")]);
+            }
+        }
+        args.push(spec.context.as_deref().unwrap_or(".").into());
+        args
+    }
+
     fn remove_image_args(&self, reference: &str, force: bool) -> Vec<String> {
         let mut args = vec!["rmi".into()];
         if force { args.push("-f".into()); }
@@ -312,6 +338,18 @@ impl CliProtocol for DockerProtocol {
         }).collect())
     }
 
+    fn parse_inspect_image_output(&self, stdout: &str) -> Result<ImageInfo> {
+        let entries: Vec<DockerImageEntry> = serde_json::from_str(stdout)?;
+        let e = entries.into_iter().next().ok_or_else(|| ComposeError::NotFound("Image inspect output empty".into()))?;
+        Ok(ImageInfo {
+            id: e.id,
+            repository: e.repository,
+            tag: e.tag,
+            size: e.size,
+            created: e.created,
+        })
+    }
+
     fn security_args(&self, _profile: &SecurityProfile) -> Vec<String> {
         vec![
             "--security-opt".into(), "no-new-privileges".into(),
@@ -342,12 +380,14 @@ impl CliProtocol for AppleContainerProtocol {
     fn remove_args(&self, id: &str, force: bool) -> Vec<String> { DockerProtocol.remove_args(id, force) }
     fn logs_args(&self, id: &str, tail: Option<u32>) -> Vec<String> { DockerProtocol.logs_args(id, tail) }
     fn exec_args(&self, id: &str, cmd: &[String], env: Option<&HashMap<String, String>>, workdir: Option<&str>) -> Vec<String> { DockerProtocol.exec_args(id, cmd, env, workdir) }
+    fn build_args(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Vec<String> { DockerProtocol.build_args(spec, image_name) }
     fn remove_image_args(&self, reference: &str, force: bool) -> Vec<String> { DockerProtocol.remove_image_args(reference, force) }
     fn create_network_args(&self, name: &str, config: &NetworkConfig) -> Vec<String> { DockerProtocol.create_network_args(name, config) }
     fn create_volume_args(&self, name: &str, config: &VolumeConfig) -> Vec<String> { DockerProtocol.create_volume_args(name, config) }
     fn parse_list_output(&self, stdout: &str) -> Result<Vec<ContainerInfo>> { DockerProtocol.parse_list_output(stdout) }
     fn parse_inspect_output(&self, id: &str, stdout: &str) -> Result<ContainerInfo> { DockerProtocol.parse_inspect_output(id, stdout) }
     fn parse_list_images_output(&self, stdout: &str) -> Result<Vec<ImageInfo>> { DockerProtocol.parse_list_images_output(stdout) }
+    fn parse_inspect_image_output(&self, stdout: &str) -> Result<ImageInfo> { DockerProtocol.parse_inspect_image_output(stdout) }
 }
 
 pub struct LimaProtocol {
@@ -365,12 +405,14 @@ impl CliProtocol for LimaProtocol {
     fn remove_args(&self, id: &str, force: bool) -> Vec<String> { DockerProtocol.remove_args(id, force) }
     fn logs_args(&self, id: &str, tail: Option<u32>) -> Vec<String> { DockerProtocol.logs_args(id, tail) }
     fn exec_args(&self, id: &str, cmd: &[String], env: Option<&HashMap<String, String>>, workdir: Option<&str>) -> Vec<String> { DockerProtocol.exec_args(id, cmd, env, workdir) }
+    fn build_args(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Vec<String> { DockerProtocol.build_args(spec, image_name) }
     fn remove_image_args(&self, reference: &str, force: bool) -> Vec<String> { DockerProtocol.remove_image_args(reference, force) }
     fn create_network_args(&self, name: &str, config: &NetworkConfig) -> Vec<String> { DockerProtocol.create_network_args(name, config) }
     fn create_volume_args(&self, name: &str, config: &VolumeConfig) -> Vec<String> { DockerProtocol.create_volume_args(name, config) }
     fn parse_list_output(&self, stdout: &str) -> Result<Vec<ContainerInfo>> { DockerProtocol.parse_list_output(stdout) }
     fn parse_inspect_output(&self, id: &str, stdout: &str) -> Result<ContainerInfo> { DockerProtocol.parse_inspect_output(id, stdout) }
     fn parse_list_images_output(&self, stdout: &str) -> Result<Vec<ImageInfo>> { DockerProtocol.parse_list_images_output(stdout) }
+    fn parse_inspect_image_output(&self, stdout: &str) -> Result<ImageInfo> { DockerProtocol.parse_inspect_image_output(stdout) }
 }
 
 pub struct CliBackend<P: CliProtocol> {
@@ -518,9 +560,20 @@ impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
         Ok(ContainerLogs { stdout, stderr })
     }
 
+    async fn build(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Result<()> {
+        let args = self.protocol.build_args(spec, image_name);
+        self.exec_raw(args).await.map(|_| ())
+    }
+
     async fn pull_image(&self, reference: &str) -> Result<()> {
         let args = self.protocol.pull_image_args(reference);
         self.exec_raw(args).await.map(|_| ())
+    }
+
+    async fn inspect_image(&self, reference: &str) -> Result<ImageInfo> {
+        let args = self.protocol.inspect_image_args(reference);
+        let (stdout, _) = self.exec_raw(args).await?;
+        self.protocol.parse_inspect_image_output(&stdout)
     }
 
     async fn list_images(&self) -> Result<Vec<ImageInfo>> {

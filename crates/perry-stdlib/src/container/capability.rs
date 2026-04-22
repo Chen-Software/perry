@@ -18,7 +18,7 @@ pub async fn alloy_container_run_capability(
     cmd: &[&str],
     grants: &CapabilityGrants,
 ) -> Result<ContainerLogs, ContainerError> {
-    let digest = verification::verify_image(image).await?;
+    let digest = verification::verify_image(image).await.map_err(|e| ContainerError::VerificationFailed { image: image.to_string(), reason: e })?;
 
     let spec = ContainerSpec {
         image: format!("{}@{}", image, digest),
@@ -33,7 +33,7 @@ pub async fn alloy_container_run_capability(
         ..Default::default()
     };
 
-    let backend = Arc::clone(get_global_backend().await?);
+    let backend = get_global_backend().await?;
     let handle = backend.run_with_security(&spec, &SecurityProfile::default()).await.map_err(|e| ContainerError::BackendError { code: -1, message: e.to_string() })?;
 
     backend.logs(&handle.id, None).await.map_err(|e| ContainerError::BackendError { code: -1, message: e.to_string() })
