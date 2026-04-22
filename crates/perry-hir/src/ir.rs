@@ -1159,6 +1159,7 @@ pub enum Expr {
     MathAsinh(Box<Expr>),                // Math.asinh(x) -> number
     MathAcosh(Box<Expr>),                // Math.acosh(x) -> number
     MathAtanh(Box<Expr>),                // Math.atanh(x) -> number
+    MathExp(Box<Expr>),                  // Math.exp(x) -> number (e^x)
 
     /// performance.now() -> number (high-resolution time in ms)
     PerformanceNow,

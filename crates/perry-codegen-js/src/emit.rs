@@ -1423,6 +1423,7 @@ impl JsEmitter {
             Expr::MathAsinh(x) => { self.emit_math_unary("Math.asinh", x); }
             Expr::MathAcosh(x) => { self.emit_math_unary("Math.acosh", x); }
             Expr::MathAtanh(x) => { self.emit_math_unary("Math.atanh", x); }
+            Expr::MathExp(x) => { self.emit_math_unary("Math.exp", x); }
             Expr::MathHypot(args) => { self.emit_math_variadic("Math.hypot", args); }
             Expr::MathPow(base, exp) => {
                 self.output.push_str("Math.pow(");

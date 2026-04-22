@@ -6004,6 +6004,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                         "asinh" => { if args.len() >= 1 { return Ok(Expr::MathAsinh(Box::new(args.into_iter().next().unwrap()))); } }
                                         "acosh" => { if args.len() >= 1 { return Ok(Expr::MathAcosh(Box::new(args.into_iter().next().unwrap()))); } }
                                         "atanh" => { if args.len() >= 1 { return Ok(Expr::MathAtanh(Box::new(args.into_iter().next().unwrap()))); } }
+                                        "exp" => { if args.len() >= 1 { return Ok(Expr::MathExp(Box::new(args.into_iter().next().unwrap()))); } }
                                         _ => {} // Fall through to generic handling
                                     }
                                 }
