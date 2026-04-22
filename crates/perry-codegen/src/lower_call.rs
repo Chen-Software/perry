@@ -2582,6 +2582,13 @@ pub(crate) fn lower_native_method_call(
                         llvm_args.push((I64, i));
                         runtime_param_types.push(I64);
                     }
+                    UiArgKind::I32Raw => {
+                        let v = lower_expr(ctx, arg)?;
+                        let blk = ctx.block();
+                        let i = blk.fptosi(DOUBLE, &v, I32);
+                        llvm_args.push((I32, i));
+                        runtime_param_types.push(I32);
+                    }
                 }
             }
             let return_type = match sig.ret {
