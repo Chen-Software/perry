@@ -1,7 +1,60 @@
 //! Service runtime state and name generation.
 
-use crate::types::ComposeService;
+use crate::backend::ContainerBackend;
+use crate::error::Result;
+use crate::types::{ComposeService, ContainerHandle, ContainerInfo, ComposeServiceBuild};
 use md5::{Digest, Md5};
+use std::collections::HashMap;
+
+pub struct Service {
+    pub image: Option<String>,
+    pub name: Option<String>, // container_name in YAML
+    pub ports: Option<Vec<String>>,
+    pub environment: Option<HashMap<String, String>>,
+    pub labels: Option<HashMap<String, String>>,
+    pub volumes: Option<Vec<String>>,
+    pub build: Option<ComposeServiceBuild>,
+}
+
+impl Service {
+    pub fn from_compose(name: &str, svc: &ComposeService) -> Self {
+        Self {
+            image: svc.image.clone(),
+            name: svc.container_name.clone().or_else(|| Some(name.to_string())),
+            ports: Some(svc.port_strings()),
+            environment: Some(svc.resolved_env()),
+            labels: Some(svc.labels.as_ref().map(|l| l.to_map()).unwrap_or_default()),
+            volumes: Some(svc.volume_strings()),
+            build: svc.build.as_ref().map(|b| b.as_build()),
+        }
+    }
+
+    pub async fn exists(&self, backend: &dyn ContainerBackend) -> bool {
+        if let Some(name) = &self.name {
+            backend.inspect(name).await.is_ok()
+        } else {
+            false
+        }
+    }
+
+    pub async fn is_running(&self, backend: &dyn ContainerBackend) -> bool {
+        if let Some(name) = &self.name {
+            if let Ok(info) = backend.inspect(name).await {
+                return info.status == "running";
+            }
+        }
+        false
+    }
+
+    pub fn needs_build(&self) -> bool {
+        self.build.is_some() && self.image.is_none()
+    }
+
+    pub fn generate_name(&self) -> String {
+        let image = self.image.as_deref().unwrap_or("unknown");
+        generate_name(image, self.name.as_deref().unwrap_or("service"))
+    }
+}
 
 /// Generate a unique container name for a service.
 ///

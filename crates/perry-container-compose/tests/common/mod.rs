@@ -72,12 +72,21 @@ impl ContainerBackend for MockBackend {
         let state = self.state.lock().unwrap();
         let mut infos = Vec::new();
         for id in &state.containers {
+            let mut labels = std::collections::HashMap::new();
+            // Simple heuristic: if it looks like a compose name, extract service
+            if id.contains('_') {
+                let parts: Vec<&str> = id.split('_').collect();
+                labels.insert("com.docker.compose.service".into(), parts[0].to_string());
+                // For tests, we use "down-project" or "test-project"
+                labels.insert("com.docker.compose.project".into(), "down-project".into());
+            }
             infos.push(ContainerInfo {
                 id: id.clone(),
                 name: id.clone(),
                 image: "mock-image".to_string(),
                 status: "running".to_string(),
                 ports: vec![],
+                labels,
                 created: "2025-01-01T00:00:00Z".to_string(),
             })
         }
@@ -93,6 +102,7 @@ impl ContainerBackend for MockBackend {
                 image: "mock-image".to_string(),
                 status: "running".to_string(),
                 ports: vec![],
+                labels: std::collections::HashMap::new(),
                 created: "2025-01-01T00:00:00Z".to_string(),
             })
         } else {
@@ -109,6 +119,15 @@ impl ContainerBackend for MockBackend {
     }
 
     async fn pull_image(&self, _reference: &str) -> Result<()> { Ok(()) }
+    async fn inspect_image(&self, _reference: &str) -> Result<ImageInfo> {
+        Ok(ImageInfo {
+            id: "digest".to_string(),
+            repository: "repo".to_string(),
+            tag: "tag".to_string(),
+            size: 0,
+            created: "2025-01-01T00:00:00Z".to_string(),
+        })
+    }
     async fn list_images(&self) -> Result<Vec<ImageInfo>> { Ok(vec![]) }
     async fn remove_image(&self, _reference: &str, _force: bool) -> Result<()> { Ok(()) }
 

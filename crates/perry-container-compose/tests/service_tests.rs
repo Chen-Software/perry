@@ -14,7 +14,7 @@ fn test_service_container_name_precedence() {
     // Default should use generated name (starting with service name)
     let svc2 = ComposeService::default();
     let name2 = service_container_name(&svc2, "web");
-    assert!(name2.starts_with("web-"));
-    let parts: Vec<&str> = name2.split('-').collect();
-    assert_eq!(parts.len(), 3);
+    assert!(name2.starts_with("web_"));
+    let parts: Vec<&str> = name2.split('_').collect();
+    assert_eq!(parts.len(), 2);
 }

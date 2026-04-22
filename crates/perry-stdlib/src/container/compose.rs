@@ -9,7 +9,7 @@ use perry_container_compose::ComposeEngine;
 use std::collections::HashMap;
 
 pub struct ComposeWrapper {
-    engine: Arc<ComposeEngine>,
+    pub engine: Arc<ComposeEngine>,
 }
 
 impl ComposeWrapper {

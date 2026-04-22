@@ -6,6 +6,7 @@
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use crate::backend::IsolationLevel;
 
 /// Convert a `serde_yaml::Value` to a string representation.
 fn yaml_value_to_str(v: &serde_yaml::Value) -> String {
@@ -704,6 +705,9 @@ pub struct ContainerSpec {
     pub entrypoint: Option<Vec<String>>,
     pub network: Option<String>,
     pub rm: Option<bool>,
+    pub labels: Option<std::collections::HashMap<String, String>>,
+    pub read_only: Option<bool>,
+    pub seccomp: Option<String>,
 }
 
 /// Handle returned after creating/running a container.
@@ -721,6 +725,7 @@ pub struct ContainerInfo {
     pub image: String,
     pub status: String,
     pub ports: Vec<String>,
+    pub labels: std::collections::HashMap<String, String>,
     pub created: String,
 }
 
@@ -739,4 +744,129 @@ pub struct ImageInfo {
     pub tag: String,
     pub size: u64,
     pub created: String,
+}
+
+// ============ Workload Graph Types ============
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RuntimeSpec {
+    Oci,
+    Microvm { config: Option<serde_json::Value> },
+    Wasm { module: Option<String> },
+    Auto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyTier {
+    Default,
+    Isolated,
+    Hardened,
+    Untrusted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PolicySpec {
+    pub tier: PolicyTier,
+    pub no_network: Option<bool>,
+    pub read_only_root: Option<bool>,
+    pub seccomp: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum RefProjection {
+    Endpoint,
+    Ip,
+    InternalUrl,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkloadRef {
+    pub node_id: String,
+    pub projection: RefProjection,
+    pub port: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum WorkloadEnvValue {
+    Literal(String),
+    Ref(WorkloadRef),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkloadResources {
+    pub cpu: Option<String>,
+    pub memory: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkloadNode {
+    pub id: String,
+    pub name: String,
+    pub image: Option<String>,
+    pub resources: Option<WorkloadResources>,
+    pub ports: Vec<String>,
+    pub env: std::collections::HashMap<String, WorkloadEnvValue>,
+    pub depends_on: Vec<String>,
+    pub runtime: RuntimeSpec,
+    pub policy: PolicySpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkloadEdge {
+    pub from: String,
+    pub to: String,
+    pub condition: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkloadGraph {
+    pub name: String,
+    pub nodes: indexmap::IndexMap<String, WorkloadNode>,
+    pub edges: Vec<WorkloadEdge>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunGraphOptions {
+    pub strategy: Option<String>,
+    pub on_failure: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeState {
+    Running,
+    Stopped,
+    Failed,
+    Pending,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphStatus {
+    pub nodes: std::collections::HashMap<String, NodeState>,
+    pub healthy: bool,
+    pub errors: Option<std::collections::HashMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeInfo {
+    pub node_id: String,
+    pub name: String,
+    pub container_id: Option<String>,
+    pub state: NodeState,
+    pub image: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackendInfo {
+    pub name: String,
+    pub available: bool,
+    pub reason: Option<String>,
+    pub version: Option<String>,
+    pub mode: String,
+    pub isolation_level: IsolationLevel,
 }

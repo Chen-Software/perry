@@ -1,5 +1,6 @@
 use perry_container_compose::compose::ComposeEngine;
 use perry_container_compose::types::{ComposeSpec, ComposeService};
+use perry_container_compose::service as service_mod;
 use std::sync::Arc;
 
 mod common;
@@ -74,10 +75,12 @@ async fn test_compose_down_cleans_resources() {
     });
 
     let backend = Arc::new(MockBackend::default());
-    let engine = ComposeEngine::new(spec, "down-project".into(), backend.clone());
+    let engine = ComposeEngine::new(spec.clone(), "down-project".into(), backend.clone());
 
-    let handle = engine.up(&[], true, false, false).await.unwrap();
-    engine.down(&handle.services, false, true).await.expect("down failed");
+    let _handle = engine.up(&[], true, false, false).await.unwrap();
+
+
+    engine.down(&[], false, true).await.expect("down failed");
 
     let state = backend.state.lock().unwrap();
     assert!(state.containers.is_empty(), "Containers should be empty, but found: {:?}", state.containers);

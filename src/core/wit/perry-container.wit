@@ -1,8 +1,50 @@
-interface container {
-    use types.{container-spec, container-handle, container-info, container-logs, image-info, backend-info};
+package perry:container;
 
-    run: func(spec: container-spec) -> result<container-handle, string>;
-    create: func(spec: container-spec) -> result<container-handle, string>;
+interface container {
+    record container-spec {
+        image: string,
+        name: option<string>,
+        ports: option<list<string>>,
+        volumes: option<list<string>>,
+        env: option<list<tuple<string, string>>>,
+        cmd: option<list<string>>,
+        entrypoint: option<list<string>>,
+        network: option<string>,
+        rm: option<bool>,
+    }
+
+    record container-info {
+        id: string,
+        name: string,
+        image: string,
+        status: string,
+        ports: list<string>,
+        created: string,
+    }
+
+    record container-logs {
+        stdout: string,
+        stderr: string,
+    }
+
+    record image-info {
+        id: string,
+        repository: string,
+        tag: string,
+        size: u64,
+        created: string,
+    }
+
+    record backend-info {
+        name: string,
+        available: bool,
+        reason: option<string>,
+        version: option<string>,
+        mode: string,
+    }
+
+    run: func(spec: container-spec) -> result<u64, string>;
+    create: func(spec: container-spec) -> result<u64, string>;
     start: func(id: string) -> result<_, string>;
     stop: func(id: string, timeout: option<u32>) -> result<_, string>;
     remove: func(id: string, force: bool) -> result<_, string>;
@@ -15,27 +57,12 @@ interface container {
     remove-image: func(reference: string, force: bool) -> result<_, string>;
     get-backend: func() -> string;
     detect-backend: func() -> result<list<backend-info>, string>;
-    compose-up: func(spec: string) -> result<u64, string>;
+    compose-up: func(spec-or-path: string) -> result<u64, string>;
 }
 
-interface compose {
-    use types.{container-info, container-logs};
-
-    down: func(handle-id: u64, volumes: bool) -> result<_, string>;
-    ps: func(handle-id: u64) -> result<list<container-info>, string>;
-    logs: func(handle-id: u64, service: option<string>, tail: option<u32>) -> result<container-logs, string>;
-    exec: func(handle-id: u64, service: string, cmd: list<string>) -> result<container-logs, string>;
-}
-
-interface workloads {
-    use types.{workload-graph, workload-node, run-graph-options, graph-status, node-info, container-logs};
-
-    run-graph: func(graph: workload-graph, opts: option<run-graph-options>) -> result<u64, string>;
-    inspect-graph: func(graph: workload-graph) -> result<graph-status, string>;
-    handle-down: func(handle-id: u64, opts: string) -> result<_, string>;
-    handle-status: func(handle-id: u64) -> result<graph-status, string>;
-    handle-graph: func(handle-id: u64) -> workload-graph;
-    handle-logs: func(handle-id: u64, node: option<string>, tail: option<u32>) -> result<container-logs, string>;
-    handle-exec: func(handle-id: u64, node: string, cmd: list<string>) -> result<container-logs, string>;
-    handle-ps: func(handle-id: u64) -> result<list<node-info>, string>;
+interface compose-handle {
+    compose-down: func(handle: u64, volumes: bool) -> result<_, string>;
+    compose-ps: func(handle: u64) -> result<list<perry:container/container/container-info>, string>;
+    compose-logs: func(handle: u64, service: option<string>, tail: option<u32>) -> result<perry:container/container/container-logs, string>;
+    compose-exec: func(handle: u64, service: string, cmd: list<string>) -> result<perry:container/container/container-logs, string>;
 }

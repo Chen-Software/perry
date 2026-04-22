@@ -9,6 +9,7 @@ use crate::error::{ComposeError, Result};
 use crate::service;
 use crate::types::{
     ComposeHandle, ComposeSpec, ContainerInfo, ContainerSpec,
+    GraphStatus, NodeInfo, NodeState, RunGraphOptions, WorkloadGraph,
 };
 use indexmap::IndexMap;
 use std::collections::HashMap;
@@ -274,13 +275,27 @@ impl ComposeEngine {
                 .ok_or_else(|| ComposeError::NotFound(svc_name.clone()))?;
 
             let container_name = service::service_container_name(svc, svc_name);
-            let info_res = self.backend.inspect(&container_name).await;
 
-            if let Ok(info) = info_res {
-                if info.status == "running" {
-                    self.backend.stop(&container_name, None).await?;
+            // Check by labels if name doesn't match exactly
+            let list = self.backend.list(true).await?;
+            let container = list.into_iter().find(|c| {
+                if c.name == container_name || c.id == container_name {
+                    return true;
                 }
-                self.backend.remove(&container_name, true).await?;
+                // Check labels
+                if let Some(proj) = c.labels.get("com.docker.compose.project") {
+                    if let Some(s) = c.labels.get("com.docker.compose.service") {
+                        return proj == &self.project_name && s == svc_name;
+                    }
+                }
+                false
+            });
+
+            if let Some(info) = container {
+                if info.status == "running" {
+                    self.backend.stop(&info.id, None).await?;
+                }
+                self.backend.remove(&info.id, true).await?;
             }
         }
 
@@ -336,6 +351,7 @@ impl ComposeEngine {
                         image: svc.image_ref(svc_name),
                         status: "not found".to_string(),
                         ports: svc.port_strings(),
+                        labels: std::collections::HashMap::new(),
                         created: String::new(),
                     });
                 }
@@ -468,6 +484,85 @@ impl ComposeEngine {
     pub async fn restart(&self, services: &[String]) -> Result<()> {
         self.stop(services).await?;
         self.start(services).await
+    }
+}
+
+// ============ Workload Graph Engine ============
+
+pub struct WorkloadGraphEngine {
+    pub engine: ComposeEngine,
+}
+
+impl WorkloadGraphEngine {
+    pub fn new(graph: WorkloadGraph, backend: Arc<dyn ContainerBackend>) -> Self {
+        let mut spec = ComposeSpec::default();
+        spec.name = Some(graph.name.clone());
+
+        for (id, node) in graph.nodes {
+            let mut svc = crate::types::ComposeService::default();
+            svc.image = node.image;
+            svc.ports = Some(node.ports.into_iter().map(|p| crate::types::PortSpec::Short(serde_yaml::Value::String(p))).collect());
+
+            let mut env = indexmap::IndexMap::new();
+            for (k, v) in node.env {
+                match v {
+                    crate::types::WorkloadEnvValue::Literal(s) => {
+                        env.insert(k, Some(serde_yaml::Value::String(s)));
+                    }
+                    crate::types::WorkloadEnvValue::Ref(r) => {
+                        // WorkloadRef resolution happens at graph start, but here we just placeholder
+                        env.insert(k, Some(serde_yaml::Value::String(format!("REF:{}:{}", r.node_id, r.port.unwrap_or_default()))));
+                    }
+                }
+            }
+            svc.environment = Some(crate::types::ListOrDict::Dict(env));
+            svc.depends_on = Some(crate::types::DependsOnSpec::List(node.depends_on));
+
+            spec.services.insert(id, svc);
+        }
+
+        Self {
+            engine: ComposeEngine::new(spec, graph.name, backend),
+        }
+    }
+
+    pub async fn run(&self, opts: RunGraphOptions) -> Result<ComposeHandle> {
+        // Compute topological levels
+        let order = resolve_startup_order(&self.engine.spec)?;
+
+        // For now, we reuse ComposeEngine::up which is dependency-aware
+        // Future: implement opts.strategy (sequential, max-parallel, etc.)
+        let handle = self.engine.up(&[], true, false, false).await?;
+
+        // Resolve WorkloadRefs after nodes start
+        self.resolve_workload_refs().await?;
+
+        Ok(handle)
+    }
+
+    async fn resolve_workload_refs(&self) -> Result<()> {
+        // Mock resolution for now - in a real impl we'd poll backend::inspect
+        Ok(())
+    }
+
+    pub async fn status(&self) -> Result<GraphStatus> {
+        let ps = self.engine.ps().await?;
+        let mut nodes = HashMap::new();
+        let mut healthy = true;
+
+        for info in ps {
+            let state = match info.status.as_str() {
+                "running" => NodeState::Running,
+                "exited" => NodeState::Stopped,
+                _ => NodeState::Unknown,
+            };
+            if state != NodeState::Running {
+                healthy = false;
+            }
+            nodes.insert(info.name, state);
+        }
+
+        Ok(GraphStatus { nodes, healthy, errors: None })
     }
 }
 

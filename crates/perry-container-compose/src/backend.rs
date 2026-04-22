@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use tokio::process::Command;
 use std::time::Duration;
 use which::which;
+use std::io::IsTerminal;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum IsolationLevel {
@@ -193,6 +194,17 @@ impl CliProtocol for DockerProtocol {
         for (k, v) in spec.env.as_ref().iter().flat_map(|m| m.iter()) { args.extend(["-e".into(), format!("{k}={v}")]); }
         if let Some(net) = &spec.network { args.extend(["--network".into(), net.clone()]); }
         if spec.rm.unwrap_or(false) { args.push("--rm".into()); }
+        if let Some(labels) = &spec.labels {
+            for (k, v) in labels {
+                args.extend(["--label".into(), format!("{k}={v}")]);
+            }
+        }
+        if let Some(ro) = spec.read_only {
+            if ro { args.push("--read-only".into()); }
+        }
+        if let Some(sec) = &spec.seccomp {
+            args.extend(["--security-opt".into(), format!("seccomp={sec}")]);
+        }
         if let Some(ep) = &spec.entrypoint {
             args.push("--entrypoint".into());
             args.push(ep.join(" "));
@@ -209,6 +221,17 @@ impl CliProtocol for DockerProtocol {
         for vol in spec.volumes.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["-v".into(), vol.clone()]); }
         for (k, v) in spec.env.as_ref().iter().flat_map(|m| m.iter()) { args.extend(["-e".into(), format!("{k}={v}")]); }
         if let Some(net) = &spec.network { args.extend(["--network".into(), net.clone()]); }
+        if let Some(labels) = &spec.labels {
+            for (k, v) in labels {
+                args.extend(["--label".into(), format!("{k}={v}")]);
+            }
+        }
+        if let Some(ro) = spec.read_only {
+            if ro { args.push("--read-only".into()); }
+        }
+        if let Some(sec) = &spec.seccomp {
+            args.extend(["--security-opt".into(), format!("seccomp={sec}")]);
+        }
         if let Some(ep) = &spec.entrypoint {
             args.push("--entrypoint".into());
             args.push(ep.join(" "));
@@ -308,6 +331,7 @@ impl CliProtocol for DockerProtocol {
             image: e.image,
             status: e.status,
             ports: e.ports,
+            labels: std::collections::HashMap::new(),
             created: e.created,
         }).collect())
     }
@@ -321,6 +345,7 @@ impl CliProtocol for DockerProtocol {
             image: e.config.image,
             status: e.state.status,
             ports: vec![],
+            labels: std::collections::HashMap::new(),
             created: e.created,
         })
     }
@@ -619,9 +644,17 @@ impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
 }
 
 pub async fn detect_backend() -> std::result::Result<Box<dyn ContainerBackend>, Vec<BackendProbeResult>> {
-    match probe_all_backends().await {
+    let probe_res = probe_all_backends().await;
+    match probe_res {
         (Some(backend), _) => Ok(backend),
-        (None, results) => Err(results),
+        (None, results) => {
+            // Check if we should try interactive installer
+            if std::io::stderr().is_terminal() && std::env::var("PERRY_NO_INSTALL_PROMPT").is_err() {
+                 return crate::installer::BackendInstaller::run().await
+                    .map_err(|_| results);
+            }
+            Err(results)
+        }
     }
 }
 
