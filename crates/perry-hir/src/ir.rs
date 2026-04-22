@@ -130,8 +130,6 @@ const RUNTIME_ONLY_MODULES: &[&str] = &[
     "perry/widget",
     "perry/i18n",
     "perry/thread",
-    "perry/container",
-    "perry/compose",
 ];
 
 /// Check if a native module import requires linking perry-stdlib.

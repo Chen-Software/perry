@@ -290,21 +290,8 @@ pub unsafe extern "C" fn js_container_getBackend() -> *const StringHeader {
 pub unsafe extern "C" fn js_container_detectBackend() -> *mut Promise {
     let promise = js_promise_new();
     crate::common::spawn_for_promise_deferred(promise as *mut u8, async move {
-        match detect_backend().await {
-            Ok(b) => {
-                let name = b.backend_name().to_string();
-                let json = serde_json::json!([{
-                    "name": name,
-                    "available": true,
-                    "reason": ""
-                }]).to_string();
-                Ok(json)
-            }
-            Err(probed) => {
-                let json = serde_json::to_string(&probed).unwrap_or_default();
-                Ok(json) // Resolve with probe info array on failure to find any
-            }
-        }
+        let (_, results) = perry_container_compose::backend::probe_all_backends().await;
+        Ok(serde_json::to_string(&results).unwrap_or_default())
     }, |json| {
         let str_ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
         perry_runtime::JSValue::string_ptr(str_ptr).bits()

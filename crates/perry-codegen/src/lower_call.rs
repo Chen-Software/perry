@@ -223,7 +223,7 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
         // These arrive as ExternFuncRef because perry/system imports aren't
         // lowered to NativeMethodCall in the HIR.
         if let Some(sig) = perry_system_table_lookup(name) {
-            return lower_perry_ui_table_call(ctx, sig, args);
+            return lower_table_dispatch_call(ctx, sig, args);
         }
         // Built-in runtime extern functions (`js_weakmap_set`,
         // `js_regexp_exec`, etc.) that start with `js_` are resolved
@@ -2362,7 +2362,13 @@ pub(crate) fn lower_native_method_call(
     // perry/system dispatch: audioStart, audioGetLevel, getDeviceModel, etc.
     if module == "perry/system" && object.is_none() {
         if let Some(sig) = perry_system_table_lookup(method) {
-            return lower_perry_ui_table_call(ctx, sig, args);
+            return lower_table_dispatch_call(ctx, sig, args);
+        }
+    }
+
+    if module == "perry/workloads" && object.is_none() {
+        if let Some(sig) = perry_workloads_table_lookup(method) {
+            return lower_table_dispatch_call(ctx, sig, args);
         }
     }
 
@@ -2373,7 +2379,7 @@ pub(crate) fn lower_native_method_call(
         && method != "HStack"
     {
         if let Some(sig) = perry_ui_table_lookup(method) {
-            return lower_perry_ui_table_call(ctx, sig, args);
+            return lower_table_dispatch_call(ctx, sig, args);
         }
         // Warn at compile time so missing methods are visible instead
         // of silently returning 0.0 (which causes null-pointer crashes
@@ -2383,13 +2389,13 @@ pub(crate) fn lower_native_method_call(
 
     if module == "perry/container" && object.is_none() {
         if let Some(sig) = perry_container_table_lookup(method) {
-            return lower_perry_ui_table_call(ctx, sig, args);
+            return lower_table_dispatch_call(ctx, sig, args);
         }
     }
 
     if module == "perry/compose" && object.is_none() {
         if let Some(sig) = perry_compose_table_lookup(method) {
-            return lower_perry_ui_table_call(ctx, sig, args);
+            return lower_table_dispatch_call(ctx, sig, args);
         }
     }
 
@@ -3902,12 +3908,24 @@ static PERRY_COMPOSE_TABLE: &[UiSig] = &[
     UiSig { method: "restart", runtime: "js_compose_restart", args: &[UiArgKind::I64Raw, UiArgKind::Str], ret: UiReturnKind::Widget },
 ];
 
+/// Dispatch table for perry/workloads module.
+static PERRY_WORKLOADS_TABLE: &[UiSig] = &[
+    UiSig { method: "graph", runtime: "js_workload_graph", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Str },
+    UiSig { method: "node", runtime: "js_workload_node", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Str },
+    UiSig { method: "runGraph", runtime: "js_workload_runGraph", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "inspectGraph", runtime: "js_workload_inspectGraph", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
+];
+
 fn perry_container_table_lookup(method: &str) -> Option<&'static UiSig> {
     PERRY_CONTAINER_TABLE.iter().find(|s| s.method == method)
 }
 
 fn perry_compose_table_lookup(method: &str) -> Option<&'static UiSig> {
     PERRY_COMPOSE_TABLE.iter().find(|s| s.method == method)
+}
+
+fn perry_workloads_table_lookup(method: &str) -> Option<&'static UiSig> {
+    PERRY_WORKLOADS_TABLE.iter().find(|s| s.method == method)
 }
 
 fn perry_ui_instance_method_lookup(method: &str) -> Option<&'static UiSig> {
@@ -3919,7 +3937,7 @@ fn perry_ui_instance_method_lookup(method: &str) -> Option<&'static UiSig> {
 // =============================================================================
 
 /// Maps JS import names from `perry/system` to their `perry_system_*` / `perry_*`
-/// runtime C symbols. Uses the same UiSig + lower_perry_ui_table_call machinery
+/// runtime C symbols. Uses the same UiSig + lower_table_dispatch_call machinery
 /// since the calling convention is identical.
 static PERRY_SYSTEM_TABLE: &[UiSig] = &[
     UiSig { method: "isDarkMode", runtime: "perry_system_is_dark_mode",
@@ -3968,7 +3986,7 @@ fn perry_system_table_lookup(method: &str) -> Option<&'static UiSig> {
 /// zero-sentinel. The catch-all is intentional: TS users may write
 /// `Text()` (no arg) or `Text(s, extra)` and we don't want to bail
 /// the entire compilation.
-fn lower_perry_ui_table_call(
+fn lower_table_dispatch_call(
     ctx: &mut FnCtx<'_>,
     sig: &UiSig,
     args: &[Expr],

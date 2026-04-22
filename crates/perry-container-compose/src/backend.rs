@@ -11,11 +11,23 @@ use tokio::process::Command;
 use std::time::Duration;
 use which::which;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum IsolationLevel {
+    None,
+    Process,
+    Container,
+    MicroVm,
+    Wasm,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackendProbeResult {
     pub name: String,
     pub available: bool,
     pub reason: String,
+    pub version: Option<String>,
+    pub mode: String,
+    pub isolation_level: IsolationLevel,
 }
 
 /// Minimal network creation config — driver and labels only.
@@ -43,6 +55,7 @@ pub struct SecurityProfile {
 #[async_trait]
 pub trait ContainerBackend: Send + Sync {
     fn backend_name(&self) -> &str;
+    fn backend_version(&self) -> Option<String> { None }
     async fn check_available(&self) -> Result<()>;
     async fn run(&self, spec: &ContainerSpec) -> Result<ContainerHandle>;
     async fn run_with_security(&self, spec: &ContainerSpec, profile: &SecurityProfile) -> Result<ContainerHandle>;
@@ -103,6 +116,7 @@ pub trait CliProtocol: Send + Sync {
     fn parse_inspect_output(&self, id: &str, stdout: &str) -> Result<ContainerInfo>;
     fn parse_list_images_output(&self, stdout: &str) -> Result<Vec<ImageInfo>>;
     fn parse_container_id(&self, stdout: &str) -> Result<String> { Ok(stdout.trim().to_string()) }
+    fn security_args(&self, _profile: &SecurityProfile) -> Vec<String> { vec![] }
 }
 
 #[derive(Debug, Deserialize)]
@@ -297,6 +311,14 @@ impl CliProtocol for DockerProtocol {
             created: e.created,
         }).collect())
     }
+
+    fn security_args(&self, _profile: &SecurityProfile) -> Vec<String> {
+        vec![
+            "--security-opt".into(), "no-new-privileges".into(),
+            "--security-opt".into(), "seccomp=unconfined".into(), // Placeholder for real profile
+            "--read-only".into(),
+        ]
+    }
 }
 
 pub struct AppleContainerProtocol;
@@ -354,6 +376,7 @@ impl CliProtocol for LimaProtocol {
 pub struct CliBackend<P: CliProtocol> {
     pub bin: PathBuf,
     pub protocol: P,
+    pub version: Option<String>,
 }
 
 pub type DockerBackend = CliBackend<DockerProtocol>;
@@ -361,8 +384,8 @@ pub type AppleBackend = CliBackend<AppleContainerProtocol>;
 pub type LimaBackend = CliBackend<LimaProtocol>;
 
 impl<P: CliProtocol> CliBackend<P> {
-    pub fn new(bin: PathBuf, protocol: P) -> Self {
-        Self { bin, protocol }
+    pub fn new(bin: PathBuf, protocol: P, version: Option<String>) -> Self {
+        Self { bin, protocol, version }
     }
 
     async fn exec_raw(&self, subcommand_args: Vec<String>) -> Result<(String, String)> {
@@ -394,6 +417,10 @@ impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
         self.bin.file_name().and_then(|n| n.to_str()).unwrap_or("unknown")
     }
 
+    fn backend_version(&self) -> Option<String> {
+        self.version.clone()
+    }
+
     async fn check_available(&self) -> Result<()> {
         let mut cmd = Command::new(&self.bin);
         if let Some(prefix) = self.protocol.subcommand_prefix() {
@@ -413,7 +440,7 @@ impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
         Ok(ContainerHandle { id, name: spec.name.clone() })
     }
 
-    async fn run_with_security(&self, spec: &ContainerSpec, _profile: &SecurityProfile) -> Result<ContainerHandle> {
+    async fn run_with_security(&self, spec: &ContainerSpec, profile: &SecurityProfile) -> Result<ContainerHandle> {
         // Enforce base security constraints for capability-based runs
         let mut security_spec = spec.clone();
 
@@ -425,7 +452,21 @@ impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
             security_spec.network = Some("none".to_string());
         }
 
-        let args = self.protocol.run_args(&security_spec);
+        let mut args = self.protocol.run_args(&security_spec);
+
+        // Inject security arguments before the image name
+        let sec_args = self.protocol.security_args(profile);
+        if !sec_args.is_empty() {
+            // Find position of image name to insert security options before it
+            if let Some(pos) = args.iter().position(|a| a == &security_spec.image) {
+                for (i, arg) in sec_args.into_iter().enumerate() {
+                    args.insert(pos + i, arg);
+                }
+            } else {
+                args.extend(sec_args);
+            }
+        }
+
         let (stdout, _) = self.exec_raw(args).await?;
         let id = self.protocol.parse_container_id(&stdout)?;
         Ok(ContainerHandle { id, name: security_spec.name.clone() })
@@ -525,23 +566,95 @@ impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
 }
 
 pub async fn detect_backend() -> std::result::Result<Box<dyn ContainerBackend>, Vec<BackendProbeResult>> {
-    if let Ok(name) = std::env::var("PERRY_CONTAINER_BACKEND") {
-        return probe_candidate(&name).await
-            .map_err(|reason| vec![BackendProbeResult { name: name.clone(), available: false, reason }]);
+    match probe_all_backends().await {
+        (Some(backend), _) => Ok(backend),
+        (None, results) => Err(results),
+    }
+}
+
+pub async fn probe_all_backends() -> (Option<Box<dyn ContainerBackend>>, Vec<BackendProbeResult>) {
+    let mode = std::env::var("PERRY_CONTAINER_MODE").unwrap_or_else(|_| "local-first".to_string());
+    if mode != "local-first" && mode != "server-first" {
+        return (None, vec![BackendProbeResult {
+            name: "config".into(),
+            available: false,
+            reason: format!("Invalid PERRY_CONTAINER_MODE: {}. Expected 'local-first' or 'server-first'", mode),
+            version: None,
+            mode,
+            isolation_level: IsolationLevel::None,
+        }]);
     }
 
-    let candidates = platform_candidates();
+    if let Ok(name) = std::env::var("PERRY_CONTAINER_BACKEND") {
+        return match probe_candidate(&name).await {
+            Ok((backend, version)) => (Some(backend), vec![BackendProbeResult {
+                name: name.clone(),
+                available: true,
+                reason: String::new(),
+                version,
+                mode,
+                isolation_level: IsolationLevel::Container,
+            }]),
+            Err(reason) => (None, vec![BackendProbeResult {
+                name: name.clone(),
+                available: false,
+                reason,
+                version: None,
+                mode,
+                isolation_level: IsolationLevel::Container,
+            }]),
+        };
+    }
+
+    let mut candidates: Vec<&str> = platform_candidates().to_vec();
+
+    // In server-first mode, prioritize standard daemon-based runtimes
+    if mode == "server-first" {
+        candidates.sort_by_key(|&c| match c {
+            "docker" | "podman" => 0,
+            _ => 1,
+        });
+    }
+
     let mut results = Vec::new();
+    let mut winner = None;
 
     for candidate in candidates {
         match tokio::time::timeout(Duration::from_secs(2), probe_candidate(candidate)).await {
-            Ok(Ok(backend)) => return Ok(backend),
-            Ok(Err(reason)) => results.push(BackendProbeResult { name: candidate.to_string(), available: false, reason }),
-            Err(_) => results.push(BackendProbeResult { name: candidate.to_string(), available: false, reason: "probe timed out".into() }),
+            Ok(Ok((backend, version))) => {
+                results.push(BackendProbeResult {
+                    name: candidate.to_string(),
+                    available: true,
+                    reason: String::new(),
+                    version: version.clone(),
+                    mode: mode.clone(),
+                    isolation_level: IsolationLevel::Container,
+                });
+                if winner.is_none() {
+                    tracing::debug!(backend = candidate, version = ?version, "container backend detected");
+                    winner = Some(backend);
+                }
+            }
+            Ok(Err(reason)) => results.push(BackendProbeResult {
+                name: candidate.to_string(),
+                available: false,
+                reason,
+                version: None,
+                mode: mode.clone(),
+                isolation_level: IsolationLevel::Container,
+            }),
+            Err(_) => results.push(BackendProbeResult {
+                name: candidate.to_string(),
+                available: false,
+                reason: "probe timed out".into(),
+                version: None,
+                mode: mode.clone(),
+                isolation_level: IsolationLevel::Container,
+            }),
         }
     }
 
-    Err(results)
+    (winner, results)
 }
 
 fn platform_candidates() -> &'static [&'static str] {
@@ -552,18 +665,35 @@ fn platform_candidates() -> &'static [&'static str] {
     }
 }
 
-async fn probe_candidate(name: &str) -> std::result::Result<Box<dyn ContainerBackend>, String> {
+async fn probe_candidate(name: &str) -> std::result::Result<(Box<dyn ContainerBackend>, Option<String>), String> {
     let which_bin = |name: &str| -> std::result::Result<PathBuf, String> {
         which(name).map_err(|_| format!("{} not found", name))
+    };
+
+    let get_version = |bin: PathBuf| async move {
+        Command::new(bin)
+            .arg("--version")
+            .output()
+            .await
+            .ok()
+            .and_then(|out| {
+                if out.status.success() {
+                    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+                } else {
+                    None
+                }
+            })
     };
 
     match name {
         "apple/container" => {
             let bin = which_bin("container")?;
-            Ok(Box::new(AppleBackend::new(bin, AppleContainerProtocol)))
+            let version = get_version(bin.clone()).await;
+            Ok((Box::new(AppleBackend::new(bin, AppleContainerProtocol, version.clone())), version))
         }
         "podman" => {
             let bin = which_bin("podman")?;
+            let version = get_version(bin.clone()).await;
             if std::env::consts::OS == "macos" {
                 let out = Command::new(&bin).args(&["machine", "list", "--format", "json"]).output().await.map_err(|_| "podman machine list failed")?;
                 let json: serde_json::Value = serde_json::from_slice(&out.stdout).map_err(|_| "invalid podman output")?;
@@ -571,38 +701,43 @@ async fn probe_candidate(name: &str) -> std::result::Result<Box<dyn ContainerBac
                     return Err("no podman machine running".into());
                 }
             }
-            Ok(Box::new(DockerBackend::new(bin, DockerProtocol)))
+            Ok((Box::new(DockerBackend::new(bin, DockerProtocol, version.clone())), version))
         }
         "orbstack" => {
             let bin = which_bin("orb").or_else(|_| which_bin("docker")).map_err(|_| "orbstack not found")?;
-            Ok(Box::new(DockerBackend::new(bin, DockerProtocol)))
+            let version = get_version(bin.clone()).await;
+            Ok((Box::new(DockerBackend::new(bin, DockerProtocol, version.clone())), version))
         }
         "colima" => {
             let bin = which_bin("colima")?;
+            let version = get_version(bin.clone()).await;
             let out = Command::new(&bin).arg("status").output().await.map_err(|_| "colima status failed")?;
             if !String::from_utf8_lossy(&out.stdout).contains("running") {
                 return Err("colima not running".into());
             }
             let dbin = which_bin("docker").map_err(|_| "docker cli not found for colima")?;
-            Ok(Box::new(DockerBackend::new(dbin, DockerProtocol)))
+            Ok((Box::new(DockerBackend::new(dbin, DockerProtocol, version.clone())), version))
         }
         "lima" => {
             let bin = which_bin("limactl")?;
+            let version = get_version(bin.clone()).await;
             let out = Command::new(&bin).args(&["list", "--json"]).output().await.map_err(|_| "limactl list failed")?;
             let instance = String::from_utf8_lossy(&out.stdout).lines()
                 .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
                 .find(|v| v["status"] == "Running")
                 .and_then(|v| v["name"].as_str().map(|s| s.to_string()))
                 .ok_or("no running lima instance")?;
-            Ok(Box::new(LimaBackend::new(bin, LimaProtocol { instance })))
+            Ok((Box::new(LimaBackend::new(bin, LimaProtocol { instance }, version.clone())), version))
         }
         "nerdctl" => {
             let bin = which_bin("nerdctl")?;
-            Ok(Box::new(DockerBackend::new(bin, DockerProtocol)))
+            let version = get_version(bin.clone()).await;
+            Ok((Box::new(DockerBackend::new(bin, DockerProtocol, version.clone())), version))
         }
         "docker" => {
             let bin = which_bin("docker")?;
-            Ok(Box::new(DockerBackend::new(bin, DockerProtocol)))
+            let version = get_version(bin.clone()).await;
+            Ok((Box::new(DockerBackend::new(bin, DockerProtocol, version.clone())), version))
         }
         _ => Err("unknown backend".into()),
     }

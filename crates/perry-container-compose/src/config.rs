@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+#[derive(Default)]
 pub struct ProjectConfig {
     pub files: Vec<PathBuf>,
     pub project_name: Option<String>,
