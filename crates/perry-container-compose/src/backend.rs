@@ -47,6 +47,7 @@ pub trait ContainerBackend: Send + Sync {
         env: Option<&HashMap<String, String>>,
         workdir: Option<&str>,
     ) -> Result<ContainerLogs>;
+    async fn build(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Result<()>;
     async fn pull_image(&self, reference: &str) -> Result<()>;
     async fn list_images(&self) -> Result<Vec<ImageInfo>>;
     async fn remove_image(&self, reference: &str, force: bool) -> Result<()>;
@@ -54,6 +55,7 @@ pub trait ContainerBackend: Send + Sync {
     async fn remove_network(&self, name: &str) -> Result<()>;
     async fn create_volume(&self, name: &str, config: &VolumeConfig) -> Result<()>;
     async fn remove_volume(&self, name: &str) -> Result<()>;
+    async fn inspect_network(&self, name: &str) -> Result<()>;
 }
 
 pub fn docker_run_flags(spec: &ContainerSpec, include_detach: bool) -> Vec<String> {
@@ -101,6 +103,7 @@ pub trait CliProtocol: Send + Sync {
     fn remove_args(&self, id: &str, force: bool) -> Vec<String>;
     fn list_args(&self, all: bool) -> Vec<String>;
     fn inspect_args(&self, id: &str) -> Vec<String>;
+    fn build_args(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Vec<String>;
     fn logs_args(&self, id: &str, tail: Option<u32>) -> Vec<String>;
     fn exec_args(&self, id: &str, cmd: &[String], env: Option<&HashMap<String, String>>, workdir: Option<&str>) -> Vec<String>;
     fn pull_image_args(&self, reference: &str) -> Vec<String>;
@@ -110,6 +113,7 @@ pub trait CliProtocol: Send + Sync {
     fn remove_network_args(&self, name: &str) -> Vec<String>;
     fn create_volume_args(&self, name: &str, config: &VolumeConfig) -> Vec<String>;
     fn remove_volume_args(&self, name: &str) -> Vec<String>;
+    fn inspect_network_args(&self, name: &str) -> Vec<String>;
 
     fn parse_list_output(&self, stdout: &str) -> Result<Vec<ContainerInfo>>;
     fn parse_inspect_output(&self, stdout: &str) -> Result<ContainerInfo>;
@@ -219,6 +223,24 @@ impl CliProtocol for DockerProtocol {
         vec!["inspect".into(), "--format".into(), "json".into(), id.into()]
     }
 
+    fn build_args(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Vec<String> {
+        let mut args = vec!["build".into(), "-t".into(), image_name.into()];
+        if let Some(context) = &spec.context {
+            args.push(context.clone());
+        } else {
+            args.push(".".into());
+        }
+        if let Some(dockerfile) = &spec.dockerfile {
+            args.extend(["-f".into(), dockerfile.clone()]);
+        }
+        if let Some(args_map) = &spec.args {
+            for (k, v) in args_map.to_map() {
+                args.extend(["--build-arg".into(), format!("{}={}", k, v)]);
+            }
+        }
+        args
+    }
+
     fn logs_args(&self, id: &str, tail: Option<u32>) -> Vec<String> {
         let mut args = vec!["logs".into()];
         if let Some(t) = tail { args.extend(["--tail".into(), t.to_string()]); }
@@ -280,6 +302,10 @@ impl CliProtocol for DockerProtocol {
 
     fn remove_volume_args(&self, name: &str) -> Vec<String> {
         vec!["volume".into(), "rm".into(), name.into()]
+    }
+
+    fn inspect_network_args(&self, name: &str) -> Vec<String> {
+        vec!["network".into(), "inspect".into(), name.into()]
     }
 
     fn parse_list_output(&self, stdout: &str) -> Result<Vec<ContainerInfo>> {
@@ -347,6 +373,7 @@ impl CliProtocol for AppleContainerProtocol {
     fn inspect_args(&self, id: &str) -> Vec<String> { DockerProtocol.inspect_args(id) }
     fn logs_args(&self, id: &str, tail: Option<u32>) -> Vec<String> { DockerProtocol.logs_args(id, tail) }
     fn exec_args(&self, id: &str, cmd: &[String], env: Option<&HashMap<String, String>>, workdir: Option<&str>) -> Vec<String> { DockerProtocol.exec_args(id, cmd, env, workdir) }
+    fn build_args(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Vec<String> { DockerProtocol.build_args(spec, image_name) }
     fn pull_image_args(&self, reference: &str) -> Vec<String> { DockerProtocol.pull_image_args(reference) }
     fn list_images_args(&self) -> Vec<String> { DockerProtocol.list_images_args() }
     fn remove_image_args(&self, reference: &str, force: bool) -> Vec<String> { DockerProtocol.remove_image_args(reference, force) }
@@ -354,6 +381,7 @@ impl CliProtocol for AppleContainerProtocol {
     fn remove_network_args(&self, name: &str) -> Vec<String> { DockerProtocol.remove_network_args(name) }
     fn create_volume_args(&self, name: &str, config: &VolumeConfig) -> Vec<String> { DockerProtocol.create_volume_args(name, config) }
     fn remove_volume_args(&self, name: &str) -> Vec<String> { DockerProtocol.remove_volume_args(name) }
+    fn inspect_network_args(&self, name: &str) -> Vec<String> { DockerProtocol.inspect_network_args(name) }
     fn parse_list_output(&self, stdout: &str) -> Result<Vec<ContainerInfo>> { DockerProtocol.parse_list_output(stdout) }
     fn parse_inspect_output(&self, stdout: &str) -> Result<ContainerInfo> { DockerProtocol.parse_inspect_output(stdout) }
     fn parse_list_images_output(&self, stdout: &str) -> Result<Vec<ImageInfo>> { DockerProtocol.parse_list_images_output(stdout) }
@@ -381,6 +409,7 @@ impl CliProtocol for LimaProtocol {
     fn inspect_args(&self, id: &str) -> Vec<String> { DockerProtocol.inspect_args(id) }
     fn logs_args(&self, id: &str, tail: Option<u32>) -> Vec<String> { DockerProtocol.logs_args(id, tail) }
     fn exec_args(&self, id: &str, cmd: &[String], env: Option<&HashMap<String, String>>, workdir: Option<&str>) -> Vec<String> { DockerProtocol.exec_args(id, cmd, env, workdir) }
+    fn build_args(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Vec<String> { DockerProtocol.build_args(spec, image_name) }
     fn pull_image_args(&self, reference: &str) -> Vec<String> { DockerProtocol.pull_image_args(reference) }
     fn list_images_args(&self) -> Vec<String> { DockerProtocol.list_images_args() }
     fn remove_image_args(&self, reference: &str, force: bool) -> Vec<String> { DockerProtocol.remove_image_args(reference, force) }
@@ -388,6 +417,7 @@ impl CliProtocol for LimaProtocol {
     fn remove_network_args(&self, name: &str) -> Vec<String> { DockerProtocol.remove_network_args(name) }
     fn create_volume_args(&self, name: &str, config: &VolumeConfig) -> Vec<String> { DockerProtocol.create_volume_args(name, config) }
     fn remove_volume_args(&self, name: &str) -> Vec<String> { DockerProtocol.remove_volume_args(name) }
+    fn inspect_network_args(&self, name: &str) -> Vec<String> { DockerProtocol.inspect_network_args(name) }
     fn parse_list_output(&self, stdout: &str) -> Result<Vec<ContainerInfo>> { DockerProtocol.parse_list_output(stdout) }
     fn parse_inspect_output(&self, stdout: &str) -> Result<ContainerInfo> { DockerProtocol.parse_inspect_output(stdout) }
     fn parse_list_images_output(&self, stdout: &str) -> Result<Vec<ImageInfo>> { DockerProtocol.parse_list_images_output(stdout) }
@@ -502,6 +532,11 @@ impl<P: CliProtocol> ContainerBackend for CliBackend<P> {
         Ok(ContainerLogs { stdout, stderr })
     }
 
+    async fn build(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Result<()> {
+        let args = self.protocol.build_args(spec, image_name);
+        self.exec_raw(args).await.map(|_| ())
+    }
+
     async fn pull_image(&self, reference: &str) -> Result<()> {
         let args = self.protocol.pull_image_args(reference);
         self.exec_raw(args).await.map(|_| ())
@@ -535,6 +570,11 @@ impl<P: CliProtocol> ContainerBackend for CliBackend<P> {
 
     async fn remove_volume(&self, name: &str) -> Result<()> {
         let args = self.protocol.remove_volume_args(name);
+        self.exec_raw(args).await.map(|_| ())
+    }
+
+    async fn inspect_network(&self, name: &str) -> Result<()> {
+        let args = self.protocol.inspect_network_args(name);
         self.exec_raw(args).await.map(|_| ())
     }
 }
@@ -572,7 +612,16 @@ pub async fn detect_backend() -> std::result::Result<Arc<dyn ContainerBackend>, 
 
 fn platform_candidates() -> &'static [&'static str] {
     if cfg!(target_os = "macos") || cfg!(target_os = "ios") {
-        &["apple/container", "orbstack", "colima", "rancher-desktop", "podman", "lima", "docker"]
+        &[
+            "apple/container",
+            "orbstack",
+            "colima",
+            "rancher-desktop",
+            "lima",
+            "podman",
+            "nerdctl",
+            "docker",
+        ]
     } else {
         &["podman", "nerdctl", "docker"]
     }

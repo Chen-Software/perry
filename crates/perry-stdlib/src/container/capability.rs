@@ -36,7 +36,7 @@ pub async fn alloy_container_run_capability(
     };
 
     // 3. Get backend and run
-    let backend = get_global_backend_instance().map_err(|e| ContainerError::BackendError { code: -1, message: e })?;
+    let backend = get_global_backend_instance().await.map_err(|e| ContainerError::BackendError { code: -1, message: e })?;
     let handle = backend.run(&spec).await.map_err(|e| ContainerError::BackendError { code: -1, message: e.to_string() })?;
 
     // 4. Collect logs (container is auto-removed by rm: true when it exits)

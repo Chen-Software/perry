@@ -22,7 +22,7 @@ static NEXT_HANDLE_ID: AtomicU64 = AtomicU64::new(1);
 pub fn register_container_handle(handle: perry_container_compose::types::ContainerHandle) -> u64 {
     let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
     CONTAINER_HANDLES.get_or_init(DashMap::new).insert(id, handle);
-    id
+    perry_runtime::JSValue::pointer(id as *mut u8).bits()
 }
 
 pub fn get_container_handle_obj(id: u64) -> Option<perry_container_compose::types::ContainerHandle> {
@@ -31,12 +31,14 @@ pub fn get_container_handle_obj(id: u64) -> Option<perry_container_compose::type
 
 /// Register a single `ContainerInfo` and return an opaque integer handle.
 pub fn register_container_info(info: ContainerInfo) -> u64 {
-    handle::register_handle(info) as u64
+    let handle = handle::register_handle(info);
+    perry_runtime::JSValue::pointer(handle as *mut u8).bits()
 }
 
 /// Register a `Vec<ContainerInfo>` (list result from `list` / `ps`) and return an opaque integer handle.
 pub fn register_container_info_list(list: Vec<ContainerInfo>) -> u64 {
-    handle::register_handle(list) as u64
+    let handle = handle::register_handle(list);
+    perry_runtime::JSValue::pointer(handle as *mut u8).bits()
 }
 
 /// Retrieve the container info list associated with a handle.
@@ -53,7 +55,7 @@ pub fn take_container_info_list(id: u64) -> Option<Vec<ContainerInfo>> {
 pub fn register_compose_engine(engine: perry_container_compose::ComposeEngine) -> u64 {
     let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
     COMPOSE_HANDLES.get_or_init(DashMap::new).insert(id, engine);
-    id
+    perry_runtime::JSValue::pointer(id as *mut u8).bits()
 }
 
 /// Retrieve a `ComposeEngine` by handle id.
@@ -63,12 +65,14 @@ pub fn get_compose_engine(id: u64) -> Option<dashmap::mapref::one::Ref<'static, 
 
 /// Register a string and return an opaque integer handle.
 pub fn register_string(s: String) -> u64 {
-    handle::register_handle(s) as u64
+    let handle = handle::register_handle(s);
+    perry_runtime::JSValue::pointer(handle as *mut u8).bits()
 }
 
 /// Register `ContainerLogs` and return an opaque integer handle.
 pub fn register_container_logs(logs: ContainerLogs) -> u64 {
-    handle::register_handle(logs) as u64
+    let handle = handle::register_handle(logs);
+    perry_runtime::JSValue::pointer(handle as *mut u8).bits()
 }
 
 /// Retrieve `ContainerLogs` by handle id (read-only).
@@ -83,7 +87,8 @@ pub fn take_container_logs(id: u64) -> Option<ContainerLogs> {
 
 /// Register a `Vec<ImageInfo>` and return an opaque integer handle.
 pub fn register_image_info_list(list: Vec<ImageInfo>) -> u64 {
-    handle::register_handle(list) as u64
+    let handle = handle::register_handle(list);
+    perry_runtime::JSValue::pointer(handle as *mut u8).bits()
 }
 
 /// Retrieve the image info list associated with a handle.
