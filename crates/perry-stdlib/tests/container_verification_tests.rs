@@ -1,4 +1,5 @@
 use perry_stdlib::container::verification::*;
+use perry_stdlib::container::verification::clear_verification_cache;
 
 // Feature: perry-container | Layer: unit | Req: 14.1 | Property: -
 #[test]

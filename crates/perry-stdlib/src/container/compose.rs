@@ -1,12 +1,9 @@
 //! ComposeWrapper — thin orchestration adapter over `perry_container_compose::ComposeEngine`.
 
+use super::types::{ComposeHandle, ComposeSpec, ContainerError, ContainerInfo, ContainerLogs};
 use perry_container_compose::backend::ContainerBackend;
-use super::types::{
-    ComposeHandle, ComposeSpec, ContainerError, ContainerInfo, ContainerLogs,
-};
-use std::sync::Arc;
 use perry_container_compose::ComposeEngine;
-use std::collections::HashMap;
+use std::sync::Arc;
 
 pub struct ComposeWrapper {
     engine: Arc<ComposeEngine>,
@@ -14,31 +11,58 @@ pub struct ComposeWrapper {
 
 impl ComposeWrapper {
     pub fn new(spec: ComposeSpec, backend: Arc<dyn ContainerBackend>) -> Self {
-        let project_name = spec.name.clone().unwrap_or_else(|| "perry-stack".to_string());
+        let project_name = spec
+            .name
+            .clone()
+            .unwrap_or_else(|| "perry-stack".to_string());
 
         Self {
             engine: Arc::new(ComposeEngine::new(spec, project_name, backend)),
         }
     }
 
+    /// Create a wrapper from an existing handle by looking up the engine.
+    pub fn new_with_handle(handle: &ComposeHandle, _backend: Arc<dyn ContainerBackend>) -> Result<Self, ContainerError> {
+        if let Some(engine) = perry_container_compose::compose::get_engine(handle.stack_id) {
+            Ok(Self { engine })
+        } else {
+            Err(ContainerError::NotFound(format!("Compose engine not found for stack {}", handle.stack_id)))
+        }
+    }
+
     pub async fn up(&self) -> Result<ComposeHandle, ContainerError> {
-        self.engine.up(&[], true, false, false).await.map_err(ContainerError::from)
+        self.engine
+            .up(&[], true, false, false)
+            .await
+            .map_err(ContainerError::from)
     }
 
     pub async fn down(&self, _handle: &ComposeHandle, volumes: bool) -> Result<(), ContainerError> {
-        self.engine.down(&[], false, volumes).await.map_err(ContainerError::from)
+        self.engine
+            .down(&[], false, volumes)
+            .await
+            .map_err(ContainerError::from)
     }
 
     pub async fn ps(&self, _handle: &ComposeHandle) -> Result<Vec<ContainerInfo>, ContainerError> {
         self.engine.ps().await.map_err(ContainerError::from)
     }
 
-    pub async fn logs(&self, _handle: &ComposeHandle, service: Option<&str>, tail: Option<u32>) -> Result<ContainerLogs, ContainerError> {
+    pub async fn logs(
+        &self,
+        _handle: &ComposeHandle,
+        service: Option<&str>,
+        tail: Option<u32>,
+    ) -> Result<ContainerLogs, ContainerError> {
         let services = match service {
             Some(s) => vec![s.to_string()],
             None => vec![],
         };
-        let logs_map = self.engine.logs(&services, tail).await.map_err(ContainerError::from)?;
+        let logs_map = self
+            .engine
+            .logs(&services, tail)
+            .await
+            .map_err(ContainerError::from)?;
 
         let mut stdout = String::new();
         let mut stderr = String::new();
@@ -56,23 +80,52 @@ impl ComposeWrapper {
         Ok(ContainerLogs { stdout, stderr })
     }
 
-    pub async fn exec(&self, _handle: &ComposeHandle, service: &str, cmd: &[String]) -> Result<ContainerLogs, ContainerError> {
-        self.engine.exec(service, cmd, None, None).await.map_err(ContainerError::from)
+    pub async fn exec(
+        &self,
+        _handle: &ComposeHandle,
+        service: &str,
+        cmd: &[String],
+    ) -> Result<ContainerLogs, ContainerError> {
+        self.engine
+            .exec(service, cmd, None, None)
+            .await
+            .map_err(ContainerError::from)
     }
 
     pub fn config(&self) -> Result<String, ContainerError> {
         self.engine.config().map_err(ContainerError::from)
     }
 
-    pub async fn start(&self, _handle: &ComposeHandle, services: &[String]) -> Result<(), ContainerError> {
-        self.engine.start(services).await.map_err(ContainerError::from)
+    pub async fn start(
+        &self,
+        _handle: &ComposeHandle,
+        services: &[String],
+    ) -> Result<(), ContainerError> {
+        self.engine
+            .start(services)
+            .await
+            .map_err(ContainerError::from)
     }
 
-    pub async fn stop(&self, _handle: &ComposeHandle, services: &[String]) -> Result<(), ContainerError> {
-        self.engine.stop(services).await.map_err(ContainerError::from)
+    pub async fn stop(
+        &self,
+        _handle: &ComposeHandle,
+        services: &[String],
+    ) -> Result<(), ContainerError> {
+        self.engine
+            .stop(services)
+            .await
+            .map_err(ContainerError::from)
     }
 
-    pub async fn restart(&self, _handle: &ComposeHandle, services: &[String]) -> Result<(), ContainerError> {
-        self.engine.restart(services).await.map_err(ContainerError::from)
+    pub async fn restart(
+        &self,
+        _handle: &ComposeHandle,
+        services: &[String],
+    ) -> Result<(), ContainerError> {
+        self.engine
+            .restart(services)
+            .await
+            .map_err(ContainerError::from)
     }
 }

@@ -2686,6 +2686,20 @@ fn lower_module_decl(
                                                     }
                                                     _ => {}
                                                 }
+                                            } else if module_name == "perry/container" || module_name == "perry/container-compose" || module_name == "perry/compose" {
+                                                match method_name {
+                                                    "run" | "create" | "composeUp" | "up" => {
+                                                        ctx.register_native_instance(name.clone(), module_name.to_string(), method_name.to_string());
+                                                    }
+                                                    _ => {}
+                                                }
+                                            } else if module_name == "perry/workloads" {
+                                                match method_name {
+                                                    "runGraph" => {
+                                                        ctx.register_native_instance(name.clone(), module_name.to_string(), method_name.to_string());
+                                                    }
+                                                    _ => {}
+                                                }
                                             }
                                         }
                                     }

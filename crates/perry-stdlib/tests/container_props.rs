@@ -237,7 +237,9 @@ proptest! {
         let map_names = map_entry.service_names();
 
         // Both should yield the same service names (order may differ for Map)
-        prop_assert_eq!(list_names.len(), map_names.len());
+        // Note: Map deduplicates keys, so list length might be greater than map length if duplicates in `names`
+        let unique_names_count = names.iter().collect::<std::collections::HashSet<_>>().len();
+        prop_assert_eq!(map_names.len(), unique_names_count);
         for name in &list_names {
             prop_assert!(map_names.contains(name), "map should contain {}", name);
         }

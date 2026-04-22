@@ -2356,7 +2356,7 @@ pub(crate) fn lower_native_method_call(
     // arms BELOW so they short-circuit before this table is consulted.
     //
     // Extending: add a row to PERRY_UI_TABLE matching the TS method name
-    if module == "perry/container" || module == "perry/container-compose" || module == "perry/compose" {
+    if module == "perry/container" || module == "perry/container-compose" || module == "perry/compose" || module == "perry/workloads" {
         let handle_id = if let Some(recv) = object {
             let recv_val = lower_expr(ctx, recv)?;
             let blk = ctx.block();
@@ -2368,6 +2368,7 @@ pub(crate) fn lower_native_method_call(
         if let Some((_, ffi_symbol)) = PERRY_CONTAINER_TABLE
             .iter()
             .chain(PERRY_CONTAINER_COMPOSE_TABLE.iter())
+            .chain(PERRY_WORKLOAD_TABLE.iter())
             .find(|(m, _)| *m == method)
         {
             return lower_perry_container_compose_call(ctx, ffi_symbol, handle_id, args);
@@ -3491,6 +3492,14 @@ const PERRY_CONTAINER_COMPOSE_TABLE: &[(&str, &str)] = &[
     ("start", "js_container_compose_start"),
     ("stop", "js_container_compose_stop"),
     ("restart", "js_container_compose_restart"),
+];
+
+/// Maps perry/workloads TypeScript function names to their FFI symbols.
+const PERRY_WORKLOAD_TABLE: &[(&str, &str)] = &[
+    ("runGraph", "js_workload_runGraph"),
+    ("inspectGraph", "js_workload_inspectGraph"),
+    ("down", "js_workload_handle_down"),
+    ("status", "js_workload_handle_status"),
 ];
 
 ///
