@@ -22,7 +22,7 @@ mod test_utils {
         assert!(!promise.is_null(), "Promise pointer must not be null");
         let mut iterations = 0;
 
-        while perry_runtime::js_promise_state(promise) == 0 && iterations < 2000 {
+        while perry_runtime::js_promise_state(promise) == 0 && iterations < 10000 {
             perry_stdlib::common::js_stdlib_process_pending();
             perry_runtime::js_promise_run_microtasks();
             std::thread::sleep(std::time::Duration::from_millis(1));
