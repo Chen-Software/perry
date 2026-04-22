@@ -1287,6 +1287,273 @@ fn is_clamp_call(e: &perry_hir::Expr, clamp_fn_ids: &HashSet<u32>) -> bool {
     false
 }
 
+/// Collect LocalIds that are referenced anywhere in an `index` subexpression
+/// of an array/buffer/typed-array access (`arr[i]`, `buf[i] = v`, `uint8[i]`,
+/// `arr.at(i)`, `arr.with(i, v)`, `str.at(i)`, etc.).
+///
+/// Used as a gate for the parallel i32 shadow slot (issue #140 regression fix).
+/// The i32 shadow exists to skip the per-iteration `fptosi double → i32` that
+/// IndexGet/IndexSet emit when the index local is a loop counter. For pure
+/// accumulator locals (`sum = sum + 1` with no array indexing), the shadow is
+/// net-negative: every write becomes a parallel `store i32` + dead `store f64`
+/// that — combined with the `asm sideeffect` loop barrier from #74 — blocks
+/// LLVM's vectorizer from recognizing the fadd reduction. Without the shadow,
+/// the body collapses back to a clean `load/fadd/store` chain that the
+/// autovectorizer can widen into a `<2 x double>` parallel-accumulator
+/// reduction (4 f64 lanes after unrolling).
+///
+/// Conservative over-approximation: any LocalGet/LocalSet/Update id that
+/// appears *anywhere* inside an index subtree is marked — `arr[i]`, `arr[i+1]`,
+/// `arr[(i|0)]`, `buf[k*4+j]` all mark their inner locals. Walker stops at
+/// closure boundaries since captured locals can't use the i32 slot anyway
+/// (boxed-capture path goes through `js_box_get`/`js_box_set`).
+pub(crate) fn collect_index_used_locals(stmts: &[perry_hir::Stmt]) -> HashSet<u32> {
+    let mut out: HashSet<u32> = HashSet::new();
+    walk_index_uses_in_stmts(stmts, &mut out);
+    out
+}
+
+fn walk_index_uses_in_stmts(stmts: &[perry_hir::Stmt], out: &mut HashSet<u32>) {
+    use perry_hir::Stmt;
+    for s in stmts {
+        match s {
+            Stmt::Expr(e) | Stmt::Throw(e) => walk_index_uses_in_expr(e, out),
+            Stmt::Return(opt) => {
+                if let Some(e) = opt {
+                    walk_index_uses_in_expr(e, out);
+                }
+            }
+            Stmt::Let { init, .. } => {
+                if let Some(e) = init {
+                    walk_index_uses_in_expr(e, out);
+                }
+            }
+            Stmt::If { condition, then_branch, else_branch } => {
+                walk_index_uses_in_expr(condition, out);
+                walk_index_uses_in_stmts(then_branch, out);
+                if let Some(eb) = else_branch {
+                    walk_index_uses_in_stmts(eb, out);
+                }
+            }
+            Stmt::While { condition, body } => {
+                walk_index_uses_in_expr(condition, out);
+                walk_index_uses_in_stmts(body, out);
+            }
+            Stmt::DoWhile { body, condition } => {
+                walk_index_uses_in_stmts(body, out);
+                walk_index_uses_in_expr(condition, out);
+            }
+            Stmt::For { init, condition, update, body } => {
+                if let Some(i) = init {
+                    walk_index_uses_in_stmts(std::slice::from_ref(i), out);
+                }
+                if let Some(c) = condition {
+                    walk_index_uses_in_expr(c, out);
+                }
+                if let Some(u) = update {
+                    walk_index_uses_in_expr(u, out);
+                }
+                walk_index_uses_in_stmts(body, out);
+            }
+            Stmt::Try { body, catch, finally } => {
+                walk_index_uses_in_stmts(body, out);
+                if let Some(c) = catch {
+                    walk_index_uses_in_stmts(&c.body, out);
+                }
+                if let Some(f) = finally {
+                    walk_index_uses_in_stmts(f, out);
+                }
+            }
+            Stmt::Switch { discriminant, cases } => {
+                walk_index_uses_in_expr(discriminant, out);
+                for c in cases {
+                    if let Some(t) = &c.test {
+                        walk_index_uses_in_expr(t, out);
+                    }
+                    walk_index_uses_in_stmts(&c.body, out);
+                }
+            }
+            Stmt::Labeled { body, .. } => {
+                walk_index_uses_in_stmts(std::slice::from_ref(body.as_ref()), out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn walk_index_uses_in_expr(e: &perry_hir::Expr, out: &mut HashSet<u32>) {
+    use perry_hir::{ArrayElement, CallArg, Expr};
+    // For the `index` field of an index-using variant we need EVERY local
+    // referenced anywhere inside the subtree, so dispatch to the existing
+    // `collect_ref_ids_in_expr` walker (which already walks `LocalGet` /
+    // `LocalSet` / `Update` and inserts their ids).
+    let collect_index_refs = |idx: &Expr, out: &mut HashSet<u32>| {
+        collect_ref_ids_in_expr(idx, out);
+    };
+
+    match e {
+        // --- index-using variants: mark locals in `index` subtree ---
+        Expr::IndexGet { object, index } => {
+            collect_index_refs(index, out);
+            walk_index_uses_in_expr(object, out);
+            walk_index_uses_in_expr(index, out);
+        }
+        Expr::IndexSet { object, index, value } => {
+            collect_index_refs(index, out);
+            walk_index_uses_in_expr(object, out);
+            walk_index_uses_in_expr(index, out);
+            walk_index_uses_in_expr(value, out);
+        }
+        Expr::IndexUpdate { object, index, .. } => {
+            collect_index_refs(index, out);
+            walk_index_uses_in_expr(object, out);
+            walk_index_uses_in_expr(index, out);
+        }
+        Expr::BufferIndexGet { buffer, index } => {
+            collect_index_refs(index, out);
+            walk_index_uses_in_expr(buffer, out);
+            walk_index_uses_in_expr(index, out);
+        }
+        Expr::BufferIndexSet { buffer, index, value } => {
+            collect_index_refs(index, out);
+            walk_index_uses_in_expr(buffer, out);
+            walk_index_uses_in_expr(index, out);
+            walk_index_uses_in_expr(value, out);
+        }
+        Expr::Uint8ArrayGet { array, index } => {
+            collect_index_refs(index, out);
+            walk_index_uses_in_expr(array, out);
+            walk_index_uses_in_expr(index, out);
+        }
+        Expr::Uint8ArraySet { array, index, value } => {
+            collect_index_refs(index, out);
+            walk_index_uses_in_expr(array, out);
+            walk_index_uses_in_expr(index, out);
+            walk_index_uses_in_expr(value, out);
+        }
+        Expr::ArrayAt { array, index } => {
+            collect_index_refs(index, out);
+            walk_index_uses_in_expr(array, out);
+            walk_index_uses_in_expr(index, out);
+        }
+        Expr::ArrayWith { array, index, value } => {
+            collect_index_refs(index, out);
+            walk_index_uses_in_expr(array, out);
+            walk_index_uses_in_expr(index, out);
+            walk_index_uses_in_expr(value, out);
+        }
+        Expr::StringAt { string, index } => {
+            collect_index_refs(index, out);
+            walk_index_uses_in_expr(string, out);
+            walk_index_uses_in_expr(index, out);
+        }
+        Expr::StringCodePointAt { string, index } => {
+            collect_index_refs(index, out);
+            walk_index_uses_in_expr(string, out);
+            walk_index_uses_in_expr(index, out);
+        }
+
+        // --- pass-through structural traversal ---
+        Expr::LocalGet(_) | Expr::Update { .. } => {}
+        Expr::LocalSet(_, value) => walk_index_uses_in_expr(value, out),
+        Expr::Binary { left, right, .. }
+        | Expr::Compare { left, right, .. }
+        | Expr::Logical { left, right, .. } => {
+            walk_index_uses_in_expr(left, out);
+            walk_index_uses_in_expr(right, out);
+        }
+        Expr::Unary { operand, .. }
+        | Expr::Void(operand)
+        | Expr::TypeOf(operand)
+        | Expr::Await(operand)
+        | Expr::Delete(operand)
+        | Expr::StringCoerce(operand)
+        | Expr::BooleanCoerce(operand)
+        | Expr::NumberCoerce(operand) => {
+            walk_index_uses_in_expr(operand, out);
+        }
+        Expr::Conditional { condition, then_expr, else_expr } => {
+            walk_index_uses_in_expr(condition, out);
+            walk_index_uses_in_expr(then_expr, out);
+            walk_index_uses_in_expr(else_expr, out);
+        }
+        Expr::Call { callee, args, .. } => {
+            walk_index_uses_in_expr(callee, out);
+            for a in args {
+                walk_index_uses_in_expr(a, out);
+            }
+        }
+        Expr::CallSpread { callee, args, .. } => {
+            walk_index_uses_in_expr(callee, out);
+            for a in args {
+                match a {
+                    CallArg::Expr(e) | CallArg::Spread(e) => walk_index_uses_in_expr(e, out),
+                }
+            }
+        }
+        Expr::NativeMethodCall { object, args, .. } => {
+            if let Some(o) = object {
+                walk_index_uses_in_expr(o, out);
+            }
+            for a in args {
+                walk_index_uses_in_expr(a, out);
+            }
+        }
+        Expr::PropertyGet { object, .. } => walk_index_uses_in_expr(object, out),
+        Expr::PropertySet { object, value, .. } => {
+            walk_index_uses_in_expr(object, out);
+            walk_index_uses_in_expr(value, out);
+        }
+        Expr::PropertyUpdate { object, .. } => walk_index_uses_in_expr(object, out),
+        Expr::Array(elements) => {
+            for el in elements {
+                walk_index_uses_in_expr(el, out);
+            }
+        }
+        Expr::ArraySpread(elements) => {
+            for el in elements {
+                match el {
+                    ArrayElement::Expr(e) | ArrayElement::Spread(e) => {
+                        walk_index_uses_in_expr(e, out);
+                    }
+                }
+            }
+        }
+        Expr::Object(props) => {
+            for (_, v) in props {
+                walk_index_uses_in_expr(v, out);
+            }
+        }
+        Expr::ObjectSpread { parts } => {
+            for (_, e) in parts {
+                walk_index_uses_in_expr(e, out);
+            }
+        }
+        Expr::Sequence(es) => {
+            for e in es {
+                walk_index_uses_in_expr(e, out);
+            }
+        }
+        Expr::New { args, .. } => {
+            for a in args {
+                walk_index_uses_in_expr(a, out);
+            }
+        }
+        // Closure bodies are intentionally NOT walked: a captured local can't
+        // use the i32 slot anyway (boxed captures route through
+        // `js_box_get`/`js_box_set` and non-boxed ones through
+        // `js_closure_get_capture_f64`), so marking them as index-used would
+        // have no effect at the Let-site emission gate.
+        Expr::Closure { .. } => {}
+        // Everything else: conservatively skipped. Missing a variant means we
+        // don't recurse further into that subtree — a local used as an index
+        // deeper inside may not be marked, in which case its i32 shadow is
+        // not emitted and the per-iteration `fptosi` cost returns. That's a
+        // missed optimization, not a correctness bug.
+        _ => {}
+    }
+}
+
 pub(crate) fn collect_integer_locals(
     stmts: &[perry_hir::Stmt],
     flat_const_ids: &HashSet<u32>,

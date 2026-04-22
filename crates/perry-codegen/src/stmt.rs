@@ -8,7 +8,7 @@ use anyhow::{anyhow, bail, Result};
 use perry_hir::Stmt;
 
 use crate::expr::{lower_expr, FnCtx};
-use crate::loop_purity::body_is_observably_side_effect_free;
+use crate::loop_purity::body_needs_asm_barrier;
 use crate::lower_conditional::lower_truthy;
 use crate::types::{DOUBLE, I8, I32, I64, PTR};
 
@@ -433,7 +433,18 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
                 Some(perry_hir::Expr::Integer(n)) => i32::try_from(*n).is_ok(),
                 _ => true, // non-Integer init: writes will always go via i32-coercing paths
             };
+            // Issue #140: only emit the parallel i32 shadow slot when this local
+            // actually participates in an array/buffer index expression. Pure
+            // accumulators (`sum = sum + 1` between `Date.now()` calls) would
+            // otherwise get a dead i32/sitofp mirror that blocks LLVM's
+            // vectorizer — combined with the #74 `asm sideeffect` loop barrier
+            // the fadd reduction can't be SIMD-widened. Real loop counters that
+            // match `classify_for_length_hoist` in `lower_for` still pick up
+            // their i32 slot via the loop-specific allocation path a few hundred
+            // lines below, so `for (let i=0; i<arr.length; i++) arr[i]=v` keeps
+            // its fast-path even when this gate skips the Let site.
             let needs_i32_slot = ctx.integer_locals.contains(id)
+                && ctx.index_used_locals.contains(id)
                 && *mutable
                 && init_in_i32_range
                 && !ctx.boxed_vars.contains(id)
@@ -946,7 +957,7 @@ fn lower_for(
     // calls bracketing the loop end up adjacent in the binary and
     // report 0ms wall-clock. The barrier emits zero machine
     // instructions but is opaque to IndVarSimplify.
-    if !ctx.block().is_terminated() && body_is_observably_side_effect_free(body) {
+    if !ctx.block().is_terminated() && body_needs_asm_barrier(body) {
         ctx.block().asm_sideeffect_barrier();
     }
     if !ctx.block().is_terminated() {
@@ -1286,7 +1297,7 @@ fn lower_while(ctx: &mut FnCtx<'_>, condition: &perry_hir::Expr, body: &[Stmt]) 
     ctx.current_block = body_idx;
     lower_stmts(ctx, body)?;
     // Issue #74: see lower_for for rationale.
-    if !ctx.block().is_terminated() && body_is_observably_side_effect_free(body) {
+    if !ctx.block().is_terminated() && body_needs_asm_barrier(body) {
         ctx.block().asm_sideeffect_barrier();
     }
     if !ctx.block().is_terminated() {
@@ -1329,7 +1340,7 @@ fn lower_do_while(
     ctx.current_block = body_idx;
     lower_stmts(ctx, body)?;
     // Issue #74: see lower_for for rationale.
-    if !ctx.block().is_terminated() && body_is_observably_side_effect_free(body) {
+    if !ctx.block().is_terminated() && body_needs_asm_barrier(body) {
         ctx.block().asm_sideeffect_barrier();
     }
     if !ctx.block().is_terminated() {

@@ -125,19 +125,22 @@ impl LlBlock {
     //     `x * y + z` pattern, which is common in matrix and vector math.
     //
     // We deliberately DON'T emit the full `fast` flag set (`nnan ninf nsz
-    // arcp contract afn reassoc`). Those would change NaN/Inf/signed-zero
-    // semantics in ways JS programs can observe — e.g. `Math.max(-0, 0)`
-    // is -0 in JS but could flip with `nsz`. `reassoc` alone can produce
-    // different results when an explicit Infinity is summed in, but Perry
-    // already uses `-ffast-math` at the clang step (see commit 083ce16),
-    // so this is consistent with the project's existing stance: trade
-    // strict IEEE behaviour for throughput.
+    // arcp contract afn reassoc`). `nnan` and `ninf` in particular are
+    // UB-style flags — they tell LLVM to assume no NaN or Inf inputs,
+    // which is catastrophic for Perry: NaN-boxing uses NaN bit patterns
+    // for EVERY non-number value (strings, objects, null, undefined,
+    // booleans). Passing `-ffast-math` to clang was tried briefly at
+    // v0.2-era commit 083ce16 and reverted two days later in b5a8c83f
+    // because `-ffinite-math-only` (implied by `-ffast-math`) made LLVM
+    // replace TAG_NULL / TAG_UNDEFINED constants with 0.0 at codegen
+    // time. The clang step now passes `-fno-math-errno` only — every
+    // fast-math effect in Perry comes from the per-instruction FMFs
+    // emitted here.
     //
-    // The clang `-ffast-math` flag does NOT retroactively apply to ops
-    // already in an `.ll` input file — the FMFs must be on each
-    // instruction. That's why adding them at the IR-builder layer is
-    // load-bearing; passing `-ffast-math` at the clang step alone was a
-    // no-op for our emitted IR.
+    // For reference, Rust's nightly `#![feature(float_algebraic)]`
+    // enables `reassoc + contract + nsz + arcp + afn` — a broader set
+    // than Perry's two flags. So Perry's default is strictly more
+    // conservative than Rust's nightly opt-in per-operation API.
 
     pub fn fadd(&mut self, a: &str, b: &str) -> String {
         let r = self.reg();

@@ -385,6 +385,23 @@ pub(crate) struct FnCtx<'a> {
     /// i++) arr[i] = expr`.
     pub i32_counter_slots: std::collections::HashMap<u32, String>,
 
+    /// LocalIds that appear anywhere inside an `index` subexpression of an
+    /// array/buffer/typed-array access (`arr[i]`, `buf[k+1]`, `uint8[j]`,
+    /// `arr.at(n)`, etc.). Populated once per function by
+    /// `crate::collectors::collect_index_used_locals` at each `compile_*`
+    /// entry point.
+    ///
+    /// Used as a gate on the Let-site i32 shadow allocation (issue #140):
+    /// without this guard, every mutable integer-valued local got a parallel
+    /// i32 slot — fine for real loop counters (`for (let i=0; i<arr.length;
+    /// i++) arr[i] = v`, where the i32 load skips a `fptosi` per iteration)
+    /// but harmful for pure accumulators (`sum = sum + 1`), where the shadow
+    /// turns a clean `load/fadd/store` body into a dual `load/add/store +
+    /// dead sitofp+store` body that LLVM's autovectorizer refuses to fold
+    /// into a SIMD reduction, especially with the `asm sideeffect`
+    /// loop-preservation barrier from issue #74 in place.
+    pub index_used_locals: &'a std::collections::HashSet<u32>,
+
     /// Compile-time i18n resolution context. When `Some`, the
     /// `Expr::I18nString` lowering looks up the translation for the
     /// default locale at compile time and emits the resolved string

@@ -13,29 +13,33 @@ each delta.
 
 ## Results
 
-**Run date:** 2026-04-22 — Perry commit `d81acb5` (v0.5.162).
+**Run date:** 2026-04-22 — Perry commit `main` (v0.5.164).
 **Hardware:** Apple M1 Max (10 cores, 64 GB RAM), macOS 26.4.
 **Methodology:** best of 5 runs per cell, monotonic clock, no warmup.
 All times in milliseconds. Lower is better.
 
 | Benchmark      | Perry |  Rust |   C++ |    Go | Swift |  Java |  Node |   Bun |  Python |
 |----------------|-------|-------|-------|-------|-------|-------|-------|-------|---------|
-| fibonacci      |   305 |   311 |   308 |   440 |   395 |   279 |   996 |   510 |   15792 |
-| loop_overhead  |    32 |    94 |    95 |    95 |    94 |    95 |    52 |    39 |    2929 |
+| fibonacci      |   309 |   311 |   308 |   440 |   395 |   279 |   996 |   510 |   15792 |
+| loop_overhead  |    12 |    94 |    95 |    95 |    94 |    95 |    52 |    39 |    2929 |
 | array_write    |     3 |     6 |     2 |     8 |     2 |     6 |     8 |     4 |     385 |
 | array_read     |     3 |     9 |     9 |     9 |     9 |    11 |    13 |    14 |     327 |
-| math_intensive |    48 |    46 |    49 |    48 |    47 |    49 |    49 |    49 |    2185 |
+| math_intensive |    14 |    46 |    49 |    48 |    47 |    49 |    49 |    49 |    2185 |
 | object_create  |     0 |     0 |     0 |     0 |     0 |     4 |     8 |     6 |     157 |
-| nested_loops   |     9 |     8 |     8 |     9 |     8 |    10 |    16 |    19 |     458 |
-| accumulate     |    97 |    94 |    94 |    95 |    93 |    98 |   583 |    96 |    4854 |
+| nested_loops   |     8 |     8 |     8 |     9 |     8 |    10 |    16 |    19 |     458 |
+| accumulate     |    24 |    94 |    94 |    95 |    93 |    98 |   583 |    96 |    4854 |
 
-**Known regression** ([#140](https://github.com/PerryTS/perry/issues/140)):
-`loop_overhead`, `math_intensive`, and `accumulate` all regressed 2–4x
-between v0.5.22 and v0.5.162 after an `asm sideeffect` loop-body barrier
-(from #74's fix) and an over-eager i32 shadow counter started blocking
-the LLVM vectorizer on pure-accumulator loops. v0.5.22 numbers for those
-three cells were 12/14/24 ms respectively — Perry used to beat Rust
-3–8x on them. Tracking issue has the IR diff and fix options.
+**Fixed in v0.5.164** ([#140](https://github.com/PerryTS/perry/issues/140)):
+`loop_overhead`, `math_intensive`, and `accumulate` had regressed 2–4×
+between v0.5.22 and v0.5.162 (32/48/97 ms) after an `asm sideeffect`
+loop-body barrier (from #74) and an over-eager i32 shadow counter
+started blocking LLVM's vectorizer on pure-accumulator loops. v0.5.164
+scopes the i32 shadow to counters that actually appear in an index
+subtree and refines the loop-body barrier to fire only on truly-empty
+bodies — restoring the `<2 x double>` parallel-accumulator reduction
+(vectorization width 2, interleave count 4) that v0.5.22 had. The three
+cells are back to 12/14/24 ms, matching the v0.5.22 baseline exactly.
+Perry now beats Rust 3–8× on these cells again.
 
 ## How to reproduce
 
@@ -52,49 +56,50 @@ Swift, Go, Java (`javac` + `java`), Python 3.
 
 See [`METHODOLOGY.md`](./METHODOLOGY.md) for what each benchmark measures,
 compiler versions, why certain cells look the way they do, and where Perry
-wins (`array_read`, `loop_overhead`) vs where it ties (`math_intensive`,
-`accumulate`, `nested_loops`) vs where it loses (`object_create`).
+wins (`loop_overhead`, `math_intensive`, `accumulate`, `array_read`) vs
+where it matches the compiled pack (`nested_loops`, `fibonacci`) vs where
+it loses (`object_create`).
 
 ## Benchmark-by-benchmark summary
 
 ### `loop_overhead` — `sum += 1.0` × 100M
-Perry 32 ms vs Rust/C++/Go/Swift/Java ~94 ms. **This entire gap is the
-default fast-math setting.** Perry emits `reassoc contract` on f64 ops
-because JS/TS `number` semantics can't observe the difference (no
-signalling NaNs, no fenv, no strict `-0` rules at the operator level).
-Rust/C++/Go/Swift default to strict-IEEE `fadd`, which has a 3-cycle
-latency wall and is unreassociable. `g++ -O3 -ffast-math` on the same
-`bench.cpp` drops C++ from 96 ms to 11 ms — same LLVM, same pipeline,
-one flag. See [RESULTS_OPT.md](./RESULTS_OPT.md) for the per-language
-opt-sweep (C++ opt = 12 ms, Rust opt = 24 ms on stable, Go = 99 ms
-because Go has no fast-math flag at all).
+Perry 12 ms vs Rust/C++/Go/Swift/Java ~94 ms — **Perry wins 7–8×**. Two
+stacked optimizations produce this: (1) Perry emits `reassoc contract`
+on f64 ops because JS/TS `number` semantics can't observe the difference
+(no signalling NaNs, no fenv, no strict `-0` rules at the operator
+level), so LLVM's IndVarSimplify can rewrite `sum + 1.0 × N` as an
+integer induction variable. Rust/C++/Go/Swift default to strict-IEEE
+`fadd`, which has a 3-cycle latency wall and is unreassociable. (2) On
+top of the integer rewrite LLVM autovectorizes the body into a
+`<2 x double>` parallel-accumulator reduction with interleave count 4
+(four SIMD lanes worth of fadd happening per iteration). `g++ -O3
+-ffast-math` on `bench.cpp` drops C++ from 96 ms to 11 ms, matching
+Perry — same LLVM, same pipeline, one flag. See
+[RESULTS_OPT.md](./RESULTS_OPT.md) for the per-language opt-sweep (C++
+opt = 12 ms, Rust opt = 24 ms on stable, Go = 99 ms because Go has no
+fast-math flag).
 
-Under `reassoc`, LLVM's IndVarSimplify recognizes `sum + 1.0 × N` as
-integer-valued and rewrites the f64 accumulator to i32 `add` in post-opt.
-That's what Perry's 32 ms is measuring — not the f64 fadd chain at all.
-
-This cell used to be 12 ms pre-v0.5.91 because on top of the i32 rewrite
-LLVM was also vectorizing into SIMD parallel accumulators. The vectorizer
-currently bails on Perry's IR; tracked as [#140](https://github.com/PerryTS/perry/issues/140).
+This cell regressed to 32 ms between v0.5.91 and v0.5.162 after an
+`asm sideeffect` barrier (from #74) and an unconditional i32 shadow slot
+started blocking the vectorizer. Restored in v0.5.164 via [#140](https://github.com/PerryTS/perry/issues/140).
 
 ### `math_intensive` — `result += 1.0/i` × 50M
-Perry 48 ms, Rust/C++/Go/Swift/Java/Node/Bun all ~46–49 ms — essentially
-tied. Same fast-math default story as `loop_overhead` but the reciprocal
-divide's 10+ cycle latency makes the single-accumulator serial chain
-match the integer rewrite cost-wise. Pre-v0.5.91 Perry was 14 ms here
-thanks to vectorization on top of the fast-math rewrite (see [#140](https://github.com/PerryTS/perry/issues/140)).
-C++ `-ffast-math` matches the v0.5.22 14 ms exactly per
-[RESULTS_OPT.md](./RESULTS_OPT.md).
+Perry 14 ms, Rust/C++/Go/Swift/Java/Node/Bun all ~46–49 ms — **Perry
+wins 3×**. Same fast-math default + vectorization story as
+`loop_overhead`: the reciprocal divide has a 10+ cycle latency, but
+vectorizing into a parallel 4-accumulator reduction keeps 4 independent
+divides in flight so the scheduler hides the latency. C++ `-ffast-math`
+matches Perry at 14 ms per [RESULTS_OPT.md](./RESULTS_OPT.md). Regressed
+to 48 ms at v0.5.162, restored in v0.5.164 ([#140](https://github.com/PerryTS/perry/issues/140)).
 
 ### `accumulate` — `sum += i % 1000` × 100M
-Perry 97 ms, Rust/C++/Go/Swift/Java/Bun all 93–98 ms — tied with the
-compiled pack. Node 583 ms is an outlier because V8 doesn't inline the
-libm `fmod` call on this pattern. Perry's type analysis still emits
-`srem` instead of `fmod` for the mod op (same optimization Node misses),
-which is why Perry ties the compiled pack instead of sitting at Node's
-583 ms. Pre-v0.5.91 Perry was 24 ms because a vectorized fadd reduction
-ran alongside the srem path; same regression as the other two cells,
-tracked in [#140](https://github.com/PerryTS/perry/issues/140).
+Perry 24 ms, Rust/C++/Go/Swift/Java/Bun all 93–98 ms — **Perry wins 4×**.
+Node 583 ms is an outlier because V8 doesn't inline the libm `fmod` call
+on this pattern. Perry's type analysis emits `srem` instead of `fmod`
+for the mod op (same optimization Node misses), LLVM vectorizes the
+resulting integer chain + fadd reduction, and the two together beat
+Rust's strict-IEEE scalar `fmod`+`fadd` by 4×. Regressed to 97 ms at
+v0.5.162, restored in v0.5.164 ([#140](https://github.com/PerryTS/perry/issues/140)).
 
 ### `array_read` — sum 10M-element `number[]`
 Perry 3 ms, C++/Swift 9 ms, Rust 10 ms, Go 10 ms, Java 11 ms. Perry
