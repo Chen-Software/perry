@@ -83,7 +83,6 @@ pub fn compose_error_to_js(e: &ComposeError) -> String {
         ComposeError::ServiceStartupFailed { .. } => 500,
         ComposeError::ImagePullFailed { .. } => 500,
         ComposeError::IoError(_) => 500,
-        _ => 500,
     };
     serde_json::json!({
         "message": e.to_string(),
