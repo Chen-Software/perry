@@ -1,20 +1,21 @@
 use indexmap::IndexMap;
 use crate::error::{ComposeError, Result};
 use crate::types::{ComposeSpec, ContainerInfo, ContainerLogs, ContainerSpec, ComposeHandle, ContainerHandle, ListOrDict};
-use crate::backend::ContainerBackend;
+use crate::backend::{ContainerBackend, NetworkConfig, VolumeConfig};
 use crate::service::generate_name;
-use std::collections::{BTreeSet};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct ComposeEngine {
     pub spec: ComposeSpec,
-    pub backend: Arc<dyn ContainerBackend + Send + Sync>,
+    pub project_name: String,
+    pub backend: Arc<dyn ContainerBackend>,
 }
 
 impl ComposeEngine {
-    pub fn new(spec: ComposeSpec, backend: Arc<dyn ContainerBackend + Send + Sync>) -> Self {
-        Self { spec, backend }
+    pub fn new(spec: ComposeSpec, project_name: String, backend: Arc<dyn ContainerBackend>) -> Self {
+        Self { spec, project_name, backend }
     }
 
     pub fn resolve_startup_order(spec: &ComposeSpec) -> Result<Vec<String>> {
@@ -72,16 +73,27 @@ impl ComposeEngine {
         Ok(order)
     }
 
-    pub async fn up(&self) -> Result<ComposeHandle> {
+    pub async fn up(&self, services: &[String], _detach: bool, _build: bool, _remove_orphans: bool) -> Result<ComposeHandle> {
         let order = Self::resolve_startup_order(&self.spec)?;
         let mut created_networks = Vec::new();
         let mut created_volumes = Vec::new();
         let mut started_containers: Vec<(String, ContainerHandle)> = Vec::new();
 
+        // Create networks
         if let Some(networks) = &self.spec.networks {
-            for (name, config) in networks {
-                let config = config.clone().unwrap_or_default();
-                if let Err(e) = self.backend.create_network(name, &config).await {
+            for (name, config_opt) in networks {
+                let config = config_opt.as_ref().cloned().unwrap_or_default();
+                let backend_config = NetworkConfig {
+                    driver: config.driver.clone(),
+                    labels: match &config.labels {
+                        Some(ListOrDict::Dict(d)) => d.iter().map(|(k, v)| (k.clone(), format!("{:?}", v))).collect(),
+                        _ => HashMap::new(),
+                    },
+                    internal: config.internal.unwrap_or(false),
+                    enable_ipv4: config.enable_ipv4.unwrap_or(false),
+                    enable_ipv6: config.enable_ipv6.unwrap_or(false),
+                };
+                if let Err(e) = self.backend.create_network(name, &backend_config).await {
                     self.rollback(&started_containers, &created_networks, &created_volumes).await;
                     return Err(e);
                 }
@@ -89,10 +101,18 @@ impl ComposeEngine {
             }
         }
 
+        // Create volumes
         if let Some(volumes) = &self.spec.volumes {
-            for (name, config) in volumes {
-                let config = config.clone().unwrap_or_default();
-                if let Err(e) = self.backend.create_volume(name, &config).await {
+            for (name, config_opt) in volumes {
+                let config = config_opt.as_ref().cloned().unwrap_or_default();
+                let backend_config = VolumeConfig {
+                    driver: config.driver.clone(),
+                    labels: match &config.labels {
+                        Some(ListOrDict::Dict(d)) => d.iter().map(|(k, v)| (k.clone(), format!("{:?}", v))).collect(),
+                        _ => HashMap::new(),
+                    },
+                };
+                if let Err(e) = self.backend.create_volume(name, &backend_config).await {
                     self.rollback(&started_containers, &created_networks, &created_volumes).await;
                     return Err(e);
                 }
@@ -101,6 +121,9 @@ impl ComposeEngine {
         }
 
         for service_name in order {
+            if !services.is_empty() && !services.contains(&service_name) {
+                continue;
+            }
             let service = self.spec.services.get(&service_name).unwrap();
             let image = service.image.clone().unwrap_or_default();
             let container_spec = ContainerSpec {
@@ -139,7 +162,7 @@ impl ComposeEngine {
 
         Ok(ComposeHandle {
             stack_id: rand::random(),
-            project_name: self.spec.name.clone().unwrap_or_else(|| "default".into()),
+            project_name: self.project_name.clone(),
             services: started_containers.iter().map(|(n, _)| n.clone()).collect(),
         })
     }
@@ -157,7 +180,7 @@ impl ComposeEngine {
         }
     }
 
-    pub async fn down(&self, volumes: bool) -> Result<()> {
+    pub async fn down(&self, _services: &[String], _remove_orphans: bool, volumes: bool) -> Result<()> {
         let order = Self::resolve_startup_order(&self.spec)?;
         for service_name in order.iter().rev() {
              let _ = self.backend.remove(service_name, true).await;
@@ -181,16 +204,19 @@ impl ComposeEngine {
         self.backend.list(true).await
     }
 
-    pub async fn logs(&self, service: Option<&str>, tail: Option<u32>) -> Result<ContainerLogs> {
-        if let Some(svc) = service {
-             self.backend.logs(svc, tail).await
-        } else {
-             Ok(ContainerLogs { stdout: "".into(), stderr: "".into() })
+    pub async fn logs(&self, services: &[String], tail: Option<u32>) -> Result<ContainerLogs> {
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        for svc in services {
+            let logs = self.backend.logs(svc, tail).await?;
+            stdout.push_str(&logs.stdout);
+            stderr.push_str(&logs.stderr);
         }
+        Ok(ContainerLogs { stdout, stderr })
     }
 
-    pub async fn exec(&self, service: &str, cmd: &[String]) -> Result<ContainerLogs> {
-        self.backend.exec(service, cmd, None, None).await
+    pub async fn exec(&self, service: &str, cmd: &[String], env: Option<&HashMap<String, String>>, workdir: Option<&str>) -> Result<ContainerLogs> {
+        self.backend.exec(service, cmd, env, workdir).await
     }
 
     pub async fn start(&self, services: &[String]) -> Result<()> {
@@ -205,9 +231,13 @@ impl ComposeEngine {
 
     pub async fn restart(&self, services: &[String]) -> Result<()> {
         for svc in services {
-            self.backend.stop(svc, None).await?;
+            let _ = self.backend.stop(svc, None).await;
             self.backend.start(svc).await?;
         }
         Ok(())
+    }
+
+    pub fn config(&self) -> Result<String> {
+        serde_yaml::to_string(&self.spec).map_err(ComposeError::ParseError)
     }
 }

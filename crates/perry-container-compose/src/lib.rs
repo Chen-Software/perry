@@ -8,8 +8,6 @@ pub mod backend;
 pub mod cli;
 pub mod config;
 
-#[cfg(feature = "ffi")]
-pub mod ffi;
 
 pub use error::{ComposeError, Result, BackendProbeResult};
 pub use types::{ComposeSpec, ComposeService, ComposeHandle};

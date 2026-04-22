@@ -176,6 +176,10 @@ pub struct CompilationContext {
     /// promise rejections via `catch_unwind` in `perry-runtime/src/thread.rs`
     /// instead of aborting the whole process.
     pub needs_thread: bool,
+    /// Whether `perry/container` or `perry/container-compose` is imported.
+    /// Rebuilding with `panic = "unwind"` is required because tokio/OciBackend
+    /// uses catch_unwind to bridge async errors.
+    pub needs_container: bool,
 }
 
 impl std::fmt::Debug for CompilationContext {
@@ -212,6 +216,7 @@ impl CompilationContext {
             uses_fetch: false,
             uses_crypto_builtins: false,
             needs_thread: false,
+            needs_container: false,
         }
     }
 }
@@ -1059,6 +1064,7 @@ fn build_optimized_libs(
     // and the matching landing pads / Drop glue.
     let panic_abort_safe = !ctx.needs_ui
         && !ctx.needs_thread
+        && !ctx.needs_container
         && !ctx.needs_plugins
         && !ctx.needs_geisterhand;
 
@@ -4488,6 +4494,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
                 bundled_extensions: bundled_ext_vec,
                 native_library_functions: ffi_functions.clone(),
                 i18n_table: i18n_snapshot.clone(),
+                needs_container: ctx.needs_container,
             };
             let object_code = perry_codegen::compile_module(hir_module, opts)
                 .map_err(|e| format!(

@@ -396,3 +396,19 @@ pub struct ImageInfo {
     pub id: String, pub repository: String, pub tag: String,
     pub size: u64, pub created: String,
 }
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BackendMode {
+    Local,
+    Remote,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackendInfo {
+    pub name: String,
+    pub available: bool,
+    pub reason: Option<String>,
+    pub version: Option<String>,
+    pub mode: BackendMode,
+}

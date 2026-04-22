@@ -152,6 +152,9 @@ pub struct CompileOptions {
     /// it, the lowering would have to either pick locale 0 blindly or
     /// fall back to the verbatim key.
     pub i18n_table: Option<(Vec<String>, usize, usize, Vec<String>, usize)>,
+    /// Whether the project uses `perry/container` or `perry/container-compose`.
+    /// When true, `js_container_module_init` is called in the entry point.
+    pub needs_container: bool,
 }
 
 /// A class imported from another native module.
@@ -1382,6 +1385,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         &closure_rest_params,
         &cross_module,
         &opts.output_type,
+        opts.needs_container,
     )
     .with_context(|| format!("lowering entry of module '{}'", hir.name))?;
 
@@ -2029,6 +2033,7 @@ fn compile_module_entry(
     closure_rest_params: &HashMap<u32, usize>,
     cross_module: &CrossModuleCtx,
     output_type: &str,
+    needs_container: bool,
 ) -> Result<()> {
     let strings_init_name = format!("__perry_init_strings_{}", module_prefix);
 
@@ -2041,6 +2046,10 @@ fn compile_module_entry(
         // resolves the symbols at link time.
         for prefix in non_entry_module_prefixes {
             llmod.declare_function(&format!("{}__init", prefix), VOID, &[]);
+        }
+
+        if needs_container {
+            llmod.declare_function("js_container_module_init", VOID, &[]);
         }
 
         // For dylib output, emit `void perry_module_init()` instead of
@@ -2058,6 +2067,12 @@ fn compile_module_entry(
         {
             let blk = main.block_mut(0).unwrap();
             blk.call_void("js_gc_init", &[]);
+
+            // Container module initialization (backend detection)
+            if needs_container {
+                blk.call_void("js_container_module_init", &[]);
+            }
+
             // Entry module's own string pool first.
             blk.call_void(&strings_init_name, &[]);
             // Then every non-entry module's init in order. Each

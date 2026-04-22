@@ -110,8 +110,29 @@ pub struct ConfigArgs {
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
+    let mut files = cli.files.clone();
+    if files.is_empty() {
+        if let Ok(compose_file) = std::env::var("COMPOSE_FILE") {
+            files = compose_file.split(':').map(PathBuf::from).collect();
+        } else {
+            let yaml = PathBuf::from("compose.yaml");
+            let yml = PathBuf::from("compose.yml");
+            let d_yaml = PathBuf::from("docker-compose.yaml");
+            let d_yml = PathBuf::from("docker-compose.yml");
+            if yaml.exists() {
+                files.push(yaml);
+            } else if yml.exists() {
+                files.push(yml);
+            } else if d_yaml.exists() {
+                files.push(d_yaml);
+            } else if d_yml.exists() {
+                files.push(d_yml);
+            }
+        }
+    }
+
     let config = ProjectConfig::new(
-        cli.files.clone(),
+        files,
         cli.project_name.clone(),
         cli.env_files.clone(),
     );
@@ -120,7 +141,7 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     let backend = crate::backend::detect_backend().await
         .map_err(|probed| ComposeError::NoBackendFound { probed })?;
-    let backend = Arc::new(backend);
+    let backend: Arc<dyn crate::backend::ContainerBackend> = Arc::from(backend);
 
     let engine = ComposeEngine::new(project.spec.clone(), project.project_name.clone(), backend);
 
@@ -145,15 +166,9 @@ pub async fn run(cli: Cli) -> Result<()> {
             print_ps_table(&infos);
         }
         Commands::Logs(args) => {
-            let logs_map = engine.logs(&args.services, args.tail).await?;
-            let mut names: Vec<&String> = logs_map.keys().collect();
-            names.sort();
-            for name in names {
-                let log = &logs_map[name];
-                for line in log.lines() {
-                    println!("{:<12} | {}", name, line);
-                }
-            }
+            let logs = engine.logs(&args.services, args.tail).await?;
+            print!("{}", logs.stdout);
+            eprint!("{}", logs.stderr);
         }
         Commands::Exec(args) => {
             let mut env_map = HashMap::new();
