@@ -4211,6 +4211,8 @@ dependencies = [
  "anyhow",
  "async-trait",
  "clap",
+ "console",
+ "dialoguer",
  "dotenvy",
  "hex",
  "indexmap",

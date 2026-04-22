@@ -56,11 +56,11 @@ impl ComposeWrapper {
         Ok(ContainerLogs { stdout, stderr })
     }
 
-    pub async fn exec(&self, _handle: &ComposeHandle, service: &str, cmd: &[String]) -> Result<ContainerLogs, ContainerError> {
-        self.engine.exec(service, cmd, None, None).await.map_err(ContainerError::from)
+    pub async fn exec(&self, _handle: &ComposeHandle, service: &str, cmd: &[String], env: Option<&HashMap<String, String>>, workdir: Option<&str>) -> Result<ContainerLogs, ContainerError> {
+        self.engine.exec(service, cmd, env, workdir).await.map_err(ContainerError::from)
     }
 
-    pub fn config(&self) -> Result<String, ContainerError> {
+    pub fn config(&self, _handle: &ComposeHandle) -> Result<String, ContainerError> {
         self.engine.config().map_err(ContainerError::from)
     }
 

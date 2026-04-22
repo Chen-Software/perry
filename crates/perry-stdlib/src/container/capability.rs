@@ -1,39 +1,36 @@
-//! alloy_container_run_capability() for ShellBridge integration.
-
-use super::types::{ContainerError, ContainerLogs, ContainerSpec};
-use super::verification;
-use super::get_global_backend;
-use std::collections::HashMap;
+use crate::container::types::{ContainerError, ContainerLogs, ContainerSpec};
+use crate::container::verification::verify_image;
+use crate::container::ContainerBackend;
 use std::sync::Arc;
 
-pub struct CapabilityGrants {
-    pub network: bool,
-    pub env: Option<HashMap<String, String>>,
-}
-
 pub async fn alloy_container_run_capability(
-    name: &str,
+    _name: &str,
     image: &str,
-    cmd: &[&str],
-    grants: &CapabilityGrants,
+    cmd: &[String],
+    backend: Arc<dyn ContainerBackend>,
 ) -> Result<ContainerLogs, ContainerError> {
-    let digest = verification::verify_image(image).await?;
+    // 1. Verify image signature
+    verify_image(image).await?;
 
+    // 2. Configure ephemeral container
     let spec = ContainerSpec {
-        image: format!("{}@{}", image, digest),
-        name: Some(format!("alloy-cap-{}-{}", name, rand::random::<u32>())),
-        ports: Some(vec![]),
-        volumes: Some(vec![]),
-        network: if grants.network { None } else { Some("none".to_string()) },
-        rm: Some(true),
-        env: grants.env.clone(),
-        cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
+        image: image.to_string(),
+        name: None,
+        ports: None,
+        volumes: None,
+        env: None,
+        cmd: Some(cmd.to_vec()),
         entrypoint: None,
-        ..Default::default()
+        network: Some("none".into()),
+        rm: Some(true),
     };
 
-    let backend = Arc::clone(get_global_backend().await?);
-    let handle = backend.run(&spec).await.map_err(|e| ContainerError::BackendError { code: -1, message: e.to_string() })?;
+    // 3. Run and capture logs
+    let handle = backend.run(&spec).await.map_err(ContainerError::from)?;
+    let logs = backend.logs(&handle.id, None).await.map_err(ContainerError::from)?;
 
-    backend.logs(&handle.id, None).await.map_err(|e| ContainerError::BackendError { code: -1, message: e.to_string() })
+    // 4. Remove
+    let _ = backend.remove(&handle.id, true).await;
+
+    Ok(logs)
 }

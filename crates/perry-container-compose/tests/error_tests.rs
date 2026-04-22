@@ -65,6 +65,6 @@ fn test_compose_error_verification_failed_mapping() {
 fn test_compose_error_file_not_found_mapping() {
     let err = ComposeError::FileNotFound { path: "compose.yml".into() };
     let js = compose_error_to_js(&err);
-    // FileNotFound matches catch-all 500 in current implementation
-    assert!(js.contains("\"code\":500"));
+    // FileNotFound matches 404 per SPEC 2.6
+    assert!(js.contains("\"code\":404"));
 }

@@ -3,7 +3,6 @@ use crate::service;
 use crate::types::{
     ComposeHandle, ComposeSpec, ContainerInfo, ContainerLogs, ContainerSpec,
 };
-use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -13,6 +12,31 @@ static COMPOSE_ENGINES: once_cell::sync::Lazy<std::sync::Mutex<IndexMap<u64, Arc
     once_cell::sync::Lazy::new(|| std::sync::Mutex::new(IndexMap::new()));
 
 static NEXT_STACK_ID: AtomicU64 = AtomicU64::new(1);
+
+use indexmap::IndexMap;
+use crate::service::Service;
+
+pub struct Compose {
+    pub services: IndexMap<String, Service>,
+}
+
+impl Compose {
+    pub fn parse(yaml: &str) -> Result<Self> {
+        let spec = ComposeSpec::parse_str(yaml)?;
+        let mut services = IndexMap::new();
+        for (name, svc_spec) in spec.services {
+            let mut service = Service::new(name.clone(), svc_spec.image.clone());
+            service.container_name = svc_spec.container_name.clone();
+            service.ports = Some(svc_spec.port_strings());
+            service.environment = svc_spec.environment.clone();
+            service.labels = svc_spec.labels.clone();
+            service.volumes = Some(svc_spec.volume_strings());
+            service.build = svc_spec.build.clone();
+            services.insert(name, service);
+        }
+        Ok(Compose { services })
+    }
+}
 
 pub struct ComposeEngine {
     pub spec: ComposeSpec,
@@ -114,61 +138,16 @@ impl ComposeEngine {
             let svc = self.spec.services.get(svc_name).unwrap();
             let container_name = service::service_container_name(svc, svc_name);
 
-            // Extract primary network if any
-            let network = match &svc.networks {
-                Some(crate::types::ServiceNetworks::List(l)) => l.first().cloned(),
-                Some(crate::types::ServiceNetworks::Map(m)) => m.keys().next().cloned(),
-                None => None,
-            };
+            let mut service = Service::new(svc_name.clone(), svc.image.clone());
+            service.container_name = Some(container_name.clone());
+            service.ports = Some(svc.port_strings());
+            service.environment = svc.environment.clone();
+            service.labels = svc.labels.clone();
+            service.volumes = Some(svc.volume_strings());
+            service.build = svc.build.clone();
+            service.stable_id = Some(rand::random());
 
-            let container_spec = ContainerSpec {
-                image: svc.image.clone().unwrap_or_default(),
-                name: Some(container_name.clone()),
-                ports: Some(svc.ports.as_ref().map(|p| p.iter().map(|ps| match ps {
-                    crate::types::PortSpec::Short(v) => match v {
-                        serde_yaml::Value::String(s) => s.clone(),
-                        serde_yaml::Value::Number(n) => n.to_string(),
-                        _ => v.as_str().unwrap_or_default().to_string(),
-                    },
-                    crate::types::PortSpec::Long(lp) => {
-                        let publ = lp.published.as_ref().map(|v| match v {
-                            serde_yaml::Value::String(s) => s.clone(),
-                            serde_yaml::Value::Number(n) => n.to_string(),
-                            _ => v.as_str().unwrap_or_default().to_string(),
-                        }).unwrap_or_default();
-                        let target = match &lp.target {
-                            serde_yaml::Value::String(s) => s.clone(),
-                            serde_yaml::Value::Number(n) => n.to_string(),
-                            _ => lp.target.as_str().unwrap_or_default().to_string(),
-                        };
-                        format!("{}:{}", publ, target)
-                    },
-                }).collect()).unwrap_or_default()),
-                volumes: Some(svc.volumes.as_ref().map(|v| v.iter().map(|vs| match vs {
-                    serde_yaml::Value::String(s) => s.clone(),
-                    _ => vs.as_str().unwrap_or_default().to_string(),
-                }).collect()).unwrap_or_default()),
-                env: Some(match &svc.environment {
-                    Some(crate::types::ListOrDict::Dict(d)) => d.iter().map(|(k, v)| (k.clone(), v.as_ref().map(|vv| match vv {
-                        serde_yaml::Value::String(s) => s.clone(),
-                        serde_yaml::Value::Number(n) => n.to_string(),
-                        serde_yaml::Value::Bool(b) => b.to_string(),
-                        _ => vv.as_str().unwrap_or_default().to_string(),
-                    }).unwrap_or_default())).collect(),
-                    Some(crate::types::ListOrDict::List(l)) => l.iter().filter_map(|s| s.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect(),
-                    None => HashMap::new(),
-                }),
-                cmd: Some(match &svc.command {
-                    Some(serde_yaml::Value::String(s)) => vec![s.clone()],
-                    Some(serde_yaml::Value::Sequence(seq)) => seq.iter().map(|v| v.as_str().unwrap_or_default().to_string()).collect(),
-                    _ => vec![],
-                }),
-                entrypoint: None,
-                network,
-                rm: None,
-            };
-
-            match self.backend.run(&container_spec).await {
+            match crate::orchestrate::orchestrate_service(&service, self.backend.as_ref()).await {
                 Ok(_) => {
                     started_containers.push(container_name);
                 }

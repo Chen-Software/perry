@@ -2356,7 +2356,20 @@ pub(crate) fn lower_native_method_call(
     // arms BELOW so they short-circuit before this table is consulted.
     //
     // Extending: add a row to PERRY_UI_TABLE matching the TS method name
-    if module == "perry/container" || module == "perry/container-compose" || module == "perry/compose" {
+    if module == "perry/container" || module == "perry/container-compose" || module == "perry/compose" || module == "perry/workloads" {
+        if method == "getBackend" && args.is_empty() {
+            // Recognize getBackend() called either directly or through a namespace.
+            // When called through a namespace, object is Some(NativeModuleRef).
+            let is_direct = object.is_none();
+            let is_namespace = matches!(object, Some(Expr::NativeModuleRef(m)) if m == "perry/container");
+            if is_direct || is_namespace {
+                ctx.pending_declares.push(("js_container_getBackend".to_string(), I64, vec![]));
+                let blk = ctx.block();
+                let raw_ptr = blk.call(I64, "js_container_getBackend", &[]);
+                return Ok(nanbox_string_inline(blk, &raw_ptr));
+            }
+        }
+
         let handle_id = if let Some(recv) = object {
             let recv_val = lower_expr(ctx, recv)?;
             let blk = ctx.block();
@@ -2365,12 +2378,15 @@ pub(crate) fn lower_native_method_call(
             None
         };
 
-        if let Some((_, ffi_symbol)) = PERRY_CONTAINER_TABLE
+        let ffi_symbol = PERRY_CONTAINER_TABLE
             .iter()
             .chain(PERRY_CONTAINER_COMPOSE_TABLE.iter())
+            .chain(PERRY_WORKLOADS_TABLE.iter())
             .find(|(m, _)| *m == method)
-        {
-            return lower_perry_container_compose_call(ctx, ffi_symbol, handle_id, args);
+            .map(|(_, sym)| *sym);
+
+        if let Some(sym) = ffi_symbol {
+            return lower_perry_container_compose_call(ctx, sym, handle_id, args);
         }
     }
 
@@ -3491,6 +3507,20 @@ const PERRY_CONTAINER_COMPOSE_TABLE: &[(&str, &str)] = &[
     ("start", "js_container_compose_start"),
     ("stop", "js_container_compose_stop"),
     ("restart", "js_container_compose_restart"),
+];
+
+/// Maps perry/workloads TypeScript function names to their FFI symbols.
+const PERRY_WORKLOADS_TABLE: &[(&str, &str)] = &[
+    ("graph", "js_workload_graph"),
+    ("node", "js_workload_node"),
+    ("runGraph", "js_workload_runGraph"),
+    ("inspectGraph", "js_workload_inspectGraph"),
+    ("down", "js_workload_handle_down"),
+    ("status", "js_workload_handle_status"),
+    ("graph", "js_workload_handle_graph"),
+    ("logs", "js_workload_handle_logs"),
+    ("exec", "js_workload_handle_exec"),
+    ("ps", "js_workload_handle_ps"),
 ];
 
 ///
