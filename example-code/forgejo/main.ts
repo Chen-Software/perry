@@ -5,7 +5,7 @@
  * deployment using Perry's container-compose API.
  *
  * Architecture:
- * - forgejo:  Main Forgejo application (gitea/gitea)
+ * - forgejo:  Main Forgejo application (codeberg.org/forgejo/forgejo)
  * - postgres: PostgreSQL database for Forgejo data
  *
  * Features:
@@ -18,49 +18,44 @@
  * Run: npx tsx crates/perry-container-compose/examples/forgejo/main.ts
  */
 
-import { composeUp, getBackend, pullImage, imageExists } from 'perry/container';
+import { composeUp, getBackend, pullImage } from 'perry/container';
 
 async function main() {
   // ──────────────────────────────────────────────────────────────
-  // Verify Backend Support
+  // 1. Verify Backend Support (Required first step)
   // ──────────────────────────────────────────────────────────────
 
-  const backend = await getBackend();
+  const backend = getBackend();
   console.log(`🔧 Using container backend: ${backend}\n`);
 
   // ──────────────────────────────────────────────────────────────
-  // Forgejo Production Stack Configuration
+  // 2. Pull Images Explicitly (Production Best Practice)
   // ──────────────────────────────────────────────────────────────
 
-  const FORGEJO_VERSION = '9';
-  const postgresVersion = '16-alpine';
+  const FORGEJO_VERSION = '9.0';
+  const POSTGRES_VERSION = '16-alpine';
+
+  const forgejoImage = `codeberg.org/forgejo/forgejo:${FORGEJO_VERSION}`;
+  const postgresImage = `postgres:${POSTGRES_VERSION}`;
+
+  console.log('📥 Pulling required images...');
+  console.log(`   - ${postgresImage}`);
+  await pullImage(postgresImage);
+  console.log(`   - ${forgejoImage}`);
+  await pullImage(forgejoImage);
+  console.log('✅ Images pulled successfully\n');
 
   // ──────────────────────────────────────────────────────────────
-  // Explicit Image Pulling
+  // 3. Define Forgejo Production Stack Configuration
   // ──────────────────────────────────────────────────────────────
 
-  console.log('📥 Pulling required images...\n');
-  const images = [
-    `postgres:${postgresVersion}`,
-    `codeberg.org/forgejo/forgejo:${FORGEJO_VERSION}`
-  ];
+  console.log('🚀 Deploying Forgejo stack...');
 
-  for (const img of images) {
-    if (await imageExists(img)) {
-      console.log(`  - ${img} (already exists)`);
-    } else {
-      console.log(`  - ${img} (pulling...)`);
-      // Explicitly pull each image before starting the stack
-      await pullImage(img);
-    }
-  }
-
-  // Stack name for tracking
   const stack = await composeUp({
     version: '3.8',
     services: {
       postgres: {
-        image: `postgres:${postgresVersion}`,
+        image: postgresImage,
         restart: 'always',
         environment: {
           POSTGRES_USER: '${FORGEJO_DB_USER:-forgejo}',
@@ -68,24 +63,26 @@ async function main() {
           POSTGRES_DB: '${FORGEJO_DB_NAME:-forgejo}',
         },
         volumes: ['forgejo-pgdata:/var/lib/postgresql/data'],
+        // Database is internal to the network, but exposed for backups
         ports: ['5432:5432'],
         networks: ['forgejo-network'],
       },
       forgejo: {
-        image: `codeberg.org/forgejo/forgejo:${FORGEJO_VERSION}`,
+        image: forgejoImage,
         restart: 'always',
         dependsOn: ['postgres'],
         environment: {
           // Database configuration
-          FORGEJO__database__HOST: '${FORGEJO_DB_HOST:-postgres:5432}',
-          FORGEJO__database__name: '${FORGEJO_DB_NAME:-forgejo}',
-          FORGEJO__database__user: '${FORGEJO_DB_USER:-forgejo}',
-          FORGEJO__database__passwd: '${FORGEJO_DB_PASSWORD:-changeme}',
-          // URL configuration (adjust for your setup)
+          FORGEJO__database__DB_TYPE: 'postgres',
+          FORGEJO__database__HOST: 'postgres:5432',
+          FORGEJO__database__NAME: '${FORGEJO_DB_NAME:-forgejo}',
+          FORGEJO__database__USER: '${FORGEJO_DB_USER:-forgejo}',
+          FORGEJO__database__PASSWD: '${FORGEJO_DB_PASSWORD:-changeme}',
+          // URL configuration
           FORGEJO__server__PROTOCOL: '${FORGEJO_PROTOCOL:-http}',
           FORGEJO__server__DOMAIN: '${FORGEJO_DOMAIN:-localhost}',
           FORGEJO__server__ROOT_URL: '${FORGEJO_ROOT_URL:-http://localhost:3000}',
-          // Admin configuration
+          // Security and Admin
           FORGEJO__security__INSTALL_LOCK: 'true',
           FORGEJO__service__DISABLE_REGISTRATION: 'false',
           FORGEJO__service__REQUIRE_SIGNIN: 'true',
@@ -95,7 +92,10 @@ async function main() {
           '/etc/timezone:/etc/timezone:ro',
           '/etc/localtime:/etc/localtime:ro',
         ],
-        ports: ['3000:3000', '2222:22'],
+        ports: [
+          '3000:3000', // Web UI
+          '2222:22',   // SSH
+        ],
         networks: ['forgejo-network'],
       },
     },
@@ -105,17 +105,13 @@ async function main() {
       },
     },
     volumes: {
-      'forgejo-pgdata': {
-        driver: 'local',
-      },
-      'forgejo-data': {
-        driver: 'local',
-      },
+      'forgejo-pgdata': {},
+      'forgejo-data': {},
     },
   });
 
   // ──────────────────────────────────────────────────────────────
-  // Verify Stack Status
+  // 4. Verify Stack Status
   // ──────────────────────────────────────────────────────────────
 
   console.log('\n🔍 Checking Forgejo stack status...\n');
@@ -123,13 +119,14 @@ async function main() {
   const statuses = await stack.ps();
   console.table(statuses);
 
-  // Verify both services are running
-  const allRunning = statuses.every((s: any) => s.status.includes('running') || s.status.includes('Up'));
+  const allRunning = statuses.every((s) => s.status.toLowerCase().includes('running') || s.status.toLowerCase().includes('up'));
   if (!allRunning) {
     console.error('❌ Not all services are running!');
-    console.log('Logs from forgejo service:');
+    console.log('Fetching logs for diagnostics...');
     const logs = await stack.logs({ service: 'forgejo', tail: 50 });
     console.log(logs.stdout);
+
+    // Cleanup on failure
     await stack.down({ volumes: true });
     process.exit(1);
   }
@@ -137,84 +134,68 @@ async function main() {
   console.log('✅ Stack is up and running!');
 
   // ──────────────────────────────────────────────────────────────
-  // Health Check: Verify PostgreSQL is ready
+  // 5. Health Check: Verify PostgreSQL is ready via exec
   // ──────────────────────────────────────────────────────────────
 
-  console.log('\n🏥 Performing health checks...\n');
+  console.log('\n🏥 Performing database health check...\n');
 
-  const postgresHealth = await stack.exec('postgres', [
-    'pg_isready',
-    '-U',
-    'forgejo',
-    '-d',
-    'forgejo',
-  ]);
-
-  if (postgresHealth.stdout.includes('accepting connections')) {
-    console.log('✅ PostgreSQL: ready');
-  } else {
-    console.error('❌ PostgreSQL: not ready');
-    console.error('stderr:', postgresHealth.stderr);
-    await stack.down({ volumes: true });
-    process.exit(1);
+  try {
+    const health = await stack.exec('postgres', [
+      'pg_isready',
+      '-U',
+      '${FORGEJO_DB_USER:-forgejo}',
+    ]);
+    console.log('PostgreSQL Status:', health.stdout.trim());
+  } catch (e) {
+    console.error('❌ Database health check failed:', e);
   }
 
   // ──────────────────────────────────────────────────────────────
-  // Usage Instructions
+  // 6. Usage Instructions
   // ──────────────────────────────────────────────────────────────
 
   console.log(`
-  ─────────────────────────────────────────────────────────────
-  🎉 Forgejo Stack is Ready!
-  ─────────────────────────────────────────────────────────────
+─────────────────────────────────────────────────────────────
+🎉 Forgejo Stack is Ready!
+─────────────────────────────────────────────────────────────
 
-  Access URLs:
-    - Web UI:  http://localhost:3000
-    - SSH:     ssh://localhost:2222
+Access URLs:
+  - Web UI:  http://localhost:3000
+  - SSH:     ssh://localhost:2222
 
-  Default admin account (first-run):
-    - Username: root
-    - Password: (set via web UI on first login)
+Environment variables used:
+  FORGEJO_DB_USER=forgejo
+  FORGEJO_DB_PASSWORD=changeme (change in production!)
+  FORGEJO_DOMAIN=localhost
 
-  Environment variables used:
-    FORGEJO_DB_USER=forgejo
-    FORGEJO_DB_PASSWORD=changeme (change in production!)
-    FORGEJO_DB_NAME=forgejo
-    FORGEJO_DOMAIN=localhost
-    FORGEJO_ROOT_URL=http://localhost:3000
-
-  Useful commands:
-    # View logs
-    await stack.logs({ service: 'forgejo', tail: 100 });
-
-    # Execute command in forgejo container
-    await stack.exec('forgejo', ['ls', '/data/gitea/conf']);
-
-    # Stop stack (preserves data)
-    await stack.down();
-
-    # Stop stack and remove volumes (destroys all data)
-    await stack.down({ volumes: true });
-
-  ─────────────────────────────────────────────────────────────
-  `);
+Useful stack commands:
+  - View logs:    stack.logs({ service: 'forgejo' })
+  - Stop stack:   stack.down()
+  - Full purge:   stack.down({ volumes: true })
+─────────────────────────────────────────────────────────────
+`);
 
   // ──────────────────────────────────────────────────────────────
-  // Cleanup on SIGINT/SIGTERM
+  // 7. Graceful Cleanup Handler
   // ──────────────────────────────────────────────────────────────
 
   const cleanup = async () => {
     console.log('\n🧹 Cleaning up stack...');
-    await stack.down({ volumes: true });
-    console.log('✅ Cleanup complete');
+    // In production you might want to preserve volumes (volumes: false)
+    await stack.down({ volumes: false });
+    console.log('✅ Stack stopped safely');
     process.exit(0);
   };
 
   process.on('SIGINT', cleanup);
   process.on('SIGTERM', cleanup);
+
+  // Keep the process alive to handle signals and keep the stack managed
+  console.log('Press Ctrl+C to stop the stack.');
+  await new Promise(() => {});
 }
 
-main().catch(err => {
-  console.error('Failed to start stack:', err);
+main().catch((err) => {
+  console.error('Fatal error during deployment:', err);
   process.exit(1);
 });

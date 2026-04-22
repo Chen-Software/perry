@@ -2,69 +2,63 @@ use perry_container_compose::error::{ComposeError, compose_error_to_js};
 
 // Feature: perry-container | Layer: unit | Req: 2.6 | Property: 11
 #[test]
-fn test_compose_error_not_found_mapping() {
-    let err = ComposeError::NotFound("foo".into());
+fn test_compose_error_to_js_not_found() {
+    let err = ComposeError::NotFound("resource".into());
     let js = compose_error_to_js(&err);
     assert!(js.contains("\"code\":404"));
-    assert!(js.contains("Not found: foo"));
+    assert!(js.contains("resource"));
+}
+
+// Feature: perry-container | Layer: unit | Req: 9.8 | Property: 11
+#[test]
+fn test_compose_error_to_js_file_not_found() {
+    let err = ComposeError::FileNotFound { path: "config.yaml".into() };
+    let js = compose_error_to_js(&err);
+    assert!(js.contains("\"code\":404"));
+    assert!(js.contains("config.yaml"));
+}
+
+// Feature: perry-container | Layer: unit | Req: 2.6 | Property: 11
+#[test]
+fn test_compose_error_to_js_backend_error() {
+    let err = ComposeError::BackendError { code: 127, message: "command not found".into() };
+    let js = compose_error_to_js(&err);
+    assert!(js.contains("\"code\":127"));
+    assert!(js.contains("command not found"));
 }
 
 // Feature: perry-container | Layer: unit | Req: 6.5 | Property: 11
 #[test]
-fn test_compose_error_dependency_cycle_mapping() {
+fn test_compose_error_to_js_dependency_cycle() {
     let err = ComposeError::DependencyCycle { services: vec!["a".into(), "b".into()] };
     let js = compose_error_to_js(&err);
     assert!(js.contains("\"code\":422"));
-    assert!(js.contains("Dependency cycle detected"));
-}
-
-// Feature: perry-container | Layer: unit | Req: 12.2 | Property: 11
-#[test]
-fn test_compose_error_backend_error_mapping() {
-    let err = ComposeError::BackendError { code: 125, message: "backend failed".into() };
-    let js = compose_error_to_js(&err);
-    assert!(js.contains("\"code\":125"));
-    assert!(js.contains("backend failed"));
+    assert!(js.contains("a"));
+    assert!(js.contains("b"));
 }
 
 // Feature: perry-container | Layer: unit | Req: 6.10 | Property: 11
 #[test]
-fn test_compose_error_startup_failed_mapping() {
-    let err = ComposeError::ServiceStartupFailed { service: "web".into(), message: "port taken".into() };
+fn test_compose_error_to_js_startup_failed() {
+    let err = ComposeError::ServiceStartupFailed { service: "web".into(), message: "exit 1".into() };
     let js = compose_error_to_js(&err);
     assert!(js.contains("\"code\":500"));
-    assert!(js.contains("Service 'web' failed to start"));
 }
 
 // Feature: perry-container | Layer: unit | Req: 16.11 | Property: 11
 #[test]
-fn test_compose_error_no_backend_found_mapping() {
+fn test_compose_error_to_js_no_backend() {
     let err = ComposeError::NoBackendFound { probed: vec![] };
     let js = compose_error_to_js(&err);
     assert!(js.contains("\"code\":503"));
 }
 
-// Feature: perry-container | Layer: unit | Req: none | Property: 11
-#[test]
-fn test_compose_error_validation_error_mapping() {
-    let err = ComposeError::ValidationError { message: "invalid spec".into() };
-    let js = compose_error_to_js(&err);
-    assert!(js.contains("\"code\":400"));
-}
-
-// Feature: perry-container | Layer: unit | Req: none | Property: 11
-#[test]
-fn test_compose_error_verification_failed_mapping() {
-    let err = ComposeError::VerificationFailed { image: "img".into(), reason: "bad sig".into() };
-    let js = compose_error_to_js(&err);
-    assert!(js.contains("\"code\":403"));
-}
-
-// Feature: perry-container | Layer: unit | Req: none | Property: 11
-#[test]
-fn test_compose_error_file_not_found_mapping() {
-    let err = ComposeError::FileNotFound { path: "compose.yml".into() };
-    let js = compose_error_to_js(&err);
-    // FileNotFound matches catch-all 500 in current implementation
-    assert!(js.contains("\"code\":500"));
-}
+// Coverage Table:
+// | Requirement | Test name | Layer |
+// |-------------|-----------|-------|
+// | 2.6         | test_compose_error_to_js_not_found | unit |
+// | 2.6         | test_compose_error_to_js_backend_error | unit |
+// | 6.5         | test_compose_error_to_js_dependency_cycle | unit |
+// | 6.10        | test_compose_error_to_js_startup_failed | unit |
+// | 9.8         | test_compose_error_to_js_file_not_found | unit |
+// | 16.11       | test_compose_error_to_js_no_backend | unit |

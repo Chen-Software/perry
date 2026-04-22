@@ -75,4 +75,8 @@ impl ComposeWrapper {
     pub async fn restart(&self, _handle: &ComposeHandle, services: &[String]) -> Result<(), ContainerError> {
         self.engine.restart(services).await.map_err(ContainerError::from)
     }
+
+    pub fn config(&self) -> Result<String, ContainerError> {
+        self.engine.config().map_err(Into::into)
+    }
 }

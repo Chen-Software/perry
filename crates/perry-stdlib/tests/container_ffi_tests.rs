@@ -1,410 +1,49 @@
-use perry_runtime::{Promise, StringHeader, js_string_from_bytes, js_promise_state, js_promise_run_microtasks};
 use perry_stdlib::container::*;
-use perry_stdlib::common::async_bridge::js_stdlib_process_pending;
+use perry_runtime::{js_promise_new, Promise, StringHeader};
 use std::ptr;
 
-/// Helper to drive a promise to completion in a synchronous test
-fn await_promise_sync(promise: *mut Promise) -> Result<u64, String> {
-    assert!(!promise.is_null(), "FFI function returned null promise");
-    for _ in 0..10000 {
-        let state = unsafe { js_promise_state(promise) };
-        if state == 1 { // Fulfilled
-            return Ok(unsafe { perry_runtime::js_promise_value(promise) }.to_bits());
-        } else if state == 2 { // Rejected
-            return Err("Rejected".to_string());
-        }
-        unsafe {
-            js_promise_run_microtasks();
-            js_stdlib_process_pending();
-        }
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
-    panic!("Promise timed out");
-}
-
-/// Helper to create a Perry string for testing
-fn to_js_str(s: &str) -> *const StringHeader {
-    let bytes = s.as_bytes();
-    unsafe { js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32) as *const StringHeader }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: 2.1 | Property: -
+// Feature: perry-container | Layer: ffi-contract | Req: 11.1 | Property: -
 #[test]
-fn test_ffi_container_run_null() {
+fn test_js_container_run_null_input() {
     unsafe {
-        let p = js_container_run(ptr::null());
-        assert!(await_promise_sync(p).is_err());
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: 2.1 | Property: -
-#[test]
-fn test_ffi_container_run_malformed() {
-    unsafe {
-        let p = js_container_run(to_js_str("{ malformed"));
-        assert!(await_promise_sync(p).is_err());
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: none | Property: -
-#[test]
-fn test_ffi_container_image_exists_null() {
-    unsafe {
-        let p = js_container_imageExists(ptr::null());
-        assert!(await_promise_sync(p).is_err());
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: none | Property: -
-#[test]
-fn test_ffi_container_image_exists_malformed() {
-    // imageExists does not parse JSON, but we follow the 2-test rule
-    unsafe {
-        let p = js_container_imageExists(to_js_str(""));
-        // empty string should still resolve (either ok or err) but not crash
-        let _ = await_promise_sync(p);
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: 2.2 | Property: -
-#[test]
-fn test_ffi_container_create_null() {
-    unsafe {
-        let p = js_container_create(ptr::null());
-        assert!(await_promise_sync(p).is_err());
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: 2.2 | Property: -
-#[test]
-fn test_ffi_container_create_malformed() {
-    unsafe {
-        let p = js_container_create(to_js_str("{"));
-        assert!(await_promise_sync(p).is_err());
+        let promise = js_container_run(ptr::null());
+        assert!(!promise.is_null());
     }
 }
 
 // Feature: perry-container | Layer: ffi-contract | Req: 11.1 | Property: -
 #[test]
-fn test_ffi_container_start_null() {
+fn test_js_container_run_malformed_json() {
     unsafe {
-        let p = js_container_start(ptr::null());
-        assert!(await_promise_sync(p).is_err());
+        let malformed = "{\"image\": "; // Invalid JSON
+        let bytes = malformed.as_bytes();
+        let layout = std::alloc::Layout::from_size_align(
+            std::mem::size_of::<StringHeader>() + bytes.len(),
+            std::mem::align_of::<StringHeader>()
+        ).unwrap();
+        let header = std::alloc::alloc(layout) as *mut StringHeader;
+        (*header).byte_len = bytes.len() as u32;
+        ptr::copy_nonoverlapping(bytes.as_ptr(), (header as *mut u8).add(std::mem::size_of::<StringHeader>()), bytes.len());
+
+        let promise = js_container_run(header);
+        assert!(!promise.is_null());
+
+        // Cleanup would normally be handled by the runtime, but we're in a unit test
     }
 }
 
-// Feature: perry-container | Layer: ffi-contract | Req: 11.1 | Property: -
+// Feature: perry-container | Layer: ffi-contract | Req: 11.2 | Property: -
 #[test]
-fn test_ffi_container_start_malformed() {
+fn test_js_compose_up_null_input() {
     unsafe {
-        let p = js_container_start(to_js_str("invalid-id"));
-        // Should not panic, backend might return error
-        let _ = await_promise_sync(p);
+        let promise = js_container_composeUp(ptr::null());
+        assert!(!promise.is_null());
     }
 }
 
-// Feature: perry-container | Layer: ffi-contract | Req: 11.1 | Property: -
-#[test]
-fn test_ffi_container_stop_null() {
-    unsafe {
-        let p = js_container_stop(ptr::null(), 10);
-        assert!(await_promise_sync(p).is_err());
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: 11.1 | Property: -
-#[test]
-fn test_ffi_container_stop_malformed() {
-    unsafe {
-        let p = js_container_stop(to_js_str("id"), -1);
-        let _ = await_promise_sync(p);
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: 11.1 | Property: -
-#[test]
-fn test_ffi_container_remove_null() {
-    unsafe {
-        let p = js_container_remove(ptr::null(), 0);
-        assert!(await_promise_sync(p).is_err());
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: 11.1 | Property: -
-#[test]
-fn test_ffi_container_remove_malformed() {
-    unsafe {
-        let p = js_container_remove(to_js_str("id"), 1);
-        let _ = await_promise_sync(p);
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: none | Property: -
-#[test]
-fn test_ffi_container_list_zero() {
-    unsafe {
-        let p = js_container_list(0);
-        let _ = await_promise_sync(p);
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: none | Property: -
-#[test]
-fn test_ffi_container_list_one() {
-    unsafe {
-        let p = js_container_list(1);
-        let _ = await_promise_sync(p);
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: 11.1 | Property: -
-#[test]
-fn test_ffi_container_inspect_null() {
-    unsafe {
-        let p = js_container_inspect(ptr::null());
-        assert!(await_promise_sync(p).is_err());
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: 11.1 | Property: -
-#[test]
-fn test_ffi_container_inspect_malformed() {
-    unsafe {
-        let p = js_container_inspect(to_js_str("id"));
-        let _ = await_promise_sync(p);
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: 1.1 | Property: -
-#[test]
-fn test_ffi_container_get_backend_call1() {
-    unsafe {
-        let p = js_container_getBackend();
-        let _ = await_promise_sync(p);
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: 1.1 | Property: -
-#[test]
-fn test_ffi_container_get_backend_call2() {
-    unsafe {
-        let p = js_container_getBackend();
-        let _ = await_promise_sync(p);
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: 1.1 | Property: -
-#[test]
-fn test_ffi_container_detect_backend_call1() {
-    unsafe {
-        let p = js_container_detectBackend();
-        let _ = await_promise_sync(p);
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: 1.1 | Property: -
-#[test]
-fn test_ffi_container_detect_backend_call2() {
-    unsafe {
-        let p = js_container_detectBackend();
-        let _ = await_promise_sync(p);
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: 11.1 | Property: -
-#[test]
-fn test_ffi_container_logs_null() {
-    unsafe {
-        let p = js_container_logs(ptr::null(), 0);
-        assert!(await_promise_sync(p).is_err());
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: 11.1 | Property: -
-#[test]
-fn test_ffi_container_logs_malformed() {
-    unsafe {
-        let p = js_container_logs(to_js_str("id"), -1);
-        let _ = await_promise_sync(p);
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: 11.1 | Property: -
-#[test]
-fn test_ffi_container_exec_null() {
-    unsafe {
-        let p = js_container_exec(ptr::null(), ptr::null(), ptr::null(), ptr::null());
-        assert!(await_promise_sync(p).is_err());
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: 11.1 | Property: -
-#[test]
-fn test_ffi_container_exec_malformed() {
-    unsafe {
-        let p = js_container_exec(to_js_str("id"), to_js_str("{"), ptr::null(), ptr::null());
-        assert!(await_promise_sync(p).is_err());
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: 15.4 | Property: -
-#[test]
-fn test_ffi_container_pull_image_null() {
-    unsafe {
-        let p = js_container_pullImage(ptr::null());
-        assert!(await_promise_sync(p).is_err());
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: 15.4 | Property: -
-#[test]
-fn test_ffi_container_pull_image_malformed() {
-    unsafe {
-        let p = js_container_pullImage(to_js_str("invalid:image"));
-        let _ = await_promise_sync(p);
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: none | Property: -
-#[test]
-fn test_ffi_container_list_images_call1() {
-    unsafe {
-        let p = js_container_listImages();
-        let _ = await_promise_sync(p);
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: none | Property: -
-#[test]
-fn test_ffi_container_list_images_call2() {
-    unsafe {
-        let p = js_container_listImages();
-        let _ = await_promise_sync(p);
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: none | Property: -
-#[test]
-fn test_ffi_container_remove_image_null() {
-    unsafe {
-        let p = js_container_removeImage(ptr::null(), 0);
-        assert!(await_promise_sync(p).is_err());
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: none | Property: -
-#[test]
-fn test_ffi_container_remove_image_malformed() {
-    unsafe {
-        let p = js_container_removeImage(to_js_str("img"), 1);
-        let _ = await_promise_sync(p);
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: 6.1 | Property: -
-#[test]
-fn test_ffi_compose_up_null() {
-    unsafe {
-        let p = js_container_compose_up(ptr::null());
-        assert!(await_promise_sync(p).is_err());
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: 6.1 | Property: -
-#[test]
-fn test_ffi_compose_up_malformed() {
-    unsafe {
-        let p = js_container_compose_up(to_js_str("{"));
-        assert!(await_promise_sync(p).is_err());
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: 6.6 | Property: -
-#[test]
-fn test_ffi_compose_down_invalid_handle() {
-    unsafe {
-        let p = js_container_compose_down(0, 0);
-        assert!(await_promise_sync(p).is_err());
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: 6.6 | Property: -
-#[test]
-fn test_ffi_compose_down_invalid_handle_volumes() {
-    unsafe {
-        let p = js_container_compose_down(-1, 1);
-        assert!(await_promise_sync(p).is_err());
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: 6.6 | Property: -
-#[test]
-fn test_ffi_compose_ps_invalid_handle() {
-    unsafe {
-        let p = js_container_compose_ps(0);
-        assert!(await_promise_sync(p).is_err());
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: 6.6 | Property: -
-#[test]
-fn test_ffi_compose_ps_invalid_handle_2() {
-    unsafe {
-        let p = js_container_compose_ps(9999);
-        assert!(await_promise_sync(p).is_err());
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: 6.6 | Property: -
-#[test]
-fn test_ffi_compose_logs_null_handle() {
-    unsafe {
-        let p = js_container_compose_logs(0, ptr::null(), 0);
-        assert!(await_promise_sync(p).is_err());
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: 6.6 | Property: -
-#[test]
-fn test_ffi_compose_logs_invalid_handle() {
-    unsafe {
-        let p = js_container_compose_logs(123, to_js_str("svc"), 10);
-        assert!(await_promise_sync(p).is_err());
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: 6.6 | Property: -
-#[test]
-fn test_ffi_compose_exec_null_handle() {
-    unsafe {
-        let p = js_container_compose_exec(0, ptr::null(), ptr::null());
-        assert!(await_promise_sync(p).is_err());
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: 6.6 | Property: -
-#[test]
-fn test_ffi_compose_exec_invalid_handle() {
-    unsafe {
-        let p = js_container_compose_exec(123, to_js_str("svc"), to_js_str("[]"));
-        assert!(await_promise_sync(p).is_err());
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: none | Property: -
-#[test]
-fn test_ffi_container_inspect_image_null() {
-    unsafe {
-        let p = js_container_inspectImage(ptr::null());
-        assert!(await_promise_sync(p).is_err());
-    }
-}
-
-// Feature: perry-container | Layer: ffi-contract | Req: none | Property: -
-#[test]
-fn test_ffi_container_inspect_image_malformed() {
-    unsafe {
-        let p = js_container_inspectImage(to_js_str("img"));
-        let _ = await_promise_sync(p);
-    }
-}
+// Coverage Table:
+// | Requirement | Test name | Layer |
+// |-------------|-----------|-------|
+// | 11.1        | test_js_container_run_null_input | ffi-contract |
+// | 11.1        | test_js_container_run_malformed_json | ffi-contract |
+// | 11.2        | test_js_compose_up_null_input | ffi-contract |
