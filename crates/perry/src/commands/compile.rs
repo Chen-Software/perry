@@ -249,6 +249,11 @@ pub struct TargetNativeConfig {
     /// final binary. Used by `--features watchos-swift-app` so a native lib
     /// can ship its own `@main struct App: App` SwiftUI root.
     pub swift_sources: Vec<PathBuf>,
+    /// Metal shader sources (absolute paths) to compile via `xcrun metal` and
+    /// pack into `<app>.app/default.metallib`. Consumed at runtime by SwiftUI's
+    /// `ShaderLibrary.default` / Metal's dynamic loader — not linked. iOS /
+    /// tvOS / watchOS only.
+    pub metal_sources: Vec<PathBuf>,
 }
 
 /// Get the Rust target triple for a given perry target string
@@ -1558,6 +1563,12 @@ fn parse_native_library_manifest(
                         .filter_map(|v| v.as_str().map(|p| package_dir.join(p)))
                         .collect())
                     .unwrap_or_default(),
+                metal_sources: tc.get("metal_sources")
+                    .and_then(|s| s.as_array())
+                    .map(|a| a.iter()
+                        .filter_map(|v| v.as_str().map(|p| package_dir.join(p)))
+                        .collect())
+                    .unwrap_or_default(),
             }
         });
 
@@ -2758,6 +2769,105 @@ fn lookup_bundle_id_from_toml(input: &std::path::Path, section: &str) -> Option<
         }
     }
     None
+}
+
+/// Compile all `metal_sources` declared across `ctx.native_libraries` into a
+/// single `<app_dir>/default.metallib`. Each `.metal` file is compiled to an
+/// intermediate `.air` via `xcrun -sdk <sdk> metal -c`, then all `.air` files
+/// are linked into `default.metallib` via `xcrun -sdk <sdk> metallib`. That's
+/// the path SwiftUI's `ShaderLibrary.default` (and `MTLDevice.makeDefaultLibrary()`)
+/// loads at runtime.
+///
+/// Deduplicates by canonical source path — shared manifests (e.g., the same
+/// package.json seen by multiple imported modules) only compile each shader
+/// once. No-op if no native lib declares `metal_sources`.
+fn compile_metallib_for_bundle(
+    ctx: &CompilationContext,
+    target: Option<&str>,
+    app_dir: &Path,
+    format: OutputFormat,
+) -> Result<()> {
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut sources: Vec<(PathBuf, String)> = Vec::new();
+    for native_lib in &ctx.native_libraries {
+        if let Some(ref tc) = native_lib.target_config {
+            for src in &tc.metal_sources {
+                let canonical = src.canonicalize().unwrap_or_else(|_| src.clone());
+                if seen.insert(canonical) {
+                    sources.push((src.clone(), native_lib.module.clone()));
+                }
+            }
+        }
+    }
+    if sources.is_empty() {
+        return Ok(());
+    }
+
+    let metal_sdk = match target {
+        Some("watchos-simulator") => "watchsimulator",
+        Some("watchos") => "watchos",
+        Some("ios-simulator") => "iphonesimulator",
+        Some("ios") => "iphoneos",
+        Some("tvos-simulator") => "appletvsimulator",
+        Some("tvos") => "appletvos",
+        other => return Err(anyhow!(
+            "metal_sources is only supported on ios/tvos/watchos (got {:?})",
+            other
+        )),
+    };
+
+    let air_dir = std::env::temp_dir()
+        .join(format!("perry_metal_{}", std::process::id()));
+    std::fs::create_dir_all(&air_dir).ok();
+
+    let mut air_files: Vec<PathBuf> = Vec::new();
+    for (src, module) in &sources {
+        if !src.exists() {
+            return Err(anyhow!(
+                "Metal source not found: {} (declared in {}'s nativeLibrary.metal_sources)",
+                src.display(),
+                module
+            ));
+        }
+        let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("shader");
+        let air_out = air_dir.join(format!("{}.air", stem));
+        let status = Command::new("xcrun")
+            .args(["-sdk", metal_sdk, "metal", "-c"])
+            .arg(src)
+            .arg("-o")
+            .arg(&air_out)
+            .status()?;
+        if !status.success() {
+            return Err(anyhow!("Failed to compile Metal shader: {}", src.display()));
+        }
+        match format {
+            OutputFormat::Text => println!("Compiled Metal shader: {}", src.display()),
+            OutputFormat::Json => {}
+        }
+        air_files.push(air_out);
+    }
+
+    let metallib_out = app_dir.join("default.metallib");
+    let mut link_cmd = Command::new("xcrun");
+    link_cmd.args(["-sdk", metal_sdk, "metallib", "-o"])
+        .arg(&metallib_out);
+    for air in &air_files {
+        link_cmd.arg(air);
+    }
+    let status = link_cmd.status()?;
+    if !status.success() {
+        return Err(anyhow!(
+            "Failed to link Metal library into {}",
+            metallib_out.display()
+        ));
+    }
+
+    match format {
+        OutputFormat::Text => println!("Wrote Metal library: {}", metallib_out.display()),
+        OutputFormat::Json => {}
+    }
+
+    Ok(())
 }
 
 /// Compile for Android widget target: emit Kotlin/Glance source + JNI bridge
@@ -6262,6 +6372,21 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
                     }
                 }
             }
+
+            // Metal sources are compiled + packed into <app>.app/default.metallib
+            // after the `.app` bundle is created below. Just validate the target
+            // here so we fail early with a clear message instead of silently
+            // dropping shaders on non-Apple-bundle targets.
+            if !target_config.metal_sources.is_empty()
+                && !matches!(target.as_deref(),
+                    Some("ios") | Some("ios-simulator") |
+                    Some("tvos") | Some("tvos-simulator") |
+                    Some("watchos") | Some("watchos-simulator"))
+            {
+                return Err(anyhow!(
+                    "perry.nativeLibrary.targets.<target>.metal_sources is only supported on ios / ios-simulator / tvos / tvos-simulator / watchos / watchos-simulator"
+                ));
+            }
         }
     }
 
@@ -6855,6 +6980,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
             }
         }
 
+        compile_metallib_for_bundle(&ctx, target.as_deref(), &app_dir, format)?;
+
         match format {
             OutputFormat::Text => {
                 println!("Wrote iOS app bundle: {}", app_dir.display());
@@ -6955,6 +7082,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
             }
         }
 
+        compile_metallib_for_bundle(&ctx, target.as_deref(), &app_dir, format)?;
+
         match format {
             OutputFormat::Text => {
                 println!("Wrote watchOS app bundle: {}", app_dir.display());
@@ -7020,6 +7149,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
 </plist>"#
         );
         fs::write(app_dir.join("Info.plist"), info_plist)?;
+
+        compile_metallib_for_bundle(&ctx, target.as_deref(), &app_dir, format)?;
 
         match format {
             OutputFormat::Text => {
