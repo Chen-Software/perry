@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque, BTreeSet};
 use indexmap::IndexMap;
 use std::sync::Arc;
 use dashmap::DashMap;
@@ -12,6 +12,54 @@ use crate::service;
 
 static COMPOSE_HANDLES: Lazy<DashMap<u64, Arc<ComposeEngine>>> = Lazy::new(DashMap::new);
 static NEXT_HANDLE_ID: AtomicU64 = AtomicU64::new(1);
+
+pub fn resolve_startup_order(spec: &ComposeSpec) -> Result<Vec<String>> {
+    let mut in_degree = HashMap::new();
+    let mut adj = HashMap::new();
+
+    for (name, service) in &spec.services {
+        in_degree.entry(name.clone()).or_insert(0);
+        if let Some(deps) = &service.depends_on {
+            let dep_names = deps.service_names();
+            for dep in dep_names {
+                if !spec.services.contains_key(&dep) {
+                    return Err(ComposeError::validation(format!("Service {} depends on unknown service {}", name, dep)));
+                }
+                adj.entry(dep.clone()).or_insert_with(Vec::new).push(name.clone());
+                *in_degree.entry(name.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let mut queue: BTreeSet<String> = in_degree.iter()
+        .filter(|&(_, &deg)| deg == 0)
+        .map(|(name, _)| name.clone())
+        .collect();
+
+    let mut order: Vec<String> = Vec::new();
+    while let Some(name) = queue.pop_first() {
+        order.push(name.clone());
+        if let Some(neighbors) = adj.get(&name) {
+            for next in neighbors {
+                let deg = in_degree.get_mut(next).unwrap();
+                *deg -= 1;
+                if *deg == 0 {
+                    queue.insert(next.clone());
+                }
+            }
+        }
+    }
+
+    if order.len() < spec.services.len() {
+        let cycle_services: Vec<String> = in_degree.iter()
+            .filter(|&(_, &deg)| deg > 0)
+            .map(|(name, _)| name.clone())
+            .collect();
+        return Err(ComposeError::DependencyCycle { services: cycle_services });
+    }
+
+    Ok(order)
+}
 
 pub struct ComposeEngine {
     pub spec: ComposeSpec,

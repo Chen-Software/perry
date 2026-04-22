@@ -336,6 +336,16 @@ pub struct ComposeSpec {
     pub extensions: IndexMap<String, serde_yaml::Value>,
 }
 
+impl ComposeSpec {
+    pub fn to_yaml(&self) -> Result<String, serde_yaml::Error> {
+        serde_yaml::to_string(self)
+    }
+
+    pub fn parse_str(yaml: &str) -> crate::error::Result<Self> {
+        crate::yaml::parse_compose_yaml(yaml, &std::collections::HashMap::new())
+    }
+}
+
 impl ListOrDict {
     pub fn to_map(&self) -> std::collections::HashMap<String, String> {
         let mut map = std::collections::HashMap::new();
