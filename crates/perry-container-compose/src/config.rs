@@ -107,7 +107,6 @@ pub fn find_default_compose_file(dir: &Path) -> Result<Vec<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     #[test]
     fn test_resolve_project_name_cli_priority() {
