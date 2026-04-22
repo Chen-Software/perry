@@ -3466,17 +3466,17 @@ static PERRY_CONTAINER_TABLE: &[(&str, &str)] = &[
     ("composeUp",   "js_container_composeUp"),
 ];
 
-/// Maps perry/compose TypeScript function names to their FFI symbols.
-static PERRY_COMPOSE_TABLE: &[(&str, &str)] = &[
-    ("up",      "js_compose_up"),
-    ("down",    "js_compose_down"),
-    ("ps",      "js_compose_ps"),
-    ("logs",    "js_compose_logs"),
-    ("exec",    "js_compose_exec"),
-    ("config",  "js_compose_config"),
-    ("start",   "js_compose_start"),
-    ("stop",    "js_compose_stop"),
-    ("restart", "js_compose_restart"),
+/// Maps perry/container-compose TypeScript function names to their FFI symbols.
+static PERRY_CONTAINER_COMPOSE_TABLE: &[(&str, &str)] = &[
+    ("up",      "js_container_compose_up"),
+    ("down",    "js_container_compose_down"),
+    ("ps",      "js_container_compose_ps"),
+    ("logs",    "js_container_compose_logs"),
+    ("exec",    "js_container_compose_exec"),
+    ("config",  "js_container_compose_config"),
+    ("start",   "js_container_compose_start"),
+    ("stop",    "js_container_compose_stop"),
+    ("restart", "js_container_compose_restart"),
 ];
 
 const PERRY_UI_TABLE: &[UiSig] = &[

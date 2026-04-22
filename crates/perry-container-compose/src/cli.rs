@@ -7,6 +7,7 @@ use crate::error::Result;
 use crate::project::ComposeProject;
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// perry-compose: Docker Compose-like experience for Apple Container / Podman
 #[derive(Parser, Debug)]
@@ -127,9 +128,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         cli.env_files.clone(),
     );
     let project = ComposeProject::load(&config)?;
-    let backend = crate::backend::detect_backend()
-        .await
-        .map_err(|probed| crate::error::ComposeError::NoBackendFound { probed })?;
+    let backend = Arc::from(crate::backend::detect_backend().await?);
     let engine = ComposeEngine::new(project.spec.clone(), project.project_name.clone(), backend);
 
     match cli.command {
@@ -141,7 +140,7 @@ pub async fn run(cli: Cli) -> Result<()> {
 
         Commands::Down(args) => {
             engine
-                .down(&args.services, args.remove_orphans, args.volumes)
+                .down(args.volumes, args.remove_orphans)
                 .await?;
         }
 
@@ -163,58 +162,15 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
 
         Commands::Logs(args) => {
-            let logs_map = engine.logs(&args.services, args.tail).await?;
-
-            let mut names: Vec<&String> = logs_map.keys().collect();
-            names.sort();
-            for name in names {
-                let log = &logs_map[name];
-                if !log.stdout.is_empty() {
-                    for line in log.stdout.lines() {
-                        println!("{} | {}", name, line);
-                    }
-                }
-                if !log.stderr.is_empty() {
-                    for line in log.stderr.lines() {
-                        eprintln!("{} | {}", name, line);
-                    }
-                }
-            }
+            let logs = engine.logs(args.services.first().map(|s| s.as_str()), args.tail).await?;
+            print!("{}", logs.stdout);
+            eprint!("{}", logs.stderr);
         }
 
         Commands::Exec(args) => {
-            let env: std::collections::HashMap<String, String> = args
-                .env
-                .iter()
-                .filter_map(|e| {
-                    let mut parts = e.splitn(2, '=');
-                    let k = parts.next()?.to_owned();
-                    let v = parts.next().unwrap_or("").to_owned();
-                    Some((k, v))
-                })
-                .collect();
-
-            let cmd = args.cmd.clone();
-
-            let svc = engine
-                .spec
-                .services
-                .get(&args.service)
-                .ok_or_else(|| crate::error::ComposeError::NotFound(args.service.clone()))?;
-            let container_name = crate::service::service_container_name(svc, &args.service);
-
-            let result = engine
-                .backend
-                .exec(
-                    &container_name,
-                    &cmd,
-                    if env.is_empty() { None } else { Some(&env) },
-                    args.workdir.as_deref(),
-                )
-                .await?;
-
-            print!("{}", result.stdout);
-            eprint!("{}", result.stderr);
+            let logs = engine.exec(&args.service, &args.cmd).await?;
+            print!("{}", logs.stdout);
+            eprint!("{}", logs.stderr);
         }
 
         Commands::Config(args) => {
