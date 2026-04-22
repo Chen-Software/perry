@@ -3682,6 +3682,63 @@ const PERRY_UI_TABLE: &[UiSig] = &[
             args: &[UiArgKind::Widget, UiArgKind::F64, UiArgKind::Closure], ret: UiReturnKind::Void },
 ];
 
+#[derive(Copy, Clone, Debug)]
+enum ContainerArgKind {
+    /// JSON-serialized string: lower the JSValue, then call `js_json_stringify`
+    /// to get a NaN-boxed string, then extract its StringHeader pointer as i64.
+    Json,
+    /// Plain string: extract StringHeader pointer as i64.
+    Str,
+    /// Boolean/Int: convert f64 to i32.
+    I32,
+    /// Handle ID: convert f64 to i64.
+    I64,
+}
+
+#[derive(Copy, Clone, Debug)]
+enum ContainerReturnKind {
+    /// Returns a NaN-boxed Promise pointer.
+    Promise,
+    /// Returns a NaN-boxed string.
+    String,
+}
+
+struct ContainerSig {
+    method: &'static str,
+    runtime: &'static str,
+    args: &'static [ContainerArgKind],
+    ret: ContainerReturnKind,
+}
+
+static PERRY_CONTAINER_TABLE: &[ContainerSig] = &[
+    ContainerSig { method: "run",         runtime: "js_container_run",         args: &[ContainerArgKind::Json],                                     ret: ContainerReturnKind::Promise },
+    ContainerSig { method: "create",      runtime: "js_container_create",      args: &[ContainerArgKind::Json],                                     ret: ContainerReturnKind::Promise },
+    ContainerSig { method: "start",       runtime: "js_container_start",       args: &[ContainerArgKind::Str],                                      ret: ContainerReturnKind::Promise },
+    ContainerSig { method: "stop",        runtime: "js_container_stop",        args: &[ContainerArgKind::Str, ContainerArgKind::I32],               ret: ContainerReturnKind::Promise },
+    ContainerSig { method: "remove",      runtime: "js_container_remove",      args: &[ContainerArgKind::Str, ContainerArgKind::I32],               ret: ContainerReturnKind::Promise },
+    ContainerSig { method: "list",        runtime: "js_container_list",        args: &[ContainerArgKind::I32],                                      ret: ContainerReturnKind::Promise },
+    ContainerSig { method: "inspect",     runtime: "js_container_inspect",     args: &[ContainerArgKind::Str],                                      ret: ContainerReturnKind::Promise },
+    ContainerSig { method: "logs",        runtime: "js_container_logs",        args: &[ContainerArgKind::Str, ContainerArgKind::I32],               ret: ContainerReturnKind::Promise },
+    ContainerSig { method: "exec",        runtime: "js_container_exec",        args: &[ContainerArgKind::Str, ContainerArgKind::Json, ContainerArgKind::Json, ContainerArgKind::Str], ret: ContainerReturnKind::Promise },
+    ContainerSig { method: "pullImage",   runtime: "js_container_pullImage",   args: &[ContainerArgKind::Str],                                      ret: ContainerReturnKind::Promise },
+    ContainerSig { method: "listImages",  runtime: "js_container_listImages",  args: &[],                                                           ret: ContainerReturnKind::Promise },
+    ContainerSig { method: "removeImage", runtime: "js_container_removeImage", args: &[ContainerArgKind::Str, ContainerArgKind::I32],               ret: ContainerReturnKind::Promise },
+    ContainerSig { method: "getBackend",  runtime: "js_container_getBackend",  args: &[],                                                           ret: ContainerReturnKind::String },
+    ContainerSig { method: "composeUp",   runtime: "js_container_composeUp",   args: &[ContainerArgKind::Json],                                     ret: ContainerReturnKind::Promise },
+];
+
+static PERRY_CONTAINER_COMPOSE_TABLE: &[ContainerSig] = &[
+    ContainerSig { method: "up",      runtime: "js_container_compose_up",      args: &[ContainerArgKind::Json],                                     ret: ContainerReturnKind::Promise },
+    ContainerSig { method: "down",    runtime: "js_container_compose_down",    args: &[ContainerArgKind::I64, ContainerArgKind::I32],               ret: ContainerReturnKind::Promise },
+    ContainerSig { method: "ps",      runtime: "js_container_compose_ps",      args: &[ContainerArgKind::I64],                                      ret: ContainerReturnKind::Promise },
+    ContainerSig { method: "logs",    runtime: "js_container_compose_logs",    args: &[ContainerArgKind::I64, ContainerArgKind::Str, ContainerArgKind::I32], ret: ContainerReturnKind::Promise },
+    ContainerSig { method: "exec",    runtime: "js_container_compose_exec",    args: &[ContainerArgKind::I64, ContainerArgKind::Str, ContainerArgKind::Json], ret: ContainerReturnKind::Promise },
+    ContainerSig { method: "config",  runtime: "js_container_compose_config",  args: &[ContainerArgKind::Json],                                     ret: ContainerReturnKind::Promise },
+    ContainerSig { method: "start",   runtime: "js_container_compose_start",   args: &[ContainerArgKind::I64, ContainerArgKind::Json],               ret: ContainerReturnKind::Promise },
+    ContainerSig { method: "stop",    runtime: "js_container_compose_stop",    args: &[ContainerArgKind::I64, ContainerArgKind::Json],               ret: ContainerReturnKind::Promise },
+    ContainerSig { method: "restart", runtime: "js_container_compose_restart", args: &[ContainerArgKind::I64, ContainerArgKind::Json],               ret: ContainerReturnKind::Promise },
+];
+
 /// Instance method table for perry/ui receiver-based calls.
 /// These methods are called on a widget/window handle: `handle.method(args)`.
 /// The handle is automatically prepended as the first i64 arg.

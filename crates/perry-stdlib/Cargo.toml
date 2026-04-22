@@ -67,7 +67,7 @@ validation = ["dep:validator", "dep:regex"]
 ids = ["dep:uuid", "dep:nanoid"]
 
 # Container module (OCI container management)
-container = ["dep:async-trait", "dep:tokio", "async-runtime"]
+container = ["dep:async-trait", "dep:tokio", "async-runtime", "dep:perry-container-compose"]
 
 # Async runtime (tokio) - internal feature
 async-runtime = ["dep:tokio"]
@@ -162,6 +162,7 @@ nanoid = { version = "0.4", optional = true }
 
 # Container module
 async-trait = { version = "0.1", optional = true }
+perry-container-compose = { path = "../perry-container-compose", optional = true }
 
 # LRU Cache
 lru = "0.12"

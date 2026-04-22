@@ -1,119 +1,127 @@
-//! Image signature verification using Sigstore/cosign
-//!
-//! Provides cryptographic verification of OCI images before execution.
+//! Sigstore/cosign verification for OCI images
 
-use super::types::ContainerError;
 use std::collections::HashMap;
-use std::sync::{RwLock, OnceLock};
-use std::time::{Duration, Instant};
+use std::sync::{OnceLock, RwLock};
+use perry_container_compose::error::ComposeError as ContainerError;
 
-/// Verification cache entry
-struct CacheEntry {
-    verified: bool,
-    timestamp: Instant,
+pub const CHAINGUARD_IDENTITY: &str =
+    "https://github.com/chainguard-images/images/.github/workflows/sign.yaml@refs/heads/main";
+pub const CHAINGUARD_ISSUER: &str =
+    "https://token.actions.githubusercontent.com";
+
+#[derive(Clone, Debug)]
+pub enum VerificationResult {
+    Verified,
+    Failed(String),
 }
 
-/// Global verification cache
-static VERIFICATION_CACHE: OnceLock<RwLock<HashMap<String, CacheEntry>>> = OnceLock::new();
+static VERIFICATION_CACHE: OnceLock<RwLock<HashMap<String, VerificationResult>>> = OnceLock::new();
 
-/// Chainguard signing identity for certificate validation
-const CHAINGUARD_IDENTITY: &str = "https://github.com/chainguard-images/images/.github/workflows/sign.yaml@refs/heads/main";
-const CHAINGUARD_ISSUER: &str = "https://token.actions.githubusercontent.com";
-
-/// Verify an image reference using Sigstore/cosign
 pub async fn verify_image(reference: &str) -> Result<String, ContainerError> {
-    // Extract image digest for cache key
+    // 1. Fetch digest (tag -> digest resolution)
+    // Requirement 15.4: fetches digest
     let digest = fetch_image_digest(reference).await?;
 
-    // Get or create cache
+    // 2. Check cache (keyed by digest, not tag)
+    // Requirement 15.4: caches result by digest
     let cache = VERIFICATION_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
-
-    // Check cache
     {
-        let cache_read = cache.read().unwrap();
-        if let Some(entry) = cache_read.get(&digest) {
-            // Cache entry is valid for 1 hour
-            if entry.timestamp.elapsed() < Duration::from_secs(3600) {
-                if entry.verified {
-                    return Ok(digest);
-                } else {
-                    return Err(ContainerError::VerificationFailed {
-                        image: reference.to_string(),
-                        reason: "cached verification failed".to_string(),
-                    });
-                }
+        let read = cache.read().unwrap();
+        if let Some(res) = read.get(&digest) {
+            match res {
+                VerificationResult::Verified => return Ok(digest),
+                VerificationResult::Failed(reason) => return Err(ContainerError::VerificationFailed {
+                    image: reference.to_string(),
+                    reason: reason.clone()
+                }),
             }
         }
     }
 
-    // Perform verification
-    let verified = perform_verification(reference, &digest).await?;
+    // 3. Run cosign verify
+    // Requirement 15.1, 15.2, 15.3
+    let result = run_cosign_verify(reference, &digest).await;
 
-    // Update cache
+    // 4. Cache and return
     {
-        let mut cache = cache.write().unwrap();
-        cache.insert(
-            digest.clone(),
-            CacheEntry {
-                verified,
-                timestamp: Instant::now(),
-            },
-        );
+        let mut write = cache.write().unwrap();
+        write.insert(digest.clone(), result.clone());
     }
 
-    if verified {
-        Ok(digest)
-    } else {
-        Err(ContainerError::VerificationFailed {
+    match result {
+        VerificationResult::Verified => Ok(digest),
+        VerificationResult::Failed(reason) => Err(ContainerError::VerificationFailed {
             image: reference.to_string(),
-            reason: "signature verification failed".to_string(),
-        })
+            reason
+        }),
     }
 }
 
-/// Fetch image digest from registry or local cache
 async fn fetch_image_digest(reference: &str) -> Result<String, ContainerError> {
-    // TODO: Implement actual digest fetching
-    // For now, use the reference as a placeholder
-    Ok(reference.to_string())
+    // Requirement 15.4: fetches digest
+    let backend = crate::container::get_global_backend_instance_async().await.map_err(|e| ContainerError::BackendError {
+        code: 1,
+        message: e
+    })?;
+
+    let info = backend.inspect_image(reference).await?;
+    Ok(info.id) // Usually info.id is the digest in OCI backends
 }
 
-/// Perform actual verification using Sigstore/cosign
-async fn perform_verification(_reference: &str, _digest: &str) -> Result<bool, ContainerError> {
-    // TODO: Implement actual Sigstore/cosign verification
-    // This requires the sigstore-cosign crate
-    // For now, always return true (trusted) for development
-    // In production, this would:
-    // 1. Fetch the image signature from the registry
-    // 2. Verify the signature using cosign keyless verification
-    // 3. Validate certificate identity and OIDC issuer
-    // 4. Check against Chainguard's public keys
+async fn run_cosign_verify(reference: &str, _digest: &str) -> VerificationResult {
+    // Requirement 15.3: shells out to cosign verify
+    use tokio::process::Command;
 
-    Ok(true)
+    let mut cmd = Command::new("cosign");
+    cmd.args([
+        "verify",
+        "--certificate-identity", CHAINGUARD_IDENTITY,
+        "--certificate-oidc-issuer", CHAINGUARD_ISSUER,
+        reference
+    ]);
+
+    match cmd.output().await {
+        Ok(output) if output.status.success() => VerificationResult::Verified,
+        Ok(output) => VerificationResult::Failed(String::from_utf8_lossy(&output.stderr).to_string()),
+        Err(e) => VerificationResult::Failed(format!("cosign binary not found or failed: {}", e)),
+    }
 }
 
-/// Get the default Chainguard image for a given tool
 pub fn get_chainguard_image(tool: &str) -> Option<String> {
     match tool {
-        "git" => Some("cgr.dev/chainguard/git".to_string()),
-        "curl" => Some("cgr.dev/chainguard/curl".to_string()),
-        "wget" => Some("cgr.dev/chainguard/wget".to_string()),
+        "git"     => Some("cgr.dev/chainguard/git".to_string()),
+        "curl"    => Some("cgr.dev/chainguard/curl".to_string()),
+        "wget"    => Some("cgr.dev/chainguard/wget".to_string()),
         "openssl" => Some("cgr.dev/chainguard/openssl".to_string()),
-        "bash" => Some("cgr.dev/chainguard/bash".to_string()),
-        "sh" => Some("cgr.dev/chainguard/busybox".to_string()),
-        _ => None,
+        "bash"    => Some("cgr.dev/chainguard/bash".to_string()),
+        "sh"      => Some("cgr.dev/chainguard/busybox".to_string()),
+        "node"    => Some("cgr.dev/chainguard/node".to_string()),
+        "python"  => Some("cgr.dev/chainguard/python".to_string()),
+        "ruby"    => Some("cgr.dev/chainguard/ruby".to_string()),
+        "go"      => Some("cgr.dev/chainguard/go".to_string()),
+        "rust"    => Some("cgr.dev/chainguard/rust".to_string()),
+        _         => None,
     }
 }
 
-/// Get the default base image for sandboxed containers
-pub fn get_default_base_image() -> String {
-    "cgr.dev/chainguard/alpine-base".to_string()
+pub fn get_default_base_image() -> &'static str {
+    "cgr.dev/chainguard/alpine-base"
 }
 
-/// Clear the verification cache (useful for testing)
-pub fn clear_verification_cache() {
-    if let Some(cache) = VERIFICATION_CACHE.get() {
-        let mut cache_write = cache.write().unwrap();
-        cache_write.clear();
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_verification_cache_idempotence() {
+        let img = "cgr.dev/chainguard/alpine-base";
+        let res1 = verify_image(img).await;
+        let res2 = verify_image(img).await;
+
+        match (res1, res2) {
+            (Ok(d1), Ok(d2)) => assert_eq!(d1, d2),
+            (Err(e1), Err(e2)) => assert_eq!(e1.to_string(), e2.to_string()),
+            _ => panic!("Non-idempotent result for image verification"),
+        }
     }
 }

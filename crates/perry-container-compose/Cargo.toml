@@ -21,13 +21,19 @@ async-trait = "0.1"
 md-5 = "0.10"
 hex = "0.4"
 dotenvy = { workspace = true }
-indexmap = "2.2"
+indexmap = { version = "2.2", features = ["serde"] }
+rand = "0.8"
+regex = "1"
+dashmap = "5"
+dirs = "6"
 
 [dev-dependencies]
 tokio = { workspace = true }
+proptest = "1"
 
 [features]
 default = []
+integration-tests = []
 ffi = []  # Enable FFI exports for Perry TypeScript integration
 
 [[bin]]

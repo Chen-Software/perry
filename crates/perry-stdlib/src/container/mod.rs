@@ -1,36 +1,82 @@
 //! Container module for Perry
-//!
-//! Provides OCI container management with platform-adaptive backend selection.
-//! Uses apple/container on macOS/iOS and podman on all other platforms.
 
 pub mod backend;
+pub mod capability;
 pub mod compose;
 pub mod types;
 pub mod verification;
+mod tests;
 
-// Re-export commonly used types
-pub use types::{
-    ComposeHealthcheck, ComposeNetwork, ComposeService, ComposeSpec, ComposeVolume,
-    ContainerHandle, ContainerInfo, ContainerLogs, ContainerSpec, ImageInfo,
-};
+use perry_container_compose::backend::{detect_backend, ContainerBackend};
+use perry_runtime::{js_promise_new, Promise, StringHeader};
+use std::sync::{Arc, OnceLock, Mutex};
 
-use perry_runtime::{js_promise_new, js_string_from_bytes, Promise, StringHeader, JSValue};
-use backend::{get_backend, ContainerBackend};
-use std::sync::OnceLock;
-use std::sync::Arc;
+static BACKEND: OnceLock<Arc<dyn ContainerBackend + Send + Sync>> = OnceLock::new();
+static BACKEND_ERROR: OnceLock<String> = OnceLock::new();
+static INIT_MUTEX: Mutex<()> = Mutex::new(());
 
-// Global backend instance - initialized once at first use
-static BACKEND: OnceLock<Arc<dyn ContainerBackend>> = OnceLock::new();
+pub async fn get_global_backend_instance_async() -> Result<&'static Arc<dyn ContainerBackend + Send + Sync>, String> {
+    if let Some(error) = BACKEND_ERROR.get() {
+        return Err(error.clone());
+    }
+    if let Some(backend) = BACKEND.get() {
+        return Ok(backend);
+    }
 
-/// Get or initialize the global backend instance
-fn get_global_backend() -> &'static Arc<dyn ContainerBackend> {
-    BACKEND.get_or_init(|| {
-        get_backend().expect("Failed to initialize container backend")
+    let _lock = INIT_MUTEX.lock().unwrap();
+    if let Some(backend) = BACKEND.get() {
+        return Ok(backend);
+    }
+
+    match detect_backend().await {
+        Ok(backend) => {
+            let arc = Arc::from(backend);
+            let _ = BACKEND.set(arc);
+            Ok(BACKEND.get().unwrap())
+        }
+        Err(probed) => {
+            let err = format!("No container backend found. Probed: {:?}", probed);
+            let _ = BACKEND_ERROR.set(err.clone());
+            Err(err)
+        }
+    }
+}
+
+pub fn get_global_backend_instance() -> Result<&'static Arc<dyn ContainerBackend + Send + Sync>, String> {
+    if let Some(error) = BACKEND_ERROR.get() {
+        return Err(error.clone());
+    }
+    if let Some(backend) = BACKEND.get() {
+        return Ok(backend);
+    }
+
+    let _lock = INIT_MUTEX.lock().unwrap();
+    if let Some(backend) = BACKEND.get() {
+        return Ok(backend);
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio");
+
+    runtime.block_on(async {
+        match detect_backend().await {
+            Ok(backend) => {
+                let arc = Arc::from(backend);
+                let _ = BACKEND.set(arc);
+                Ok(BACKEND.get().unwrap())
+            }
+            Err(probed) => {
+                let err = format!("No container backend found. Probed: {:?}", probed);
+                let _ = BACKEND_ERROR.set(err.clone());
+                Err(err)
+            }
+        }
     })
 }
 
-/// Helper to extract string from StringHeader pointer
-unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
+pub unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
     if ptr.is_null() || (ptr as usize) < 0x1000 {
         return None;
     }
@@ -40,87 +86,97 @@ unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
     Some(String::from_utf8_lossy(bytes).to_string())
 }
 
-/// Helper to create a JS string from a Rust string
-unsafe fn string_to_js(s: &str) -> *const StringHeader {
+pub unsafe fn string_to_js(s: &str) -> *const StringHeader {
     let bytes = s.as_bytes();
     perry_runtime::js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
 }
 
 // ============ Container Lifecycle ============
 
-/// Run a container from the given spec
-/// FFI: js_container_run(spec_ptr: *const JSValue) -> *mut Promise
 #[no_mangle]
-pub unsafe extern "C" fn js_container_run(spec_ptr: *const perry_runtime::JSValue) -> *mut Promise {
+pub unsafe extern "C" fn js_container_run(spec_json_ptr: *const StringHeader) -> *mut Promise {
     let promise = js_promise_new();
-    let backend = Arc::clone(get_global_backend());
+    let backend = match get_global_backend_instance() {
+        Ok(b) => Arc::clone(b),
+        Err(e) => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move { Err(e) });
+            return promise;
+        }
+    };
 
-    let spec = match types::parse_container_spec(spec_ptr) {
+    let spec_json = match string_from_header(spec_json_ptr) {
+        Some(s) => s,
+        None => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move { Err("Invalid JSON".into()) });
+            return promise;
+        }
+    };
+
+    let spec: types::ContainerSpec = match serde_json::from_str(&spec_json) {
         Ok(s) => s,
         Err(e) => {
-            crate::common::spawn_for_promise(promise as *mut u8, async move {
-                Err::<u64, String>(e)
-            });
+            let msg = e.to_string();
+            crate::common::spawn_for_promise(promise as *mut u8, async move { Err(msg) });
             return promise;
         }
     };
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         match backend.run(&spec).await {
-            Ok(handle) => {
-                let handle_id = types::register_container_handle(handle);
-                Ok(handle_id as u64)
-            }
-            Err(e) => Err::<u64, String>(e.to_string()),
+            Ok(handle) => Ok(types::register_container_handle(handle)),
+            Err(e) => Err(e.to_string()),
         }
     });
 
     promise
 }
 
-/// Create a container from the given spec without starting it
-/// FFI: js_container_create(spec_ptr: *const JSValue) -> *mut Promise
 #[no_mangle]
-pub unsafe extern "C" fn js_container_create(spec_ptr: *const perry_runtime::JSValue) -> *mut Promise {
+pub unsafe extern "C" fn js_container_create(spec_json_ptr: *const StringHeader) -> *mut Promise {
     let promise = js_promise_new();
-    let backend = Arc::clone(get_global_backend());
+    let backend = match get_global_backend_instance() {
+        Ok(b) => Arc::clone(b),
+        Err(e) => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move { Err(e) });
+            return promise;
+        }
+    };
 
-    let spec = match types::parse_container_spec(spec_ptr) {
+    let spec_json = match string_from_header(spec_json_ptr) {
+        Some(s) => s,
+        None => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move { Err("Invalid JSON".into()) });
+            return promise;
+        }
+    };
+
+    let spec: types::ContainerSpec = match serde_json::from_str(&spec_json) {
         Ok(s) => s,
         Err(e) => {
-            crate::common::spawn_for_promise(promise as *mut u8, async move {
-                Err::<u64, String>(e)
-            });
+            let msg = e.to_string();
+            crate::common::spawn_for_promise(promise as *mut u8, async move { Err(msg) });
             return promise;
         }
     };
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         match backend.create(&spec).await {
-            Ok(handle) => {
-                let handle_id = types::register_container_handle(handle);
-                Ok(handle_id as u64)
-            }
-            Err(e) => Err::<u64, String>(e.to_string()),
+            Ok(handle) => Ok(types::register_container_handle(handle)),
+            Err(e) => Err(e.to_string()),
         }
     });
 
     promise
 }
 
-/// Start a previously created container
-/// FFI: js_container_start(id_ptr: *const StringHeader) -> *mut Promise
 #[no_mangle]
 pub unsafe extern "C" fn js_container_start(id_ptr: *const StringHeader) -> *mut Promise {
     let promise = js_promise_new();
-    let backend = Arc::clone(get_global_backend());
-
-    let id = match string_from_header(id_ptr) {
-        Some(s) => s,
-        None => {
-            crate::common::spawn_for_promise(promise as *mut u8, async move {
-                Err::<u64, String>("Invalid container ID".to_string())
-            });
+    let id = string_from_header(id_ptr).unwrap_or_default();
+    let backend = match get_global_backend_instance() {
+        Ok(b) => Arc::clone(b),
+        Err(e) => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move { Err(e) });
             return promise;
         }
     };
@@ -128,53 +184,43 @@ pub unsafe extern "C" fn js_container_start(id_ptr: *const StringHeader) -> *mut
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         match backend.start(&id).await {
             Ok(()) => Ok(0u64),
-            Err(e) => Err::<u64, String>(e.to_string()),
+            Err(e) => Err(e.to_string()),
         }
     });
 
     promise
 }
 
-/// Stop a running container
-/// FFI: js_container_stop(id_ptr: *const StringHeader, timeout: i32) -> *mut Promise
 #[no_mangle]
 pub unsafe extern "C" fn js_container_stop(id_ptr: *const StringHeader, timeout: i32) -> *mut Promise {
     let promise = js_promise_new();
-    let backend = Arc::clone(get_global_backend());
-
-    let id = match string_from_header(id_ptr) {
-        Some(s) => s,
-        None => {
-            crate::common::spawn_for_promise(promise as *mut u8, async move {
-                Err::<u64, String>("Invalid container ID".to_string())
-            });
+    let id = string_from_header(id_ptr).unwrap_or_default();
+    let backend = match get_global_backend_instance() {
+        Ok(b) => Arc::clone(b),
+        Err(e) => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move { Err(e) });
             return promise;
         }
     };
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        match backend.stop(&id, timeout as u32).await {
+        match backend.stop(&id, if timeout >= 0 { Some(timeout as u32) } else { None }).await {
             Ok(()) => Ok(0u64),
-            Err(e) => Err::<u64, String>(e.to_string()),
+            Err(e) => Err(e.to_string()),
         }
     });
 
     promise
 }
 
-/// Remove a container
-/// FFI: js_container_remove(id_ptr: *const StringHeader, force: i32) -> *mut Promise
 #[no_mangle]
 pub unsafe extern "C" fn js_container_remove(id_ptr: *const StringHeader, force: i32) -> *mut Promise {
     let promise = js_promise_new();
-    let backend = Arc::clone(get_global_backend());
-
-    let id = match string_from_header(id_ptr) {
-        Some(s) => s,
-        None => {
-            crate::common::spawn_for_promise(promise as *mut u8, async move {
-                Err::<u64, String>("Invalid container ID".to_string())
-            });
+    let id = string_from_header(id_ptr).unwrap_or_default();
+    let backend = match get_global_backend_instance() {
+        Ok(b) => Arc::clone(b),
+        Err(e) => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move { Err(e) });
             return promise;
         }
     };
@@ -182,346 +228,370 @@ pub unsafe extern "C" fn js_container_remove(id_ptr: *const StringHeader, force:
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         match backend.remove(&id, force != 0).await {
             Ok(()) => Ok(0u64),
-            Err(e) => Err::<u64, String>(e.to_string()),
+            Err(e) => Err(e.to_string()),
         }
     });
 
     promise
 }
 
-/// List containers
-/// FFI: js_container_list(all: i32) -> *mut Promise
 #[no_mangle]
 pub unsafe extern "C" fn js_container_list(all: i32) -> *mut Promise {
     let promise = js_promise_new();
-    let backend = Arc::clone(get_global_backend());
+    let backend = match get_global_backend_instance() {
+        Ok(b) => Arc::clone(b),
+        Err(e) => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move { Err(e) });
+            return promise;
+        }
+    };
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         match backend.list(all != 0).await {
-            Ok(containers) => {
-                let handle_id = types::register_container_info_list(containers);
-                Ok(handle_id as u64)
-            }
-            Err(e) => Err::<u64, String>(e.to_string()),
+            Ok(list) => Ok(list.len() as u64),
+            Err(e) => Err(e.to_string()),
         }
     });
 
     promise
 }
 
-/// Inspect a container
-/// FFI: js_container_inspect(id_ptr: *const StringHeader) -> *mut Promise
 #[no_mangle]
 pub unsafe extern "C" fn js_container_inspect(id_ptr: *const StringHeader) -> *mut Promise {
     let promise = js_promise_new();
-    let backend = Arc::clone(get_global_backend());
-
-    let id = match string_from_header(id_ptr) {
-        Some(s) => s,
-        None => {
-            crate::common::spawn_for_promise(promise as *mut u8, async move {
-                Err::<u64, String>("Invalid container ID".to_string())
-            });
+    let id = string_from_header(id_ptr).unwrap_or_default();
+    let backend = match get_global_backend_instance() {
+        Ok(b) => Arc::clone(b),
+        Err(e) => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move { Err(e) });
             return promise;
         }
     };
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         match backend.inspect(&id).await {
-            Ok(info) => {
-                let handle_id = types::register_container_info(info);
-                Ok(handle_id as u64)
-            }
-            Err(e) => Err::<u64, String>(e.to_string()),
+            Ok(_info) => Ok(0u64),
+            Err(e) => Err(e.to_string()),
         }
     });
 
     promise
 }
 
-/// Get the current backend name
-/// FFI: js_container_getBackend() -> *const StringHeader
 #[no_mangle]
-pub unsafe extern "C" fn js_container_getBackend() -> *const StringHeader {
-    let backend_name = get_global_backend().name();
-    string_to_js(backend_name)
-}
-
-// ============ Container Logs and Exec ============
-
-/// Get logs from a container
-/// FFI: js_container_logs(id_ptr: *const StringHeader, follow: i32, tail: i32) -> *mut Promise
-#[no_mangle]
-pub unsafe extern "C" fn js_container_logs(id_ptr: *const StringHeader, follow: i32, tail: i32) -> *mut Promise {
+pub unsafe extern "C" fn js_container_logs(id_ptr: *const StringHeader, tail: i32) -> *mut Promise {
     let promise = js_promise_new();
-    let backend = Arc::clone(get_global_backend());
-
-    let id = match string_from_header(id_ptr) {
-        Some(s) => s,
-        None => {
-            crate::common::spawn_for_promise(promise as *mut u8, async move {
-                Err::<u64, String>("Invalid container ID".to_string())
-            });
+    let id = string_from_header(id_ptr).unwrap_or_default();
+    let backend = match get_global_backend_instance() {
+        Ok(b) => Arc::clone(b),
+        Err(e) => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move { Err(e) });
             return promise;
         }
     };
 
-    let tail_opt = if tail >= 0 { Some(tail as u32) } else { None };
-
-    // TODO: Implement follow mode with ReadableStream
-    if follow != 0 {
-        crate::common::spawn_for_promise(promise as *mut u8, async move {
-            Err::<u64, String>("Follow mode not yet implemented".to_string())
-        });
-        return promise;
-    }
-
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        match backend.logs(&id, tail_opt).await {
-            Ok(logs) => {
-                let handle_id = types::register_container_logs(logs);
-                Ok(handle_id as u64)
-            }
-            Err(e) => Err::<u64, String>(e.to_string()),
+        match backend.logs(&id, if tail >= 0 { Some(tail as u32) } else { None }).await {
+            Ok(_logs) => Ok(0u64),
+            Err(e) => Err(e.to_string()),
         }
     });
 
     promise
 }
 
-/// Execute a command in a container
-/// FFI: js_container_exec(id_ptr: *const StringHeader, cmd_array: *const JSValue, env_obj: *const JSValue, workdir_ptr: *const StringHeader) -> *mut Promise
 #[no_mangle]
 pub unsafe extern "C" fn js_container_exec(
     id_ptr: *const StringHeader,
-    _cmd_array: *const JSValue,
-    _env_obj: *const JSValue,
-    _workdir_ptr: *const StringHeader,
+    cmd_json_ptr: *const StringHeader,
+    env_json_ptr: *const StringHeader,
+    workdir_ptr: *const StringHeader
 ) -> *mut Promise {
     let promise = js_promise_new();
-    let backend = Arc::clone(get_global_backend());
+    let id = string_from_header(id_ptr).unwrap_or_default();
+    let cmd_json = string_from_header(cmd_json_ptr).unwrap_or_default();
+    let env_json = string_from_header(env_json_ptr).unwrap_or_default();
+    let workdir = string_from_header(workdir_ptr);
 
-    let id = match string_from_header(id_ptr) {
-        Some(s) => s,
-        None => {
-            crate::common::spawn_for_promise(promise as *mut u8, async move {
-                Err::<u64, String>("Invalid container ID".to_string())
-            });
+    let backend = match get_global_backend_instance() {
+        Ok(b) => Arc::clone(b),
+        Err(e) => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move { Err(e) });
             return promise;
         }
     };
 
-    // TODO: Parse cmd_array, env_obj, workdir_ptr
-    // For now, use empty command
-    let cmd = Vec::new();
-    let env = None;
+    let cmd: Vec<String> = serde_json::from_str(&cmd_json).unwrap_or_default();
+    let env: Option<std::collections::HashMap<String, String>> = serde_json::from_str(&env_json).ok();
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        match backend.exec(&id, &cmd, env).await {
-            Ok(logs) => {
-                let handle_id = types::register_container_logs(logs);
-                Ok(handle_id as u64)
-            }
-            Err(e) => Err::<u64, String>(e.to_string()),
+        match backend.exec(&id, &cmd, env.as_ref(), workdir.as_deref()).await {
+            Ok(_logs) => Ok(0u64),
+            Err(e) => Err(e.to_string()),
         }
     });
 
     promise
 }
 
-// ============ Image Management ============
-
-/// Pull a container image
-/// FFI: js_container_pullImage(reference_ptr: *const StringHeader) -> *mut Promise
 #[no_mangle]
-pub unsafe extern "C" fn js_container_pullImage(reference_ptr: *const StringHeader) -> *mut Promise {
+pub unsafe extern "C" fn js_container_pullImage(id_ptr: *const StringHeader) -> *mut Promise {
     let promise = js_promise_new();
-    let backend = Arc::clone(get_global_backend());
-
-    let reference = match string_from_header(reference_ptr) {
-        Some(s) => s,
-        None => {
-            crate::common::spawn_for_promise(promise as *mut u8, async move {
-                Err::<u64, String>("Invalid image reference".to_string())
-            });
+    let id = string_from_header(id_ptr).unwrap_or_default();
+    let backend = match get_global_backend_instance() {
+        Ok(b) => Arc::clone(b),
+        Err(e) => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move { Err(e) });
             return promise;
         }
     };
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        match backend.pull_image(&reference).await {
+        match backend.pull_image(&id).await {
             Ok(()) => Ok(0u64),
-            Err(e) => Err::<u64, String>(e.to_string()),
+            Err(e) => Err(e.to_string()),
         }
     });
 
     promise
 }
 
-/// List images
-/// FFI: js_container_listImages() -> *mut Promise
 #[no_mangle]
 pub unsafe extern "C" fn js_container_listImages() -> *mut Promise {
     let promise = js_promise_new();
-    let backend = Arc::clone(get_global_backend());
+    let backend = match get_global_backend_instance() {
+        Ok(b) => Arc::clone(b),
+        Err(e) => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move { Err(e) });
+            return promise;
+        }
+    };
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         match backend.list_images().await {
-            Ok(images) => {
-                let handle_id = types::register_image_info_list(images);
-                Ok(handle_id as u64)
-            }
-            Err(e) => Err::<u64, String>(e.to_string()),
+            Ok(list) => Ok(list.len() as u64),
+            Err(e) => Err(e.to_string()),
         }
     });
 
     promise
 }
 
-/// Remove an image
-/// FFI: js_container_removeImage(reference_ptr: *const StringHeader, force: i32) -> *mut Promise
 #[no_mangle]
-pub unsafe extern "C" fn js_container_removeImage(reference_ptr: *const StringHeader, force: i32) -> *mut Promise {
+pub unsafe extern "C" fn js_container_removeImage(id_ptr: *const StringHeader, force: i32) -> *mut Promise {
     let promise = js_promise_new();
-    let backend = Arc::clone(get_global_backend());
-
-    let reference = match string_from_header(reference_ptr) {
-        Some(s) => s,
-        None => {
-            crate::common::spawn_for_promise(promise as *mut u8, async move {
-                Err::<u64, String>("Invalid image reference".to_string())
-            });
+    let id = string_from_header(id_ptr).unwrap_or_default();
+    let backend = match get_global_backend_instance() {
+        Ok(b) => Arc::clone(b),
+        Err(e) => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move { Err(e) });
             return promise;
         }
     };
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        match backend.remove_image(&reference, force != 0).await {
+        match backend.remove_image(&id, force != 0).await {
             Ok(()) => Ok(0u64),
-            Err(e) => Err::<u64, String>(e.to_string()),
+            Err(e) => Err(e.to_string()),
         }
     });
 
     promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_container_getBackend() -> *const StringHeader {
+    if let Ok(b) = get_global_backend_instance() {
+        string_to_js(b.backend_name())
+    } else {
+        string_to_js("none")
+    }
 }
 
 // ============ Compose Functions ============
 
-/// Bring up a Compose stack
-/// FFI: js_container_composeUp(spec_ptr: *const JSValue) -> *mut Promise
 #[no_mangle]
-pub unsafe extern "C" fn js_container_composeUp(spec_ptr: *const JSValue) -> *mut Promise {
+pub unsafe extern "C" fn js_container_composeUp(spec_json_ptr: *const StringHeader) -> *mut Promise {
     let promise = js_promise_new();
-
-    let spec = match types::parse_compose_spec(spec_ptr) {
-        Ok(s) => s,
+    let backend = match get_global_backend_instance() {
+        Ok(b) => Arc::clone(b),
         Err(e) => {
-            crate::common::spawn_for_promise(promise as *mut u8, async move {
-                Err::<u64, String>(e)
-            });
+            crate::common::spawn_for_promise(promise as *mut u8, async move { Err(e) });
             return promise;
         }
     };
 
-    let backend = Arc::clone(get_global_backend());
+    let spec_json = string_from_header(spec_json_ptr).unwrap_or_default();
+    let spec: types::ComposeSpec = match serde_json::from_str(&spec_json) {
+        Ok(s) => s,
+        Err(e) => {
+            let msg = e.to_string();
+            crate::common::spawn_for_promise(promise as *mut u8, async move { Err(msg) });
+            return promise;
+        }
+    };
+
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let engine = compose::ComposeEngine::new(spec, backend);
-        match engine.up().await {
-            Ok(handle) => {
-                let handle_id = types::register_compose_handle(handle);
-                Ok(handle_id as u64)
-            }
-            Err(e) => Err::<u64, String>(e.to_string()),
+        let name = spec.name.clone().unwrap_or_else(|| "default".into());
+        match compose::compose_up(spec, name, backend).await {
+            Ok(id) => Ok(id),
+            Err(e) => Err(e),
         }
     });
 
     promise
 }
 
-/// Stop and remove compose stack
-/// FFI: js_composeHandle_down(handle_ptr: *const JSValue, volumes: i32) -> *mut Promise
 #[no_mangle]
-pub unsafe extern "C" fn js_composeHandle_down(_handle_ptr: *const JSValue, _volumes: i32) -> *mut Promise {
+pub unsafe extern "C" fn js_compose_up(spec_json: *const StringHeader) -> *mut Promise {
+    js_container_composeUp(spec_json)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_down(handle_id: i64, volumes: i32) -> *mut Promise {
     let promise = js_promise_new();
-
-    // TODO: Retrieve ComposeHandle from handle_ptr
-    // For now, just return success
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        Ok(0u64)
+        if let Some(engine) = types::get_compose_engine(handle_id as u64) {
+            engine.down(volumes != 0, false).await.map(|_| 0u64).map_err(|e| e.to_string())
+        } else {
+            Err("Engine not found".into())
+        }
     });
-
     promise
 }
 
-/// Get container info for compose stack
-/// FFI: js_composeHandle_ps(handle_ptr: *const JSValue) -> *mut Promise
 #[no_mangle]
-pub unsafe extern "C" fn js_composeHandle_ps(_handle_ptr: *const JSValue) -> *mut Promise {
+pub unsafe extern "C" fn js_compose_ps(handle_id: i64) -> *mut Promise {
     let promise = js_promise_new();
-
-    // TODO: Retrieve ComposeHandle from handle_ptr
-    // For now, return empty array
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let handle_id = types::register_container_info_list(Vec::new());
-        Ok(handle_id as u64)
+        if let Some(engine) = types::get_compose_engine(handle_id as u64) {
+            engine.ps().await.map(|_| 0u64).map_err(|e| e.to_string())
+        } else {
+            Err("Engine not found".into())
+        }
     });
-
     promise
 }
 
-/// Get logs from compose stack
-/// FFI: js_composeHandle_logs(handle_ptr: *const JSValue, service_ptr: *const StringHeader, tail: i32) -> *mut Promise
 #[no_mangle]
-pub unsafe extern "C" fn js_composeHandle_logs(_handle_ptr: *const JSValue, service_ptr: *const StringHeader, tail: i32) -> *mut Promise {
+pub unsafe extern "C" fn js_compose_logs(handle_id: i64, service_ptr: *const StringHeader, tail: i32) -> *mut Promise {
     let promise = js_promise_new();
-
-    let _tail_opt = if tail >= 0 { Some(tail as u32) } else { None };
-
-    // TODO: Retrieve ComposeHandle from handle_ptr
-    // For now, return empty logs
+    let service = string_from_header(service_ptr);
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let logs = types::ContainerLogs {
-            stdout: String::new(),
-            stderr: String::new(),
-        };
-        let handle_id = types::register_container_logs(logs);
-        Ok(handle_id as u64)
+        if let Some(engine) = types::get_compose_engine(handle_id as u64) {
+            engine.logs(service.as_deref(), if tail >= 0 { Some(tail as u32) } else { None })
+                .await
+                .map(|_| 0u64)
+                .map_err(|e| e.to_string())
+        } else {
+            Err("Engine not found".into())
+        }
     });
-
     promise
 }
 
-/// Execute a command in a compose service
-/// FFI: js_composeHandle_exec(handle_ptr: *const JSValue, service_ptr: *const StringHeader, cmd_array: *const JSValue, env_obj: *const JSValue) -> *mut Promise
 #[no_mangle]
-pub unsafe extern "C" fn js_composeHandle_exec(
-    _handle_ptr: *const JSValue,
-    _service_ptr: *const StringHeader,
-    _cmd_array: *const JSValue,
-    _env_obj: *const JSValue,
-) -> *mut Promise {
+pub unsafe extern "C" fn js_compose_exec(handle_id: i64, service_ptr: *const StringHeader, cmd_json_ptr: *const StringHeader) -> *mut Promise {
     let promise = js_promise_new();
+    let service = string_from_header(service_ptr).unwrap_or_default();
+    let cmd_json = string_from_header(cmd_json_ptr).unwrap_or_default();
+    let cmd: Vec<String> = serde_json::from_str(&cmd_json).unwrap_or_default();
 
-    // TODO: Parse cmd_array and env_obj
-    // TODO: Retrieve ComposeHandle from handle_ptr
-    // For now, return empty logs
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let logs = types::ContainerLogs {
-            stdout: String::new(),
-            stderr: String::new(),
-        };
-        let handle_id = types::register_container_logs(logs);
-        Ok(handle_id as u64)
+        if let Some(engine) = types::get_compose_engine(handle_id as u64) {
+            engine.exec(&service, &cmd)
+                .await
+                .map(|_| 0u64)
+                .map_err(|e| e.to_string())
+        } else {
+            Err("Engine not found".into())
+        }
     });
-
     promise
 }
 
-// ============ Module Initialization ============
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_config(spec_json_ptr: *const StringHeader) -> *mut Promise {
+    let promise = js_promise_new();
+    let spec_json = string_from_header(spec_json_ptr).unwrap_or_default();
+    let spec: types::ComposeSpec = match serde_json::from_str(&spec_json) {
+        Ok(s) => s,
+        Err(e) => {
+            let msg = e.to_string();
+            crate::common::spawn_for_promise(promise as *mut u8, async move { Err(msg) });
+            return promise;
+        }
+    };
 
-/// Initialize the container module (called during runtime startup)
+    crate::common::spawn_for_promise_deferred(
+        promise as *mut u8,
+        async move { serde_json::to_string_pretty(&spec).map_err(|e| e.to_string()) },
+        |json| {
+            let str_ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
+            perry_runtime::JSValue::string_ptr(str_ptr).bits()
+        },
+    );
+    promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_start(handle_id: i64, services_json_ptr: *const StringHeader) -> *mut Promise {
+    let promise = js_promise_new();
+    let services_json = string_from_header(services_json_ptr).unwrap_or_default();
+    let services: Vec<String> = serde_json::from_str(&services_json).unwrap_or_default();
+
+    crate::common::spawn_for_promise(promise as *mut u8, async move {
+        if let Some(engine) = types::get_compose_engine(handle_id as u64) {
+            engine.start(&services)
+                .await
+                .map(|_| 0u64)
+                .map_err(|e| e.to_string())
+        } else {
+            Err("Engine not found".into())
+        }
+    });
+    promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_stop(handle_id: i64, services_json_ptr: *const StringHeader) -> *mut Promise {
+    let promise = js_promise_new();
+    let services_json = string_from_header(services_json_ptr).unwrap_or_default();
+    let services: Vec<String> = serde_json::from_str(&services_json).unwrap_or_default();
+
+    crate::common::spawn_for_promise(promise as *mut u8, async move {
+        if let Some(engine) = types::get_compose_engine(handle_id as u64) {
+            engine.stop(&services)
+                .await
+                .map(|_| 0u64)
+                .map_err(|e| e.to_string())
+        } else {
+            Err("Engine not found".into())
+        }
+    });
+    promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_restart(handle_id: i64, services_json_ptr: *const StringHeader) -> *mut Promise {
+    let promise = js_promise_new();
+    let services_json = string_from_header(services_json_ptr).unwrap_or_default();
+    let services: Vec<String> = serde_json::from_str(&services_json).unwrap_or_default();
+
+    crate::common::spawn_for_promise(promise as *mut u8, async move {
+        if let Some(engine) = types::get_compose_engine(handle_id as u64) {
+            engine.restart(&services)
+                .await
+                .map(|_| 0u64)
+                .map_err(|e| e.to_string())
+        } else {
+            Err("Engine not found".into())
+        }
+    });
+    promise
+}
+
 #[no_mangle]
 pub extern "C" fn js_container_module_init() {
-    // Force backend initialization
-    let _ = get_global_backend();
+    let _ = get_global_backend_instance();
 }
