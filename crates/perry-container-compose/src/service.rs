@@ -6,9 +6,9 @@ pub fn service_container_name(service: &crate::types::ComposeService, service_na
         return name.clone();
     }
 
-    let image = service.image.as_deref().unwrap_or("unknown");
+    let yaml = serde_yaml::to_string(service).unwrap_or_default();
     let mut hasher = Md5::new();
-    hasher.update(image.as_bytes());
+    hasher.update(yaml.as_bytes());
     let hash = hex::encode(hasher.finalize());
     let short_hash = &hash[..8];
 
