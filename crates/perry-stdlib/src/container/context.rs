@@ -29,6 +29,10 @@ impl ContainerContext {
         }
     }
 
+    pub fn get_backend_sync(&self) -> Option<Arc<dyn ContainerBackend + Send + Sync>> {
+        self.backend.try_lock().ok().and_then(|l| l.as_ref().map(Arc::clone))
+    }
+
     pub async fn get_backend(&self) -> Result<Arc<dyn ContainerBackend + Send + Sync>, String> {
         let mut backend_lock = self.backend.lock().await;
         if let Some(b) = backend_lock.as_ref() {
@@ -40,7 +44,16 @@ impl ContainerContext {
                 *backend_lock = Some(Arc::clone(&b));
                 Ok(b)
             }
-            Err(probed) => Err(format!("No container backend found. Probed: {:?}", probed)),
+            Err(probed) => {
+                let installer = perry_container_compose::installer::BackendInstaller { probed };
+                match installer.run().await {
+                    Ok(b) => {
+                        *backend_lock = Some(Arc::clone(&b));
+                        Ok(b)
+                    }
+                    Err(e) => Err(e.to_string()),
+                }
+            }
         }
     }
 }

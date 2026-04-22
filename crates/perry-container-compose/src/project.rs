@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use crate::error::{ComposeError, Result};
 use crate::types::ComposeSpec;
 use crate::config::ProjectConfig;
@@ -14,12 +14,14 @@ pub struct ComposeProject {
 impl ComposeProject {
     pub fn load(config: &ProjectConfig) -> Result<Self> {
         let project_dir = config.project_dir.clone();
+        let project_name = config.project_name.clone();
         let env = load_env(&project_dir, &config.env_files);
+
         let spec = parse_and_merge_files(&config.compose_files, &env)?;
 
         Ok(Self {
             spec,
-            project_name: config.project_name.clone(),
+            project_name,
             project_dir,
             compose_files: config.compose_files.clone(),
         })

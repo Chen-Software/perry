@@ -1,8 +1,9 @@
 use indexmap::IndexMap;
 use crate::error::{ComposeError, Result};
-use crate::types::{ComposeSpec, ContainerInfo, ContainerLogs, ContainerSpec, ComposeHandle, ContainerHandle, ListOrDict, ComposeNetwork, ComposeVolume, ServiceGraph, ServiceEdge, StackStatus, ServiceStatus};
+use crate::types::{ComposeSpec, ContainerInfo, ContainerLogs, ComposeHandle, ListOrDict, ServiceGraph, ServiceEdge, StackStatus, ServiceStatus, ComposeService};
 use crate::backend::{ContainerBackend, NetworkConfig, VolumeConfig};
-use crate::service::generate_name;
+use crate::orchestrate::orchestrate_service;
+use crate::workload::{WorkloadGraph, RunGraphOptions, RefProjection, WorkloadEnvValue};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
@@ -80,7 +81,7 @@ impl ComposeEngine {
         let order = Self::resolve_startup_order(&self.spec)?;
         let mut created_networks = Vec::new();
         let mut created_volumes = Vec::new();
-        let mut started_containers: Vec<(String, ContainerHandle)> = Vec::new();
+        let mut started_containers: Vec<String> = Vec::new();
 
         if let Some(networks) = &self.spec.networks {
             for (name, config_opt) in networks {
@@ -132,29 +133,10 @@ impl ComposeEngine {
 
         for service_name in order {
             let service = self.spec.services.get(&service_name).unwrap();
-            let image = service.image.clone().unwrap_or_default();
-            let container_spec = ContainerSpec {
-                image: image.clone(),
-                name: Some(generate_name(&image, &service_name)),
-                ports: service.ports.as_ref().map(|p| p.iter().map(|ps| format!("{:?}", ps)).collect()),
-                volumes: service.volumes.as_ref().map(|v| v.iter().map(|vs| format!("{:?}", vs)).collect()),
-                env: match &service.environment {
-                    Some(ListOrDict::Dict(d)) => Some(d.iter().map(|(k, v)| (k.clone(), v.as_ref().map_or("".to_string(), |val| format!("{:?}", val)))).collect()),
-                    _ => None,
-                },
-                cmd: match &service.command {
-                    Some(serde_yaml::Value::String(s)) => Some(vec![s.clone()]),
-                    Some(serde_yaml::Value::Sequence(seq)) => Some(seq.iter().map(|v| format!("{:?}", v)).collect()),
-                    _ => None,
-                },
-                entrypoint: None,
-                network: None,
-                rm: Some(false),
-            };
 
-            match self.backend.run(&container_spec).await {
-                Ok(handle) => {
-                    started_containers.push((service_name, handle));
+            match orchestrate_service(&service_name, service, self.backend.as_ref()).await {
+                Ok(_) => {
+                    started_containers.push(service_name);
                 }
                 Err(e) => {
                     self.rollback(&started_containers, &created_networks, &created_volumes).await;
@@ -169,14 +151,17 @@ impl ComposeEngine {
         Ok(ComposeHandle {
             stack_id: rand::random(),
             project_name: self.spec.name.clone().unwrap_or_else(|| "default".into()),
-            services: started_containers.iter().map(|(n, _)| n.clone()).collect(),
+            services: started_containers,
         })
     }
 
-    async fn rollback(&self, containers: &[(String, ContainerHandle)], networks: &[String], volumes: &[String]) {
-        for (_, handle) in containers.iter().rev() {
-            let _ = self.backend.stop(&handle.id, Some(10)).await;
-            let _ = self.backend.remove(&handle.id, true).await;
+    async fn rollback(&self, services: &[String], networks: &[String], volumes: &[String]) {
+        for service_key in services.iter().rev() {
+            if let Some(service) = self.spec.services.get(service_key) {
+                let name = service.name(service_key);
+                let _ = self.backend.stop(&name, Some(10)).await;
+                let _ = self.backend.remove(&name, true).await;
+            }
         }
         for net in networks {
             let _ = self.backend.remove_network(net).await;
@@ -188,8 +173,12 @@ impl ComposeEngine {
 
     pub async fn down(&self, volumes: bool) -> Result<()> {
         let order = Self::resolve_startup_order(&self.spec)?;
-        for service_name in order.iter().rev() {
-             let _ = self.backend.remove(service_name, true).await;
+        for service_key in order.iter().rev() {
+             if let Some(service) = self.spec.services.get(service_key) {
+                 let name = service.name(service_key);
+                 let _ = self.backend.stop(&name, None).await;
+                 let _ = self.backend.remove(&name, true).await;
+             }
         }
         if let Some(networks) = &self.spec.networks {
             for name in networks.keys() {
@@ -210,32 +199,51 @@ impl ComposeEngine {
         self.backend.list(true).await
     }
 
-    pub async fn logs(&self, service: Option<&str>, tail: Option<u32>) -> Result<ContainerLogs> {
-        if let Some(svc) = service {
-             self.backend.logs(svc, tail).await
-        } else {
-             Ok(ContainerLogs { stdout: "".into(), stderr: "".into() })
+    pub async fn logs(&self, service_key: Option<&str>, tail: Option<u32>) -> Result<ContainerLogs> {
+        if let Some(key) = service_key {
+            if let Some(service) = self.spec.services.get(key) {
+                 let name = service.name(key);
+                 return self.backend.logs(&name, tail).await;
+            }
         }
+        Ok(ContainerLogs { stdout: "".into(), stderr: "".into() })
     }
 
-    pub async fn exec(&self, service: &str, cmd: &[String]) -> Result<ContainerLogs> {
-        self.backend.exec(service, cmd, None, None).await
+    pub async fn exec(&self, service_key: &str, cmd: &[String]) -> Result<ContainerLogs> {
+        if let Some(service) = self.spec.services.get(service_key) {
+            let name = service.name(service_key);
+            return self.backend.exec(&name, cmd, None, None).await;
+        }
+        Err(ComposeError::NotFound(service_key.into()))
     }
 
-    pub async fn start(&self, services: &[String]) -> Result<()> {
-        for svc in services { self.backend.start(svc).await?; }
+    pub async fn start(&self, service_keys: &[String]) -> Result<()> {
+        for key in service_keys {
+            if let Some(service) = self.spec.services.get(key) {
+                let name = service.name(key);
+                self.backend.start(&name).await?;
+            }
+        }
         Ok(())
     }
 
-    pub async fn stop(&self, services: &[String]) -> Result<()> {
-        for svc in services { self.backend.stop(svc, None).await?; }
+    pub async fn stop(&self, service_keys: &[String]) -> Result<()> {
+        for key in service_keys {
+            if let Some(service) = self.spec.services.get(key) {
+                let name = service.name(key);
+                self.backend.stop(&name, None).await?;
+            }
+        }
         Ok(())
     }
 
-    pub async fn restart(&self, services: &[String]) -> Result<()> {
-        for svc in services {
-            self.backend.stop(svc, None).await?;
-            self.backend.start(svc).await?;
+    pub async fn restart(&self, service_keys: &[String]) -> Result<()> {
+        for key in service_keys {
+            if let Some(service) = self.spec.services.get(key) {
+                let name = service.name(key);
+                let _ = self.backend.stop(&name, None).await;
+                self.backend.start(&name).await?;
+            }
         }
         Ok(())
     }
@@ -264,17 +272,18 @@ impl ComposeEngine {
         let mut all_running = true;
         let containers = self.backend.list(true).await?;
 
-        for name in self.spec.services.keys() {
-            let container = containers.iter().find(|c| c.name == *name || c.name.starts_with(&format!("{}-", name)));
+        for (key, service) in &self.spec.services {
+            let name = service.name(key);
+            let container = containers.iter().find(|c| c.name == name);
             let state = container.map(|c| c.status.clone()).unwrap_or_else(|| "unknown".into());
             let container_id = container.map(|c| c.id.clone());
 
-            if state != "running" && !state.contains("Up") {
+            if !state.to_lowercase().contains("running") && !state.to_lowercase().contains("up") {
                 all_running = false;
             }
 
             services.push(ServiceStatus {
-                service: name.clone(),
+                service: key.clone(),
                 state,
                 container_id,
                 error: None,
@@ -297,5 +306,39 @@ impl WorkloadGraphEngine {
         Self {
             engine: ComposeEngine::new(spec, backend),
         }
+    }
+
+    pub async fn run(&self, graph: WorkloadGraph, _opts: RunGraphOptions) -> Result<u64> {
+        let mut spec = ComposeSpec::default();
+        spec.name = Some(graph.name.clone());
+
+        for (id, node) in &graph.nodes {
+            let mut svc = ComposeService::default();
+            svc.image = node.image.clone();
+            svc.ports = Some(node.ports.iter().map(|p| crate::types::PortSpec::Short(serde_yaml::Value::String(p.clone()))).collect());
+            svc.depends_on = Some(crate::types::DependsOnSpec::List(node.depends_on.clone()));
+
+            let mut env = IndexMap::new();
+            for (k, v) in &node.env {
+                let val = match v {
+                    WorkloadEnvValue::Literal(s) => Some(serde_yaml::Value::String(s.clone())),
+                    WorkloadEnvValue::Ref(r) => {
+                        let proj_str = match r.projection {
+                            RefProjection::Endpoint => "endpoint",
+                            RefProjection::Ip => "ip",
+                            RefProjection::InternalUrl => "url",
+                        };
+                        Some(serde_yaml::Value::String(format!("REF:{}:{}", r.node_id, proj_str)))
+                    }
+                };
+                env.insert(k.clone(), val);
+            }
+            svc.environment = Some(ListOrDict::Dict(env));
+            spec.services.insert(id.clone(), svc);
+        }
+
+        let engine = ComposeEngine::new(spec, Arc::clone(&self.engine.backend));
+        let _handle = engine.up().await?;
+        Ok(rand::random())
     }
 }

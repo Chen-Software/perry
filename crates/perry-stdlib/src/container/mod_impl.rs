@@ -320,9 +320,12 @@ pub unsafe extern "C" fn js_container_removeImage(ref_ptr: *const StringHeader, 
 
 #[no_mangle]
 pub unsafe extern "C" fn js_container_getBackend() -> *const StringHeader {
-    let name = match crate::common::async_bridge::RUNTIME.block_on(get_global_backend_instance()) {
-        Ok(b) => b.backend_name().to_string(),
-        Err(_) => "none".to_string(),
+    // Safety: use the synchronous lookup to avoid block_on in potential Tokio threads.
+    // Since js_container_module_init already forced detection, this should
+    // ideally be a cache hit.
+    let name = match ContainerContext::global().get_backend_sync() {
+        Some(b) => b.backend_name().to_string(),
+        None => "none".to_string(),
     };
     string_to_js(&name)
 }
@@ -930,5 +933,6 @@ pub unsafe extern "C" fn js_workload_handle_ps(handle_id: i64) -> *mut Promise {
 
 #[no_mangle]
 pub extern "C" fn js_container_module_init() {
-    // No-op; backend is lazily detected via get_backend() which uses tokio Mutex
+    // Force backend selection during initialization.
+    let _ = crate::common::async_bridge::RUNTIME.block_on(get_global_backend_instance());
 }
