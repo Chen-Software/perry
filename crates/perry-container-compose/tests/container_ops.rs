@@ -20,7 +20,7 @@ async fn test_container_run_success() {
     assert_eq!(handle.id, "test-container");
 
     let state = state_ref.lock().unwrap();
-    assert_eq!(state.containers, vec!["test-container"]);
+    assert!(state.containers.contains_key("test-container"));
     assert_eq!(state.actions, vec!["run:test-container"]);
 }
 
