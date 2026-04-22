@@ -8,7 +8,7 @@
 
 #[cfg(feature = "integration-tests")]
 mod integration {
-    use perry_container_compose::compose::resolve_startup_order;
+    use perry_container_compose::compose::ComposeEngine;
     use perry_container_compose::types::{ComposeService, ComposeSpec, DependsOnSpec};
     use perry_container_compose::yaml::{interpolate, parse_dotenv, parse_compose_yaml};
     use std::collections::HashMap;
@@ -63,7 +63,7 @@ services:
     image: a
 "#;
         let spec = ComposeSpec::parse_str(yaml).unwrap();
-        let order = resolve_startup_order(&spec).unwrap();
+        let order = ComposeEngine::resolve_startup_order(&spec).unwrap();
         let pos = |s: &str| order.iter().position(|n| n == s).unwrap();
         assert!(pos("a") < pos("b"), "a before b");
         assert!(pos("b") < pos("c"), "b before c");
@@ -81,7 +81,7 @@ services:
     depends_on: [a]
 "#;
         let spec = ComposeSpec::parse_str(yaml).unwrap();
-        let result = resolve_startup_order(&spec);
+        let result = ComposeEngine::resolve_startup_order(&spec);
         assert!(result.is_err());
     }
 

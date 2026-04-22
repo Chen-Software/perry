@@ -1,9 +1,9 @@
 use indexmap::IndexMap;
 use crate::error::{ComposeError, Result};
-use crate::types::{ComposeSpec, ContainerInfo, ContainerLogs, ContainerSpec, ComposeHandle, ContainerHandle, ListOrDict};
-use crate::backend::ContainerBackend;
+use crate::types::{ComposeSpec, ContainerInfo, ContainerLogs, ContainerSpec, ComposeHandle, ContainerHandle, ListOrDict, ComposeNetwork, ComposeVolume};
+use crate::backend::{ContainerBackend, NetworkConfig, VolumeConfig};
 use crate::service::generate_name;
-use std::collections::{BTreeSet};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -79,9 +79,19 @@ impl ComposeEngine {
         let mut started_containers: Vec<(String, ContainerHandle)> = Vec::new();
 
         if let Some(networks) = &self.spec.networks {
-            for (name, config) in networks {
-                let config = config.clone().unwrap_or_default();
-                if let Err(e) = self.backend.create_network(name, &config).await {
+            for (name, config_opt) in networks {
+                let config = config_opt.as_ref().cloned().unwrap_or_default();
+                let net_config = NetworkConfig {
+                    driver: config.driver.clone(),
+                    labels: match &config.labels {
+                        Some(ListOrDict::Dict(d)) => d.iter().map(|(k, v)| (k.clone(), v.as_ref().map_or("".to_string(), |val| format!("{:?}", val)))).collect(),
+                        Some(ListOrDict::List(l)) => l.iter().map(|s| (s.clone(), "".to_string())).collect(),
+                        None => HashMap::new(),
+                    },
+                    internal: config.internal.unwrap_or(false),
+                    enable_ipv6: config.enable_ipv6.unwrap_or(false),
+                };
+                if let Err(e) = self.backend.create_network(name, &net_config).await {
                     self.rollback(&started_containers, &created_networks, &created_volumes).await;
                     return Err(e);
                 }
@@ -90,9 +100,17 @@ impl ComposeEngine {
         }
 
         if let Some(volumes) = &self.spec.volumes {
-            for (name, config) in volumes {
-                let config = config.clone().unwrap_or_default();
-                if let Err(e) = self.backend.create_volume(name, &config).await {
+            for (name, config_opt) in volumes {
+                let config = config_opt.as_ref().cloned().unwrap_or_default();
+                let vol_config = VolumeConfig {
+                    driver: config.driver.clone(),
+                    labels: match &config.labels {
+                        Some(ListOrDict::Dict(d)) => d.iter().map(|(k, v)| (k.clone(), v.as_ref().map_or("".to_string(), |val| format!("{:?}", val)))).collect(),
+                        Some(ListOrDict::List(l)) => l.iter().map(|s| (s.clone(), "".to_string())).collect(),
+                        None => HashMap::new(),
+                    },
+                };
+                if let Err(e) = self.backend.create_volume(name, &vol_config).await {
                     self.rollback(&started_containers, &created_networks, &created_volumes).await;
                     return Err(e);
                 }
@@ -109,7 +127,7 @@ impl ComposeEngine {
                 ports: service.ports.as_ref().map(|p| p.iter().map(|ps| format!("{:?}", ps)).collect()),
                 volumes: service.volumes.as_ref().map(|v| v.iter().map(|vs| format!("{:?}", vs)).collect()),
                 env: match &service.environment {
-                    Some(ListOrDict::Dict(d)) => Some(d.iter().map(|(k, v)| (k.clone(), format!("{:?}", v))).collect()),
+                    Some(ListOrDict::Dict(d)) => Some(d.iter().map(|(k, v)| (k.clone(), v.as_ref().map_or("".to_string(), |val| format!("{:?}", val)))).collect()),
                     _ => None,
                 },
                 cmd: match &service.command {

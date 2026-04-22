@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 pub struct BackendProbeResult {
     pub name: String,
     pub available: bool,
-    pub reason: String,
+    pub reason: Option<String>,
+    pub version: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]

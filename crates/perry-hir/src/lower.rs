@@ -2671,21 +2671,25 @@ fn lower_module_decl(
                                     // e.g., Fastify() where Fastify is imported from 'fastify'
                                     if let ast::Expr::Ident(func_ident) = callee.as_ref() {
                                         let func_name = func_ident.sym.as_ref();
-                                        // Check if this is a default import from a native module
-                                        if let Some((module_name, None)) = ctx.lookup_native_module(func_name) {
-                                            // Register as native instance - the "class" is the module name for default exports
-                                            ctx.register_native_instance(name.clone(), module_name.to_string(), "App".to_string());
-                                        }
-                                        // Check if this is a named import that returns a handle (e.g., State from perry/ui)
-                                        if let Some((module_name, Some(method_name))) = ctx.lookup_native_module(func_name) {
-                                            if module_name == "perry/ui" {
-                                                match method_name {
-                                                    "State" | "Sheet" | "Toolbar" | "Window" | "LazyVStack"
-                                                    | "NavigationStack" | "Picker" | "Table" | "TabBar" => {
-                                                        ctx.register_native_instance(name.clone(), module_name.to_string(), method_name.to_string());
+                                        // Check if this is a default or named import from a native module
+                                        if let Some((module_name, method_opt)) = ctx.lookup_native_module(func_name).map(|(m, mo)| (m.to_string(), mo.map(|s| s.to_string()))) {
+                                            if let Some(method_name) = method_opt {
+                                                if module_name == "perry/ui" {
+                                                    match method_name.as_str() {
+                                                        "State" | "Sheet" | "Toolbar" | "Window" | "LazyVStack"
+                                                        | "NavigationStack" | "Picker" | "Table" | "TabBar" => {
+                                                            ctx.register_native_instance(name.clone(), module_name, method_name);
+                                                        }
+                                                        _ => {}
                                                     }
-                                                    _ => {}
+                                                } else if (module_name == "perry/container" || module_name == "perry/container-compose" || module_name == "perry/compose")
+                                                    && (method_name == "composeUp" || method_name == "up")
+                                                {
+                                                    ctx.register_native_instance(name.clone(), module_name, "ComposeHandle".to_string());
                                                 }
+                                            } else {
+                                                // Default import - the "class" is the module name for default exports
+                                                ctx.register_native_instance(name.clone(), module_name, "App".to_string());
                                             }
                                         }
                                     }

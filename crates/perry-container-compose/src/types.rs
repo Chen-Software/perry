@@ -336,6 +336,10 @@ pub struct ComposeSpec {
 }
 
 impl ComposeSpec {
+    pub fn parse_str(s: &str) -> Result<Self, crate::error::ComposeError> {
+        serde_yaml::from_str(s).map_err(crate::error::ComposeError::ParseError)
+    }
+
     pub fn merge(&mut self, other: ComposeSpec) {
         if other.name.is_some() { self.name = other.name; }
         for (k, v) in other.services { self.services.insert(k, v); }
