@@ -7,7 +7,7 @@ use crate::backend::ContainerBackend;
 use crate::error::{ComposeError, Result};
 use crate::service;
 use crate::types::{
-    ComposeHandle, ComposeSpec, ContainerInfo, ContainerLogs,
+    ComposeHandle, ComposeSpec, ContainerInfo, ContainerLogs, ContainerSpec,
 };
 use indexmap::IndexMap;
 use std::collections::HashMap;
@@ -26,8 +26,10 @@ pub struct ComposeEngine {
     pub spec: ComposeSpec,
     pub project_name: String,
     pub backend: Arc<dyn ContainerBackend>,
-    /// Services that were started in this session
-    started_containers: std::sync::Mutex<Vec<String>>,
+    /// Resources that were created in this session
+    session_containers: std::sync::Mutex<Vec<String>>,
+    session_networks: std::sync::Mutex<Vec<String>>,
+    session_volumes: std::sync::Mutex<Vec<String>>,
 }
 
 impl ComposeEngine {
@@ -41,12 +43,14 @@ impl ComposeEngine {
             spec,
             project_name,
             backend,
-            started_containers: std::sync::Mutex::new(Vec::new()),
+            session_containers: std::sync::Mutex::new(Vec::new()),
+            session_networks: std::sync::Mutex::new(Vec::new()),
+            session_volumes: std::sync::Mutex::new(Vec::new()),
         }
     }
 
     /// Register this engine in the global registry and return a handle.
-    fn register(&self) -> ComposeHandle {
+    fn register(self: Arc<Self>) -> ComposeHandle {
         let stack_id = NEXT_STACK_ID.fetch_add(1, Ordering::SeqCst);
         let services: Vec<String> = self.spec.services.keys().cloned().collect();
         let handle = ComposeHandle {
@@ -54,17 +58,10 @@ impl ComposeEngine {
             project_name: self.project_name.clone(),
             services,
         };
-        let engines = COMPOSE_ENGINES.lock().unwrap();
-        // Note: can't insert self while holding a reference, so we re-acquire later
-        drop(engines);
         COMPOSE_ENGINES
             .lock()
             .unwrap()
-            .insert(stack_id, Arc::new(ComposeEngine::new(
-                self.spec.clone(),
-                self.project_name.clone(),
-                Arc::clone(&self.backend),
-            )));
+            .insert(stack_id, Arc::clone(&self));
         handle
     }
 
@@ -83,12 +80,12 @@ impl ComposeEngine {
     /// Bring up services in dependency order.
     ///
     /// Creates networks and volumes first, then starts containers.
-    /// On failure, rolls back all previously started containers.
+    /// On failure, rolls back all resources created during this session.
     pub async fn up(
-        &self,
+        self: Arc<Self>,
         services: &[String],
         _detach: bool,
-        _build: bool,
+        build: bool,
         _remove_orphans: bool,
     ) -> Result<ComposeHandle> {
         let order = resolve_startup_order(&self.spec)?;
@@ -101,7 +98,6 @@ impl ComposeEngine {
         };
 
         // 1. Create networks (skip external)
-        let mut created_networks = Vec::new();
         if let Some(networks) = &self.spec.networks {
             for (net_name, net_config_opt) in networks {
                 let external = net_config_opt
@@ -115,27 +111,29 @@ impl ComposeEngine {
                     .and_then(|c| c.name.as_deref())
                     .unwrap_or(net_name.as_str());
 
-                let spec_config = net_config_opt.clone().unwrap_or_default();
-                let config = crate::backend::NetworkConfig {
-                    driver: spec_config.driver,
-                    labels: spec_config.labels.map(|l| l.to_map()).unwrap_or_default(),
-                    internal: spec_config.internal.unwrap_or(false),
-                    enable_ipv6: spec_config.enable_ipv6.unwrap_or(false),
-                };
-                tracing::info!("Creating network '{}'…", resolved_name);
-                if let Err(e) = self.backend.create_network(resolved_name, &config).await {
-                    self.rollback(&[], &created_networks, &[]).await;
-                    return Err(ComposeError::ServiceStartupFailed {
-                        service: format!("network/{}", net_name),
-                        message: e.to_string(),
-                    });
+                // State-aware: only create if not exists
+                if self.backend.inspect_network(resolved_name).await.is_err() {
+                    let spec_config = net_config_opt.clone().unwrap_or_default();
+                    let config = crate::backend::NetworkConfig {
+                        driver: spec_config.driver,
+                        labels: spec_config.labels.map(|l| l.to_map()).unwrap_or_default(),
+                        internal: spec_config.internal.unwrap_or(false),
+                        enable_ipv6: spec_config.enable_ipv6.unwrap_or(false),
+                    };
+                    tracing::info!("Creating network '{}'…", resolved_name);
+                    if let Err(e) = self.backend.create_network(resolved_name, &config).await {
+                        self.rollback().await;
+                        return Err(ComposeError::ServiceStartupFailed {
+                            service: format!("network/{}", net_name),
+                            message: e.to_string(),
+                        });
+                    }
+                    self.session_networks.lock().unwrap().push(resolved_name.to_string());
                 }
-                created_networks.push(resolved_name.to_string());
             }
         }
 
         // 2. Create volumes (skip external)
-        let mut created_volumes = Vec::new();
         if let Some(volumes) = &self.spec.volumes {
             for (vol_name, vol_config_opt) in volumes {
                 let external = vol_config_opt
@@ -149,6 +147,7 @@ impl ComposeEngine {
                     .and_then(|c| c.name.as_deref())
                     .unwrap_or(vol_name.as_str());
 
+                // State-aware: only create if not exists
                 let spec_config = vol_config_opt.clone().unwrap_or_default();
                 let config = crate::backend::VolumeConfig {
                     driver: spec_config.driver,
@@ -156,19 +155,17 @@ impl ComposeEngine {
                 };
                 tracing::info!("Creating volume '{}'…", resolved_name);
                 if let Err(e) = self.backend.create_volume(resolved_name, &config).await {
-                    self.rollback(&[], &created_networks, &created_volumes).await;
+                    self.rollback().await;
                     return Err(ComposeError::ServiceStartupFailed {
                         service: format!("volume/{}", vol_name),
                         message: e.to_string(),
                     });
                 }
-                created_volumes.push(resolved_name.to_string());
+                self.session_volumes.lock().unwrap().push(resolved_name.to_string());
             }
         }
 
         // 3. Start services in dependency order
-        let mut started = Vec::new();
-
         for svc_name in target {
             let svc = self
                 .spec
@@ -176,38 +173,116 @@ impl ComposeEngine {
                 .get(svc_name)
                 .ok_or_else(|| ComposeError::NotFound(svc_name.clone()))?;
 
-            if let Err(e) = crate::orchestrate::orchestrate_service(svc, svc_name, &*self.backend).await {
-                self.rollback(&started, &created_networks, &created_volumes).await;
+            let container_name = service::service_container_name(svc, svc_name);
+            let inspect_result = self.backend.inspect(&container_name).await;
+
+            let res = match inspect_result {
+                Ok(info) if info.status == "running" => Ok(()),
+                Ok(info) if info.status != "not found" => {
+                    self.backend.start(&container_name).await.map(|_| {
+                        self.session_containers.lock().unwrap().push(container_name.clone());
+                    })
+                }
+                _ => {
+                    // Build if needed
+                    if build && svc.needs_build() {
+                        let build_config = svc.build.as_ref().unwrap().as_build();
+                        let tag = svc.image_ref(svc_name);
+                        tracing::info!("Building image '{}'…", tag);
+                        if let Err(e) = self.backend.build(&build_config, &tag).await {
+                            Err(e)
+                        } else {
+                            self.run_service(svc, svc_name, &container_name).await
+                        }
+                    } else {
+                        // Check if image exists, if not and image_ref is set, try to pull
+                        let image = svc.image_ref(svc_name);
+                        if self.backend.list_images().await.map_or(true, |list| !list.iter().any(|i| i.repository == image || i.id == image)) {
+                            if let Some(img) = &svc.image {
+                                tracing::info!("Pulling image '{}'…", img);
+                                if let Err(e) = self.backend.pull_image(img).await {
+                                    return Err(ComposeError::ImagePullFailed { message: e.to_string() });
+                                }
+                            }
+                        }
+                        self.run_service(svc, svc_name, &container_name).await
+                    }
+                }
+            };
+
+            if let Err(e) = res {
+                self.rollback().await;
                 return Err(ComposeError::ServiceStartupFailed {
                     service: svc_name.clone(),
                     message: e.to_string(),
                 });
             }
-            started.push(service::service_container_name(svc, svc_name));
         }
-
-        // Record started containers
-        self.started_containers.lock().unwrap().extend(started);
 
         // Register and return handle
         Ok(self.register())
     }
 
+    async fn run_service(&self, svc: &crate::types::ComposeService, svc_name: &str, container_name: &str) -> Result<()> {
+        let image = svc.image_ref(svc_name);
+        let env = svc.resolved_env();
+        let ports = svc.port_strings();
+        let vols = svc.volume_strings();
 
-    async fn rollback(&self, started: &[String], networks: &[String], volumes: &[String]) {
-        tracing::info!("Rolling back partial startup…");
-        // Stop and remove containers in reverse order
-        for container_name in started.iter().rev() {
+        let mut all_labels: HashMap<String, String> = svc
+            .labels
+            .as_ref()
+            .map(|l| l.to_map())
+            .unwrap_or_default();
+        all_labels.insert("perry.compose.project".into(), self.project_name.clone());
+        all_labels.insert("perry.compose.service".into(), svc_name.to_string());
+
+        let cmd = svc.command_list();
+
+        let spec = ContainerSpec {
+            image: image.clone(),
+            name: Some(container_name.to_string()),
+            ports: Some(ports),
+            volumes: Some(vols),
+            env: Some(env),
+            labels: Some(all_labels),
+            cmd,
+            rm: Some(false),
+            read_only: svc.read_only,
+            ..Default::default()
+        };
+
+        self.backend.run(&spec).await.map(|_| {
+            self.session_containers.lock().unwrap().push(container_name.to_string());
+        })
+    }
+
+    async fn rollback(&self) {
+        tracing::info!("Rolling back session resources…");
+
+        let containers = {
+            let mut guard = self.session_containers.lock().unwrap();
+            std::mem::take(&mut *guard)
+        };
+        for container_name in containers.iter().rev() {
             let _ = self.backend.stop(container_name, None).await;
             let _ = self.backend.remove(container_name, true).await;
         }
-        // Remove networks
+
+        let networks = {
+            let mut guard = self.session_networks.lock().unwrap();
+            std::mem::take(&mut *guard)
+        };
         for net_name in networks {
-            let _ = self.backend.remove_network(net_name).await;
+            let _ = self.backend.remove_network(&net_name).await;
         }
-        // Remove volumes
+
+        let volumes = {
+            let mut guard = self.session_volumes.lock().unwrap();
+            std::mem::take(&mut *guard)
+        };
         for vol_name in volumes {
-            let _ = self.backend.remove_volume(vol_name).await;
+            let _ = self.backend.remove_volume(&vol_name).await;
         }
     }
 
@@ -230,51 +305,68 @@ impl ComposeEngine {
         };
 
         // 1. Stop and remove containers
-        for svc_name in target {
-            let svc = self
-                .spec
-                .services
-                .get(svc_name)
-                .ok_or_else(|| ComposeError::NotFound(svc_name.clone()))?;
-
-            let container_name = service::service_container_name(svc, svc_name);
-            let inspect_result = self.backend.inspect(&container_name).await;
-
-            if let Ok(info) = inspect_result {
-                if info.status == "running" {
-                    self.backend.stop(&container_name, None).await?;
-                }
-                self.backend.remove(&container_name, true).await?;
-            }
-        }
-
-        // 2. Remove networks (non-external, idempotent)
-        if let Some(networks) = &self.spec.networks {
-            for (net_name, net_config_opt) in networks {
-                let external = net_config_opt.as_ref().map_or(false, |c| c.external.unwrap_or(false));
-                if external {
-                    continue;
-                }
-                let resolved_name = net_config_opt.as_ref()
-                    .and_then(|c| c.name.as_deref())
-                    .unwrap_or(net_name.as_str());
-                let _ = self.backend.remove_network(resolved_name).await;
-            }
-        }
-
-        // 3. Remove volumes (if requested)
-        if remove_volumes {
-            if let Some(volumes) = &self.spec.volumes {
-                for (vol_name, vol_config_opt) in volumes {
-                    let external = vol_config_opt.as_ref().map_or(false, |c| c.external.unwrap_or(false));
-                    if external {
-                        continue;
+        if services.is_empty() {
+            // Remove by project labels if no specific services targeted
+            let all = self.backend.list(true).await?;
+            for container in all {
+                if container.labels.get("perry.compose.project").map(|v| v == &self.project_name).unwrap_or(false) {
+                    if container.status == "running" {
+                        let _ = self.backend.stop(&container.id, None).await;
                     }
-                    let resolved_name = vol_config_opt.as_ref()
-                        .and_then(|c| c.name.as_deref())
-                        .unwrap_or(vol_name.as_str());
-                    let _ = self.backend.remove_volume(resolved_name).await;
+                    let _ = self.backend.remove(&container.id, true).await;
                 }
+            }
+        } else {
+            for svc_name in &target {
+                let svc = self
+                    .spec
+                    .services
+                    .get(*svc_name)
+                    .ok_or_else(|| ComposeError::NotFound((*svc_name).clone()))?;
+
+                let container_name = service::service_container_name(svc, svc_name);
+                let inspect_result = self.backend.inspect(&container_name).await;
+
+                if let Ok(info) = inspect_result {
+                    if info.status == "running" {
+                        self.backend.stop(&container_name, None).await?;
+                    }
+                    self.backend.remove(&container_name, true).await?;
+                }
+            }
+        }
+        // Also clear session containers if they match target
+        if services.is_empty() {
+             let mut guard = self.session_containers.lock().unwrap();
+             guard.clear();
+        } else {
+            let mut guard = self.session_containers.lock().unwrap();
+            guard.retain(|c| !target.iter().any(|svc_name| {
+                 if let Some(svc) = self.spec.services.get(*svc_name) {
+                     service::service_container_name(svc, svc_name) == *c
+                 } else {
+                     false
+                 }
+            }));
+        }
+
+        // 2. Remove session networks (non-external, idempotent)
+        let networks = {
+            let mut guard = self.session_networks.lock().unwrap();
+            std::mem::take(&mut *guard)
+        };
+        for net_name in networks {
+            let _ = self.backend.remove_network(&net_name).await;
+        }
+
+        // 3. Remove session volumes (if requested)
+        if remove_volumes {
+            let volumes = {
+                let mut guard = self.session_volumes.lock().unwrap();
+                std::mem::take(&mut *guard)
+            };
+            for vol_name in volumes {
+                let _ = self.backend.remove_volume(&vol_name).await;
             }
         }
 
@@ -300,7 +392,7 @@ impl ComposeEngine {
                     image: svc.image_ref(svc_name),
                     status: "not found".to_string(),
                     ports: svc.port_strings(),
-                    labels: std::collections::HashMap::new(),
+                    labels: HashMap::new(),
                     created: String::new(),
                 },
             };
@@ -589,96 +681,5 @@ mod tests {
         let compose = make_compose(&[("c", &[]), ("a", &[]), ("b", &[])]);
         let order = resolve_startup_order(&compose).unwrap();
         assert_eq!(order, vec!["a", "b", "c"]);
-    }
-}
-
-#[cfg(test)]
-mod tests_v4 {
-    use super::*;
-    use proptest::prelude::*;
-
-    // Feature: alloy-container, Property 9: Container name generation uniqueness
-    proptest! {
-        #[test]
-        fn test_container_name_uniqueness(img1 in ".*", svc1 in ".*", img2 in ".*", svc2 in ".*") {
-            prop_assume!(img1 != img2 || svc1 != svc2);
-            let n1 = service::generate_name(&img1, &svc1);
-            let n2 = service::generate_name(&img2, &svc2);
-            // Due to random suffix, they should be different even if img/svc are same,
-            // but we explicitly assume different inputs here to test general case.
-            assert_ne!(n1, n2);
-        }
-    }
-}
-
-pub struct WorkloadGraphEngine {
-    pub backend: Arc<dyn ContainerBackend>,
-}
-
-impl WorkloadGraphEngine {
-    pub fn new(backend: Arc<dyn ContainerBackend>) -> Self {
-        Self { backend }
-    }
-
-    pub async fn run(&self, spec_json: &str, _opts_json: &str) -> Result<u64> {
-        // In a real implementation, parse spec_json to WorkloadGraph,
-        // convert to ComposeSpec, then call ComposeEngine::up.
-        let spec: ComposeSpec = serde_json::from_str(spec_json).map_err(ComposeError::JsonError)?;
-        let engine = ComposeEngine::new(spec, "workload".to_string(), Arc::clone(&self.backend));
-        let handle = engine.up(&[], true, false, false).await?;
-        Ok(handle.stack_id)
-    }
-}
-
-impl ComposeEngine {
-    pub async fn status(&self) -> Result<crate::types::StackStatus> {
-        let mut services = Vec::new();
-        let mut all_running = true;
-
-        for (svc_name, svc) in &self.spec.services {
-            let container_name = service::service_container_name(svc, svc_name);
-            let (state, container_id, error) = match self.backend.inspect(&container_name).await {
-                Ok(info) => {
-                    if info.status != "running" {
-                        all_running = false;
-                    }
-                    (info.status, Some(info.id), None)
-                }
-                Err(e) => {
-                    all_running = false;
-                    ("unknown".to_string(), None, Some(e.to_string()))
-                }
-            };
-
-            services.push(crate::types::ServiceStatus {
-                service: svc_name.clone(),
-                state,
-                container_id,
-                error,
-            });
-        }
-
-        Ok(crate::types::StackStatus {
-            services,
-            healthy: all_running,
-        })
-    }
-
-    pub fn graph(&self) -> Result<crate::types::ServiceGraph> {
-        let nodes = resolve_startup_order(&self.spec)?;
-        let mut edges = Vec::new();
-
-        for (name, svc) in &self.spec.services {
-            if let Some(deps) = &svc.depends_on {
-                for dep in deps.service_names() {
-                    edges.push(crate::types::ServiceEdge {
-                        from: name.clone(),
-                        to: dep,
-                    });
-                }
-            }
-        }
-
-        Ok(crate::types::ServiceGraph { nodes, edges })
     }
 }

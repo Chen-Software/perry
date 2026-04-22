@@ -295,7 +295,8 @@ pub enum BuildSpec {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeServiceBuild {
     pub context: Option<String>,
-    pub dockerfile: Option<String>,
+    #[serde(alias = "dockerfile")]
+    pub containerfile: Option<String>,
     pub dockerfile_inline: Option<String>,
     pub args: Option<ListOrDict>,
     pub ssh: Option<serde_yaml::Value>,
@@ -726,7 +727,6 @@ pub struct ContainerSpec {
     pub rm: Option<bool>,
     pub read_only: Option<bool>,
     pub seccomp: Option<String>,
-    pub labels: Option<std::collections::HashMap<String, String>>,
 }
 
 /// Handle returned after creating/running a container.
