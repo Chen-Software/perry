@@ -175,8 +175,16 @@ pub unsafe extern "C" fn js_container_removeImage(reference_ptr: *const StringHe
 
 #[no_mangle]
 pub unsafe extern "C" fn js_container_getBackend() -> *const StringHeader {
-    let b = tokio::runtime::Handle::current().block_on(get_global_backend_instance());
-    let name = b.map(|b| b.backend_name().to_string()).unwrap_or_else(|_| "unknown".to_string());
+    // Attempt to get the already-initialized backend name from the lock.
+    // We avoid block_on here because getBackend is synchronous in TS.
+    // If the backend isn't initialized yet, we return "unknown".
+    let name = if let Ok(lock) = BACKEND.try_lock() {
+        lock.as_ref()
+            .map(|b| b.backend_name().to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    } else {
+        "unknown".to_string()
+    };
     let bytes = name.as_bytes();
     perry_runtime::js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
 }
