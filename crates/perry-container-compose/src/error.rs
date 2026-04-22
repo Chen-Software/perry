@@ -60,6 +60,8 @@ impl ComposeError {
             ComposeError::BackendError { code, .. } => *code,
             ComposeError::DependencyCycle { .. } => 422,
             ComposeError::ValidationError { .. } => 400,
+            ComposeError::ParseError(_) => 400,
+            ComposeError::JsonError(_) => 400,
             ComposeError::VerificationFailed { .. } => 403,
             ComposeError::NoBackendFound { .. } => 503,
             ComposeError::BackendNotAvailable { .. } => 503,

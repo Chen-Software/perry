@@ -4,4 +4,5 @@ pub use perry_container_compose::backend::{
     DockerBackend, AppleBackend, LimaBackend,
     NetworkConfig, VolumeConfig,
     BackendProbeResult, detect_backend, probe_all_backends,
+    OciBackend, BackendDriver, OciCommandBuilder,
 };

@@ -9,13 +9,6 @@ use which::which;
 pub use crate::error::{ComposeError, Result, BackendProbeResult};
 use crate::types::{ContainerSpec, ContainerHandle, ContainerInfo, ContainerLogs, ImageInfo};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-pub enum ExecutionStrategy {
-    CliExec,
-    ApiSocket,
-    VmSpawn,
-}
-
 /// Layer 1: Abstract Operations
 #[async_trait]
 pub trait ContainerBackend: Send + Sync {
@@ -39,6 +32,7 @@ pub trait ContainerBackend: Send + Sync {
     async fn remove_volume(&self, name: &str) -> Result<()>;
     async fn build(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Result<()>;
     async fn inspect_network(&self, name: &str) -> Result<()>;
+    async fn inspect_volume(&self, name: &str) -> Result<()>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -180,6 +174,10 @@ pub trait CliProtocol: Send + Sync {
 
     fn remove_volume_args(&self, name: &str) -> Vec<String> {
         vec!["volume".into(), "rm".into(), name.into()]
+    }
+
+    fn inspect_volume_args(&self, name: &str) -> Vec<String> {
+        vec!["volume".into(), "inspect".into(), name.into()]
     }
 
     fn parse_list_output(&self, stdout: &str) -> Vec<ContainerInfo> {
@@ -452,8 +450,161 @@ impl<P: CliProtocol + Send + Sync + 'static> ContainerBackend for CliBackend<P> 
         self.exec_ok(args).await?;
         Ok(())
     }
+
+    async fn inspect_volume(&self, name: &str) -> Result<()> {
+        let args = self.protocol.inspect_volume_args(name);
+        self.exec_ok(args).await?;
+        Ok(())
+    }
 }
 
+/// Identifies the detected container runtime and its resolved CLI binary path.
+#[derive(Debug, Clone)]
+pub enum BackendDriver {
+    AppleContainer { bin: PathBuf },
+    Podman { bin: PathBuf },
+    OrbStack { bin: PathBuf },
+    Colima { bin: PathBuf },
+    RancherDesktop { bin: PathBuf },
+    Lima { bin: PathBuf, instance: String },
+    Nerdctl { bin: PathBuf },
+    Docker { bin: PathBuf },
+}
+
+impl BackendDriver {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::AppleContainer { .. } => "apple/container",
+            Self::Podman { .. } => "podman",
+            Self::OrbStack { .. } => "orbstack",
+            Self::Colima { .. } => "colima",
+            Self::RancherDesktop { .. } => "rancher-desktop",
+            Self::Lima { .. } => "lima",
+            Self::Nerdctl { .. } => "nerdctl",
+            Self::Docker { .. } => "docker",
+        }
+    }
+}
+
+pub struct OciBackend {
+    inner: Box<dyn ContainerBackend>,
+    driver: BackendDriver,
+}
+
+impl OciBackend {
+    pub fn new(driver: BackendDriver) -> Self {
+        let inner: Box<dyn ContainerBackend> = match &driver {
+            BackendDriver::AppleContainer { bin } => Box::new(CliBackend::new(bin.clone(), AppleContainerProtocol)),
+            BackendDriver::Lima { bin, instance } => Box::new(CliBackend::new(bin.clone(), LimaProtocol { instance: instance.clone() })),
+            BackendDriver::Podman { bin } | BackendDriver::OrbStack { bin } | BackendDriver::Colima { bin } |
+            BackendDriver::RancherDesktop { bin } | BackendDriver::Nerdctl { bin } | BackendDriver::Docker { bin } =>
+                Box::new(CliBackend::new(bin.clone(), DockerProtocol)),
+        };
+        Self { inner, driver }
+    }
+
+    pub fn driver(&self) -> &BackendDriver {
+        &self.driver
+    }
+}
+
+#[async_trait]
+impl ContainerBackend for OciBackend {
+    fn backend_name(&self) -> &str {
+        self.driver.name()
+    }
+
+    async fn check_available(&self) -> Result<()> {
+        self.inner.check_available().await
+    }
+
+    async fn run(&self, spec: &ContainerSpec) -> Result<ContainerHandle> {
+        self.inner.run(spec).await
+    }
+
+    async fn create(&self, spec: &ContainerSpec) -> Result<ContainerHandle> {
+        self.inner.create(spec).await
+    }
+
+    async fn start(&self, id: &str) -> Result<()> {
+        self.inner.start(id).await
+    }
+
+    async fn stop(&self, id: &str, timeout: Option<u32>) -> Result<()> {
+        self.inner.stop(id, timeout).await
+    }
+
+    async fn remove(&self, id: &str, force: bool) -> Result<()> {
+        self.inner.remove(id, force).await
+    }
+
+    async fn list(&self, all: bool) -> Result<Vec<ContainerInfo>> {
+        self.inner.list(all).await
+    }
+
+    async fn inspect(&self, id: &str) -> Result<ContainerInfo> {
+        self.inner.inspect(id).await
+    }
+
+    async fn logs(&self, id: &str, tail: Option<u32>) -> Result<ContainerLogs> {
+        self.inner.logs(id, tail).await
+    }
+
+    async fn exec(&self, id: &str, cmd: &[String], env: Option<&HashMap<String, String>>, workdir: Option<&str>) -> Result<ContainerLogs> {
+        self.inner.exec(id, cmd, env, workdir).await
+    }
+
+    async fn pull_image(&self, reference: &str) -> Result<()> {
+        self.inner.pull_image(reference).await
+    }
+
+    async fn list_images(&self) -> Result<Vec<ImageInfo>> {
+        self.inner.list_images().await
+    }
+
+    async fn remove_image(&self, reference: &str, force: bool) -> Result<()> {
+        self.inner.remove_image(reference, force).await
+    }
+
+    async fn create_network(&self, name: &str, config: &NetworkConfig) -> Result<()> {
+        self.inner.create_network(name, config).await
+    }
+
+    async fn remove_network(&self, name: &str) -> Result<()> {
+        self.inner.remove_network(name).await
+    }
+
+    async fn create_volume(&self, name: &str, config: &VolumeConfig) -> Result<()> {
+        self.inner.create_volume(name, config).await
+    }
+
+    async fn remove_volume(&self, name: &str) -> Result<()> {
+        self.inner.remove_volume(name).await
+    }
+
+    async fn build(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Result<()> {
+        self.inner.build(spec, image_name).await
+    }
+
+    async fn inspect_network(&self, name: &str) -> Result<()> {
+        self.inner.inspect_network(name).await
+    }
+
+    async fn inspect_volume(&self, name: &str) -> Result<()> {
+        self.inner.inspect_volume(name).await
+    }
+}
+
+pub struct OciCommandBuilder;
+impl OciCommandBuilder {
+    pub fn run_args(driver: &BackendDriver, spec: &ContainerSpec) -> Vec<String> {
+        match driver {
+            BackendDriver::AppleContainer { .. } => AppleContainerProtocol.run_args(spec),
+            BackendDriver::Lima { instance, .. } => LimaProtocol { instance: instance.clone() }.run_args(spec),
+            _ => DockerProtocol.run_args(spec),
+        }
+    }
+}
 static GLOBAL_BACKEND: tokio::sync::OnceCell<std::sync::Arc<dyn ContainerBackend + Send + Sync>> = tokio::sync::OnceCell::const_new();
 
 pub async fn get_global_backend_instance() -> Result<std::sync::Arc<dyn ContainerBackend + Send + Sync>> {
@@ -539,11 +690,11 @@ pub async fn probe_all_backends() -> Vec<BackendProbeResult> {
 }
 
 async fn probe_candidate(name: &str) -> std::result::Result<(std::sync::Arc<dyn ContainerBackend + Send + Sync>, String), String> {
-    match name {
+    let (bin, ver, driver) = match name {
         "apple/container" => {
             let bin = which("container").map_err(|_| "container binary not found on PATH".to_string())?;
             let ver = run_version_check(&bin).await?;
-            Ok((std::sync::Arc::new(CliBackend::new(bin, AppleContainerProtocol)), ver))
+            (bin, ver, BackendDriver::AppleContainer { bin: PathBuf::new() }) // bin will be replaced below
         }
         "podman" => {
             let bin = which("podman").map_err(|_| "podman binary not found on PATH".to_string())?;
@@ -551,45 +702,58 @@ async fn probe_candidate(name: &str) -> std::result::Result<(std::sync::Arc<dyn 
             if std::env::consts::OS == "macos" {
                 check_podman_machine_running(&bin).await?;
             }
-            Ok((std::sync::Arc::new(CliBackend::new(bin, DockerProtocol)), ver))
+            (bin, ver, BackendDriver::Podman { bin: PathBuf::new() })
         }
         "orbstack" => {
             let bin = which("orb").or_else(|_| which("docker"))
                 .map_err(|_| "orbstack not found".to_string())?;
             let ver = check_orbstack_socket_or_version(&bin).await?;
-            Ok((std::sync::Arc::new(CliBackend::new(bin, DockerProtocol)), ver))
+            (bin, ver, BackendDriver::OrbStack { bin: PathBuf::new() })
         }
         "colima" => {
             let bin = which("colima").map_err(|_| "colima binary not found on PATH".to_string())?;
             check_colima_running(&bin).await?;
             let docker_bin = which("docker").map_err(|_| "docker CLI not found (needed for colima)".to_string())?;
             let ver = run_version_check(&docker_bin).await?;
-            Ok((std::sync::Arc::new(CliBackend::new(docker_bin, DockerProtocol)), ver))
+            (docker_bin, ver, BackendDriver::Colima { bin: PathBuf::new() })
         }
         "rancher-desktop" => {
             let bin = which("nerdctl").map_err(|_| "nerdctl binary not found on PATH".to_string())?;
             let ver = run_version_check(&bin).await?;
             check_rancher_socket().await?;
-            Ok((std::sync::Arc::new(CliBackend::new(bin, DockerProtocol)), ver))
+            (bin, ver, BackendDriver::RancherDesktop { bin: PathBuf::new() })
         }
         "lima" => {
             let bin = which("limactl").map_err(|_| "limactl binary not found on PATH".to_string())?;
             let instance = check_lima_running_instance(&bin).await?;
             let ver = run_version_check(&bin).await?;
-            Ok((std::sync::Arc::new(CliBackend::new(bin, LimaProtocol { instance })), ver))
+            (bin, ver, BackendDriver::Lima { bin: PathBuf::new(), instance })
         }
         "nerdctl" => {
             let bin = which("nerdctl").map_err(|_| "nerdctl binary not found on PATH".to_string())?;
             let ver = run_version_check(&bin).await?;
-            Ok((std::sync::Arc::new(CliBackend::new(bin, DockerProtocol)), ver))
+            (bin, ver, BackendDriver::Nerdctl { bin: PathBuf::new() })
         }
         "docker" => {
             let bin = which("docker").map_err(|_| "docker binary not found on PATH".to_string())?;
             let ver = run_version_check(&bin).await?;
-            Ok((std::sync::Arc::new(CliBackend::new(bin, DockerProtocol)), ver))
+            (bin, ver, BackendDriver::Docker { bin: PathBuf::new() })
         }
-        other => Err(format!("unknown backend: {other}")),
-    }
+        other => return Err(format!("unknown backend: {other}")),
+    };
+
+    let final_driver = match driver {
+        BackendDriver::AppleContainer { .. } => BackendDriver::AppleContainer { bin: bin.clone() },
+        BackendDriver::Podman { .. } => BackendDriver::Podman { bin: bin.clone() },
+        BackendDriver::OrbStack { .. } => BackendDriver::OrbStack { bin: bin.clone() },
+        BackendDriver::Colima { .. } => BackendDriver::Colima { bin: bin.clone() },
+        BackendDriver::RancherDesktop { .. } => BackendDriver::RancherDesktop { bin: bin.clone() },
+        BackendDriver::Lima { instance, .. } => BackendDriver::Lima { bin: bin.clone(), instance },
+        BackendDriver::Nerdctl { .. } => BackendDriver::Nerdctl { bin: bin.clone() },
+        BackendDriver::Docker { .. } => BackendDriver::Docker { bin: bin.clone() },
+    };
+
+    Ok((std::sync::Arc::new(OciBackend::new(final_driver)), ver))
 }
 
 async fn run_version_check(bin: &Path) -> std::result::Result<String, String> {

@@ -85,6 +85,10 @@ impl ComposeEngine {
         if let Some(networks) = &self.spec.networks {
             for (name, config_opt) in networks {
                 let config = config_opt.as_ref().cloned().unwrap_or_default();
+                if config.external.unwrap_or(false) || self.backend.inspect_network(name).await.is_ok() {
+                    continue;
+                }
+
                 let net_config = NetworkConfig {
                     driver: config.driver.clone(),
                     labels: match &config.labels {
@@ -106,6 +110,10 @@ impl ComposeEngine {
         if let Some(volumes) = &self.spec.volumes {
             for (name, config_opt) in volumes {
                 let config = config_opt.as_ref().cloned().unwrap_or_default();
+                if config.external.unwrap_or(false) || self.backend.inspect_volume(name).await.is_ok() {
+                    continue;
+                }
+
                 let vol_config = VolumeConfig {
                     driver: config.driver.clone(),
                     labels: match &config.labels {
