@@ -13,7 +13,7 @@ pub mod ffi;
 
 pub use error::{ComposeError, Result, BackendProbeResult};
 pub use types::{ComposeSpec, ComposeService, ComposeHandle};
-pub use compose::ComposeEngine;
+pub use compose::{ComposeEngine, WorkloadGraphEngine};
 pub use project::ComposeProject;
 pub use backend::{ContainerBackend, CliBackend, CliProtocol, DockerProtocol, AppleContainerProtocol, LimaProtocol, detect_backend};
 pub use backend::{DockerBackend, AppleBackend, LimaBackend};

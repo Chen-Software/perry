@@ -2686,6 +2686,10 @@ fn lower_module_decl(
                                                     && (method_name == "composeUp" || method_name == "up")
                                                 {
                                                     ctx.register_native_instance(name.clone(), module_name, "ComposeHandle".to_string());
+                                                } else if (module_name == "perry/workloads")
+                                                    && (method_name == "runGraph")
+                                                {
+                                                    ctx.register_native_instance(name.clone(), module_name, "GraphHandle".to_string());
                                                 }
                                             } else {
                                                 // Default import - the "class" is the module name for default exports

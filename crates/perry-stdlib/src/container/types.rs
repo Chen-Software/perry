@@ -24,3 +24,9 @@ pub fn register_compose_engine(engine: super::compose::ComposeEngine) -> u64 {
     COMPOSE_ENGINES.get_or_init(DashMap::new).insert(id, Arc::new(engine));
     id
 }
+
+pub fn register_compose_engine_arc(engine: Arc<super::compose::ComposeEngine>) -> u64 {
+    let id = NEXT_HANDLE.fetch_add(1, Ordering::SeqCst);
+    COMPOSE_ENGINES.get_or_init(DashMap::new).insert(id, engine);
+    id
+}

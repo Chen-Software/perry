@@ -2211,7 +2211,7 @@ fn collect_modules(
                 // panic = "unwind" when this is set.
                 ctx.needs_thread = true;
             }
-            if import.source == "perry/container" || import.source == "perry/container-compose" || import.source == "perry/compose" {
+            if import.source == "perry/container" || import.source == "perry/container-compose" || import.source == "perry/compose" || import.source == "perry/workloads" {
                 // Container module uses async and calls into perry-container-compose.
                 // Re-enable unwinding for safety and link stdlib.
                 ctx.needs_container = true;

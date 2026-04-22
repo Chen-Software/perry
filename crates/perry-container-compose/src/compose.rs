@@ -1,6 +1,6 @@
 use indexmap::IndexMap;
 use crate::error::{ComposeError, Result};
-use crate::types::{ComposeSpec, ContainerInfo, ContainerLogs, ContainerSpec, ComposeHandle, ContainerHandle, ListOrDict, ComposeNetwork, ComposeVolume};
+use crate::types::{ComposeSpec, ContainerInfo, ContainerLogs, ContainerSpec, ComposeHandle, ContainerHandle, ListOrDict, ComposeNetwork, ComposeVolume, ServiceGraph, ServiceEdge, StackStatus, ServiceStatus};
 use crate::backend::{ContainerBackend, NetworkConfig, VolumeConfig};
 use crate::service::generate_name;
 use std::collections::{BTreeSet, HashMap};
@@ -72,6 +72,10 @@ impl ComposeEngine {
         Ok(order)
     }
 
+    pub fn resolve_startup_order_method(&self) -> Result<Vec<String>> {
+        Self::resolve_startup_order(&self.spec)
+    }
+
     pub async fn up(&self) -> Result<ComposeHandle> {
         let order = Self::resolve_startup_order(&self.spec)?;
         let mut created_networks = Vec::new();
@@ -138,7 +142,6 @@ impl ComposeEngine {
                 entrypoint: None,
                 network: None,
                 rm: Some(false),
-                read_only: service.read_only,
             };
 
             match self.backend.run(&container_spec).await {
@@ -227,5 +230,64 @@ impl ComposeEngine {
             self.backend.start(svc).await?;
         }
         Ok(())
+    }
+
+    pub fn graph(&self) -> Result<ServiceGraph> {
+        let order = Self::resolve_startup_order(&self.spec)?;
+        let mut edges = Vec::new();
+        for (name, service) in &self.spec.services {
+            if let Some(deps) = &service.depends_on {
+                for dep in deps.service_names() {
+                    edges.push(ServiceEdge {
+                        from: name.clone(),
+                        to: dep,
+                    });
+                }
+            }
+        }
+        Ok(ServiceGraph {
+            nodes: order,
+            edges,
+        })
+    }
+
+    pub async fn status(&self) -> Result<StackStatus> {
+        let mut services = Vec::new();
+        let mut all_running = true;
+        let containers = self.backend.list(true).await?;
+
+        for name in self.spec.services.keys() {
+            let container = containers.iter().find(|c| c.name == *name || c.name.starts_with(&format!("{}-", name)));
+            let state = container.map(|c| c.status.clone()).unwrap_or_else(|| "unknown".into());
+            let container_id = container.map(|c| c.id.clone());
+
+            if state != "running" && !state.contains("Up") {
+                all_running = false;
+            }
+
+            services.push(ServiceStatus {
+                service: name.clone(),
+                state,
+                container_id,
+                error: None,
+            });
+        }
+
+        Ok(StackStatus {
+            services,
+            healthy: all_running,
+        })
+    }
+}
+
+pub struct WorkloadGraphEngine {
+    pub engine: ComposeEngine,
+}
+
+impl WorkloadGraphEngine {
+    pub fn new(spec: ComposeSpec, backend: Arc<dyn ContainerBackend + Send + Sync>) -> Self {
+        Self {
+            engine: ComposeEngine::new(spec, backend),
+        }
     }
 }

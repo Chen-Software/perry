@@ -24,7 +24,6 @@ pub async fn alloy_container_run_capability(
         env: grants.env.clone(),
         cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
         entrypoint: None,
-        read_only: Some(true),
         ports: None,
     };
 

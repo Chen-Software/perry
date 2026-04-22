@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
@@ -7,6 +8,13 @@ use which::which;
 
 pub use crate::error::{ComposeError, Result, BackendProbeResult};
 use crate::types::{ContainerSpec, ContainerHandle, ContainerInfo, ContainerLogs, ImageInfo};
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub enum ExecutionStrategy {
+    CliExec,
+    ApiSocket,
+    VmSpawn,
+}
 
 /// Layer 1: Abstract Operations
 #[async_trait]
@@ -29,6 +37,8 @@ pub trait ContainerBackend: Send + Sync {
     async fn remove_network(&self, name: &str) -> Result<()>;
     async fn create_volume(&self, name: &str, config: &VolumeConfig) -> Result<()>;
     async fn remove_volume(&self, name: &str) -> Result<()>;
+    async fn build(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Result<()>;
+    async fn inspect_network(&self, name: &str) -> Result<()>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -231,9 +241,6 @@ pub fn docker_run_flags(spec: &ContainerSpec, include_detach: bool) -> Vec<Strin
     if spec.rm.unwrap_or(false) {
         args.push("--rm".into());
     }
-    if spec.read_only.unwrap_or(false) {
-        args.push("--read-only".into());
-    }
     if let Some(entrypoint) = &spec.entrypoint {
         args.extend(["--entrypoint".into(), entrypoint.join(" ")]);
     }
@@ -430,6 +437,29 @@ impl<P: CliProtocol + Send + Sync + 'static> ContainerBackend for CliBackend<P> 
         self.exec_ok(self.protocol.remove_volume_args(name)).await?;
         Ok(())
     }
+
+    async fn build(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Result<()> {
+        let mut args = vec!["build".into(), "--tag".into(), image_name.into()];
+        if let Some(ctx) = &spec.context {
+            args.push(ctx.clone());
+        }
+        self.exec_ok(args).await?;
+        Ok(())
+    }
+
+    async fn inspect_network(&self, name: &str) -> Result<()> {
+        let args = vec!["network".into(), "inspect".into(), name.into()];
+        self.exec_ok(args).await?;
+        Ok(())
+    }
+}
+
+static GLOBAL_BACKEND: tokio::sync::OnceCell<std::sync::Arc<dyn ContainerBackend + Send + Sync>> = tokio::sync::OnceCell::const_new();
+
+pub async fn get_global_backend_instance() -> Result<std::sync::Arc<dyn ContainerBackend + Send + Sync>> {
+    GLOBAL_BACKEND.get_or_try_init(|| async {
+        detect_backend().await.map_err(|e| ComposeError::NoBackendFound { probed: e })
+    }).await.cloned()
 }
 
 /// Layer 4: Runtime Detection
@@ -442,16 +472,22 @@ pub async fn detect_backend() -> std::result::Result<std::sync::Arc<dyn Containe
             }]);
     }
 
-    let candidates: &[&str] = match std::env::consts::OS {
-        "macos" | "ios" => &["apple/container", "orbstack", "colima", "rancher-desktop", "podman", "lima", "docker"],
-        _ => &["podman", "nerdctl", "docker"],
+    let mode = std::env::var("PERRY_CONTAINER_MODE").unwrap_or_else(|_| "local-first".to_string());
+
+    let candidates: &[&str] = if mode == "server-first" {
+        &["docker", "podman", "nerdctl"] // Remote candidates typically use standard names
+    } else {
+        match std::env::consts::OS {
+            "macos" | "ios" => &["apple/container", "orbstack", "colima", "rancher-desktop", "podman", "lima", "docker"],
+            _ => &["podman", "nerdctl", "docker"],
+        }
     };
 
     let mut results = Vec::new();
 
     for &candidate in candidates {
         match timeout(Duration::from_secs(2), probe_candidate(candidate)).await {
-            Ok(Ok((backend, version))) => {
+            Ok(Ok((backend, _version))) => {
                 return Ok(backend);
             }
             Ok(Err(reason)) => {

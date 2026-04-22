@@ -53,4 +53,22 @@ impl ComposeError {
     pub fn validation(message: String) -> Self {
         ComposeError::ValidationError { message }
     }
+
+    pub fn to_js_json(&self) -> String {
+        let code = match self {
+            ComposeError::NotFound(_) => 404,
+            ComposeError::BackendError { code, .. } => *code,
+            ComposeError::DependencyCycle { .. } => 422,
+            ComposeError::ValidationError { .. } => 400,
+            ComposeError::VerificationFailed { .. } => 403,
+            ComposeError::NoBackendFound { .. } => 503,
+            ComposeError::BackendNotAvailable { .. } => 503,
+            ComposeError::FileNotFound { .. } => 404,
+            _ => 500,
+        };
+        serde_json::json!({
+            "message": self.to_string(),
+            "code": code
+        }).to_string()
+    }
 }
