@@ -104,16 +104,10 @@ pub trait ContainerBackend: Send + Sync {
     async fn create_volume(&self, name: &str, config: &VolumeConfig) -> Result<()>;
     async fn remove_volume(&self, name: &str) -> Result<()>;
 
-    async fn inspect_network(&self, name: &str) -> Result<serde_json::Value>;
+    async fn inspect_network(&self, name: &str) -> Result<()>;
     async fn inspect_volume(&self, name: &str) -> Result<serde_json::Value>;
 
-    async fn build_image(
-        &self,
-        context: &str,
-        tag: &str,
-        dockerfile: Option<&str>,
-        args: Option<&HashMap<String, String>>,
-    ) -> Result<()>;
+    async fn build(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Result<()>;
 
     async fn inspect_image(&self, reference: &str) -> Result<serde_json::Value>;
     async fn manifest_inspect(&self, reference: &str) -> Result<serde_json::Value>;
@@ -936,15 +930,20 @@ impl ContainerBackend for OciBackend {
         self.logs(id, None).await
     }
 
-    async fn build_image(
+    async fn build(
         &self,
-        context: &str,
-        tag: &str,
-        dockerfile: Option<&str>,
-        args: Option<&HashMap<String, String>>,
+        spec: &crate::types::ComposeServiceBuild,
+        image_name: &str,
     ) -> Result<()> {
-        self.exec_ok(OciCommandBuilder::build_args(&self.driver, context, tag, dockerfile, args))
-            .await?;
+        let context = spec.context.as_deref().unwrap_or(".");
+        self.exec_ok(OciCommandBuilder::build_args(
+            &self.driver,
+            context,
+            image_name,
+            spec.dockerfile.as_deref(),
+            spec.args.as_ref().map(|l| l.to_map()).as_ref(),
+        ))
+        .await?;
         Ok(())
     }
 
@@ -962,11 +961,10 @@ impl ContainerBackend for OciBackend {
         serde_json::from_str(&stdout).map_err(ComposeError::JsonError)
     }
 
-    async fn inspect_network(&self, name: &str) -> Result<serde_json::Value> {
-        let stdout = self
-            .exec_ok(OciCommandBuilder::inspect_network_args(&self.driver, name))
+    async fn inspect_network(&self, name: &str) -> Result<()> {
+        self.exec_ok(OciCommandBuilder::inspect_network_args(&self.driver, name))
             .await?;
-        serde_json::from_str(&stdout).map_err(ComposeError::JsonError)
+        Ok(())
     }
 
     async fn inspect_volume(&self, name: &str) -> Result<serde_json::Value> {

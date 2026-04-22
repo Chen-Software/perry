@@ -217,12 +217,7 @@ impl ComposeEngine {
                     let context = build_config.context.as_deref().unwrap_or(".");
                     tracing::info!("Building service '{}' (image: {})...", svc_name, image_ref);
                     self.backend
-                        .build_image(
-                            context,
-                            &image_ref,
-                            build_config.dockerfile.as_deref(),
-                            build_config.args.as_ref().map(|l| l.to_map()).as_ref(),
-                        )
+                        .build(&build_config, &image_ref)
                         .await
                         .map_err(|e| ComposeError::ServiceStartupFailed {
                             service: svc_name.clone(),
@@ -499,6 +494,32 @@ impl ComposeEngine {
     /// Validate and return the resolved compose configuration.
     pub fn config(&self) -> Result<String> {
         self.spec.to_yaml()
+    }
+
+    /// Pull all images defined in the compose spec.
+    pub async fn pull(&self, services: &[String]) -> Result<()> {
+        let target: Vec<&String> = if services.is_empty() {
+            self.spec.services.keys().collect()
+        } else {
+            self.spec
+                .services
+                .keys()
+                .filter(|s| services.contains(s))
+                .collect()
+        };
+
+        for svc_name in target {
+            let svc = self
+                .spec
+                .services
+                .get(svc_name)
+                .ok_or_else(|| ComposeError::NotFound(svc_name.clone()))?;
+            if let Some(image) = &svc.image {
+                tracing::info!("Pulling image '{}' for service '{}'...", image, svc_name);
+                self.backend.pull_image(image).await?;
+            }
+        }
+        Ok(())
     }
 
     // ============ start / stop / restart ============
