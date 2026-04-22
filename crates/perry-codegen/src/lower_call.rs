@@ -223,13 +223,7 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
         // These arrive as ExternFuncRef because perry/system imports aren't
         // lowered to NativeMethodCall in the HIR.
         if let Some(sig) = perry_system_table_lookup(name) {
-            return lower_perry_ui_table_call(ctx, sig, args);
-        }
-        if let Some(sig) = perry_container_table_lookup(name) {
-            return lower_perry_ui_table_call(ctx, sig, args);
-        }
-        if let Some(sig) = perry_compose_table_lookup(name) {
-            return lower_perry_ui_table_call(ctx, sig, args);
+            return lower_table_dispatch_call(ctx, sig, args);
         }
         // Built-in runtime extern functions (`js_weakmap_set`,
         // `js_regexp_exec`, etc.) that start with `js_` are resolved
@@ -2321,52 +2315,6 @@ pub(crate) fn lower_native_method_call(
         return Ok(nanbox_pointer_inline(blk, &parent_final));
     }
 
-    // perry/ui ForEach — TS shape is `ForEach(state, (i) => Widget)`. The
-    // runtime's `perry_ui_for_each_init` wants `(container, state, closure)`,
-    // so we synthesize a VStack container, call for_each_init with it, and
-    // return the container handle. Without this special case the call falls
-    // through to the generic dispatch which emits the "method 'ForEach' not
-    // in dispatch table" warning and returns 0/undefined — the outer VStack
-    // then tries to add_child with an invalid handle, AppKit silently fails
-    // to attach the window body, and the process runs but no window shows.
-    if module == "perry/ui" && method == "ForEach" && object.is_none() && args.len() == 2 {
-        ctx.pending_declares.push((
-            "perry_ui_vstack_create".to_string(),
-            I64,
-            vec![DOUBLE],
-        ));
-        ctx.pending_declares.push((
-            "perry_ui_for_each_init".to_string(),
-            crate::types::VOID,
-            vec![I64, I64, DOUBLE],
-        ));
-
-        let spacing = "8.0".to_string();
-        let blk = ctx.block();
-        let container = blk.call(I64, "perry_ui_vstack_create", &[(DOUBLE, &spacing)]);
-        let container_slot = ctx.func.alloca_entry(I64);
-        ctx.block().store(I64, &container, &container_slot);
-
-        // args[0]: State handle — NaN-boxed pointer, unbox to i64.
-        let state_box = lower_expr(ctx, &args[0])?;
-        let blk = ctx.block();
-        let state_handle = unbox_to_i64(blk, &state_box);
-
-        // args[1]: render closure — stays as a NaN-boxed f64.
-        let closure_d = lower_expr(ctx, &args[1])?;
-
-        let blk = ctx.block();
-        let container_reload = blk.load(I64, &container_slot);
-        blk.call_void(
-            "perry_ui_for_each_init",
-            &[(I64, &container_reload), (I64, &state_handle), (DOUBLE, &closure_d)],
-        );
-
-        let blk = ctx.block();
-        let container_final = blk.load(I64, &container_slot);
-        return Ok(nanbox_pointer_inline(blk, &container_final));
-    }
-
     // perry/ui Button — TS shape is `Button(label, handler)` where
     // handler is a closure. The simple positional form is what mango
     // uses. The Object-config form (`Button(label, { onPress: cb })`)
@@ -2414,7 +2362,13 @@ pub(crate) fn lower_native_method_call(
     // perry/system dispatch: audioStart, audioGetLevel, getDeviceModel, etc.
     if module == "perry/system" && object.is_none() {
         if let Some(sig) = perry_system_table_lookup(method) {
-            return lower_perry_ui_table_call(ctx, sig, args);
+            return lower_table_dispatch_call(ctx, sig, args);
+        }
+    }
+
+    if module == "perry/workloads" && object.is_none() {
+        if let Some(sig) = perry_workloads_table_lookup(method) {
+            return lower_table_dispatch_call(ctx, sig, args);
         }
     }
 
@@ -2425,105 +2379,97 @@ pub(crate) fn lower_native_method_call(
         && method != "HStack"
     {
         if let Some(sig) = perry_ui_table_lookup(method) {
-            return lower_perry_ui_table_call(ctx, sig, args);
+            return lower_table_dispatch_call(ctx, sig, args);
         }
-        // Fail fast at compile time so a missing/misspelled method
-        // surfaces as an error instead of silently returning 0.0 —
-        // which used to compile, link, and run with a zero widget
-        // handle (no window, or null-pointer crash at the caller).
-        bail!(
-            "perry/ui: '{}' is not a known function (args: {}). \
-             Check the spelling and consult types/perry/ui/index.d.ts \
-             for the supported API surface.",
-            method,
-            args.len()
-        );
+        // Warn at compile time so missing methods are visible instead
+        // of silently returning 0.0 (which causes null-pointer crashes
+        // when the caller expects a widget handle).
+        eprintln!("perry/ui warning: method '{}' not in dispatch table (args: {})", method, args.len());
     }
 
-    if module == "perry/ui" && method == "App" && object.is_none() {
-        if args.len() != 1 {
-            bail!(
-                "perry/ui: App(...) takes a single config object literal like \
-                 `App({{ title, width, height, body }})`, got {} argument(s). \
-                 There is no `App(title, builder)` callback form.",
-                args.len()
-            );
+    if module == "perry/container" && object.is_none() {
+        if let Some(sig) = perry_container_table_lookup(method) {
+            return lower_table_dispatch_call(ctx, sig, args);
         }
-        let Expr::Object(props) = &args[0] else {
-            bail!(
-                "perry/ui: App(...) requires a config object literal. Use \
-                 `App({{ title: ..., width: ..., height: ..., body: ... }})` \
-                 (see types/perry/ui/index.d.ts)."
-            );
-        };
-        let mut title_ptr: String = "0".to_string();
-        let mut width_d: String = "1024.0".to_string();
-        let mut height_d: String = "768.0".to_string();
-        let mut body_handle: String = "0".to_string();
-        let mut icon_ptr: Option<String> = None;
-        for (key, val) in props {
-            match key.as_str() {
-                "title" => {
-                    let v = lower_expr(ctx, val)?;
-                    let blk = ctx.block();
-                    title_ptr = unbox_to_i64(blk, &v);
-                }
-                "width" => {
-                    width_d = lower_expr(ctx, val)?;
-                }
-                "height" => {
-                    height_d = lower_expr(ctx, val)?;
-                }
-                "body" => {
-                    let v = lower_expr(ctx, val)?;
-                    let blk = ctx.block();
-                    body_handle = unbox_to_i64(blk, &v);
-                }
-                "icon" => {
-                    let v = lower_expr(ctx, val)?;
-                    let blk = ctx.block();
-                    icon_ptr = Some(unbox_to_i64(blk, &v));
-                }
-                _ => {
-                    let _ = lower_expr(ctx, val)?;
+    }
+
+    if module == "perry/compose" && object.is_none() {
+        if let Some(sig) = perry_compose_table_lookup(method) {
+            return lower_table_dispatch_call(ctx, sig, args);
+        }
+    }
+
+    if module == "perry/ui" && method == "App" && object.is_none() && args.len() == 1 {
+        if let Expr::Object(props) = &args[0] {
+            let mut title_ptr: String = "0".to_string();
+            let mut width_d: String = "1024.0".to_string();
+            let mut height_d: String = "768.0".to_string();
+            let mut body_handle: String = "0".to_string();
+            let mut icon_ptr: Option<String> = None;
+            for (key, val) in props {
+                match key.as_str() {
+                    "title" => {
+                        let v = lower_expr(ctx, val)?;
+                        let blk = ctx.block();
+                        title_ptr = unbox_to_i64(blk, &v);
+                    }
+                    "width" => {
+                        width_d = lower_expr(ctx, val)?;
+                    }
+                    "height" => {
+                        height_d = lower_expr(ctx, val)?;
+                    }
+                    "body" => {
+                        let v = lower_expr(ctx, val)?;
+                        let blk = ctx.block();
+                        body_handle = unbox_to_i64(blk, &v);
+                    }
+                    "icon" => {
+                        let v = lower_expr(ctx, val)?;
+                        let blk = ctx.block();
+                        icon_ptr = Some(unbox_to_i64(blk, &v));
+                    }
+                    _ => {
+                        let _ = lower_expr(ctx, val)?;
+                    }
                 }
             }
+            ctx.pending_declares.push((
+                "perry_ui_app_create".to_string(),
+                I64,
+                vec![I64, DOUBLE, DOUBLE],
+            ));
+            ctx.pending_declares.push((
+                "perry_ui_app_set_icon".to_string(),
+                crate::types::VOID,
+                vec![I64],
+            ));
+            ctx.pending_declares.push((
+                "perry_ui_app_set_body".to_string(),
+                crate::types::VOID,
+                vec![I64, I64],
+            ));
+            ctx.pending_declares.push((
+                "perry_ui_app_run".to_string(),
+                crate::types::VOID,
+                vec![I64],
+            ));
+            let blk = ctx.block();
+            let app_handle = blk.call(
+                I64,
+                "perry_ui_app_create",
+                &[(I64, &title_ptr), (DOUBLE, &width_d), (DOUBLE, &height_d)],
+            );
+            if let Some(icon) = icon_ptr {
+                blk.call_void("perry_ui_app_set_icon", &[(I64, &icon)]);
+            }
+            blk.call_void(
+                "perry_ui_app_set_body",
+                &[(I64, &app_handle), (I64, &body_handle)],
+            );
+            blk.call_void("perry_ui_app_run", &[(I64, &app_handle)]);
+            return Ok(double_literal(0.0));
         }
-        ctx.pending_declares.push((
-            "perry_ui_app_create".to_string(),
-            I64,
-            vec![I64, DOUBLE, DOUBLE],
-        ));
-        ctx.pending_declares.push((
-            "perry_ui_app_set_icon".to_string(),
-            crate::types::VOID,
-            vec![I64],
-        ));
-        ctx.pending_declares.push((
-            "perry_ui_app_set_body".to_string(),
-            crate::types::VOID,
-            vec![I64, I64],
-        ));
-        ctx.pending_declares.push((
-            "perry_ui_app_run".to_string(),
-            crate::types::VOID,
-            vec![I64],
-        ));
-        let blk = ctx.block();
-        let app_handle = blk.call(
-            I64,
-            "perry_ui_app_create",
-            &[(I64, &title_ptr), (DOUBLE, &width_d), (DOUBLE, &height_d)],
-        );
-        if let Some(icon) = icon_ptr {
-            blk.call_void("perry_ui_app_set_icon", &[(I64, &icon)]);
-        }
-        blk.call_void(
-            "perry_ui_app_set_body",
-            &[(I64, &app_handle), (I64, &body_handle)],
-        );
-        blk.call_void("perry_ui_app_run", &[(I64, &app_handle)]);
-        return Ok(double_literal(0.0));
     }
 
     // fs module functions: readdirSync, statSync, mkdirSync, etc.
@@ -2651,7 +2597,8 @@ pub(crate) fn lower_native_method_call(
                 }
             }
             let return_type = match sig.ret {
-                UiReturnKind::Widget | UiReturnKind::Promise | UiReturnKind::Str => I64,
+                UiReturnKind::Widget => I64,
+                UiReturnKind::Str => I64,
                 UiReturnKind::F64 => DOUBLE,
                 UiReturnKind::Void => crate::types::VOID,
             };
@@ -2664,7 +2611,7 @@ pub(crate) fn lower_native_method_call(
                     blk.call_void(sig.runtime, &ref_args);
                     Ok(double_literal(0.0))
                 }
-                UiReturnKind::Widget | UiReturnKind::Promise => {
+                UiReturnKind::Widget => {
                     let raw = blk.call(I64, sig.runtime, &ref_args);
                     Ok(crate::expr::nanbox_pointer_inline(blk, &raw))
                 }
@@ -2677,21 +2624,12 @@ pub(crate) fn lower_native_method_call(
                 }
             };
         }
-        // Unknown instance method — fail the compile. Previously this
-        // lowered the args for side effects and returned TAG_UNDEFINED,
-        // which silently swallowed styling calls like `label.setColor(...)`
-        // and `btn.setCornerRadius(...)` (see types/perry/ui/index.d.ts
-        // for the real method surface — styling uses the free-function
-        // `textSetColor(widget, r, g, b, a)` / `setCornerRadius(widget, r)`
-        // forms, not instance methods on the widget handle).
-        bail!(
-            "perry/ui: '.{}(...)' is not a known instance method (args: {}). \
-             See types/perry/ui/index.d.ts — widget styling uses free functions \
-             like `textSetFontSize(label, 24)` and `widgetSetBackgroundColor(btn, r, g, b, a)`, \
-             not instance-method setters.",
-            method,
-            args.len()
-        );
+        // Unknown instance method — warn and lower args for side effects.
+        eprintln!("perry/ui warning: instance method '{}' not in dispatch table (args: {})", method, args.len());
+        for a in args {
+            let _ = lower_expr(ctx, a)?;
+        }
+        return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
     }
 
     if module == "array" && (method == "push_single" || method == "push") {
@@ -3499,9 +3437,7 @@ enum UiArgKind {
 enum UiReturnKind {
     /// Widget handle: NaN-box the i64 result with POINTER_TAG.
     Widget,
-    /// Promise handle: NaN-box the i64 result with POINTER_TAG.
-    Promise,
-    /// String handle: NaN-box the i64 result with STRING_TAG.
+    /// String pointer: NaN-box the i64 result with STRING_TAG.
     Str,
     /// Raw f64: pass through unchanged. Used by `scrollviewGetOffset` etc.
     F64,
@@ -3537,37 +3473,6 @@ struct UiSig {
 /// returns the zero-sentinel). That's the behavior the entire perry/ui
 /// surface had pre-v0.5.10 — adding a row here flips one method from
 /// "silent no-op" to "real call into libperry_ui_macos.a".
-/// Maps perry/container TypeScript function names to their FFI symbols.
-static PERRY_CONTAINER_TABLE: &[(&str, &str)] = &[
-    ("run",         "js_container_run"),
-    ("create",      "js_container_create"),
-    ("start",       "js_container_start"),
-    ("stop",        "js_container_stop"),
-    ("remove",      "js_container_remove"),
-    ("list",        "js_container_list"),
-    ("inspect",     "js_container_inspect"),
-    ("logs",        "js_container_logs"),
-    ("exec",        "js_container_exec"),
-    ("pullImage",   "js_container_pullImage"),
-    ("listImages",  "js_container_listImages"),
-    ("removeImage", "js_container_removeImage"),
-    ("getBackend",  "js_container_getBackend"),
-    ("composeUp",   "js_container_composeUp"),
-];
-
-/// Maps perry/compose TypeScript function names to their FFI symbols.
-static PERRY_COMPOSE_TABLE: &[(&str, &str)] = &[
-    ("up",      "js_compose_up"),
-    ("down",    "js_compose_down"),
-    ("ps",      "js_compose_ps"),
-    ("logs",    "js_compose_logs"),
-    ("exec",    "js_compose_exec"),
-    ("config",  "js_compose_config"),
-    ("start",   "js_compose_start"),
-    ("stop",    "js_compose_stop"),
-    ("restart", "js_compose_restart"),
-];
-
 const PERRY_UI_TABLE: &[UiSig] = &[
     // ---- Constructors (return widget handle) ----
     UiSig { method: "Divider", runtime: "perry_ui_divider_create",
@@ -3696,17 +3601,6 @@ const PERRY_UI_TABLE: &[UiSig] = &[
     UiSig { method: "widgetSetEdgeInsets", runtime: "perry_ui_widget_set_edge_insets",
             args: &[UiArgKind::Widget, UiArgKind::F64, UiArgKind::F64, UiArgKind::F64, UiArgKind::F64],
             ret: UiReturnKind::Void },
-
-    // ---- LazyVStack (virtualized list) ----
-    // `LazyVStack(count, (i) => Widget)` — on macOS backed by NSTableView
-    // with lazy row rendering. The render closure is invoked only for rows
-    // currently in the visible rect.
-    UiSig { method: "LazyVStack", runtime: "perry_ui_lazyvstack_create",
-            args: &[UiArgKind::F64, UiArgKind::Closure], ret: UiReturnKind::Widget },
-    UiSig { method: "lazyvstackUpdate", runtime: "perry_ui_lazyvstack_update",
-            args: &[UiArgKind::Widget, UiArgKind::I64Raw], ret: UiReturnKind::Void },
-    UiSig { method: "lazyvstackSetRowHeight", runtime: "perry_ui_lazyvstack_set_row_height",
-            args: &[UiArgKind::Widget, UiArgKind::F64], ret: UiReturnKind::Void },
 
     // ---- State ----
     UiSig { method: "State", runtime: "perry_ui_state_create",
@@ -3878,19 +3772,8 @@ const PERRY_UI_TABLE: &[UiSig] = &[
             args: &[UiArgKind::Str], ret: UiReturnKind::Void },
 
     // ---- Alert ----
-    // `alert(title, message)` dispatches to a dedicated 2-arg FFI; the prior
-    // entry pointed at the 4-arg `perry_ui_alert` symbol, which was ABI-broken
-    // (buttons/callback read from uninitialized registers, usually segfaulting
-    // inside js_array_get_length).
-    UiSig { method: "alert", runtime: "perry_ui_alert_simple",
+    UiSig { method: "alert", runtime: "perry_ui_alert",
             args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Void },
-    // `alertWithButtons(title, message, buttons, cb)` — buttons is a JS array
-    // of labels, callback receives the 0-based button index. Passed as F64
-    // because the runtime extracts the array pointer via
-    // `js_nanbox_get_pointer` just like closures.
-    UiSig { method: "alertWithButtons", runtime: "perry_ui_alert",
-            args: &[UiArgKind::Str, UiArgKind::Str, UiArgKind::F64, UiArgKind::Closure],
-            ret: UiReturnKind::Void },
 
     // ---- Window (constructor — receiver-less) ----
     UiSig { method: "Window", runtime: "perry_ui_window_create",
@@ -3959,25 +3842,9 @@ const PERRY_UI_TABLE: &[UiSig] = &[
     UiSig { method: "addKeyboardShortcut", runtime: "perry_ui_add_keyboard_shortcut",
             args: &[UiArgKind::Str, UiArgKind::Closure], ret: UiReturnKind::Void },
 
-    // ---- App lifecycle hooks ----
-    UiSig { method: "onTerminate", runtime: "perry_ui_app_on_terminate",
-            args: &[UiArgKind::Closure], ret: UiReturnKind::Void },
-    UiSig { method: "onActivate", runtime: "perry_ui_app_on_activate",
-            args: &[UiArgKind::Closure], ret: UiReturnKind::Void },
-
     // ---- App extras ----
     UiSig { method: "appSetTimer", runtime: "perry_ui_app_set_timer",
             args: &[UiArgKind::Widget, UiArgKind::F64, UiArgKind::Closure], ret: UiReturnKind::Void },
-    UiSig { method: "appSetMinSize", runtime: "perry_ui_app_set_min_size",
-            args: &[UiArgKind::Widget, UiArgKind::F64, UiArgKind::F64], ret: UiReturnKind::Void },
-    UiSig { method: "appSetMaxSize", runtime: "perry_ui_app_set_max_size",
-            args: &[UiArgKind::Widget, UiArgKind::F64, UiArgKind::F64], ret: UiReturnKind::Void },
-
-    // ---- Extra ScrollView alias (lowercase-v spelling matching the runtime FFI
-    // symbol; the runtime takes a single vertical offset, not the x/y pair
-    // declared on `scrollViewSetOffset` in index.d.ts — they coexist for now). ----
-    UiSig { method: "scrollviewSetOffset", runtime: "perry_ui_scrollview_set_offset",
-            args: &[UiArgKind::Widget, UiArgKind::F64], ret: UiReturnKind::Void },
 ];
 
 /// Instance method table for perry/ui receiver-based calls.
@@ -4009,6 +3876,59 @@ fn perry_ui_table_lookup(method: &str) -> Option<&'static UiSig> {
     PERRY_UI_TABLE.iter().find(|s| s.method == method)
 }
 
+/// Dispatch table for perry/container module.
+static PERRY_CONTAINER_TABLE: &[UiSig] = &[
+    UiSig { method: "run", runtime: "js_container_run", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "create", runtime: "js_container_create", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "start", runtime: "js_container_start", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "stop", runtime: "js_container_stop", args: &[UiArgKind::Str, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
+    UiSig { method: "remove", runtime: "js_container_remove", args: &[UiArgKind::Str, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
+    UiSig { method: "list", runtime: "js_container_list", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "inspect", runtime: "js_container_inspect", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "logs", runtime: "js_container_logs", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "exec", runtime: "js_container_exec", args: &[UiArgKind::Str, UiArgKind::Str, UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "build", runtime: "js_container_build", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "pullImage", runtime: "js_container_pullImage", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "listImages", runtime: "js_container_listImages", args: &[], ret: UiReturnKind::Widget },
+    UiSig { method: "removeImage", runtime: "js_container_removeImage", args: &[UiArgKind::Str, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
+    UiSig { method: "getBackend", runtime: "js_container_getBackend", args: &[], ret: UiReturnKind::Str },
+    UiSig { method: "detectBackend", runtime: "js_container_detectBackend", args: &[], ret: UiReturnKind::Widget },
+    UiSig { method: "composeUp", runtime: "js_container_composeUp", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
+];
+
+/// Dispatch table for perry/compose module.
+static PERRY_COMPOSE_TABLE: &[UiSig] = &[
+    UiSig { method: "up", runtime: "js_compose_up", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "down", runtime: "js_compose_down", args: &[UiArgKind::I64Raw, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
+    UiSig { method: "ps", runtime: "js_compose_ps", args: &[UiArgKind::I64Raw], ret: UiReturnKind::Widget },
+    UiSig { method: "logs", runtime: "js_compose_logs", args: &[UiArgKind::I64Raw, UiArgKind::Str, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
+    UiSig { method: "exec", runtime: "js_compose_exec", args: &[UiArgKind::I64Raw, UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "config", runtime: "js_compose_config", args: &[UiArgKind::I64Raw], ret: UiReturnKind::Widget },
+    UiSig { method: "start", runtime: "js_compose_start", args: &[UiArgKind::I64Raw, UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "stop", runtime: "js_compose_stop", args: &[UiArgKind::I64Raw, UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "restart", runtime: "js_compose_restart", args: &[UiArgKind::I64Raw, UiArgKind::Str], ret: UiReturnKind::Widget },
+];
+
+/// Dispatch table for perry/workloads module.
+static PERRY_WORKLOADS_TABLE: &[UiSig] = &[
+    UiSig { method: "graph", runtime: "js_workload_graph", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Str },
+    UiSig { method: "node", runtime: "js_workload_node", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Str },
+    UiSig { method: "runGraph", runtime: "js_workload_runGraph", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "inspectGraph", runtime: "js_workload_inspectGraph", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
+];
+
+fn perry_container_table_lookup(method: &str) -> Option<&'static UiSig> {
+    PERRY_CONTAINER_TABLE.iter().find(|s| s.method == method)
+}
+
+fn perry_compose_table_lookup(method: &str) -> Option<&'static UiSig> {
+    PERRY_COMPOSE_TABLE.iter().find(|s| s.method == method)
+}
+
+fn perry_workloads_table_lookup(method: &str) -> Option<&'static UiSig> {
+    PERRY_WORKLOADS_TABLE.iter().find(|s| s.method == method)
+}
+
 fn perry_ui_instance_method_lookup(method: &str) -> Option<&'static UiSig> {
     PERRY_UI_INSTANCE_TABLE.iter().find(|s| s.method == method)
 }
@@ -4018,7 +3938,7 @@ fn perry_ui_instance_method_lookup(method: &str) -> Option<&'static UiSig> {
 // =============================================================================
 
 /// Maps JS import names from `perry/system` to their `perry_system_*` / `perry_*`
-/// runtime C symbols. Uses the same UiSig + lower_perry_ui_table_call machinery
+/// runtime C symbols. Uses the same UiSig + lower_table_dispatch_call machinery
 /// since the calling convention is identical.
 static PERRY_SYSTEM_TABLE: &[UiSig] = &[
     UiSig { method: "isDarkMode", runtime: "perry_system_is_dark_mode",
@@ -4057,52 +3977,6 @@ fn perry_system_table_lookup(method: &str) -> Option<&'static UiSig> {
     PERRY_SYSTEM_TABLE.iter().find(|s| s.method == method)
 }
 
-// =============================================================================
-// perry/container dispatch table
-// =============================================================================
-
-static PERRY_CONTAINER_TABLE: &[UiSig] = &[
-    UiSig { method: "run", runtime: "js_container_run", args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "create", runtime: "js_container_create", args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "start", runtime: "js_container_start", args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "stop", runtime: "js_container_stop", args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "remove", runtime: "js_container_remove", args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "list", runtime: "js_container_list", args: &[UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "inspect", runtime: "js_container_inspect", args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "logs", runtime: "js_container_logs", args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "exec", runtime: "js_container_exec", args: &[UiArgKind::Str, UiArgKind::Str, UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "pullImage", runtime: "js_container_pullImage", args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "listImages", runtime: "js_container_listImages", args: &[], ret: UiReturnKind::Promise },
-    UiSig { method: "removeImage", runtime: "js_container_removeImage", args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "getBackend", runtime: "js_container_getBackend", args: &[], ret: UiReturnKind::Str },
-    UiSig { method: "detectBackend", runtime: "js_container_detectBackend", args: &[], ret: UiReturnKind::Promise },
-    UiSig { method: "build", runtime: "js_container_build", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Promise },
-];
-
-fn perry_container_table_lookup(method: &str) -> Option<&'static UiSig> {
-    PERRY_CONTAINER_TABLE.iter().find(|s| s.method == method)
-}
-
-// =============================================================================
-// perry/compose dispatch table
-// =============================================================================
-
-static PERRY_COMPOSE_TABLE: &[UiSig] = &[
-    UiSig { method: "up", runtime: "js_container_composeUp", args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "down", runtime: "js_container_compose_down", args: &[UiArgKind::F64, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "ps", runtime: "js_container_compose_ps", args: &[UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "logs", runtime: "js_container_compose_logs", args: &[UiArgKind::F64, UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "exec", runtime: "js_container_compose_exec", args: &[UiArgKind::F64, UiArgKind::Str, UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "config", runtime: "js_container_compose_config", args: &[UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "start", runtime: "js_container_compose_start", args: &[UiArgKind::F64, UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "stop", runtime: "js_container_compose_stop", args: &[UiArgKind::F64, UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "restart", runtime: "js_container_compose_restart", args: &[UiArgKind::F64, UiArgKind::Str], ret: UiReturnKind::Promise },
-];
-
-fn perry_compose_table_lookup(method: &str) -> Option<&'static UiSig> {
-    PERRY_COMPOSE_TABLE.iter().find(|s| s.method == method)
-}
-
 /// Lower a perry/ui call described by `sig`. Walks each arg, applies
 /// the per-kind coercion to produce an LLVM SSA value of the right type,
 /// lazy-declares the runtime function, emits the call, and boxes the
@@ -4113,7 +3987,7 @@ fn perry_compose_table_lookup(method: &str) -> Option<&'static UiSig> {
 /// zero-sentinel. The catch-all is intentional: TS users may write
 /// `Text()` (no arg) or `Text(s, extra)` and we don't want to bail
 /// the entire compilation.
-fn lower_perry_ui_table_call(
+fn lower_table_dispatch_call(
     ctx: &mut FnCtx<'_>,
     sig: &UiSig,
     args: &[Expr],
@@ -4180,7 +4054,8 @@ fn lower_perry_ui_table_call(
     // libperry_ui_*.a symbol. Same pending_declares mechanism the
     // cross-module call site uses for `perry_fn_*`.
     let return_type = match sig.ret {
-        UiReturnKind::Widget | UiReturnKind::Promise | UiReturnKind::Str => I64,
+        UiReturnKind::Widget => I64,
+        UiReturnKind::Str => I64,
         UiReturnKind::F64 => DOUBLE,
         UiReturnKind::Void => crate::types::VOID,
     };
@@ -4195,7 +4070,7 @@ fn lower_perry_ui_table_call(
     let arg_slices: Vec<(crate::types::LlvmType, &str)> =
         llvm_args.iter().map(|(t, s)| (*t, s.as_str())).collect();
     match sig.ret {
-        UiReturnKind::Widget | UiReturnKind::Promise => {
+        UiReturnKind::Widget => {
             let blk = ctx.block();
             let handle = blk.call(I64, sig.runtime, &arg_slices);
             Ok(nanbox_pointer_inline(blk, &handle))
@@ -4612,19 +4487,6 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
     NativeModSig { module: "ws", has_receiver: true, method: "close",
         class_filter: None,
         runtime: "js_ws_close", args: &[], ret: NR_VOID },
-    // Server-side helpers — the user receives a client handle as a plain
-    // f64 number from `wss.on('connection', (handle) => …)`, then passes
-    // it back to these free functions to write/close that specific peer.
-    // Without these entries the receiver-less call falls through to the
-    // silent stub a few hundred lines down, evaluates the args for side
-    // effects, and returns TAG_UNDEFINED — so frames silently never ship
-    // (issue #136).
-    NativeModSig { module: "ws", has_receiver: false, method: "sendToClient",
-        class_filter: None,
-        runtime: "js_ws_send_to_client", args: &[NA_F64, NA_STR], ret: NR_VOID },
-    NativeModSig { module: "ws", has_receiver: false, method: "closeClient",
-        class_filter: None,
-        runtime: "js_ws_close_client", args: &[NA_F64], ret: NR_VOID },
 
     // ========== Raw TCP sockets (net) + TLS ==========
     // Factory: `net.createConnection(host, port)` returns a Socket handle.
