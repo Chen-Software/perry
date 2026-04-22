@@ -171,12 +171,14 @@ pub struct ComposeServiceVolumeOpts {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct ComposeServiceVolumeTmpfs {
     pub size: Option<serde_yaml::Value>,
     pub mode: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct ComposeServiceVolumeImage {
     pub subpath: Option<String>,
 }
@@ -375,6 +377,7 @@ pub struct ComposeDeploymentResources {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub struct ComposeResourceSpec {
     pub cpus: Option<serde_yaml::Value>,
     pub memory: Option<String>,
@@ -384,6 +387,7 @@ pub struct ComposeResourceSpec {
 // ============ Logging ============
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub struct ComposeLogging {
     pub driver: Option<String>,
     pub options: Option<IndexMap<String, serde_yaml::Value>>,
@@ -401,6 +405,7 @@ pub struct ComposeNetworkIpamConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub struct ComposeNetworkIpam {
     pub driver: Option<String>,
     pub config: Option<Vec<ComposeNetworkIpamConfig>>,
@@ -598,6 +603,7 @@ impl ComposeService {
 
 /// Root compose spec (compose-spec §root)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub struct ComposeSpec {
     pub name: Option<String>,
     pub version: Option<String>,
@@ -622,6 +628,18 @@ impl ComposeSpec {
     /// Parse from raw YAML bytes.
     pub fn parse(yaml: &[u8]) -> Result<Self, crate::error::ComposeError> {
         serde_yaml::from_slice(yaml).map_err(crate::error::ComposeError::ParseError)
+    }
+
+    pub fn into_service_entities(&self) -> IndexMap<String, crate::service::Service> {
+        self.services
+            .iter()
+            .map(|(name, spec)| {
+                (
+                    name.clone(),
+                    crate::service::Service::new(name.clone(), spec),
+                )
+            })
+            .collect()
     }
 
     /// Serialize to YAML.

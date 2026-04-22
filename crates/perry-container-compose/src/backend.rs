@@ -659,13 +659,13 @@ pub async fn probe_all_backends() -> (Option<Box<dyn ContainerBackend>>, Vec<Bac
 
 fn platform_candidates() -> &'static [&'static str] {
     match std::env::consts::OS {
-        "macos" | "ios" => &["apple/container", "orbstack", "colima", "rancher-desktop", "podman", "lima", "docker"],
-        "linux" => &["podman", "nerdctl", "docker"],
-        _ => &["podman", "nerdctl", "docker"], // Windows + other
+        "macos" | "ios" => &["apple/container", "colima", "podman", "docker", "nerdctl"],
+        "linux" => &["podman", "docker", "nerdctl", "runc"],
+        _ => &["podman", "docker", "nerdctl", "runc"], // Windows + other
     }
 }
 
-async fn probe_candidate(name: &str) -> std::result::Result<(Box<dyn ContainerBackend>, Option<String>), String> {
+pub async fn probe_candidate(name: &str) -> std::result::Result<(Box<dyn ContainerBackend>, Option<String>), String> {
     let which_bin = |name: &str| -> std::result::Result<PathBuf, String> {
         which(name).map_err(|_| format!("{} not found", name))
     };
@@ -736,6 +736,11 @@ async fn probe_candidate(name: &str) -> std::result::Result<(Box<dyn ContainerBa
         }
         "docker" => {
             let bin = which_bin("docker")?;
+            let version = get_version(bin.clone()).await;
+            Ok((Box::new(DockerBackend::new(bin, DockerProtocol, version.clone())), version))
+        }
+        "runc" => {
+            let bin = which_bin("runc")?;
             let version = get_version(bin.clone()).await;
             Ok((Box::new(DockerBackend::new(bin, DockerProtocol, version.clone())), version))
         }

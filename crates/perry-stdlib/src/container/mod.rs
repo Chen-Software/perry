@@ -29,6 +29,15 @@ async fn get_global_backend() -> Result<&'static Arc<dyn ContainerBackend>, Cont
         return Ok(b);
     }
 
+    // Check PERRY_CONTAINER_BACKEND override first
+    if let Ok(name) = std::env::var("PERRY_CONTAINER_BACKEND") {
+        let b = perry_container_compose::backend::probe_candidate(&name).await
+            .map(|(b, _)| Arc::from(b) as Arc<dyn ContainerBackend>)
+            .map_err(|reason| ContainerError::BackendNotAvailable { name, reason })?;
+        let _ = BACKEND.set(b);
+        return Ok(BACKEND.get().unwrap());
+    }
+
     let b = detect_backend().await
         .map(|b| Arc::from(b) as Arc<dyn ContainerBackend>)
         .map_err(|probed| ContainerError::NoBackendFound { probed })?;

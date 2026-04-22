@@ -13,6 +13,8 @@ pub mod config;
 pub mod error;
 pub mod project;
 pub mod service;
+pub mod orchestrate;
+pub mod commands;
 pub mod types;
 pub mod yaml;
 

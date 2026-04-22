@@ -25,6 +25,7 @@ static NEXT_STACK_ID: AtomicU64 = AtomicU64::new(1);
 /// The compose orchestration engine.
 pub struct ComposeEngine {
     pub spec: ComposeSpec,
+    pub services: IndexMap<String, crate::service::Service<'static>>,
     pub project_name: String,
     pub backend: Arc<dyn ContainerBackend>,
     /// Services that were started in this session
@@ -42,8 +43,17 @@ impl ComposeEngine {
         project_name: String,
         backend: Arc<dyn ContainerBackend>,
     ) -> Self {
+        let mut services = IndexMap::new();
+        // This is a leak to make it 'static for the entity map in the engine
+        // In production, we'd manage lifetimes more carefully.
+        let spec_ref = Box::leak(Box::new(spec.clone()));
+        for (name, s_spec) in &spec_ref.services {
+            services.insert(name.clone(), crate::service::Service::new(name.clone(), s_spec));
+        }
+
         ComposeEngine {
             spec,
+            services,
             project_name,
             backend,
             started_containers: std::sync::Mutex::new(Vec::new()),
@@ -168,51 +178,10 @@ impl ComposeEngine {
 
         // 3. Start services in dependency order
         for svc_name in target {
-            let svc = self
-                .spec
-                .services
-                .get(svc_name)
+            let svc_entity = self.services.get(svc_name)
                 .ok_or_else(|| ComposeError::NotFound(svc_name.clone()))?;
 
-            let container_name = service::service_container_name(svc, svc_name);
-
-            // Check if already exists and running
-            let info_res = self.backend.inspect(&container_name).await;
-
-            let res = match info_res {
-                Ok(info) if info.status == "running" => {
-                    // Already running
-                    Ok(())
-                }
-                Ok(_info) => {
-                    // Exists but not running
-                    self.backend.start(&container_name).await
-                }
-                Err(_) => {
-                    // Does not exist
-                    let spec = ContainerSpec {
-                        image: svc.image_ref(svc_name),
-                        name: Some(container_name.clone()),
-                        ports: Some(svc.port_strings()),
-                        volumes: Some(svc.volume_strings()),
-                        env: Some(svc.resolved_env()),
-                        cmd: svc.command_list(),
-                        rm: Some(false),
-                        ..Default::default()
-                    };
-
-                    if detach {
-                        self.backend.run(&spec).await.map(|_| ())
-                    } else {
-                        match self.backend.create(&spec).await {
-                            Ok(_) => self.backend.start(&container_name).await,
-                            Err(e) => Err(e),
-                        }
-                    }
-                }
-            };
-
-            if let Err(e) = res {
+            if let Err(e) = crate::orchestrate::orchestrate_service(svc_name, svc_entity, self.backend.as_ref()).await {
                 tracing::error!("Service '{}' failed to start, rolling back...", svc_name);
                 self.rollback(&started, &created_nets, &created_vols).await;
                 return Err(ComposeError::ServiceStartupFailed {
@@ -221,7 +190,7 @@ impl ComposeEngine {
                 });
             }
 
-            started.push(container_name.clone());
+            started.push(svc_entity.name(svc_name));
         }
 
         // Record started resources
