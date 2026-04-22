@@ -7,20 +7,20 @@ use perry_container_compose::types::ComposeService;
 #[test]
 fn test_generate_name_format() {
     let name = generate_name("nginx:latest", "web");
-    let parts: Vec<&str> = name.split('-').collect();
-    // {service_name}-{md5_8chars}-{random_hex}
-    assert_eq!(parts.len(), 3);
+    let parts: Vec<&str> = name.split('_').collect();
+    // {service_name}_{short_hash}{random_suffix_hex}
+    assert_eq!(parts.len(), 2);
     assert_eq!(parts[0], "web");
-    assert_eq!(parts[1].len(), 8);
-    assert_eq!(parts[2].len(), 8);
+    assert_eq!(parts[1].len(), 16);
 }
 
 // Feature: perry-container | Layer: unit | Req: 6.13 | Property: -
 #[test]
 fn test_generate_name_sanitization() {
     let name = generate_name("img", "my.service");
-    let parts: Vec<&str> = name.split('-').collect();
-    assert_eq!(parts[0], "my_service");
+    // Format: {safe_name}_{hash+random}
+    // "my.service" becomes "my_service"
+    assert!(name.starts_with("my_service_"));
 }
 
 // Feature: perry-container | Layer: unit | Req: 6.13 | Property: -
@@ -37,7 +37,7 @@ fn test_service_container_name_explicit() {
 fn test_service_container_name_generated() {
     let svc = ComposeService::default();
     let name = service_container_name(&svc, "web");
-    assert!(name.starts_with("web-"));
+    assert!(name.starts_with("web_"));
 }
 
 /*

@@ -1,8 +1,8 @@
 use async_trait::async_trait;
-use perry_container_compose::backend::{ContainerBackend, NetworkConfig, VolumeConfig, SecurityProfile};
+use perry_container_compose::backend::{ContainerBackend, NetworkConfig, VolumeConfig};
 use perry_container_compose::types::{
     ContainerHandle, ContainerInfo, ContainerLogs, ImageInfo,
-    ContainerSpec
+    ContainerSpec, ComposeServiceBuild
 };
 use perry_container_compose::error::{ComposeError, Result};
 use std::collections::HashMap;
@@ -19,7 +19,7 @@ pub struct MockBackendState {
 
 #[derive(Clone, Default)]
 pub struct MockBackend {
-    pub state: Arc<Mutex<MockBackendState>>,
+    pub state: Arc Arc<Mutex<Mutex<MockBackendState>>,
 }
 
 #[async_trait]
@@ -28,7 +28,11 @@ impl ContainerBackend for MockBackend {
 
     async fn check_available(&self) -> Result<()> { Ok(()) }
 
-    async fn run(&self, spec: &ContainerSpec) -> Result<ContainerHandle> {
+    async fn build(&self, _spec: &ComposeServiceBuild, _image_name: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn run(&self, spec: &ContainerSpec) -> Result Result<ContainerHandle> {
         let mut state = self.state.lock().unwrap();
         let name = spec.name.clone().unwrap_or_else(|| "unnamed".to_string());
 
@@ -46,7 +50,7 @@ impl ContainerBackend for MockBackend {
         Ok(ContainerHandle { id: name.clone(), name: Some(name) })
     }
 
-    async fn create(&self, _spec: &ContainerSpec) -> Result<ContainerHandle> { Ok(ContainerHandle { id: "id".into(), name: None }) }
+    async fn create(&self, _spec: &ContainerSpec) -> Result Result<ContainerHandle> { Ok(ContainerHandle { id: "id".into(), name: None }) }
     async fn start(&self, _id: &str) -> Result<()> { Ok(()) }
     async fn stop(&self, id: &str, _timeout: Option<u32>) -> Result<()> {
         let mut state = self.state.lock().unwrap();
@@ -60,7 +64,7 @@ impl ContainerBackend for MockBackend {
         Ok(())
     }
 
-    async fn list(&self, _all: bool) -> Result<Vec<ContainerInfo>> {
+    async fn list(&self, _all: bool) -> Result<Vec<Vec<ContainerInfo>> {
         let state = self.state.lock().unwrap();
         let mut infos = Vec::new();
         for id in &state.containers {
@@ -86,7 +90,7 @@ impl ContainerBackend for MockBackend {
         Ok(infos)
     }
 
-    async fn inspect(&self, id: &str) -> Result<ContainerInfo> {
+    async fn inspect(&self, id: &str) -> Result Result<ContainerInfo> {
         let state = self.state.lock().unwrap();
         if state.containers.contains(&id.to_string()) {
             Ok(ContainerInfo {
@@ -103,11 +107,25 @@ impl ContainerBackend for MockBackend {
         }
     }
 
-    async fn logs(&self, _id: &str, _tail: Option<u32>) -> Result<ContainerLogs> {
+    async fn inspect_image(&self, _reference: &str) -> Result<ImageInfo> {
+        Ok(ImageInfo {
+            id: "mock-id".to_string(),
+            repository: "mock-repo".to_string(),
+            tag: "latest".to_string(),
+            size: 0,
+            created: "2025-01-01T00:00:00Z".to_string(),
+        })
+    }
+
+    async fn wait(&self, _id: &str) -> Result<i32> {
+        Ok(0)
+    }
+
+    async fn logs(&self, _id: &str, _tail: Option<u32>) -> Result Result<ContainerLogs> {
         Ok(ContainerLogs { stdout: "logs".into(), stderr: "".into() })
     }
 
-    async fn exec(&self, _id: &str, _cmd: &[String], _env: Option<&HashMap<String, String>>, _workdir: Option<&str>) -> Result<ContainerLogs> {
+    async fn exec(&self, _id: &str, _cmd: &[String], _env: Option<&HashMap<String, String>>, _workdir: Option<&str>) -> Result Result<ContainerLogs> {
         Ok(ContainerLogs { stdout: "exec".into(), stderr: "".into() })
     }
 
@@ -143,11 +161,5 @@ impl ContainerBackend for MockBackend {
         Ok(())
     }
 
-    async fn inspect_network(&self, _name: &str) -> Result<serde_json::Value> { Ok(serde_json::json!({})) }
-    async fn inspect_volume(&self, _name: &str) -> Result<serde_json::Value> { Ok(serde_json::json!({})) }
-    async fn build_image(&self, _image: &str, _context: &str, _dockerfile: Option<&str>, _args: Option<&HashMap<String, String>>) -> Result<()> { Ok(()) }
-    async fn inspect_image(&self, _reference: &str) -> Result<serde_json::Value> { Ok(serde_json::json!({})) }
-    async fn manifest_inspect(&self, _reference: &str) -> Result<serde_json::Value> { Ok(serde_json::json!({})) }
-    async fn run_with_security(&self, spec: &ContainerSpec, _profile: &SecurityProfile) -> Result<ContainerHandle> { self.run(spec).await }
-    async fn wait_and_logs(&self, id: &str) -> Result<ContainerLogs> { self.logs(id, None).await }
+    async fn inspect_network(&self, _name: &str) -> Result<()> { Ok(()) }
 }

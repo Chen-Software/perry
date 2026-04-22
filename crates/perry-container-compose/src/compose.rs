@@ -190,20 +190,13 @@ impl ComposeEngine {
                     // Build if needed
                     if build && svc.needs_build() {
                         let build_config = svc.build.as_ref().unwrap().as_build();
-                        let context = build_config.context.as_deref().unwrap_or(".");
                         let tag = svc.image_ref(svc_name);
-                        let build_args: Option<HashMap<String, String>> =
-                            build_config.args.as_ref().map(|a| a.to_map());
                         tracing::info!("Building image '{}'…", tag);
                         if let Err(e) = self
                             .backend
                             .build(
-                                context,
-                                build_config.dockerfile.as_deref(),
+                                &build_config,
                                 &tag,
-                                build_args.as_ref(),
-                                build_config.target.as_deref(),
-                                build_config.network.as_deref(),
                             )
                             .await
                         {
@@ -372,6 +365,7 @@ impl ComposeEngine {
                     image: svc.image_ref(svc_name),
                     status: "not found".to_string(),
                     ports: svc.port_strings(),
+                    labels: std::collections::HashMap::new(),
                     created: String::new(),
                 },
             };
@@ -442,6 +436,11 @@ impl ComposeEngine {
     /// Validate and return the resolved compose configuration.
     pub fn config(&self) -> Result<String> {
         self.spec.to_yaml()
+    }
+
+    /// Resolve the startup order of services using Kahn's algorithm.
+    pub fn resolve_startup_order(&self) -> Result<Vec<String>> {
+        resolve_startup_order(&self.spec)
     }
 
     // ============ start / stop / restart ============

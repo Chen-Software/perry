@@ -89,7 +89,7 @@ pub struct PsArgs {
 
 #[derive(Args, Debug)]
 pub struct LogsArgs {
-    #[arg(short = 'f', long = "follow")]
+    #[arg(long = "follow")]
     pub follow: bool,
     #[arg(long = "tail")]
     pub tail: Option<u32>,
