@@ -69,13 +69,16 @@ pub async fn compose_logs(id: u64, service: Option<String>, tail: Option<u32>) -
     Ok(ContainerLogs { stdout, stderr })
 }
 
-pub async fn compose_exec(id: u64, service: String, cmd: Vec<String>) -> Result<ContainerLogs, String> {
+pub async fn compose_exec(id: u64, service: String, cmd: Vec<String>, env: Option<std::collections::HashMap<String, String>>, workdir: Option<String>) -> Result<ContainerLogs, String> {
     let engine = COMPOSE_HANDLES.get_or_init(DashMap::new)
         .get(&id)
         .map(|e| Arc::clone(&e.0))
         .ok_or_else(|| format!("Compose stack {} not found", id))?;
 
-    let logs = engine.exec(&service, &cmd).await.map_err(|e| e.to_string())?;
+    let svc = engine.spec.services.get(&service).ok_or_else(|| format!("Service {} not found", service))?;
+    let container_name = perry_container_compose::service::service_container_name(svc, &service);
+
+    let logs = engine.backend.exec(&container_name, &cmd, env.as_ref(), workdir.as_deref()).await.map_err(|e| e.to_string())?;
     Ok(ContainerLogs {
         stdout: logs.stdout,
         stderr: logs.stderr,
