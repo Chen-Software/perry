@@ -169,6 +169,7 @@ pub struct ComposeHealthcheck {
     pub start_period: Option<String>,
     pub start_interval: Option<String>,
     pub disable: Option<bool>,
+    pub read_only: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -46,6 +46,8 @@ pub trait ContainerBackend: Send + Sync {
     async fn remove_network(&self, name: &str) -> Result<()>;
     async fn create_volume(&self, name: &str, config: &VolumeConfig) -> Result<()>;
     async fn remove_volume(&self, name: &str) -> Result<()>;
+    async fn build(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Result<()>;
+    async fn inspect_network(&self, name: &str) -> Result<()>;
     async fn wait(&self, id: &str) -> Result<()>;
 }
 
@@ -169,6 +171,17 @@ impl OciCommandBuilder {
         args
     }
     pub fn remove_volume_args(name: &str) -> Vec<String> { vec!["volume".into(), "rm".into(), name.into()] }
+    pub fn build_args(spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Vec<String> {
+        let mut args = vec!["build".into()];
+        if let Some(context) = &spec.context { args.extend(["--build-arg".into(), format!("CONTEXT={}", context)]); }
+        if let Some(dockerfile) = &spec.dockerfile { args.extend(["--file".into(), dockerfile.clone()]); }
+        args.extend(["-t".into(), image_name.to_string()]);
+        args.push(".".into());
+        args
+    }
+    pub fn inspect_network_args(name: &str) -> Vec<String> {
+        vec!["network".into(), "inspect".into(), name.into()]
+    }
     pub fn wait_args(id: &str) -> Vec<String> { vec!["wait".into(), id.into()] }
 }
 
@@ -321,6 +334,16 @@ impl ContainerBackend for OciBackend {
         Ok(())
     }
 
+    async fn build(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Result<()> {
+        self.exec_ok(OciCommandBuilder::build_args(spec, image_name)).await?;
+        Ok(())
+    }
+
+    async fn inspect_network(&self, name: &str) -> Result<()> {
+        self.exec_ok(OciCommandBuilder::inspect_network_args(name)).await?;
+        Ok(())
+    }
+
     async fn wait(&self, id: &str) -> Result<()> {
         self.exec_ok(OciCommandBuilder::wait_args(id)).await?;
         Ok(())
@@ -358,7 +381,7 @@ pub async fn detect_backend() -> std::result::Result<Box<dyn ContainerBackend>, 
     }
 
     let candidates = match std::env::consts::OS {
-        "macos" | "ios" => vec!["apple/container", "orbstack", "colima", "rancher-desktop", "podman", "lima", "docker"],
+        "macos" | "ios" => vec!["apple/container", "orbstack", "colima", "rancher-desktop", "lima", "podman", "nerdctl", "docker"],
         _ => vec!["podman", "nerdctl", "docker"],
     };
 
