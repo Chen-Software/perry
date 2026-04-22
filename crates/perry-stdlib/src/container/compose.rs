@@ -1,4 +1,4 @@
-//! ComposeWrapper — thin orchestration adapter over `perry_container_compose::ComposeEngine`.
+//! Compose orchestration wrapper.
 
 use perry_container_compose::backend::ContainerBackend;
 use super::types::{
@@ -19,9 +19,9 @@ pub async fn compose_up(spec: ComposeSpec) -> Result<ComposeHandle, String> {
     Ok(handle)
 }
 
-impl ComposeWrapper {
-    pub fn new(spec: ComposeSpec, backend: Arc<dyn ContainerBackend>) -> Self {
-        let project_name = spec.name.clone().unwrap_or_else(|| "perry-stack".to_string());
+pub async fn compose_down(id: u64, volumes: bool) -> Result<(), String> {
+    let engine = ComposeEngine::get_engine(id)
+        .ok_or_else(|| format!("Compose stack {} not found", id))?;
 
     engine.down(&[], false, volumes).await.map_err(|e| e.to_string())?;
     ComposeEngine::unregister(id);
