@@ -653,3 +653,93 @@ async fn probe_candidate(name: &str) -> std::result::Result<Box<dyn ContainerBac
         _ => Err("unknown backend".into()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ContainerSpec;
+
+    #[test]
+    fn test_docker_run_args() {
+        let proto = DockerProtocol;
+        let spec = ContainerSpec {
+            image: "nginx".into(),
+            name: Some("web".into()),
+            ports: Some(vec!["80:80".into()]),
+            env: Some([("FOO".into(), "BAR".into())].into()),
+            rm: Some(true),
+            ..Default::default()
+        };
+
+        let args = proto.run_args(&spec);
+        assert!(args.contains(&"run".to_string()));
+        assert!(args.contains(&"--name".to_string()));
+        assert!(args.contains(&"web".to_string()));
+        assert!(args.contains(&"-p".to_string()));
+        assert!(args.contains(&"80:80".to_string()));
+        assert!(args.contains(&"-e".to_string()));
+        assert!(args.contains(&"FOO=BAR".to_string()));
+        assert!(args.contains(&"--rm".to_string()));
+        assert!(args.contains(&"nginx".to_string()));
+    }
+
+    #[test]
+    fn test_apple_run_args() {
+        let proto = AppleContainerProtocol;
+        let spec = ContainerSpec {
+            image: "alpine".into(),
+            rm: Some(true),
+            ..Default::default()
+        };
+
+        let args = proto.run_args(&spec);
+        // apple/container run doesn't use --detach by default in our impl
+        assert!(args.contains(&"run".to_string()));
+        assert!(args.contains(&"--rm".to_string()));
+        assert!(args.contains(&"alpine".to_string()));
+        assert!(!args.contains(&"--detach".to_string()));
+    }
+
+    #[test]
+    fn test_lima_run_args() {
+        let proto = LimaProtocol { instance: "default".into() };
+        let spec = ContainerSpec {
+            image: "busybox".into(),
+            ..Default::default()
+        };
+
+        let args = proto.run_args(&spec);
+        assert_eq!(args[0], "shell");
+        assert_eq!(args[1], "default");
+        assert_eq!(args[2], "nerdctl");
+        assert_eq!(args[3], "run");
+    }
+
+    #[test]
+    fn test_platform_candidates() {
+        let candidates = platform_candidates();
+        assert!(!candidates.is_empty());
+        if cfg!(target_os = "macos") || cfg!(target_os = "ios") {
+            assert_eq!(candidates[0], "apple/container");
+        } else {
+            assert_eq!(candidates[0], "podman");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_detect_backend_env_override() {
+        std::env::set_var("PERRY_CONTAINER_BACKEND", "invalid-backend-name");
+        let res = detect_backend().await;
+        // Clean up before assertion to avoid affecting other tests
+        std::env::remove_var("PERRY_CONTAINER_BACKEND");
+
+        assert!(res.is_err());
+        if let Err(ComposeError::NoBackendFound { probed }) = res {
+            assert_eq!(probed.len(), 1);
+            assert_eq!(probed[0].name, "invalid-backend-name");
+            assert_eq!(probed[0].reason, "unknown backend");
+        } else {
+            panic!("Expected NoBackendFound error");
+        }
+    }
+}

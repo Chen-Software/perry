@@ -4630,6 +4630,19 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
     NativeModSig { module: "perry/container-compose", has_receiver: false, method: "composeExec",
         class_filter: None,
         runtime: "js_container_compose_exec", args: &[NA_JSV, NA_STR, NA_STR], ret: NR_PTR },
+    // ComposeHandle instance methods
+    NativeModSig { module: "perry/container-compose", has_receiver: true, method: "down",
+        class_filter: Some("ComposeHandle"),
+        runtime: "js_container_compose_down", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "perry/container-compose", has_receiver: true, method: "ps",
+        class_filter: Some("ComposeHandle"),
+        runtime: "js_container_compose_ps", args: &[], ret: NR_PTR },
+    NativeModSig { module: "perry/container-compose", has_receiver: true, method: "logs",
+        class_filter: Some("ComposeHandle"),
+        runtime: "js_container_compose_logs", args: &[NA_STR, NA_F64], ret: NR_PTR },
+    NativeModSig { module: "perry/container-compose", has_receiver: true, method: "exec",
+        class_filter: Some("ComposeHandle"),
+        runtime: "js_container_compose_exec", args: &[NA_STR, NA_STR], ret: NR_PTR },
 ];
 
 /// Look up a native module method in the static dispatch table.

@@ -16,7 +16,7 @@
  * - Proper port mapping with firewall considerations
  */
 
-import { composeUp, getBackend } from 'perry/container';
+import { composeUp, getBackend } from 'perry/container-compose';
 
 // ──────────────────────────────────────────────────────────────
 // Verify Backend Support

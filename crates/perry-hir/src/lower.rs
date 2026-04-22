@@ -2652,6 +2652,7 @@ fn lower_module_decl(
                                                         // `job.stop()` falls through to dynamic dispatch and the
                                                         // stop never reaches js_cron_job_stop.
                                                         ("node-cron", "schedule") => Some("CronJob"),
+                                                        ("perry/container" | "perry/container-compose", "composeUp") => Some("ComposeHandle"),
                                                         _ => None,
                                                     };
                                                     if let Some(class_name) = class_name {
@@ -2708,6 +2709,7 @@ fn lower_module_decl(
                                                             ("pg", "connect") => Some("Client"),
                                                             ("http" | "https", "request" | "get") => Some("ClientRequest"),
                                                             ("axios", "get" | "post" | "put" | "delete" | "patch" | "request") => Some("Response"),
+                                                            ("perry/container" | "perry/container-compose", "composeUp") => Some("ComposeHandle"),
                                                             _ => None,
                                                         };
                                                         if let Some(class_name) = class_name {
