@@ -2213,6 +2213,9 @@ fn collect_modules(
                 // panic = "unwind" when this is set.
                 ctx.needs_thread = true;
             }
+            if import.source == "perry/container" || import.source == "perry/container-compose" || import.source == "perry/compose" {
+                ctx.needs_container = true;
+            }
             if perry_hir::requires_stdlib(&import.source) {
                 ctx.needs_stdlib = true;
                 // Track for `--minimal-stdlib` feature computation. Strip
