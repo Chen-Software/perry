@@ -6,32 +6,38 @@ pub mod types;
 pub mod verification;
 pub mod capability;
 
+pub(crate) mod mod_internal {
+    use std::sync::{Arc, OnceLock};
+    use crate::container::backend::{detect_backend, ContainerBackend};
+
+    static BACKEND: OnceLock<Arc<dyn ContainerBackend>> = OnceLock::new();
+
+    pub async fn get_global_backend_instance() -> Result<Arc<dyn ContainerBackend>, String> {
+        if let Some(b) = BACKEND.get() {
+            return Ok(Arc::clone(b));
+        }
+        match detect_backend().await {
+            Ok(b) => {
+                let arc_b: Arc<dyn ContainerBackend> = Arc::from(b);
+                let _ = BACKEND.set(Arc::clone(&arc_b));
+                Ok(arc_b)
+            }
+            Err(probed) => Err(format!("No container backend found. Probed: {:?}", probed)),
+        }
+    }
+}
+
 pub use types::{
     ComposeHealthcheck, ComposeNetwork, ComposeService, ComposeSpec, ComposeVolume,
     ContainerHandle, ContainerInfo, ContainerLogs, ContainerSpec, ImageInfo, ComposeError,
 };
 
 use perry_runtime::{js_promise_new, Promise, StringHeader, JSValue};
-use backend::{detect_backend, ContainerBackend};
+use backend::ContainerBackend;
 use std::sync::{Arc, OnceLock};
 use dashmap::DashMap;
 
-static BACKEND: OnceLock<Arc<dyn ContainerBackend>> = OnceLock::new();
 static COMPOSE_ENGINES: OnceLock<DashMap<u64, compose::ComposeEngine>> = OnceLock::new();
-
-async fn get_global_backend_instance() -> Result<Arc<dyn ContainerBackend>, String> {
-    if let Some(b) = BACKEND.get() {
-        return Ok(Arc::clone(b));
-    }
-    match detect_backend().await {
-        Ok(b) => {
-            let arc_b: Arc<dyn ContainerBackend> = Arc::from(b);
-            let _ = BACKEND.set(Arc::clone(&arc_b));
-            Ok(arc_b)
-        }
-        Err(probed) => Err(format!("No container backend found. Probed: {:?}", probed)),
-    }
-}
 
 unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
     if ptr.is_null() || (ptr as usize) < 0x1000 { return None; }
@@ -99,7 +105,7 @@ pub unsafe extern "C" fn js_container_run(spec_json_ptr: *const StringHeader) ->
         }
     };
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = get_global_backend_instance().await.map_err(backend_err_to_js)?;
+        let backend = mod_internal::get_global_backend_instance().await.map_err(backend_err_to_js)?;
         match backend.run(&spec).await {
             Ok(handle) => Ok(types::register_container_handle(handle)),
             Err(e) => Err(compose_error_to_js(e)),
@@ -131,7 +137,7 @@ pub unsafe extern "C" fn js_container_create(spec_json_ptr: *const StringHeader)
         }
     };
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = get_global_backend_instance().await.map_err(backend_err_to_js)?;
+        let backend = mod_internal::get_global_backend_instance().await.map_err(backend_err_to_js)?;
         match backend.create(&spec).await {
             Ok(handle) => Ok(types::register_container_handle(handle)),
             Err(e) => Err(compose_error_to_js(e)),
@@ -151,7 +157,7 @@ pub unsafe extern "C" fn js_container_start(id_ptr: *const StringHeader) -> *mut
         }
     };
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = get_global_backend_instance().await.map_err(backend_err_to_js)?;
+        let backend = mod_internal::get_global_backend_instance().await.map_err(backend_err_to_js)?;
         match backend.start(&id).await {
             Ok(()) => Ok(0u64),
             Err(e) => Err(compose_error_to_js(e)),
@@ -171,7 +177,7 @@ pub unsafe extern "C" fn js_container_stop(id_ptr: *const StringHeader, timeout:
         }
     };
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = get_global_backend_instance().await.map_err(backend_err_to_js)?;
+        let backend = mod_internal::get_global_backend_instance().await.map_err(backend_err_to_js)?;
         match backend.stop(&id, if timeout >= 0 { Some(timeout as u32) } else { None }).await {
             Ok(()) => Ok(0u64),
             Err(e) => Err(compose_error_to_js(e)),
@@ -191,7 +197,7 @@ pub unsafe extern "C" fn js_container_remove(id_ptr: *const StringHeader, force:
         }
     };
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = get_global_backend_instance().await.map_err(backend_err_to_js)?;
+        let backend = mod_internal::get_global_backend_instance().await.map_err(backend_err_to_js)?;
         match backend.remove(&id, force != 0).await {
             Ok(()) => Ok(0u64),
             Err(e) => Err(compose_error_to_js(e)),
@@ -204,7 +210,7 @@ pub unsafe extern "C" fn js_container_remove(id_ptr: *const StringHeader, force:
 pub unsafe extern "C" fn js_container_list(all: i32) -> *mut Promise {
     let promise = js_promise_new();
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = get_global_backend_instance().await.map_err(backend_err_to_js)?;
+        let backend = mod_internal::get_global_backend_instance().await.map_err(backend_err_to_js)?;
         match backend.list(all != 0).await {
             Ok(list) => Ok(types::register_container_info_list(list)),
             Err(e) => Err(compose_error_to_js(e)),
@@ -224,7 +230,7 @@ pub unsafe extern "C" fn js_container_inspect(id_ptr: *const StringHeader) -> *m
         }
     };
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = get_global_backend_instance().await.map_err(backend_err_to_js)?;
+        let backend = mod_internal::get_global_backend_instance().await.map_err(backend_err_to_js)?;
         match backend.inspect(&id).await {
             Ok(info) => Ok(types::register_container_info(info)),
             Err(e) => Err(compose_error_to_js(e)),
@@ -244,8 +250,7 @@ pub unsafe extern "C" fn js_container_logs(id_ptr: *const StringHeader, tail: i3
         }
     };
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = get_global_backend_instance().await.map_err(backend_err_to_js)?;
-        // follow is not yet fully implemented in the backend trait but is required for FFI compatibility
+        let backend = mod_internal::get_global_backend_instance().await.map_err(backend_err_to_js)?;
         let _ = follow;
         match backend.logs(&id, if tail >= 0 { Some(tail as u32) } else { None }).await {
             Ok(logs) => Ok(types::register_container_logs(logs)),
@@ -278,7 +283,7 @@ pub unsafe extern "C" fn js_container_exec(
     let env: Option<std::collections::HashMap<String, String>> = serde_json::from_str(&env_json).ok();
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = get_global_backend_instance().await.map_err(backend_err_to_js)?;
+        let backend = mod_internal::get_global_backend_instance().await.map_err(backend_err_to_js)?;
         match backend.exec(&id, &cmd, env.as_ref(), workdir.as_deref()).await {
             Ok(logs) => Ok(types::register_container_logs(logs)),
             Err(e) => Err(compose_error_to_js(e)),
@@ -298,7 +303,7 @@ pub unsafe extern "C" fn js_container_pullImage(ref_ptr: *const StringHeader) ->
         }
     };
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = get_global_backend_instance().await.map_err(backend_err_to_js)?;
+        let backend = mod_internal::get_global_backend_instance().await.map_err(backend_err_to_js)?;
         match backend.pull_image(&reference).await {
             Ok(()) => Ok(0u64),
             Err(e) => Err(compose_error_to_js(e)),
@@ -311,7 +316,7 @@ pub unsafe extern "C" fn js_container_pullImage(ref_ptr: *const StringHeader) ->
 pub unsafe extern "C" fn js_container_listImages() -> *mut Promise {
     let promise = js_promise_new();
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = get_global_backend_instance().await.map_err(backend_err_to_js)?;
+        let backend = mod_internal::get_global_backend_instance().await.map_err(backend_err_to_js)?;
         match backend.list_images().await {
             Ok(list) => Ok(types::register_image_info_list(list)),
             Err(e) => Err(compose_error_to_js(e)),
@@ -331,7 +336,7 @@ pub unsafe extern "C" fn js_container_removeImage(ref_ptr: *const StringHeader, 
         }
     };
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = get_global_backend_instance().await.map_err(backend_err_to_js)?;
+        let backend = mod_internal::get_global_backend_instance().await.map_err(backend_err_to_js)?;
         match backend.remove_image(&reference, force != 0).await {
             Ok(()) => Ok(0u64),
             Err(e) => Err(compose_error_to_js(e)),
@@ -342,13 +347,11 @@ pub unsafe extern "C" fn js_container_removeImage(ref_ptr: *const StringHeader, 
 
 #[no_mangle]
 pub unsafe extern "C" fn js_container_getBackend() -> *const StringHeader {
-    let name = if let Some(b) = BACKEND.get() {
-        b.backend_name()
-    } else {
-        match std::env::consts::OS {
-            "macos" | "ios" => "apple/container",
-            _ => "podman",
-        }
+    // Synchronous backend detection for simple getter
+    let os = std::env::consts::OS;
+    let name = match os {
+        "macos" | "ios" => "apple/container",
+        _ => "podman",
     };
     string_to_js(name)
 }
@@ -382,7 +385,7 @@ pub unsafe extern "C" fn js_compose_up(spec_json_ptr: *const StringHeader) -> *m
         }
     };
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = get_global_backend_instance().await.map_err(backend_err_to_js)?;
+        let backend = mod_internal::get_global_backend_instance().await.map_err(backend_err_to_js)?;
         let engine = compose::ComposeEngine::new(spec, backend);
         match engine.up().await {
             Ok(handle) => {
@@ -536,6 +539,6 @@ pub unsafe extern "C" fn js_compose_restart(stack_id: i64, services_json_ptr: *c
 #[no_mangle]
 pub extern "C" fn js_container_module_init() {
     tokio::spawn(async {
-        let _ = get_global_backend_instance().await;
+        let _ = mod_internal::get_global_backend_instance().await;
     });
 }

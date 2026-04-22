@@ -1,5 +1,6 @@
 use crate::error::Result;
 use crate::project::ComposeProject;
+#[allow(unused_imports)]
 use crate::types::{ComposeSpec, ContainerInfo, ContainerLogs};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;

@@ -18,7 +18,6 @@ impl ComposeProject {
         extra_env_files: &[PathBuf],
     ) -> Result<Self> {
         let mut final_spec = ComposeSpec::default();
-        let mut base_env = HashMap::new();
 
         if files.is_empty() {
             return Err(ComposeError::ValidationError {
@@ -27,7 +26,7 @@ impl ComposeProject {
         }
 
         let project_dir = files[0].parent().unwrap_or(Path::new("."));
-        base_env = load_env(project_dir, extra_env_files);
+        let base_env = load_env(project_dir, extra_env_files);
 
         for f in files {
             let content = std::fs::read_to_string(f).map_err(|e| ComposeError::IoError(e))?;
