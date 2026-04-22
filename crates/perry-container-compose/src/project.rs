@@ -1,4 +1,4 @@
-use crate::error::{ComposeError, Result};
+use crate::error::Result;
 use crate::config::ProjectConfig;
 use crate::types::ComposeSpec;
 use std::path::PathBuf;
@@ -17,7 +17,7 @@ impl ComposeProject {
             spec: ComposeSpec::default(),
             project_name: config.project_name.clone().unwrap_or_default(),
             project_dir: PathBuf::from("."),
-            compose_files: config.files.clone(),
+            compose_files: config.compose_files.clone(),
         })
     }
 }

@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::process::Command;
 use tracing::debug;
+use shellexpand;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 4.8  BackendProbeResult — defined in error.rs, re-exported here
@@ -107,13 +108,7 @@ pub trait ContainerBackend: Send + Sync {
     async fn inspect_network(&self, name: &str) -> Result<serde_json::Value>;
     async fn inspect_volume(&self, name: &str) -> Result<serde_json::Value>;
 
-    async fn build_image(
-        &self,
-        context: &str,
-        tag: &str,
-        dockerfile: Option<&str>,
-        args: Option<&HashMap<String, String>>,
-    ) -> Result<()>;
+    async fn build(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Result<()>;
 
     async fn inspect_image(&self, reference: &str) -> Result<serde_json::Value>;
     async fn manifest_inspect(&self, reference: &str) -> Result<serde_json::Value>;
@@ -583,23 +578,25 @@ impl OciCommandBuilder {
 
     pub fn build_args(
         _driver: &BackendDriver,
-        context: &str,
-        tag: &str,
-        dockerfile: Option<&str>,
-        args: Option<&HashMap<String, String>>,
+        spec: &crate::types::ComposeServiceBuild,
+        image_name: &str,
     ) -> Vec<String> {
-        let mut full_args = vec!["build".into(), "-t".into(), tag.into()];
-        if let Some(df) = dockerfile {
+        let mut full_args = vec!["build".into(), "-t".into(), image_name.into()];
+        if let Some(df) = &spec.dockerfile {
             full_args.push("-f".into());
-            full_args.push(df.into());
+            full_args.push(df.clone());
         }
-        if let Some(a) = args {
-            for (k, v) in a {
+        if let Some(a) = &spec.args {
+            for (k, v) in a.to_map() {
                 full_args.push("--build-arg".into());
                 full_args.push(format!("{}={}", k, v));
             }
         }
-        full_args.push(context.into());
+        if let Some(ctx) = &spec.context {
+            full_args.push(ctx.clone());
+        } else {
+            full_args.push(".".into());
+        }
         full_args
     }
 
@@ -944,15 +941,13 @@ impl ContainerBackend for OciBackend {
         self.logs(id, None).await
     }
 
-    async fn build_image(
-        &self,
-        context: &str,
-        tag: &str,
-        dockerfile: Option<&str>,
-        args: Option<&HashMap<String, String>>,
-    ) -> Result<()> {
-        self.exec_ok(OciCommandBuilder::build_args(&self.driver, context, tag, dockerfile, args))
-            .await?;
+    async fn build(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Result<()> {
+        self.exec_ok(OciCommandBuilder::build_args(
+            &self.driver,
+            spec,
+            image_name,
+        ))
+        .await?;
         Ok(())
     }
 

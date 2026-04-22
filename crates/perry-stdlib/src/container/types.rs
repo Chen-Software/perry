@@ -54,15 +54,15 @@ pub fn take_compose_handle(id: u64) -> Option<ComposeHandle> {
     handle::take_handle(id as Handle)
 }
 
-pub fn register_compose_wrapper(w: crate::container::compose::ComposeWrapper) -> u64 {
+pub fn register_compose_engine(w: perry_container_compose::ComposeEngine) -> u64 {
     handle::register_handle(w) as u64
 }
 
-pub fn get_compose_wrapper(id: u64) -> Option<&'static crate::container::compose::ComposeWrapper> {
+pub fn get_compose_engine(id: u64) -> Option<&'static perry_container_compose::ComposeEngine> {
     handle::get_handle(id as Handle)
 }
 
-pub fn take_compose_wrapper(id: u64) -> Option<crate::container::compose::ComposeWrapper> {
+pub fn take_compose_engine(id: u64) -> Option<perry_container_compose::ComposeEngine> {
     handle::take_handle(id as Handle)
 }
 
@@ -89,6 +89,12 @@ pub fn with_image_info_list<R>(id: u64, f: impl FnOnce(&Vec<ImageInfo>) -> R) ->
 pub fn take_image_info_list(id: u64) -> Option<Vec<ImageInfo>> {
     handle::take_handle(id as Handle)
 }
+
+#[derive(Clone)]
+pub struct ArcComposeEngine(pub std::sync::Arc<perry_container_compose::ComposeEngine>);
+
+pub static COMPOSE_HANDLES: once_cell::sync::Lazy<dashmap::DashMap<u64, ArcComposeEngine>> =
+    once_cell::sync::Lazy::new(dashmap::DashMap::new);
 
 pub fn drop_container_handle(id: u64) -> bool {
     handle::drop_handle(id as Handle)
