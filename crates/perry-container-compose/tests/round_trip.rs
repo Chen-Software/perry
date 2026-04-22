@@ -10,7 +10,7 @@ use perry_container_compose::error::ComposeError;
 use perry_container_compose::types::{
     ComposeService, ComposeSpec, DependsOnCondition, DependsOnSpec, VolumeType,
 };
-use perry_container_compose::yaml::interpolate;
+use perry_container_compose::yaml::interpolate_yaml;
 use proptest::prelude::*;
 use std::collections::HashMap;
 
@@ -304,7 +304,7 @@ proptest! {
 
     #[test]
     fn prop_env_interpolation((template, env) in arb_env_template()) {
-        let result = interpolate(&template, &env);
+        let result = interpolate_yaml(&template, &env);
 
         // No ${...} should remain unexpanded
         prop_assert!(

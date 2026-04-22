@@ -7,13 +7,13 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
-/// Convert a `serde_yaml::Value` to a string representation.
-fn yaml_value_to_str(v: &serde_yaml::Value) -> String {
+/// Convert a `serde_json::Value` to a string representation.
+fn yaml_value_to_str(v: &serde_json::Value) -> String {
     match v {
-        serde_yaml::Value::String(s) => s.clone(),
-        serde_yaml::Value::Number(n) => n.to_string(),
-        serde_yaml::Value::Bool(b) => b.to_string(),
-        serde_yaml::Value::Null => String::new(),
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Null => String::new(),
         _ => format!("{}", serde_yaml::to_string(v).unwrap_or_default()).trim().to_owned(),
     }
 }
@@ -25,7 +25,7 @@ fn yaml_value_to_str(v: &serde_yaml::Value) -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ListOrDict {
-    Dict(IndexMap<String, Option<serde_yaml::Value>>),
+    Dict(IndexMap<String, Option<serde_json::Value>>),
     List(Vec<String>),
 }
 
@@ -38,13 +38,13 @@ impl ListOrDict {
                 .iter()
                 .map(|(k, v)| {
                     let val = match v {
-                        Some(serde_yaml::Value::String(s)) => s.clone(),
-                        Some(serde_yaml::Value::Number(n)) => n.to_string(),
-                        Some(serde_yaml::Value::Bool(b)) => b.to_string(),
-                        Some(serde_yaml::Value::Null) | None => String::new(),
+                        Some(serde_json::Value::String(s)) => s.clone(),
+                        Some(serde_json::Value::Number(n)) => n.to_string(),
+                        Some(serde_json::Value::Bool(b)) => b.to_string(),
+                        Some(serde_json::Value::Null) | None => String::new(),
                         Some(other) => {
                             match other {
-                                serde_yaml::Value::String(s) => s.clone(),
+                                serde_json::Value::String(s) => s.clone(),
                                 _ => serde_yaml::to_string(other).unwrap_or_else(|_| "{}".to_string()),
                             }
                         }
@@ -169,7 +169,7 @@ pub struct ComposeServiceVolumeOpts {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComposeServiceVolumeTmpfs {
-    pub size: Option<serde_yaml::Value>,
+    pub size: Option<serde_json::Value>,
     pub mode: Option<u32>,
 }
 
@@ -212,8 +212,8 @@ pub struct ComposeServicePort {
     pub name: Option<String>,
     pub mode: Option<String>,
     pub host_ip: Option<String>,
-    pub target: serde_yaml::Value,
-    pub published: Option<serde_yaml::Value>,
+    pub target: serde_json::Value,
+    pub published: Option<serde_json::Value>,
     pub protocol: Option<String>,
     pub app_protocol: Option<String>,
 }
@@ -222,7 +222,7 @@ pub struct ComposeServicePort {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum PortSpec {
-    Short(serde_yaml::Value),
+    Short(serde_json::Value),
     Long(ComposeServicePort),
 }
 
@@ -289,24 +289,24 @@ pub struct ComposeServiceBuild {
     pub dockerfile: Option<String>,
     pub dockerfile_inline: Option<String>,
     pub args: Option<ListOrDict>,
-    pub ssh: Option<serde_yaml::Value>,
+    pub ssh: Option<serde_json::Value>,
     pub labels: Option<ListOrDict>,
     pub cache_from: Option<Vec<String>>,
     pub cache_to: Option<Vec<String>>,
     pub no_cache: Option<bool>,
     pub additional_contexts: Option<IndexMap<String, String>>,
     pub network: Option<String>,
-    pub provenance: Option<serde_yaml::Value>,
-    pub sbom: Option<serde_yaml::Value>,
+    pub provenance: Option<serde_json::Value>,
+    pub sbom: Option<serde_json::Value>,
     pub pull: Option<bool>,
     pub target: Option<String>,
-    pub shm_size: Option<serde_yaml::Value>,
+    pub shm_size: Option<serde_json::Value>,
     pub extra_hosts: Option<ListOrDict>,
     pub isolation: Option<String>,
     pub privileged: Option<bool>,
     pub secrets: Option<Vec<String>>,
     pub tags: Option<Vec<String>>,
-    pub ulimits: Option<serde_yaml::Value>,
+    pub ulimits: Option<serde_json::Value>,
     pub platforms: Option<Vec<String>>,
     pub entitlements: Option<Vec<String>>,
 }
@@ -334,7 +334,7 @@ impl BuildSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComposeHealthcheck {
-    pub test: serde_yaml::Value,
+    pub test: serde_json::Value,
     pub interval: Option<String>,
     pub timeout: Option<String>,
     pub retries: Option<u32>,
@@ -351,10 +351,10 @@ pub struct ComposeDeployment {
     pub replicas: Option<u32>,
     pub labels: Option<ListOrDict>,
     pub resources: Option<ComposeDeploymentResources>,
-    pub restart_policy: Option<serde_yaml::Value>,
-    pub placement: Option<serde_yaml::Value>,
-    pub update_config: Option<serde_yaml::Value>,
-    pub rollback_config: Option<serde_yaml::Value>,
+    pub restart_policy: Option<serde_json::Value>,
+    pub placement: Option<serde_json::Value>,
+    pub update_config: Option<serde_json::Value>,
+    pub rollback_config: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -365,7 +365,7 @@ pub struct ComposeDeploymentResources {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeResourceSpec {
-    pub cpus: Option<serde_yaml::Value>,
+    pub cpus: Option<serde_json::Value>,
     pub memory: Option<String>,
     pub pids: Option<i64>,
 }
@@ -375,7 +375,7 @@ pub struct ComposeResourceSpec {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeLogging {
     pub driver: Option<String>,
-    pub options: Option<IndexMap<String, serde_yaml::Value>>,
+    pub options: Option<IndexMap<String, serde_json::Value>>,
 }
 
 // ============ Network ============
@@ -458,12 +458,12 @@ pub struct ComposeConfigObj {
 pub struct ComposeService {
     pub image: Option<String>,
     pub build: Option<BuildSpec>,
-    pub command: Option<serde_yaml::Value>,
-    pub entrypoint: Option<serde_yaml::Value>,
+    pub command: Option<serde_json::Value>,
+    pub entrypoint: Option<serde_json::Value>,
     pub environment: Option<ListOrDict>,
-    pub env_file: Option<serde_yaml::Value>,
+    pub env_file: Option<serde_json::Value>,
     pub ports: Option<Vec<PortSpec>>,
-    pub volumes: Option<Vec<serde_yaml::Value>>,
+    pub volumes: Option<Vec<serde_json::Value>>,
     pub networks: Option<ServiceNetworks>,
     pub depends_on: Option<DependsOnSpec>,
     pub restart: Option<String>,
@@ -485,29 +485,29 @@ pub struct ComposeService {
     pub cap_drop: Option<Vec<String>>,
     pub security_opt: Option<Vec<String>>,
     pub sysctls: Option<ListOrDict>,
-    pub ulimits: Option<serde_yaml::Value>,
+    pub ulimits: Option<serde_json::Value>,
     pub logging: Option<ComposeLogging>,
     pub deploy: Option<ComposeDeployment>,
-    pub develop: Option<serde_yaml::Value>,
+    pub develop: Option<serde_json::Value>,
     pub secrets: Option<Vec<String>>,
     pub configs: Option<Vec<String>>,
-    pub expose: Option<Vec<serde_yaml::Value>>,
+    pub expose: Option<Vec<serde_json::Value>>,
     pub extra_hosts: Option<ListOrDict>,
-    pub dns: Option<serde_yaml::Value>,
-    pub dns_search: Option<serde_yaml::Value>,
-    pub tmpfs: Option<serde_yaml::Value>,
-    pub shm_size: Option<serde_yaml::Value>,
-    pub mem_limit: Option<serde_yaml::Value>,
-    pub memswap_limit: Option<serde_yaml::Value>,
-    pub cpus: Option<serde_yaml::Value>,
+    pub dns: Option<serde_json::Value>,
+    pub dns_search: Option<serde_json::Value>,
+    pub tmpfs: Option<serde_json::Value>,
+    pub shm_size: Option<serde_json::Value>,
+    pub mem_limit: Option<serde_json::Value>,
+    pub memswap_limit: Option<serde_json::Value>,
+    pub cpus: Option<serde_json::Value>,
     pub cpu_shares: Option<i64>,
     pub platform: Option<String>,
     pub pull_policy: Option<String>,
     pub profiles: Option<Vec<String>>,
     pub scale: Option<u32>,
-    pub extends: Option<serde_yaml::Value>,
-    pub post_start: Option<Vec<serde_yaml::Value>>,
-    pub pre_stop: Option<Vec<serde_yaml::Value>>,
+    pub extends: Option<serde_json::Value>,
+    pub post_start: Option<Vec<serde_json::Value>>,
+    pub pre_stop: Option<Vec<serde_json::Value>>,
 }
 
 impl ComposeService {
@@ -550,7 +550,7 @@ impl ComposeService {
             .iter()
             .filter_map(|v| {
                 // Try to parse as VolumeEntry (short or long)
-                if let Ok(short) = serde_yaml::from_value::<VolumeEntry>(v.clone()) {
+                if let Ok(short) = serde_json::from_value::<VolumeEntry>(v.clone()) {
                     return Some(short.to_string_form());
                 }
                 // Fallback: string representation
@@ -567,10 +567,10 @@ impl ComposeService {
     /// Get command as a list of strings.
     pub fn command_list(&self) -> Option<Vec<String>> {
         self.command.as_ref().map(|c| match c {
-            serde_yaml::Value::String(s) => vec![s.clone()],
-            serde_yaml::Value::Sequence(arr) => arr
+            serde_json::Value::String(s) => vec![s.clone()],
+            serde_json::Value::Array(arr) => arr
                 .iter()
-                .filter_map(|v| v.as_str().map(String::from))
+                .filter_map(|v: &serde_json::Value| v.as_str().map(String::from))
                 .collect(),
             _ => vec![],
         })
@@ -590,10 +590,10 @@ pub struct ComposeSpec {
     pub volumes: Option<IndexMap<String, Option<ComposeVolume>>>,
     pub secrets: Option<IndexMap<String, Option<ComposeSecret>>>,
     pub configs: Option<IndexMap<String, Option<ComposeConfigObj>>>,
-    pub include: Option<Vec<serde_yaml::Value>>,
-    pub models: Option<IndexMap<String, serde_yaml::Value>>,
+    pub include: Option<Vec<serde_json::Value>>,
+    pub models: Option<IndexMap<String, serde_json::Value>>,
     #[serde(flatten)]
-    pub extensions: IndexMap<String, serde_yaml::Value>,
+    pub extensions: IndexMap<String, serde_json::Value>,
 }
 
 impl ComposeSpec {

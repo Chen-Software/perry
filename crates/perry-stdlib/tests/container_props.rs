@@ -147,7 +147,7 @@ proptest! {
             map.insert(key.clone(), val);
         }
 
-        let lod = perry_stdlib::container::ListOrDict::Dict(map);
+        let lod = perry_stdlib::container::ListOrDict::Dict(map.into_iter().collect());
         let result = lod.to_map();
 
         // All keys should be preserved
@@ -222,26 +222,26 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
 
     #[test]
-    fn prop_depends_on_entry_service_names(
+    fn prop_depends_on_spec_service_names(
         names in proptest::collection::vec("[a-z][a-z0-9_-]{1,10}", 1..=6),
     ) {
         // List variant
-        let list_entry = perry_stdlib::container::ComposeDependsOnEntry::List(names.clone());
+        let list_entry = perry_stdlib::container::DependsOnSpec::List(names.clone());
         let list_names = list_entry.service_names();
 
         // Map variant (same keys)
-        let mut map = HashMap::new();
+        let mut map = indexmap::IndexMap::new();
         for name in &names {
             map.insert(
                 name.clone(),
                 perry_stdlib::container::ComposeDependsOn {
-                    condition: "service_started".to_string(),
+                    condition: Some(perry_stdlib::container::DependsOnCondition::ServiceStarted),
                     required: None,
                     restart: None,
                 },
             );
         }
-        let map_entry = perry_stdlib::container::ComposeDependsOnEntry::Map(map);
+        let map_entry = perry_stdlib::container::DependsOnSpec::Map(map);
         let map_names = map_entry.service_names();
 
         // Both should yield the same service names (order may differ for Map)
@@ -275,13 +275,13 @@ proptest! {
                 reason: "test reason".to_string(),
             },
             3 => perry_stdlib::container::ContainerError::DependencyCycle {
-                cycle: vec![msg.clone()],
+                services: vec![msg.clone()],
             },
             4 => perry_stdlib::container::ContainerError::ServiceStartupFailed {
                 service: msg.clone(),
-                error: "test error".to_string(),
+                message: "test error".to_string(),
             },
-            _ => perry_stdlib::container::ContainerError::InvalidConfig(msg.clone()),
+            _ => perry_stdlib::container::ContainerError::validation(msg.clone()),
         };
 
         let display = format!("{}", error);
@@ -291,7 +291,7 @@ proptest! {
             2 => "verification failed",
             3 => "Dependency cycle",
             4 => "failed to start",
-            _ => "Invalid configuration",
+            _ => "Validation error",
         };
 
         prop_assert!(

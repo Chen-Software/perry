@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ad66ffb4c8830a9eef8fd0e5bd6644ce52c4924f955f963beeb16c006317357a # shrinks to (template, env) = ("prefix_${A_}_mid_${A_:-}_suffix", {"A_": "value1"})
