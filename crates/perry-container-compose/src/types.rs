@@ -96,8 +96,9 @@ pub enum DependsOnCondition {
 
 /// Per-dependency entry in the object form of depends_on
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub struct ComposeDependsOn {
-    pub condition: DependsOnCondition,
+    pub condition: Option<DependsOnCondition>,
     #[serde(default)]
     pub required: Option<bool>,
     #[serde(default)]
@@ -138,6 +139,7 @@ pub enum VolumeType {
 
 /// Long-form volume mount (compose-spec §service.volumes[])
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct ComposeServiceVolume {
     #[serde(rename = "type")]
     pub volume_type: VolumeType,
@@ -152,15 +154,16 @@ pub struct ComposeServiceVolume {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct ComposeServiceVolumeBind {
     pub propagation: Option<String>,
     pub create_host_path: Option<bool>,
-    #[serde(rename = "recursive")]
-    pub recursive_opt: Option<String>,
+    pub recursive: Option<String>,
     pub selinux: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct ComposeServiceVolumeOpts {
     pub labels: Option<ListOrDict>,
     pub nocopy: Option<bool>,
@@ -208,6 +211,7 @@ impl VolumeEntry {
 
 /// Port mapping (long form, compose-spec §service.ports[])
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub struct ComposeServicePort {
     pub name: Option<String>,
     pub mode: Option<String>,
@@ -249,6 +253,7 @@ impl PortSpec {
 
 /// Service network attachment config
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub struct ComposeServiceNetworkConfig {
     pub aliases: Option<Vec<String>>,
     pub ipv4_address: Option<String>,
@@ -284,9 +289,11 @@ pub enum BuildSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub struct ComposeServiceBuild {
     pub context: Option<String>,
-    pub dockerfile: Option<String>,
+    #[serde(alias = "dockerfile")]
+    pub containerfile: Option<String>,
     pub dockerfile_inline: Option<String>,
     pub args: Option<ListOrDict>,
     pub ssh: Option<serde_yaml::Value>,
@@ -323,6 +330,7 @@ impl BuildSpec {
         match self {
             BuildSpec::Context(ctx) => ComposeServiceBuild {
                 context: Some(ctx.clone()),
+                containerfile: None,
                 ..Default::default()
             },
             BuildSpec::Config(b) => b.clone(),
@@ -333,6 +341,7 @@ impl BuildSpec {
 // ============ Healthcheck ============
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct ComposeHealthcheck {
     pub test: serde_yaml::Value,
     pub interval: Option<String>,
@@ -346,6 +355,7 @@ pub struct ComposeHealthcheck {
 // ============ Deployment ============
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub struct ComposeDeployment {
     pub mode: Option<String>,
     pub replicas: Option<u32>,
@@ -358,6 +368,7 @@ pub struct ComposeDeployment {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub struct ComposeDeploymentResources {
     pub limits: Option<ComposeResourceSpec>,
     pub reservations: Option<ComposeResourceSpec>,
@@ -381,6 +392,7 @@ pub struct ComposeLogging {
 // ============ Network ============
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub struct ComposeNetworkIpamConfig {
     pub subnet: Option<String>,
     pub ip_range: Option<String>,
@@ -397,6 +409,7 @@ pub struct ComposeNetworkIpam {
 
 /// Top-level network definition
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub struct ComposeNetwork {
     pub name: Option<String>,
     pub driver: Option<String>,
@@ -414,6 +427,7 @@ pub struct ComposeNetwork {
 
 /// Top-level volume definition
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub struct ComposeVolume {
     pub name: Option<String>,
     pub driver: Option<String>,
@@ -426,6 +440,7 @@ pub struct ComposeVolume {
 
 /// Top-level secret definition
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub struct ComposeSecret {
     pub name: Option<String>,
     pub environment: Option<String>,
@@ -441,6 +456,7 @@ pub struct ComposeSecret {
 
 /// Top-level config definition (compose-spec `config` object)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub struct ComposeConfig {
     pub name: Option<String>,
     pub content: Option<String>,
@@ -455,6 +471,7 @@ pub struct ComposeConfig {
 
 /// Full service definition (compose-spec §service)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub struct ComposeService {
     pub image: Option<String>,
     pub build: Option<BuildSpec>,
@@ -666,6 +683,7 @@ impl ComposeSpec {
 /// Opaque handle to a running compose stack.
 /// The stack ID is used to look up the live ComposeEngine in a global registry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct ComposeHandle {
     pub stack_id: u64,
     pub project_name: String,
@@ -675,20 +693,17 @@ pub struct ComposeHandle {
 // ============ Container types (for single-container API) ============
 
 /// Specification for running a single container.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ContainerSpec {
     pub image: String,
     pub name: Option<String>,
     pub ports: Option<Vec<String>>,
     pub volumes: Option<Vec<String>>,
     pub env: Option<std::collections::HashMap<String, String>>,
-    pub labels: Option<std::collections::HashMap<String, String>>,
     pub cmd: Option<Vec<String>>,
     pub entrypoint: Option<Vec<String>>,
     pub network: Option<String>,
     pub rm: Option<bool>,
-    pub read_only: Option<bool>,
-    pub seccomp: Option<String>,
 }
 
 /// Handle returned after creating/running a container.
@@ -706,7 +721,6 @@ pub struct ContainerInfo {
     pub image: String,
     pub status: String,
     pub ports: Vec<String>,
-    pub labels: std::collections::HashMap<String, String>,
     pub created: String,
 }
 

@@ -1,6 +1,7 @@
-use crate::error::{ComposeError, Result};
-use crate::config::ProjectConfig;
+use crate::config::{self, ProjectConfig};
+use crate::error::Result;
 use crate::types::ComposeSpec;
+use crate::yaml;
 use std::path::PathBuf;
 
 pub struct ComposeProject {
@@ -12,23 +13,19 @@ pub struct ComposeProject {
 
 impl ComposeProject {
     pub fn load(config: &ProjectConfig) -> Result<Self> {
-        let env = crate::yaml::load_env(&std::env::current_dir()?, &config.env_files);
-        let project_name = crate::config::resolve_project_name(config.project_name.as_deref())?;
-        let files = crate::config::resolve_compose_files(&config.files)?;
+        let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let env = yaml::load_env(&project_dir, &config.env_files);
 
-        let spec = crate::yaml::parse_and_merge_files(&files, &env)?;
+        let compose_files = config::resolve_compose_files(&config.files, &env);
+        let project_name = config::resolve_project_name(config.project_name.as_deref(), &project_dir, &env);
 
-        let project_dir = if let Some(first) = files.first() {
-            first.parent().unwrap_or(std::path::Path::new(".")).to_path_buf()
-        } else {
-            std::env::current_dir()?
-        };
+        let spec = yaml::parse_and_merge_files(&compose_files, &env)?;
 
         Ok(Self {
             spec,
             project_name,
             project_dir,
-            compose_files: files,
+            compose_files,
         })
     }
 }

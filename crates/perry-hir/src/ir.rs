@@ -101,8 +101,6 @@ pub const NATIVE_MODULES: &[&str] = &[
     // Perry container module (OCI container management)
     "perry/container",
     "perry/compose",
-    "perry/container-compose",
-    "perry/compose",
     // SQLite
     "better-sqlite3",
 ];
@@ -1008,12 +1006,6 @@ pub enum Expr {
     EnvGet(String),
     // Dynamic environment variable access: process.env[expr]
     EnvGetDynamic(Box<Expr>),
-    // Bare `process.env` as a value (not followed by .KEY) — materializes
-    // the OS environment as a JS object. Used by patterns like
-    // `const e = process.env`, `Object.keys(process.env)`, and indirect
-    // access through `globalThis`/aliases where the static `.KEY` fast
-    // path doesn't fire.
-    ProcessEnv,
     // Process uptime: process.uptime() -> number (seconds)
     ProcessUptime,
     // Process current working directory: process.cwd() -> string
@@ -1040,9 +1032,6 @@ pub enum Expr {
     ProcessChdir(Box<Expr>),
     // process.kill(pid, signal?) -> void
     ProcessKill { pid: Box<Expr>, signal: Option<Box<Expr>> },
-    // process.exit(code?) -> never. Bare `process.exit()` lowers as
-    // `ProcessExit(None)` which the runtime treats as code 0.
-    ProcessExit(Option<Box<Expr>>),
     // process.stdin -> stub object { write: fn }
     ProcessStdin,
     // process.stdout -> stub object { write: fn }
@@ -1164,7 +1153,6 @@ pub enum Expr {
     MathAsinh(Box<Expr>),                // Math.asinh(x) -> number
     MathAcosh(Box<Expr>),                // Math.acosh(x) -> number
     MathAtanh(Box<Expr>),                // Math.atanh(x) -> number
-    MathExp(Box<Expr>),                  // Math.exp(x) -> number (e^x)
 
     /// performance.now() -> number (high-resolution time in ms)
     PerformanceNow,

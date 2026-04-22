@@ -1,9 +1,11 @@
-//! OCI isolation for Shell capabilities.
+//! alloy_container_run_capability() for ShellBridge integration.
 
+use super::types::{ContainerError, ContainerLogs, ContainerSpec};
+use super::verification;
+use super::get_global_backend;
+use perry_container_compose::backend::SecurityProfile;
 use std::collections::HashMap;
-use crate::container::types::{ContainerSpec, ContainerLogs};
-use crate::container::verification;
-use crate::container::mod_private::get_global_backend_instance;
+use std::sync::Arc;
 
 pub struct CapabilityGrants {
     pub network: bool,
@@ -15,50 +17,24 @@ pub async fn alloy_container_run_capability(
     image: &str,
     cmd: &[&str],
     grants: &CapabilityGrants,
-) -> Result<ContainerLogs, String> {
-    // 1. Verify image signature before running
-    let digest = verification::verify_image(image).await?;
+) -> Result<ContainerLogs, ContainerError> {
+    let digest = verification::verify_image(image).await.map_err(|e| ContainerError::VerificationFailed { image: image.to_string(), reason: e })?;
 
-    // 2. Build ephemeral ContainerSpec with security constraints
     let spec = ContainerSpec {
         image: format!("{}@{}", image, digest),
         name: Some(format!("alloy-cap-{}-{}", name, rand::random::<u32>())),
-        // No persistent volumes
-        volumes: None,
-        // No network access by default (unless grants.network == true)
+        ports: Some(vec![]),
+        volumes: Some(vec![]),
         network: if grants.network { None } else { Some("none".to_string()) },
-        // Read-only root filesystem
-        rm: Some(true),  // Always remove on exit
-        read_only: Some(true),
+        rm: Some(true),
         env: grants.env.clone(),
         cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
+        entrypoint: None,
         ..Default::default()
     };
 
-    // 3. Run
-    let backend = get_global_backend_instance().await.map_err(|e| e.to_string())?;
-    let handle = backend.run(&perry_container_compose::types::ContainerSpec {
-        image: spec.image,
-        name: spec.name,
-        ports: spec.ports,
-        volumes: spec.volumes,
-        env: spec.env,
-        cmd: spec.cmd,
-        entrypoint: spec.entrypoint,
-        network: spec.network,
-        rm: spec.rm,
-        read_only: spec.read_only,
-        labels: spec.labels,
-        seccomp: spec.seccomp,
-    }).await.map_err(|e| e.to_string())?;
+    let backend = get_global_backend().await?;
+    let handle = backend.run_with_security(&spec, &SecurityProfile::default()).await.map_err(|e| ContainerError::BackendError { code: -1, message: e.to_string() })?;
 
-    // 4. Wait for completion and collect output
-    let _ = backend.wait(&handle.id).await.map_err(|e| e.to_string())?;
-    let logs = backend.logs(&handle.id, None).await.map_err(|e| e.to_string())?;
-
-    // 5. Container is auto-removed (rm: true)
-    Ok(ContainerLogs {
-        stdout: logs.stdout,
-        stderr: logs.stderr,
-    })
+    backend.logs(&handle.id, None).await.map_err(|e| ContainerError::BackendError { code: -1, message: e.to_string() })
 }

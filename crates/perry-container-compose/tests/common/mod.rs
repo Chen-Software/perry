@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use perry_container_compose::backend::{ContainerBackend, NetworkConfig, VolumeConfig};
+use perry_container_compose::backend::{ContainerBackend, NetworkConfig, VolumeConfig, SecurityProfile};
 use perry_container_compose::types::{
     ContainerHandle, ContainerInfo, ContainerLogs, ImageInfo,
     ContainerSpec, ComposeServiceBuild
@@ -19,12 +19,12 @@ pub struct MockBackendState {
 
 #[derive(Clone, Default)]
 pub struct MockBackend {
-    pub state: Arc Arc<Mutex<Mutex<MockBackendState>>,
+    pub state: Arc<Mutex<MockBackendState>>,
 }
 
 #[async_trait]
 impl ContainerBackend for MockBackend {
-    fn backend_name(&self) -> &'static str { "mock" }
+    fn backend_name(&self) -> &str { "mock" }
 
     async fn check_available(&self) -> Result<()> { Ok(()) }
 
@@ -32,7 +32,7 @@ impl ContainerBackend for MockBackend {
         Ok(())
     }
 
-    async fn run(&self, spec: &ContainerSpec) -> Result Result<ContainerHandle> {
+    async fn run(&self, spec: &ContainerSpec) -> Result<ContainerHandle> {
         let mut state = self.state.lock().unwrap();
         let name = spec.name.clone().unwrap_or_else(|| "unnamed".to_string());
 
@@ -50,7 +50,11 @@ impl ContainerBackend for MockBackend {
         Ok(ContainerHandle { id: name.clone(), name: Some(name) })
     }
 
-    async fn create(&self, _spec: &ContainerSpec) -> Result Result<ContainerHandle> { Ok(ContainerHandle { id: "id".into(), name: None }) }
+    async fn run_with_security(&self, spec: &ContainerSpec, _profile: &SecurityProfile) -> Result<ContainerHandle> {
+        self.run(spec).await
+    }
+
+    async fn create(&self, _spec: &ContainerSpec) -> Result<ContainerHandle> { Ok(ContainerHandle { id: "id".into(), name: None }) }
     async fn start(&self, _id: &str) -> Result<()> { Ok(()) }
     async fn stop(&self, id: &str, _timeout: Option<u32>) -> Result<()> {
         let mut state = self.state.lock().unwrap();
@@ -64,33 +68,23 @@ impl ContainerBackend for MockBackend {
         Ok(())
     }
 
-    async fn list(&self, _all: bool) -> Result<Vec<Vec<ContainerInfo>> {
+    async fn list(&self, _all: bool) -> Result<Vec<ContainerInfo>> {
         let state = self.state.lock().unwrap();
         let mut infos = Vec::new();
         for id in &state.containers {
-            let mut labels = HashMap::new();
-            // Simple heuristic for Mocking labels in tests
-            if id.contains("web") {
-                labels.insert("com.docker.compose.project".into(), "down-project".into());
-                labels.insert("com.docker.compose.service".into(), "web".into());
-            } else if id.contains("db") {
-                labels.insert("com.docker.compose.project".into(), "down-project".into());
-                labels.insert("com.docker.compose.service".into(), "db".into());
-            }
             infos.push(ContainerInfo {
                 id: id.clone(),
                 name: id.clone(),
                 image: "mock-image".to_string(),
                 status: "running".to_string(),
                 ports: vec![],
-                labels,
                 created: "2025-01-01T00:00:00Z".to_string(),
             })
         }
         Ok(infos)
     }
 
-    async fn inspect(&self, id: &str) -> Result Result<ContainerInfo> {
+    async fn inspect(&self, id: &str) -> Result<ContainerInfo> {
         let state = self.state.lock().unwrap();
         if state.containers.contains(&id.to_string()) {
             Ok(ContainerInfo {
@@ -99,7 +93,6 @@ impl ContainerBackend for MockBackend {
                 image: "mock-image".to_string(),
                 status: "running".to_string(),
                 ports: vec![],
-                labels: HashMap::new(),
                 created: "2025-01-01T00:00:00Z".to_string(),
             })
         } else {
@@ -107,25 +100,11 @@ impl ContainerBackend for MockBackend {
         }
     }
 
-    async fn inspect_image(&self, _reference: &str) -> Result<ImageInfo> {
-        Ok(ImageInfo {
-            id: "mock-id".to_string(),
-            repository: "mock-repo".to_string(),
-            tag: "latest".to_string(),
-            size: 0,
-            created: "2025-01-01T00:00:00Z".to_string(),
-        })
-    }
-
-    async fn wait(&self, _id: &str) -> Result<i32> {
-        Ok(0)
-    }
-
-    async fn logs(&self, _id: &str, _tail: Option<u32>) -> Result Result<ContainerLogs> {
+    async fn logs(&self, _id: &str, _tail: Option<u32>) -> Result<ContainerLogs> {
         Ok(ContainerLogs { stdout: "logs".into(), stderr: "".into() })
     }
 
-    async fn exec(&self, _id: &str, _cmd: &[String], _env: Option<&HashMap<String, String>>, _workdir: Option<&str>) -> Result Result<ContainerLogs> {
+    async fn exec(&self, _id: &str, _cmd: &[String], _env: Option<&HashMap<String, String>>, _workdir: Option<&str>) -> Result<ContainerLogs> {
         Ok(ContainerLogs { stdout: "exec".into(), stderr: "".into() })
     }
 
@@ -162,4 +141,5 @@ impl ContainerBackend for MockBackend {
     }
 
     async fn inspect_network(&self, _name: &str) -> Result<()> { Ok(()) }
+    async fn inspect_volume(&self, _name: &str) -> Result<()> { Ok(()) }
 }
