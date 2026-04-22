@@ -6552,6 +6552,15 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
 "#.to_string()
         };
 
+        // Simulator bundles must declare iPhoneSimulator / iphonesimulator in
+        // Info.plist. Mismatch against the Mach-O LC_BUILD_VERSION (which is
+        // "iphonesimulator" when the binary was built for -target
+        // aarch64-apple-ios-sim) causes simctl to refuse launch with
+        // `FBSOpenApplicationServiceErrorDomain code=4`.
+        let is_sim = matches!(target.as_deref(), Some("ios-simulator"));
+        let plist_supported_platform = if is_sim { "iPhoneSimulator" } else { "iPhoneOS" };
+        let plist_platform_name = if is_sim { "iphonesimulator" } else { "iphoneos" };
+        let plist_sdk_name = if is_sim { "iphonesimulator" } else { "iphoneos" };
         let info_plist = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -6576,13 +6585,13 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
     <key>MinimumOSVersion</key>
     <string>17.0</string>
     <key>CFBundleSupportedPlatforms</key>
-    <array><string>iPhoneOS</string></array>
+    <array><string>{plist_supported_platform}</string></array>
     <key>DTPlatformName</key>
-    <string>iphoneos</string>
+    <string>{plist_platform_name}</string>
     <key>DTPlatformVersion</key>
     <string>26.4</string>
     <key>DTSDKName</key>
-    <string>iphoneos26.4</string>
+    <string>{plist_sdk_name}26.4</string>
     <key>DTPlatformBuild</key>
     <string>23E237</string>
     <key>DTSDKBuild</key>
