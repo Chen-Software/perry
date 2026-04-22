@@ -45,6 +45,10 @@ impl ComposeWrapper {
         self.engine.exec(service, cmd).await.map_err(Into::into)
     }
 
+    pub fn config(&self) -> Result<String, ContainerError> {
+        self.engine.config().map_err(Into::into)
+    }
+
     pub async fn start(&self, services: &[String]) -> Result<(), ContainerError> {
         self.engine.start(services).await.map_err(Into::into)
     }

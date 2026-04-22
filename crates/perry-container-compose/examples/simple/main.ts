@@ -1,6 +1,6 @@
-import { composeUp, composeDown, composePs } from 'perry/compose';
+import { up, down, ps } from 'perry/compose';
 
-const stack = await composeUp({
+const stack = await up({
   version: '3.8',
   services: {
     web: {
@@ -14,8 +14,8 @@ const stack = await composeUp({
   },
 });
 
-const statuses = await composePs(stack);
+const statuses = await ps(stack);
 console.table(statuses);
 
 // Tear down when done
-await composeDown(stack);
+await down(stack);

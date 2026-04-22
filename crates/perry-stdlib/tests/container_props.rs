@@ -4,19 +4,45 @@ use proptest::prelude::*;
 use serde_json::{json, Value};
 use perry_container_compose::indexmap::IndexMap;
 
+#[cfg(test)]
+const PROPTEST_CASES: u32 = 256;
+
+// ============ Arbitrary Strategies ============
+
+prop_compose! {
+    fn arb_image_ref()(s in "[a-z][a-z0-9_-]{1,30}(:[a-z0-9._-]+)?") -> String {
+        s
+    }
+}
+
+prop_compose! {
+    fn arb_container_name()(s in "[a-z][a-z0-9_-]{1,30}") -> String {
+        s
+    }
+}
+
+prop_compose! {
+    fn arb_port_spec()(s in "[0-9]{1,5}:[0-9]{1,5}") -> String {
+        s
+    }
+}
+
+prop_compose! {
+    fn arb_env_key()(s in "[A-Z][A-Z0-9_]{1,10}") -> String {
+        s
+    }
+}
+
 // ============ Property 2: ContainerSpec CLI argument round-trip ============
-// Feature: perry-container, Property 2: ContainerSpec CLI argument round-trip
-// Validates: Requirements 12.5
-
+// Feature: perry-container | Layer: property | Req: 12.5 | Property: 2
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(100))]
-
+    #![proptest_config(ProptestConfig::with_cases(PROPTEST_CASES))]
     #[test]
     fn prop_container_spec_json_round_trip(
-        image in "[a-z][a-z0-9_-]{1,30}(:[a-z0-9._-]+)?",
-        name in proptest::option::of("[a-z][a-z0-9_-]{1,30}"),
-        ports in proptest::option::of(proptest::collection::vec("[0-9]{1,5}:[0-9]{1,5}", 0..=5)),
-        env_keys in proptest::collection::vec("[A-Z][A-Z0-9_]{1,10}", 0..=5),
+        image in arb_image_ref(),
+        name in proptest::option::of(arb_container_name()),
+        ports in proptest::option::of(proptest::collection::vec(arb_port_spec(), 0..=5)),
+        env_keys in proptest::collection::vec(arb_env_key(), 0..=5),
     ) {
         let mut env_obj = serde_json::Map::new();
         for key in &env_keys {
@@ -32,8 +58,8 @@ proptest! {
             "rm": true,
         });
 
-        let spec_str = serde_json::to_string(&spec).unwrap();
-        let reparsed: Value = serde_json::from_str(&spec_str).unwrap();
+        let spec_str = serde_json::to_string(&spec).map_err(|e| TestCaseError::fail(e.to_string()))?;
+        let reparsed: Value = serde_json::from_str(&spec_str).map_err(|e| TestCaseError::fail(e.to_string()))?;
 
         prop_assert_eq!(&reparsed["image"], &spec["image"]);
 
@@ -41,55 +67,46 @@ proptest! {
             prop_assert_eq!(&reparsed["name"], &spec["name"]);
         }
 
-        // Ports array length preserved
         prop_assert_eq!(
             reparsed["ports"].as_array().map(|a| a.len()),
             spec["ports"].as_array().map(|a| a.len())
         );
 
-        // Env keys preserved
         if let Some(env) = reparsed["env"].as_object() {
-            prop_assert_eq!(env.len(), env_keys.len());
+            prop_assert_eq!(env.len(), env_keys.iter().collect::<std::collections::HashSet<_>>().len());
         }
     }
 }
 
-// ============ Property 10: Image verification cache idempotence ============
-// Feature: perry-container, Property 10: Image verification cache idempotence
-// Validates: Requirements 15.7
-
+// ============ Property 11: Error propagation preserves code and message ============
+// Feature: perry-container | Layer: property | Req: 2.6 | Property: 11
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(50))]
-
+    #![proptest_config(ProptestConfig::with_cases(PROPTEST_CASES))]
     #[test]
     fn prop_error_propagation_preserves_code_and_message(
         code in -1000i32..1000,
         msg in "[a-z A-Z0-9_]{1,100}"
     ) {
-        // Simulate the ComposeError::BackendError → JSON → parse flow
         let error_json = json!({
             "message": format!("Backend error (exit {}): {}", code, msg),
             "code": code
         });
 
-        let json_str = serde_json::to_string(&error_json).unwrap();
-        let reparsed: Value = serde_json::from_str(&json_str).unwrap();
+        let json_str = serde_json::to_string(&error_json).map_err(|e| TestCaseError::fail(e.to_string()))?;
+        let reparsed: Value = serde_json::from_str(&json_str).map_err(|e| TestCaseError::fail(e.to_string()))?;
 
         prop_assert_eq!(&reparsed["code"], &json!(code));
         prop_assert!(
-            reparsed["message"].as_str().unwrap_or("").contains(&msg),
+            reparsed["message"].as_str().ok_or(TestCaseError::fail("missing message"))?.contains(&msg),
             "message should contain original msg"
         );
     }
 }
 
 // ============ Property 11: Error propagation preserves code and message ============
-// Feature: perry-container, Property 11: Error propagation preserves code and message
-// Validates: Requirements 2.6, 12.2
-
+// Feature: perry-container | Layer: property | Req: 2.6 | Property: 11
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(50))]
-
+    #![proptest_config(ProptestConfig::with_cases(PROPTEST_CASES))]
     #[test]
     fn prop_compose_error_json_round_trip(
         variant in 0u8..=5,
@@ -104,35 +121,31 @@ proptest! {
             _ => (json!({ "message": format!("Parse error: {}", msg), "code": 500 }), 500),
         };
 
-        let json_str = serde_json::to_string(&error_json).unwrap();
-        let reparsed: Value = serde_json::from_str(&json_str).unwrap();
+        let json_str = serde_json::to_string(&error_json).map_err(|e| TestCaseError::fail(e.to_string()))?;
+        let reparsed: Value = serde_json::from_str(&json_str).map_err(|e| TestCaseError::fail(e.to_string()))?;
 
         prop_assert_eq!(&reparsed["code"], &json!(expected_code));
         prop_assert!(reparsed["message"].is_string());
     }
 }
 
-// ============ Property: ListOrDict to_map — Dict variant ============
-// Validates: ListOrDict::Dict correctly converts all value types to strings.
-
+// Feature: perry-container | Layer: property | Req: 10.11 | Property: -
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(100))]
-
+    #![proptest_config(ProptestConfig::with_cases(PROPTEST_CASES))]
     #[test]
     fn prop_list_or_dict_to_map_dict(
-        keys in proptest::collection::vec("[A-Z][A-Z0-9_]{1,8}", 1..=8),
+        keys in proptest::collection::vec(arb_env_key(), 1..=8),
         int_val in 0i64..1000,
         bool_val in proptest::bool::ANY,
         str_val in "[a-z0-9_]{1,10}",
     ) {
         let mut map = IndexMap::new();
-        // Mix different value types across keys
         for (i, key) in keys.iter().enumerate() {
             let val: Option<serde_yaml::Value> = match i % 4 {
                 0 => Some(serde_yaml::Value::String(str_val.clone())),
                 1 => Some(serde_yaml::Value::Number(int_val.into())),
                 2 => Some(serde_yaml::Value::Bool(bool_val)),
-                _ => None, // Null
+                _ => None,
             };
             map.insert(key.clone(), val);
         }
@@ -140,20 +153,17 @@ proptest! {
         let lod = perry_stdlib::container::ListOrDict::Dict(map);
         let result = lod.to_map();
 
-        // All keys should be preserved
-        prop_assert_eq!(result.len(), keys.len());
+        let unique_keys: std::collections::HashSet<&String> = keys.iter().collect();
+        prop_assert_eq!(result.len(), unique_keys.len());
         for key in &keys {
             prop_assert!(result.contains_key(key), "key {} should be in result", key);
         }
     }
 }
 
-// ============ Property: ListOrDict to_map — List variant ============
-// Validates: ListOrDict::List("KEY=VAL") correctly parses entries.
-
+// Feature: perry-container | Layer: property | Req: 10.11 | Property: -
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(100))]
-
+    #![proptest_config(ProptestConfig::with_cases(PROPTEST_CASES))]
     #[test]
     fn prop_list_or_dict_to_map_list(
         entries in proptest::collection::vec("[A-Z][A-Z0-9_]{1,8}=[a-z0-9_]{0,10}", 1..=8),
@@ -162,11 +172,8 @@ proptest! {
         let lod = perry_stdlib::container::ListOrDict::List(list);
         let result = lod.to_map();
 
-        // All unique keys should be present with non-None values
-        // Note: HashMap uses last-writer-wins, so duplicate keys
-        // retain the value from the last occurrence.
         let unique_keys: std::collections::HashSet<&str> =
-            entries.iter().map(|e| e.split_once('=').unwrap().0).collect();
+            entries.iter().map(|e| e.split_once('=').ok_or(TestCaseError::fail("split failed")).unwrap().0).collect();
         prop_assert_eq!(result.len(), unique_keys.len());
         for key in &unique_keys {
             prop_assert!(
@@ -178,22 +185,17 @@ proptest! {
     }
 }
 
-// ============ Property: ListOrDict to_map — List with missing = sign ============
-// Validates: Entries without '=' produce empty string values.
-
+// Feature: perry-container | Layer: property | Req: 10.11 | Property: -
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(50))]
-
+    #![proptest_config(ProptestConfig::with_cases(PROPTEST_CASES))]
     #[test]
     fn prop_list_or_dict_to_map_list_no_equals(
-        keys in proptest::collection::vec("[A-Z][A-Z0-9_]{1,8}", 1..=5),
+        keys in proptest::collection::vec(arb_env_key(), 1..=5),
     ) {
         let list: Vec<String> = keys.clone();
         let lod = perry_stdlib::container::ListOrDict::List(list);
         let result = lod.to_map();
 
-        // All unique keys should be present with empty values
-        // (HashMap deduplicates keys, so len may be <= keys.len())
         for key in &keys {
             prop_assert_eq!(
                 result.get(key).map(|s| s.as_str()),
@@ -205,23 +207,18 @@ proptest! {
     }
 }
 
-// ============ Property: DependsOnSpec service_names — List vs Map ============
-// Validates: Both List and Map variants produce the same set of service names.
-
+// Feature: perry-container | Layer: property | Req: 6.3 | Property: -
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(100))]
-
+    #![proptest_config(ProptestConfig::with_cases(PROPTEST_CASES))]
     #[test]
     fn prop_depends_on_entry_service_names(
         names in proptest::collection::vec("[a-z][a-z0-9_-]{1,10}", 1..=6),
     ) {
         use perry_container_compose::types::{DependsOnSpec, ComposeDependsOn};
 
-        // List variant
         let list_entry = DependsOnSpec::List(names.clone());
         let list_names = list_entry.service_names();
 
-        // Map variant (same keys)
         let mut map = IndexMap::new();
         for name in &names {
             map.insert(
@@ -236,7 +233,6 @@ proptest! {
         let map_entry = DependsOnSpec::Map(map);
         let map_names = map_entry.service_names();
 
-        // Both should yield the same service names (order may differ for Map)
         prop_assert_eq!(list_names.len(), map_names.len());
         for name in &list_names {
             prop_assert!(map_names.contains(name), "map should contain {}", name);
@@ -244,13 +240,9 @@ proptest! {
     }
 }
 
-// ============ Property: ContainerError Display contains identifying keyword ============
-// Validates: Each ContainerError variant's Display output contains
-// a distinguishing keyword for programmatic error classification.
-
+// Feature: perry-container | Layer: property | Req: 12.2 | Property: -
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(50))]
-
+    #![proptest_config(ProptestConfig::with_cases(PROPTEST_CASES))]
     #[test]
     fn prop_container_error_display_contains_keyword(
         variant in 0u8..=5,
@@ -295,12 +287,9 @@ proptest! {
     }
 }
 
-// ============ Property: Typed ComposeSpec JSON round-trip ============
-// Validates: The typed ComposeSpec struct survives JSON round-trip.
-
+// Feature: perry-container | Layer: property | Req: 10.13 | Property: 1
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(100))]
-
+    #![proptest_config(ProptestConfig::with_cases(PROPTEST_CASES))]
     #[test]
     fn prop_typed_compose_spec_json_round_trip(
         name in proptest::option::of("[a-z][a-z0-9_-]{1,20}"),
@@ -317,9 +306,9 @@ proptest! {
             spec.services.insert(svc_name.clone(), service);
         }
 
-        let json_str = serde_json::to_string(&spec).unwrap();
+        let json_str = serde_json::to_string(&spec).map_err(|e| TestCaseError::fail(e.to_string()))?;
         let reparsed: ComposeSpec =
-            serde_json::from_str(&json_str).unwrap();
+            serde_json::from_str(&json_str).map_err(|e| TestCaseError::fail(e.to_string()))?;
 
         prop_assert_eq!(reparsed.name, spec.name);
         prop_assert_eq!(reparsed.services.len(), spec.services.len());
@@ -331,12 +320,9 @@ proptest! {
     }
 }
 
-// ============ Property: Handle registry register/take type safety ============
-// Validates: Registering and retrieving handles preserves the value and type.
-
+// Feature: perry-container | Layer: property | Req: 6.6 | Property: -
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(100))]
-
+    #![proptest_config(ProptestConfig::with_cases(PROPTEST_CASES))]
     #[test]
     fn prop_handle_registry_type_safety(
         ids in proptest::collection::vec("[a-f0-9]{12}", 1..=3),
@@ -346,7 +332,6 @@ proptest! {
     ) {
         use perry_stdlib::container::{ContainerInfo, ContainerLogs};
 
-        // Register a Vec<ContainerInfo> and take it back
         let infos: Vec<ContainerInfo> = ids
             .iter()
             .zip(images.iter())
@@ -363,15 +348,13 @@ proptest! {
         let h = perry_stdlib::container::types::register_container_info_list(infos.clone());
         let taken: Option<Vec<ContainerInfo>> =
             perry_stdlib::container::types::take_container_info_list(h);
-        prop_assert!(taken.is_some());
-        let taken = taken.unwrap();
+        let taken = taken.ok_or(TestCaseError::fail("failed to take infos"))?;
         prop_assert_eq!(taken.len(), infos.len());
         for (original, recovered) in infos.iter().zip(taken.iter()) {
             prop_assert_eq!(&recovered.id, &original.id);
             prop_assert_eq!(&recovered.image, &original.image);
         }
 
-        // Register ContainerLogs and take it back
         let logs = ContainerLogs {
             stdout: stdout.clone(),
             stderr: stderr.clone(),
@@ -379,19 +362,15 @@ proptest! {
         let lh = perry_stdlib::container::types::register_container_logs(logs);
         let taken_logs: Option<ContainerLogs> =
             perry_stdlib::container::types::take_container_logs(lh);
-        prop_assert!(taken_logs.is_some());
-        let taken_logs = taken_logs.unwrap();
+        let taken_logs = taken_logs.ok_or(TestCaseError::fail("failed to take logs"))?;
         prop_assert_eq!(taken_logs.stdout, stdout);
         prop_assert_eq!(taken_logs.stderr, stderr);
     }
 }
 
-// ============ Property: ComposeNetwork JSON round-trip ============
-// Validates: ComposeNetwork preserves all fields through serialization.
-
+// Feature: perry-container | Layer: property | Req: 10.4 | Property: -
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(100))]
-
+    #![proptest_config(ProptestConfig::with_cases(PROPTEST_CASES))]
     #[test]
     fn prop_compose_network_json_round_trip(
         name in proptest::option::of("[a-z][a-z0-9_-]{1,20}"),
@@ -402,9 +381,9 @@ proptest! {
         network.name = name;
         network.driver = driver;
 
-        let json_str = serde_json::to_string(&network).unwrap();
+        let json_str = serde_json::to_string(&network).map_err(|e| TestCaseError::fail(e.to_string()))?;
         let reparsed: ComposeNetwork =
-            serde_json::from_str(&json_str).unwrap();
+            serde_json::from_str(&json_str).map_err(|e| TestCaseError::fail(e.to_string()))?;
 
         prop_assert_eq!(reparsed.name, network.name);
         prop_assert_eq!(reparsed.driver, network.driver);

@@ -1,6 +1,6 @@
-import { composeUp, composeDown, composeLogs } from 'perry/compose';
+import { up, down, logs } from 'perry/compose';
 
-const stack = await composeUp({
+const stack = await up({
   version: '3.8',
   services: {
     db: {
@@ -29,8 +29,8 @@ const stack = await composeUp({
 });
 
 // Stream logs from both services
-const logs = await composeLogs(stack, { services: ['web', 'db'], follow: false });
+const logs = await logs(stack, { services: ['web', 'db'], follow: false });
 console.log(logs);
 
 // Tear down, removing named volumes
-await composeDown(stack, { volumes: true });
+await down(stack, { volumes: true });

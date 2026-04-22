@@ -1,6 +1,7 @@
-use crate::error::{ComposeError, Result};
+use crate::error::Result;
 use crate::config::ProjectConfig;
 use crate::types::ComposeSpec;
+use crate::yaml::{load_env, parse_and_merge_files};
 use std::path::PathBuf;
 
 pub struct ComposeProject {
@@ -12,12 +13,26 @@ pub struct ComposeProject {
 
 impl ComposeProject {
     pub fn load(config: &ProjectConfig) -> Result<Self> {
-        // TODO: Implement full project loading
+        let compose_files = config.resolve_compose_files();
+
+        // Use CWD as project dir if no files, or parent of first file
+        let project_dir = if let Some(first_file) = compose_files.first() {
+            first_file.parent()
+                .map(|p| if p.as_os_str().is_empty() { PathBuf::from(".") } else { p.to_path_buf() })
+                .unwrap_or_else(|| PathBuf::from("."))
+        } else {
+            PathBuf::from(".")
+        };
+
+        let project_name = config.resolve_project_name(&project_dir);
+        let env = load_env(&project_dir, &config.env_files);
+        let spec = parse_and_merge_files(&compose_files, &env)?;
+
         Ok(Self {
-            spec: ComposeSpec::default(),
-            project_name: config.project_name.clone().unwrap_or_default(),
-            project_dir: PathBuf::from("."),
-            compose_files: config.files.clone(),
+            spec,
+            project_name,
+            project_dir,
+            compose_files,
         })
     }
 }

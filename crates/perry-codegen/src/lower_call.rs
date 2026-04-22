@@ -2325,7 +2325,7 @@ pub(crate) fn lower_native_method_call(
         }
     }
 
-    if module == "perry/container-compose" && object.is_none() {
+    if module == "perry/compose" && object.is_none() {
         if let Some(sig) = perry_compose_table_lookup(method) {
             return lower_perry_ui_table_call(ctx, sig, args);
         }
@@ -3868,33 +3868,33 @@ const PERRY_UI_INSTANCE_TABLE: &[UiSig] = &[
 ];
 
 static PERRY_CONTAINER_TABLE: &[UiSig] = &[
-    UiSig { method: "run", runtime: "js_container_run", args: &[NA_F64], ret: UiReturnKind::Promise },
-    UiSig { method: "create", runtime: "js_container_create", args: &[NA_F64], ret: UiReturnKind::Promise },
+    UiSig { method: "run", runtime: "js_container_run", args: &[NA_STR], ret: UiReturnKind::Promise },
+    UiSig { method: "create", runtime: "js_container_create", args: &[NA_STR], ret: UiReturnKind::Promise },
     UiSig { method: "start", runtime: "js_container_start", args: &[NA_STR], ret: UiReturnKind::Promise },
     UiSig { method: "stop", runtime: "js_container_stop", args: &[NA_STR, NA_JSV], ret: UiReturnKind::Promise },
     UiSig { method: "remove", runtime: "js_container_remove", args: &[NA_STR, NA_JSV], ret: UiReturnKind::Promise },
     UiSig { method: "list", runtime: "js_container_list", args: &[NA_JSV], ret: UiReturnKind::Promise },
     UiSig { method: "inspect", runtime: "js_container_inspect", args: &[NA_STR], ret: UiReturnKind::Promise },
     UiSig { method: "logs", runtime: "js_container_logs", args: &[NA_STR, NA_JSV], ret: UiReturnKind::Promise },
-    UiSig { method: "exec", runtime: "js_container_exec", args: &[NA_STR, NA_F64, NA_F64, NA_STR], ret: UiReturnKind::Promise },
+    UiSig { method: "exec", runtime: "js_container_exec", args: &[NA_STR, NA_STR, NA_STR, NA_STR], ret: UiReturnKind::Promise },
     UiSig { method: "pullImage", runtime: "js_container_pullImage", args: &[NA_STR], ret: UiReturnKind::Promise },
     UiSig { method: "listImages", runtime: "js_container_listImages", args: &[], ret: UiReturnKind::Promise },
     UiSig { method: "removeImage", runtime: "js_container_removeImage", args: &[NA_STR, NA_JSV], ret: UiReturnKind::Promise },
     UiSig { method: "getBackend", runtime: "js_container_getBackend", args: &[], ret: UiReturnKind::Str },
     UiSig { method: "detectBackend", runtime: "js_container_detectBackend", args: &[], ret: UiReturnKind::Promise },
-    UiSig { method: "composeUp", runtime: "js_container_composeUp", args: &[NA_F64], ret: UiReturnKind::Promise },
+    UiSig { method: "composeUp", runtime: "js_compose_up", args: &[NA_STR], ret: UiReturnKind::Promise },
 ];
 
 static PERRY_COMPOSE_TABLE: &[UiSig] = &[
-    UiSig { method: "up", runtime: "js_container_compose_up", args: &[NA_F64], ret: UiReturnKind::Promise },
-    UiSig { method: "down", runtime: "js_container_compose_down", args: &[NA_F64, NA_JSV], ret: UiReturnKind::Promise },
-    UiSig { method: "ps", runtime: "js_container_compose_ps", args: &[NA_F64], ret: UiReturnKind::Promise },
-    UiSig { method: "logs", runtime: "js_container_compose_logs", args: &[NA_F64, NA_STR, NA_JSV], ret: UiReturnKind::Promise },
-    UiSig { method: "exec", runtime: "js_container_compose_exec", args: &[NA_F64, NA_STR, NA_F64], ret: UiReturnKind::Promise },
-    UiSig { method: "config", runtime: "js_container_compose_config", args: &[NA_F64], ret: UiReturnKind::Promise },
-    UiSig { method: "start", runtime: "js_container_compose_start", args: &[NA_F64, NA_F64], ret: UiReturnKind::Promise },
-    UiSig { method: "stop", runtime: "js_container_compose_stop", args: &[NA_F64, NA_F64], ret: UiReturnKind::Promise },
-    UiSig { method: "restart", runtime: "js_container_compose_restart", args: &[NA_F64, NA_F64], ret: UiReturnKind::Promise },
+    UiSig { method: "up", runtime: "js_compose_up", args: &[NA_STR], ret: UiReturnKind::Promise },
+    UiSig { method: "down", runtime: "js_compose_down", args: &[NA_F64, NA_JSV], ret: UiReturnKind::Promise },
+    UiSig { method: "ps", runtime: "js_compose_ps", args: &[NA_F64], ret: UiReturnKind::Promise },
+    UiSig { method: "logs", runtime: "js_compose_logs", args: &[NA_F64, NA_STR, NA_JSV], ret: UiReturnKind::Promise },
+    UiSig { method: "exec", runtime: "js_compose_exec", args: &[NA_F64, NA_STR, NA_STR], ret: UiReturnKind::Promise },
+    UiSig { method: "config", runtime: "js_compose_config", args: &[NA_STR], ret: UiReturnKind::Promise },
+    UiSig { method: "start", runtime: "js_compose_start", args: &[NA_F64, NA_STR], ret: UiReturnKind::Promise },
+    UiSig { method: "stop", runtime: "js_compose_stop", args: &[NA_F64, NA_STR], ret: UiReturnKind::Promise },
+    UiSig { method: "restart", runtime: "js_compose_restart", args: &[NA_F64, NA_STR], ret: UiReturnKind::Promise },
 ];
 
 fn perry_container_table_lookup(method: &str) -> Option<&'static UiSig> {
