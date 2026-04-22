@@ -2,7 +2,7 @@
 //! and multi-file merge.
 
 use crate::error::{ComposeError, Result};
-use crate::types::ComposeSpec;
+use crate::types::ContainerCompose;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -224,10 +224,10 @@ pub fn load_env(project_dir: &Path, extra_env_files: &[PathBuf]) -> HashMap<Stri
 
 // ============ YAML parsing ============
 
-/// Parse a compose YAML string into a `ComposeSpec` after environment variable interpolation.
+/// Parse a compose YAML string into a `ContainerCompose` after environment variable interpolation.
 ///
 /// Returns a descriptive `ComposeError::ParseError` for malformed YAML.
-pub fn parse_compose_yaml(yaml: &str, env: &HashMap<String, String>) -> Result<ComposeSpec> {
+pub fn parse_compose_yaml(yaml: &str, env: &HashMap<String, String>) -> Result<ContainerCompose> {
     let interpolated = interpolate_yaml(yaml, env);
     serde_yaml::from_str(&interpolated).map_err(ComposeError::ParseError)
 }
@@ -241,8 +241,8 @@ pub fn parse_compose_yaml(yaml: &str, env: &HashMap<String, String>) -> Result<C
 pub fn parse_and_merge_files(
     files: &[PathBuf],
     env: &HashMap<String, String>,
-) -> Result<ComposeSpec> {
-    let mut merged: Option<ComposeSpec> = None;
+) -> Result<ContainerCompose> {
+    let mut merged: Option<ContainerCompose> = None;
 
     for file_path in files {
         let content =
@@ -413,7 +413,7 @@ services:
         assert!(matches!(result.unwrap_err(), ComposeError::ParseError(_)));
     }
 
-    // ---- ComposeSpec::merge (via parse_and_merge_files logic) ----
+    // ---- ContainerCompose::merge (via parse_and_merge_files logic) ----
 
     #[test]
     fn test_merge_last_writer_wins_services() {

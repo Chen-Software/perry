@@ -1,13 +1,13 @@
-use perry_container_compose::types::{ComposeSpec, ComposeService};
+use perry_container_compose::types::{ContainerCompose, ComposeService};
 use perry_container_compose::compose::ComposeEngine;
 use proptest::prelude::*;
 
-// Feature: perry-container, Property 1: ComposeSpec serialization round-trip
+// Feature: perry-container, Property 1: ContainerCompose serialization round-trip
 proptest! {
     #[test]
     fn prop_compose_spec_round_trip(spec in arb_compose_spec()) {
         let json = serde_json::to_string(&spec).unwrap();
-        let deserialized: ComposeSpec = serde_json::from_str(&json).unwrap();
+        let deserialized: ContainerCompose = serde_json::from_str(&json).unwrap();
         let json2 = serde_json::to_string(&deserialized).unwrap();
         prop_assert_eq!(json, json2);
     }
@@ -17,9 +17,9 @@ proptest! {
 proptest! {
     #[test]
     fn prop_topological_sort_respects_deps(spec in arb_compose_spec_with_dag()) {
-        let order = ComposeEngine::resolve_startup_order(&spec).unwrap();
+        let order = perry_container_compose::compose::resolve_startup_order(&spec).unwrap();
         let pos: std::collections::HashMap<&str, usize> = order.iter().enumerate()
-            .map(|(i, s)| (s.as_str(), i)).collect();
+            .map(|(i, s): (usize, &String)| (s.as_str(), i)).collect();
         for (name, service) in &spec.services {
             if let Some(deps) = &service.depends_on {
                 for dep in deps.service_names() {
@@ -35,7 +35,7 @@ proptest! {
 proptest! {
     #[test]
     fn prop_cycle_detection(spec in arb_compose_spec_with_cycle()) {
-        let result = ComposeEngine::resolve_startup_order(&spec);
+        let result = perry_container_compose::compose::resolve_startup_order(&spec);
         match result {
             Err(perry_container_compose::error::ComposeError::DependencyCycle { services }) => {
                 prop_assert!(!services.is_empty());
@@ -45,10 +45,10 @@ proptest! {
     }
 }
 
-fn arb_compose_spec() -> impl Strategy<Value = ComposeSpec> {
+fn arb_compose_spec() -> impl Strategy<Value = ContainerCompose> {
     any::<Option<String>>().prop_flat_map(|name| {
         prop::collection::vec(arb_service(), 1..5).prop_map(move |services| {
-            let mut spec = ComposeSpec::default();
+            let mut spec = ContainerCompose::default();
             spec.name = name.clone();
             for (i, svc) in services.into_iter().enumerate() {
                 spec.services.insert(format!("svc-{}", i), svc);
@@ -66,9 +66,9 @@ fn arb_service() -> impl Strategy<Value = ComposeService> {
     })
 }
 
-fn arb_compose_spec_with_dag() -> impl Strategy<Value = ComposeSpec> {
+fn arb_compose_spec_with_dag() -> impl Strategy<Value = ContainerCompose> {
     prop::collection::vec(arb_service(), 1..5).prop_map(|services| {
-        let mut spec = ComposeSpec::default();
+        let mut spec = ContainerCompose::default();
         let mut prev: Option<String> = None;
         for (i, svc) in services.into_iter().enumerate() {
             let name = format!("svc-{}", i);
@@ -83,9 +83,9 @@ fn arb_compose_spec_with_dag() -> impl Strategy<Value = ComposeSpec> {
     })
 }
 
-fn arb_compose_spec_with_cycle() -> impl Strategy<Value = ComposeSpec> {
+fn arb_compose_spec_with_cycle() -> impl Strategy<Value = ContainerCompose> {
     prop::collection::vec(arb_service(), 2..3).prop_map(|services| {
-        let mut spec = ComposeSpec::default();
+        let mut spec = ContainerCompose::default();
         let name0 = "svc-0".to_string();
         let name1 = "svc-1".to_string();
 

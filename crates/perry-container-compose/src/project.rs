@@ -1,12 +1,12 @@
 use crate::error::{ComposeError, Result};
 use crate::config::{ProjectConfig, resolve_project_name, resolve_compose_files};
-use crate::types::ComposeSpec;
+use crate::types::ContainerCompose;
 use crate::yaml::{load_env, parse_and_merge_files};
 use std::path::PathBuf;
 use std::env;
 
 pub struct ComposeProject {
-    pub spec: ComposeSpec,
+    pub spec: ContainerCompose,
     pub project_name: String,
     pub project_dir: PathBuf,
     pub compose_files: Vec<PathBuf>,

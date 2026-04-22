@@ -9,7 +9,7 @@
 #[cfg(feature = "integration-tests")]
 mod integration {
     use perry_container_compose::compose::resolve_startup_order;
-    use perry_container_compose::types::{ComposeService, ComposeSpec, DependsOnSpec};
+    use perry_container_compose::types::{ComposeService, ContainerCompose, DependsOnSpec};
     use perry_container_compose::yaml::{interpolate, parse_dotenv, parse_compose_yaml};
     use std::collections::HashMap;
 
@@ -22,7 +22,7 @@ services:
     ports:
       - "8080:80"
 "#;
-        let spec = ComposeSpec::parse_str(yaml).expect("parse failed");
+        let spec = parse_compose_yaml(yaml, &HashMap::new()).expect("parse failed");
         assert!(spec.services.contains_key("web"));
         assert_eq!(spec.services["web"].image.as_deref(), Some("nginx:alpine"));
     }
@@ -42,7 +42,7 @@ services:
     ports:
       - "3000:3000"
 "#;
-        let spec = ComposeSpec::parse_str(yaml).expect("parse failed");
+        let spec = parse_compose_yaml(yaml, &HashMap::new()).expect("parse failed");
         assert_eq!(spec.services.len(), 2);
         let web = &spec.services["web"];
         let deps = web.depends_on.as_ref().unwrap().service_names();
@@ -62,7 +62,7 @@ services:
   a:
     image: a
 "#;
-        let spec = ComposeSpec::parse_str(yaml).unwrap();
+        let spec = parse_compose_yaml(yaml, &HashMap::new()).unwrap();
         let order = resolve_startup_order(&spec).unwrap();
         let pos = |s: &str| order.iter().position(|n| n == s).unwrap();
         assert!(pos("a") < pos("b"), "a before b");
@@ -80,7 +80,7 @@ services:
     image: b
     depends_on: [a]
 "#;
-        let spec = ComposeSpec::parse_str(yaml).unwrap();
+        let spec = parse_compose_yaml(yaml, &HashMap::new()).unwrap();
         let result = resolve_startup_order(&spec);
         assert!(result.is_err());
     }
@@ -119,8 +119,8 @@ services:
   web:
     image: nginx:2.0
 "#;
-        let mut base = ComposeSpec::parse_str(base_yaml).unwrap();
-        let overlay = ComposeSpec::parse_str(override_yaml).unwrap();
+        let mut base = parse_compose_yaml(base_yaml, &HashMap::new()).unwrap();
+        let overlay = parse_compose_yaml(override_yaml, &HashMap::new()).unwrap();
         base.merge(overlay);
 
         assert_eq!(base.services["web"].image.as_deref(), Some("nginx:2.0"));

@@ -71,3 +71,11 @@ pub fn register_string(s: String) -> u64 {
     STRING_MAP.get_or_init(DashMap::new).insert(id, s);
     id
 }
+
+pub fn take_container_info_list(id: u64) -> Option<Vec<ContainerInfo>> {
+    CONTAINER_INFO_LIST.get()?.remove(&id).map(|(_, v)| v)
+}
+
+pub fn take_container_logs(id: u64) -> Option<ContainerLogs> {
+    CONTAINER_LOGS.get()?.remove(&id).map(|(_, v)| v)
+}

@@ -20,7 +20,7 @@ pub async fn get_global_backend_instance() -> Result<Arc<dyn ContainerBackend + 
 
     match detect_backend().await {
         Ok(b) => {
-            let arc_b: Arc<dyn ContainerBackend + Send + Sync> = Arc::from(b);
+            let arc_b: Arc<dyn ContainerBackend + Send + Sync> = Arc::from(b) as Arc<dyn ContainerBackend + Send + Sync>;
             let _ = BACKEND.set(Arc::clone(&arc_b));
             Ok(arc_b)
         }

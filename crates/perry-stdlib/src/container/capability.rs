@@ -23,8 +23,8 @@ pub async fn alloy_container_run_capability(
             reason: e.to_string()
         })?;
 
-    // 2. Build ephemeral ContainerSpec with security constraints
-    let spec = ContainerSpec {
+    // 2. Build ephemeral Container with security constraints
+    let spec = Container {
         image: format!("{}@{}", image, digest),
         name: Some(format!("alloy-cap-{}-{}", name, rand::random::<u32>())),
         volumes: None,

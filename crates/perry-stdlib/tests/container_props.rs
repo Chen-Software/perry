@@ -5,8 +5,8 @@ use serde_json::{json, Value};
 use perry_container_compose::indexmap::IndexMap;
 use perry_container_compose::types::DependsOnCondition;
 
-// ============ Property 2: ContainerSpec CLI argument round-trip ============
-// Feature: perry-container, Property 2: ContainerSpec CLI argument round-trip
+// ============ Property 2: Container CLI argument round-trip ============
+// Feature: perry-container, Property 2: Container CLI argument round-trip
 // Validates: Requirements 12.5
 
 proptest! {
@@ -139,7 +139,7 @@ proptest! {
         }
 
         let expected_len = map.len();
-        let lod = perry_stdlib::container::ListOrDict::Dict(map);
+        let lod = perry_container_compose::types::ListOrDict::Dict(map);
         let result = lod.to_map();
 
         // All unique keys should be preserved
@@ -161,7 +161,7 @@ proptest! {
         entries in proptest::collection::vec("[A-Z][A-Z0-9_]{1,8}=[a-z0-9_]{0,10}", 1..=8),
     ) {
         let list: Vec<String> = entries.clone();
-        let lod = perry_stdlib::container::ListOrDict::List(list);
+        let lod = perry_container_compose::types::ListOrDict::List(list);
         let result = lod.to_map();
 
         // All unique keys should be present with non-None values
@@ -191,7 +191,7 @@ proptest! {
         keys in proptest::collection::vec("[A-Z][A-Z0-9_]{1,8}", 1..=5),
     ) {
         let list: Vec<String> = keys.clone();
-        let lod = perry_stdlib::container::ListOrDict::List(list);
+        let lod = perry_container_compose::types::ListOrDict::List(list);
         let result = lod.to_map();
 
         // All unique keys should be present with empty values
@@ -246,8 +246,8 @@ proptest! {
     }
 }
 
-// ============ Property: ContainerError Display contains identifying keyword ============
-// Validates: Each ContainerError variant's Display output contains
+// ============ Property: ComposeError Display contains identifying keyword ============
+// Validates: Each ComposeError variant's Display output contains
 // a distinguishing keyword for programmatic error classification.
 
 proptest! {
@@ -259,23 +259,23 @@ proptest! {
         msg in "[a-z A-Z0-9_]{1,40}",
     ) {
         let error = match variant {
-            0 => perry_stdlib::container::ContainerError::NotFound(msg.clone()),
-            1 => perry_stdlib::container::ContainerError::BackendError {
+            0 => perry_stdlib::container::ComposeError::NotFound(msg.clone()),
+            1 => perry_stdlib::container::ComposeError::BackendError {
                 code: 1,
                 message: msg.clone(),
             },
-            2 => perry_stdlib::container::ContainerError::VerificationFailed {
+            2 => perry_stdlib::container::ComposeError::VerificationFailed {
                 image: msg.clone(),
                 reason: "test reason".to_string(),
             },
-            3 => perry_stdlib::container::ContainerError::DependencyCycle {
-                cycle: vec![msg.clone()],
+            3 => perry_stdlib::container::ComposeError::DependencyCycle {
+                services: vec![msg.clone()],
             },
-            4 => perry_stdlib::container::ContainerError::ServiceStartupFailed {
+            4 => perry_stdlib::container::ComposeError::ServiceStartupFailed {
                 service: msg.clone(),
-                error: "test error".to_string(),
+                message: "test error".to_string(),
             },
-            _ => perry_stdlib::container::ContainerError::InvalidConfig(msg.clone()),
+            _ => perry_stdlib::container::ComposeError::InvalidConfig(msg.clone()),
         };
 
         let display = format!("{}", error);
@@ -297,8 +297,8 @@ proptest! {
     }
 }
 
-// ============ Property: Typed ComposeSpec JSON round-trip ============
-// Validates: The typed ComposeSpec struct survives JSON round-trip.
+// ============ Property: Typed ContainerCompose JSON round-trip ============
+// Validates: The typed ContainerCompose struct survives JSON round-trip.
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
@@ -309,8 +309,8 @@ proptest! {
         svc_names in proptest::collection::vec("[a-z][a-z0-9_-]{1,10}", 1..=5),
         images in proptest::collection::vec("[a-z][a-z0-9_.-]{3,30}(:[a-z0-9._-]+)?", 1..=5),
     ) {
-        use perry_container_compose::types::{ComposeSpec, ComposeService};
-        let mut spec = ComposeSpec::default();
+        use perry_container_compose::types::{ContainerCompose, ComposeService};
+        let mut spec = ContainerCompose::default();
         spec.name = name;
 
         for (svc_name, image) in svc_names.iter().zip(images.iter()) {
@@ -320,7 +320,7 @@ proptest! {
         }
 
         let json_str = serde_json::to_string(&spec).unwrap();
-        let reparsed: ComposeSpec =
+        let reparsed: ContainerCompose =
             serde_json::from_str(&json_str).unwrap();
 
         prop_assert_eq!(reparsed.name, spec.name);
