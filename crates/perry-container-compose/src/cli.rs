@@ -89,7 +89,7 @@ pub struct PsArgs {
 
 #[derive(Args, Debug)]
 pub struct LogsArgs {
-    #[arg(long = "follow")]
+    #[arg(short = 'f', long = "follow")]
     pub follow: bool,
     #[arg(long = "tail")]
     pub tail: Option<u32>,
@@ -127,10 +127,14 @@ pub async fn run(cli: Cli) -> Result<()> {
         cli.env_files.clone(),
     );
     let project = ComposeProject::load(&config)?;
-    let backend = crate::backend::detect_backend()
-        .await
-        .map_err(|probed| crate::error::ComposeError::NoBackendFound { probed })?;
-    let engine = std::sync::Arc::new(ComposeEngine::new(project.spec.clone(), project.project_name.clone(), backend));
+
+    let backend_res = crate::backend::detect_backend().await;
+    let backend: std::sync::Arc<dyn crate::backend::ContainerBackend> = match backend_res {
+        Ok(b) => b.into(),
+        Err(probed) => return Err(crate::error::ComposeError::NoBackendFound { probed }),
+    };
+
+    let engine = ComposeEngine::new(project.spec.clone(), project.project_name.clone(), backend);
 
     match cli.command {
         Commands::Up(args) => {
@@ -163,23 +167,10 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
 
         Commands::Logs(args) => {
-            let logs_map = engine.logs(&args.services, args.tail).await?;
-
-            let mut names: Vec<&String> = logs_map.keys().collect();
-            names.sort();
-            for name in names {
-                let log = &logs_map[name];
-                if !log.stdout.is_empty() {
-                    for line in log.stdout.lines() {
-                        println!("{} | {}", name, line);
-                    }
-                }
-                if !log.stderr.is_empty() {
-                    for line in log.stderr.lines() {
-                        eprintln!("{} | {}", name, line);
-                    }
-                }
-            }
+            let service = if args.services.is_empty() { None } else { Some(args.services[0].as_str()) };
+            let logs = engine.logs(service, args.tail).await?;
+            print!("{}", logs.stdout);
+            eprint!("{}", logs.stderr);
         }
 
         Commands::Exec(args) => {
@@ -195,23 +186,28 @@ pub async fn run(cli: Cli) -> Result<()> {
                 .collect();
 
             let cmd = args.cmd.clone();
+            let result = if !env.is_empty() || args.workdir.is_some() {
+                // Use backend directly for workdir/env support
+                let svc = engine
+                    .spec
+                    .services
+                    .get(&args.service)
+                    .ok_or_else(|| crate::error::ComposeError::NotFound(args.service.clone()))?;
+                let container_name =
+                    crate::service::service_container_name(svc, &args.service);
 
-            let svc = engine
-                .spec
-                .services
-                .get(&args.service)
-                .ok_or_else(|| crate::error::ComposeError::NotFound(args.service.clone()))?;
-            let container_name = crate::service::service_container_name(svc, &args.service);
-
-            let result = engine
-                .backend
-                .exec(
-                    &container_name,
-                    &cmd,
-                    if env.is_empty() { None } else { Some(&env) },
-                    args.workdir.as_deref(),
-                )
-                .await?;
+                engine
+                    .backend
+                    .exec(
+                        &container_name,
+                        &cmd,
+                        if env.is_empty() { None } else { Some(&env) },
+                        args.workdir.as_deref(),
+                    )
+                    .await?
+            } else {
+                engine.exec(&args.service, &cmd).await?
+            };
 
             print!("{}", result.stdout);
             eprint!("{}", result.stderr);
