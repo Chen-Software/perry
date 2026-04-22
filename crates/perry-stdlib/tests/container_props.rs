@@ -2,8 +2,7 @@
 
 use proptest::prelude::*;
 use serde_json::{json, Value};
-use perry_container_compose::indexmap::IndexMap;
-use perry_container_compose::types::DependsOnCondition;
+use perry_container_compose::types::{DependsOnCondition, ListOrDict};
 
 // ============ Property 2: ContainerSpec CLI argument round-trip ============
 // Feature: perry-container, Property 2: ContainerSpec CLI argument round-trip
@@ -59,6 +58,25 @@ proptest! {
 // Feature: perry-container, Property 10: Image verification cache idempotence
 // Validates: Requirements 15.7
 
+#[tokio::test]
+async fn test_verification_cache_idempotence() {
+    use perry_stdlib::container::verification::verify_image;
+    let reference = "cgr.dev/chainguard/alpine-base:latest";
+
+    let res1 = verify_image(reference).await;
+    let res2 = verify_image(reference).await;
+
+    match (res1, res2) {
+        (Ok(d1), Ok(d2)) => assert_eq!(d1, d2),
+        (Err(e1), Err(e2)) => assert_eq!(e1.to_string(), e2.to_string()),
+        _ => panic!("Cache returned inconsistent results for same image"),
+    }
+}
+
+// ============ Property 11: Error propagation preserves code and message ============
+// Feature: perry-container, Property 11: Error propagation preserves code and message
+// Validates: Requirements 2.6, 12.2
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(50))]
 
@@ -67,7 +85,6 @@ proptest! {
         code in -1000i32..1000,
         msg in "[a-z A-Z0-9_]{1,100}"
     ) {
-        // Simulate the ComposeError::BackendError → JSON → parse flow
         let error_json = json!({
             "message": format!("Backend error (exit {}): {}", code, msg),
             "code": code
@@ -83,10 +100,6 @@ proptest! {
         );
     }
 }
-
-// ============ Property 11: Error propagation preserves code and message ============
-// Feature: perry-container, Property 11: Error propagation preserves code and message
-// Validates: Requirements 2.6, 12.2
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(50))]
@@ -126,8 +139,8 @@ proptest! {
         bool_val in proptest::bool::ANY,
         str_val in "[a-z0-9_]{1,10}",
     ) {
+        use perry_container_compose::indexmap::IndexMap;
         let mut map = IndexMap::new();
-        // Mix different value types across keys
         for (i, key) in keys.iter().enumerate() {
             let val: Option<serde_yaml::Value> = match i % 4 {
                 0 => Some(serde_yaml::Value::String(str_val.clone())),
@@ -139,10 +152,9 @@ proptest! {
         }
 
         let expected_len = map.len();
-        let lod = perry_stdlib::container::ListOrDict::Dict(map);
+        let lod = ListOrDict::Dict(map);
         let result = lod.to_map();
 
-        // All unique keys should be preserved
         prop_assert_eq!(result.len(), expected_len);
         for key in &keys {
             prop_assert!(result.contains_key(key), "key {} should be in result", key);
@@ -161,12 +173,9 @@ proptest! {
         entries in proptest::collection::vec("[A-Z][A-Z0-9_]{1,8}=[a-z0-9_]{0,10}", 1..=8),
     ) {
         let list: Vec<String> = entries.clone();
-        let lod = perry_stdlib::container::ListOrDict::List(list);
+        let lod = ListOrDict::List(list);
         let result = lod.to_map();
 
-        // All unique keys should be present with non-None values
-        // Note: HashMap uses last-writer-wins, so duplicate keys
-        // retain the value from the last occurrence.
         let unique_keys: std::collections::HashSet<&str> =
             entries.iter().map(|e| e.split_once('=').unwrap().0).collect();
         prop_assert_eq!(result.len(), unique_keys.len());
@@ -191,11 +200,9 @@ proptest! {
         keys in proptest::collection::vec("[A-Z][A-Z0-9_]{1,8}", 1..=5),
     ) {
         let list: Vec<String> = keys.clone();
-        let lod = perry_stdlib::container::ListOrDict::List(list);
+        let lod = ListOrDict::List(list);
         let result = lod.to_map();
 
-        // All unique keys should be present with empty values
-        // (HashMap deduplicates keys, so len may be <= keys.len())
         for key in &keys {
             prop_assert_eq!(
                 result.get(key).map(|s| s.as_str()),
@@ -218,12 +225,11 @@ proptest! {
         names in proptest::collection::vec("[a-z][a-z0-9_-]{1,10}", 1..=6),
     ) {
         use perry_container_compose::types::{DependsOnSpec, ComposeDependsOn};
+        use perry_container_compose::indexmap::IndexMap;
 
-        // List variant
         let list_entry = DependsOnSpec::List(names.clone());
         let list_names = list_entry.service_names();
 
-        // Map variant (same keys)
         let mut map = IndexMap::new();
         for name in &names {
             map.insert(
@@ -238,7 +244,6 @@ proptest! {
         let map_entry = DependsOnSpec::Map(map);
         let map_names = map_entry.service_names();
 
-        // Both should yield the same service names (order may differ for Map)
         prop_assert_eq!(list_names.len(), map_names.len());
         for name in &list_names {
             prop_assert!(map_names.contains(name), "map should contain {}", name);
@@ -258,24 +263,25 @@ proptest! {
         variant in 0u8..=5,
         msg in "[a-z A-Z0-9_]{1,40}",
     ) {
+        use perry_stdlib::container::types::ComposeError;
         let error = match variant {
-            0 => perry_stdlib::container::ContainerError::NotFound(msg.clone()),
-            1 => perry_stdlib::container::ContainerError::BackendError {
+            0 => ComposeError::NotFound(msg.clone()),
+            1 => ComposeError::BackendError {
                 code: 1,
                 message: msg.clone(),
             },
-            2 => perry_stdlib::container::ContainerError::VerificationFailed {
+            2 => ComposeError::VerificationFailed {
                 image: msg.clone(),
                 reason: "test reason".to_string(),
             },
-            3 => perry_stdlib::container::ContainerError::DependencyCycle {
-                cycle: vec![msg.clone()],
+            3 => ComposeError::DependencyCycle {
+                services: vec![msg.clone()],
             },
-            4 => perry_stdlib::container::ContainerError::ServiceStartupFailed {
+            4 => ComposeError::ServiceStartupFailed {
                 service: msg.clone(),
-                error: "test error".to_string(),
+                message: "test error".to_string(),
             },
-            _ => perry_stdlib::container::ContainerError::InvalidConfig(msg.clone()),
+            _ => ComposeError::ValidationError { message: msg.clone() },
         };
 
         let display = format!("{}", error);
@@ -285,7 +291,7 @@ proptest! {
             2 => "verification failed",
             3 => "Dependency cycle",
             4 => "failed to start",
-            _ => "Invalid configuration",
+            _ => "Validation error",
         };
 
         prop_assert!(
@@ -346,9 +352,8 @@ proptest! {
         stdout in "[a-z0-9 ]{0,50}",
         stderr in "[a-z0-9 ]{0,50}",
     ) {
-        use perry_stdlib::container::{ContainerInfo, ContainerLogs};
+        use perry_stdlib::container::types::{ContainerInfo, ContainerLogs};
 
-        // Register a Vec<ContainerInfo> and take it back
         let infos: Vec<ContainerInfo> = ids
             .iter()
             .zip(images.iter())
@@ -373,7 +378,6 @@ proptest! {
             prop_assert_eq!(&recovered.image, &original.image);
         }
 
-        // Register ContainerLogs and take it back
         let logs = ContainerLogs {
             stdout: stdout.clone(),
             stderr: stderr.clone(),

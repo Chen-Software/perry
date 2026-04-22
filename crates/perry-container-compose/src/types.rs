@@ -1,11 +1,42 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ListOrDict {
     Dict(IndexMap<String, Option<serde_yaml::Value>>),
     List(Vec<String>),
+}
+
+impl ListOrDict {
+    pub fn to_map(&self) -> HashMap<String, String> {
+        let mut map = HashMap::new();
+        match self {
+            ListOrDict::Dict(dict) => {
+                for (k, v) in dict {
+                    let v_str = match v {
+                        Some(serde_yaml::Value::String(s)) => s.clone(),
+                        Some(serde_yaml::Value::Number(n)) => n.to_string(),
+                        Some(serde_yaml::Value::Bool(b)) => b.to_string(),
+                        Some(serde_yaml::Value::Null) | None => "".to_string(),
+                        _ => "".to_string(),
+                    };
+                    map.insert(k.clone(), v_str);
+                }
+            }
+            ListOrDict::List(list) => {
+                for entry in list {
+                    if let Some((k, v)) = entry.split_once('=') {
+                        map.insert(k.to_string(), v.to_string());
+                    } else {
+                        map.insert(entry.clone(), "".to_string());
+                    }
+                }
+            }
+        }
+        map
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

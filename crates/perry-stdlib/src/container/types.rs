@@ -3,43 +3,73 @@
 pub use perry_container_compose::types::*;
 pub use perry_container_compose::error::ComposeError;
 
-use perry_runtime::JSValue;
+use dashmap::DashMap;
+use perry_runtime::StringHeader;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 // ============ Handle Management ============
 
-static NEXT_CONTAINER_HANDLE: AtomicU64 = AtomicU64::new(1);
+static NEXT_HANDLE_ID: AtomicU64 = AtomicU64::new(1);
 
-pub fn register_container_handle(_handle: ContainerHandle) -> u64 {
-    NEXT_CONTAINER_HANDLE.fetch_add(1, Ordering::SeqCst)
+static CONTAINER_HANDLES: OnceLock<DashMap<u64, ContainerHandle>> = OnceLock::new();
+static INFO_HANDLES: OnceLock<DashMap<u64, ContainerInfo>> = OnceLock::new();
+static INFO_LIST_HANDLES: OnceLock<DashMap<u64, Vec<ContainerInfo>>> = OnceLock::new();
+static LOG_HANDLES: OnceLock<DashMap<u64, ContainerLogs>> = OnceLock::new();
+static IMAGE_INFO_LIST_HANDLES: OnceLock<DashMap<u64, Vec<ImageInfo>>> = OnceLock::new();
+static COMPOSE_HANDLES: OnceLock<DashMap<u64, ComposeHandle>> = OnceLock::new();
+
+fn next_id() -> u64 {
+    NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst)
 }
 
-pub fn register_container_info(_info: ContainerInfo) -> u64 {
-    NEXT_CONTAINER_HANDLE.fetch_add(1, Ordering::SeqCst)
+pub fn register_container_handle(handle: ContainerHandle) -> u64 {
+    let id = next_id();
+    CONTAINER_HANDLES.get_or_init(DashMap::new).insert(id, handle);
+    id
 }
 
-pub fn register_container_info_list(_list: Vec<ContainerInfo>) -> u64 {
-    NEXT_CONTAINER_HANDLE.fetch_add(1, Ordering::SeqCst)
+pub fn register_container_info(info: ContainerInfo) -> u64 {
+    let id = next_id();
+    INFO_HANDLES.get_or_init(DashMap::new).insert(id, info);
+    id
 }
 
-pub fn register_compose_handle(_handle: ComposeHandle) -> u64 {
-    NEXT_CONTAINER_HANDLE.fetch_add(1, Ordering::SeqCst)
+pub fn register_container_info_list(list: Vec<ContainerInfo>) -> u64 {
+    let id = next_id();
+    INFO_LIST_HANDLES.get_or_init(DashMap::new).insert(id, list);
+    id
 }
 
-pub fn register_container_logs(_logs: ContainerLogs) -> u64 {
-    NEXT_CONTAINER_HANDLE.fetch_add(1, Ordering::SeqCst)
+pub fn register_compose_handle(handle: ComposeHandle) -> u64 {
+    let id = next_id();
+    COMPOSE_HANDLES.get_or_init(DashMap::new).insert(id, handle);
+    id
 }
 
-pub fn register_image_info_list(_list: Vec<ImageInfo>) -> u64 {
-    NEXT_CONTAINER_HANDLE.fetch_add(1, Ordering::SeqCst)
+pub fn register_container_logs(logs: ContainerLogs) -> u64 {
+    let id = next_id();
+    LOG_HANDLES.get_or_init(DashMap::new).insert(id, logs);
+    id
 }
 
-// ============ JSValue Parsing Functions ============
-
-pub fn parse_container_spec(_spec_ptr: *const JSValue) -> Result<ContainerSpec, String> {
-    Err("ContainerSpec parsing must be done at compile time.".to_string())
+pub fn register_image_info_list(list: Vec<ImageInfo>) -> u64 {
+    let id = next_id();
+    IMAGE_INFO_LIST_HANDLES.get_or_init(DashMap::new).insert(id, list);
+    id
 }
 
-pub fn parse_compose_spec(_spec_ptr: *const JSValue) -> Result<ComposeSpec, String> {
-    Err("ComposeSpec parsing must be done at compile time.".to_string())
+pub fn take_container_info_list(id: u64) -> Option<Vec<ContainerInfo>> {
+    INFO_LIST_HANDLES.get_or_init(DashMap::new).remove(&id).map(|(_, v)| v)
+}
+
+pub fn take_container_logs(id: u64) -> Option<ContainerLogs> {
+    LOG_HANDLES.get_or_init(DashMap::new).remove(&id).map(|(_, v)| v)
+}
+
+// ============ String Handling ============
+
+pub unsafe fn string_to_js(s: &str) -> *const StringHeader {
+    let bytes = s.as_bytes();
+    perry_runtime::js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
 }
