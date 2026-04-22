@@ -3492,13 +3492,14 @@ const PERRY_CONTAINER_TABLE: &[(&str, &str)] = &[
     ("removeImage", "js_container_removeImage"),
     ("inspectImage", "js_container_inspectImage"),
     ("imageExists", "js_container_imageExists"),
+    ("build", "js_container_build"),
     ("getBackend", "js_container_getBackend"),
-    ("composeUp", "js_container_compose_up"),
+    ("composeUp", "js_container_composeUp"),
 ];
 
 /// Maps perry/container-compose TypeScript function names to their FFI symbols.
 const PERRY_CONTAINER_COMPOSE_TABLE: &[(&str, &str)] = &[
-    ("up", "js_container_compose_up"),
+    ("up", "js_container_composeUp"),
     ("down", "js_container_compose_down"),
     ("ps", "js_container_compose_ps"),
     ("logs", "js_container_compose_logs"),

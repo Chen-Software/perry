@@ -134,6 +134,7 @@ impl ContainerBackend for MockBackend {
                 status: "running".into(),
                 ports: vec![],
                 created: "".into(),
+                ip: Some("172.17.0.2".into()),
             }),
         }
     }

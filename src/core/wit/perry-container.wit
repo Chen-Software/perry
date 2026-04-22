@@ -60,4 +60,63 @@ interface container {
     remove-image: func(reference: string, force: option<bool>) -> result<_, string>;
     get-backend: func() -> string;
     detect-backend: func() -> result<list<backend-info>, string>;
+
+    compose-up: func(spec: string) -> result<u64, string>;
+    compose-down: func(handle: u64, volumes: bool) -> result<_, string>;
+    compose-ps: func(handle: u64) -> result<list<container-info>, string>;
+    compose-logs: func(handle: u64, service: option<string>, tail: option<u32>) -> result<container-logs, string>;
+    compose-exec: func(handle: u64, service: string, cmd: list<string>, options: option<string>) -> result<container-logs, string>;
+    compose-config: func(handle: u64) -> result<string, string>;
+    compose-start: func(handle: u64, services: option<list<string>>) -> result<_, string>;
+    compose-stop: func(handle: u64, services: option<list<string>>) -> result<_, string>;
+    compose-restart: func(handle: u64, services: option<list<string>>) -> result<_, string>;
+
+    record workload-ref {
+        node-id: string,
+        projection: string,
+        port: option<string>,
+    }
+
+    variant workload-env-value {
+        literal(string),
+        reference(workload-ref),
+    }
+
+    record workload-node {
+        id: string,
+        name: string,
+        image: option<string>,
+        ports: list<string>,
+        env: list<tuple<string, workload-env-value>>,
+        depends-on: list<string>,
+    }
+
+    record workload-graph {
+        name: string,
+        nodes: list<tuple<string, workload-node>>,
+    }
+
+    record graph-status {
+        nodes: list<tuple<string, string>>,
+        healthy: bool,
+    }
+
+    record node-info {
+        node-id: string,
+        name: string,
+        container-id: option<string>,
+        state: string,
+        image: option<string>,
+    }
+
+    graph: func(name: string, spec: string) -> string;
+    node: func(name: string, spec: string) -> string;
+    run-graph: func(graph: workload-graph, options: option<string>) -> result<u64, string>;
+    inspect-graph: func(graph: workload-graph) -> result<u64, string>;
+    graph-handle-down: func(handle: u64, options: option<string>) -> result<_, string>;
+    graph-handle-status: func(handle: u64) -> result<u64, string>;
+    graph-handle-graph: func(handle: u64) -> string;
+    graph-handle-logs: func(handle: u64, node: string, options: option<string>) -> result<container-logs, string>;
+    graph-handle-exec: func(handle: u64, node: string, cmd: list<string>) -> result<container-logs, string>;
+    graph-handle-ps: func(handle: u64) -> result<list<node-info>, string>;
 }

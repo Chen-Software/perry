@@ -1,4 +1,4 @@
-use crate::container::types::{ContainerError, ContainerLogs, ContainerSpec};
+use crate::container::types::{ContainerError, ContainerLogs, ContainerSpec, CapabilityGrants};
 use crate::container::verification::verify_image;
 use crate::container::ContainerBackend;
 use std::sync::Arc;
@@ -7,6 +7,7 @@ pub async fn alloy_container_run_capability(
     _name: &str,
     image: &str,
     cmd: &[String],
+    grants: &CapabilityGrants,
     backend: Arc<dyn ContainerBackend>,
 ) -> Result<ContainerLogs, ContainerError> {
     // 1. Verify image signature
@@ -18,10 +19,10 @@ pub async fn alloy_container_run_capability(
         name: None,
         ports: None,
         volumes: None,
-        env: None,
+        env: Some(grants.env.clone()),
         cmd: Some(cmd.to_vec()),
         entrypoint: None,
-        network: Some("none".into()),
+        network: if grants.network { None } else { Some("none".into()) },
         rm: Some(true),
     };
 

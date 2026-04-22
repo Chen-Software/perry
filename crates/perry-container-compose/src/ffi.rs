@@ -69,11 +69,17 @@ fn parse_compose_file(file_ptr: *const StringHeader) -> Option<PathBuf> {
 }
 
 fn make_engine(files: Vec<PathBuf>) -> Result<Arc<ComposeEngine>, String> {
-    let proj = crate::project::ComposeProject::load_from_files(&files, None, &[])
-        .map_err(|e| e.to_string())?;
+    let config = crate::config::ProjectConfig {
+        files,
+        project_name: None,
+        env_files: vec![],
+    };
+
+    let proj = crate::project::ComposeProject::load(&config)
+        .map_err(|e: crate::error::ComposeError| e.to_string())?;
     let backend: Arc<dyn crate::backend::ContainerBackend> = block(crate::backend::detect_backend())
-        .map(Arc::from)
-        .map_err(|e| e.to_string())?;
+        .map(|b| Arc::from(b) as Arc<dyn crate::backend::ContainerBackend>)
+        .map_err(|_| "No backend found".to_string())?;
     Ok(Arc::new(ComposeEngine::new(proj.spec, proj.project_name, backend)))
 }
 
@@ -87,7 +93,7 @@ pub unsafe extern "C" fn js_compose_start(file_ptr: *const StringHeader) -> *con
     match make_engine(files) {
         Err(e) => json_err(&e),
         Ok(engine) => match block(engine.up(&[], true, false, false)) {
-            Ok(_) => json_ok("null"),
+            Ok(h) => json_ok(&format!("{}", h.stack_id)),
             Err(e) => json_err(&e.to_string()),
         },
     }
@@ -98,7 +104,7 @@ pub unsafe extern "C" fn js_compose_stop(file_ptr: *const StringHeader) -> *cons
     let files: Vec<PathBuf> = parse_compose_file(file_ptr).into_iter().collect();
     match make_engine(files) {
         Err(e) => json_err(&e),
-        Ok(engine) => match block(engine.down(false, false)) {
+        Ok(engine) => match block(engine.down(&[], false, false)) {
             Ok(_) => json_ok("null"),
             Err(e) => json_err(&e.to_string()),
         },
@@ -136,18 +142,21 @@ pub unsafe extern "C" fn js_compose_logs(
     _follow: bool,
 ) -> *const StringHeader {
     let files: Vec<PathBuf> = parse_compose_file(file_ptr).into_iter().collect();
-    let service: Option<String> = string_from_header(services_ptr)
+    let services: Vec<String> = string_from_header(services_ptr)
         .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
-        .and_then(|v| v.into_iter().next());
+        .unwrap_or_default();
 
     match make_engine(files) {
         Err(e) => json_err(&e),
-        Ok(engine) => match block(engine.logs(service.as_deref(), None)) {
+        Ok(engine) => match block(engine.logs(&services, None)) {
             Err(e) => json_err(&e.to_string()),
             Ok(logs) => {
-                let stdout = logs.stdout.replace('"', "\\\"").replace('\n', "\\n");
-                let stderr = logs.stderr.replace('"', "\\\"").replace('\n', "\\n");
-                let payload = format!("{{\"stdout\":\"{}\",\"stderr\":\"{}\"}}", stdout, stderr);
+                let mut stdout = String::new();
+                for (svc, l) in logs {
+                    stdout.push_str(&format!("{}: {}\n", svc, l));
+                }
+                let escaped_out = stdout.replace('"', "\\\"").replace('\n', "\\n");
+                let payload = format!("{{\"stdout\":\"{}\",\"stderr\":\"\"}}", escaped_out);
                 json_ok(&payload)
             }
         },
@@ -171,7 +180,7 @@ pub unsafe extern "C" fn js_compose_exec(
 
     match make_engine(files) {
         Err(e) => json_err(&e),
-        Ok(engine) => match block(engine.exec(&service, &cmd)) {
+        Ok(engine) => match block(engine.exec(&service, &cmd, None, None)) {
             Err(e) => json_err(&e.to_string()),
             Ok(result) => {
                 let stdout = result.stdout.replace('"', "\\\"").replace('\n', "\\n");
@@ -189,7 +198,12 @@ pub unsafe extern "C" fn js_compose_exec(
 #[no_mangle]
 pub unsafe extern "C" fn js_compose_config(file_ptr: *const StringHeader) -> *const StringHeader {
     let files: Vec<PathBuf> = parse_compose_file(file_ptr).into_iter().collect();
-    match crate::project::ComposeProject::load_from_files(&files, None, &[]) {
+    let config = crate::config::ProjectConfig {
+        files,
+        project_name: None,
+        env_files: vec![],
+    };
+    match crate::project::ComposeProject::load(&config) {
         Err(e) => json_err(&e.to_string()),
         Ok(proj) => {
             let yaml = proj.spec.to_yaml().unwrap_or_default();

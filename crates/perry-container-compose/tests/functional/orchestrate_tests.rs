@@ -17,6 +17,7 @@ async fn test_orchestrate_skip_running() {
         status: "running".into(),
         ports: vec![],
         created: "".into(),
+        ip: None,
     }));
 
     orchestrate_service(&service, &backend).await.unwrap();
@@ -44,6 +45,7 @@ async fn test_orchestrate_start_stopped() {
         status: "exited".into(),
         ports: vec![],
         created: "".into(),
+        ip: None,
     }));
     // Second inspect (exists check): Ok
     backend.push_response(MockResponse::Ok);

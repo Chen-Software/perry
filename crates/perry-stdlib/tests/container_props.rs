@@ -140,9 +140,10 @@ proptest! {
         let lod = perry_stdlib::container::ListOrDict::Dict(map);
         let result = lod.to_map();
 
-        // All keys should be preserved
-        prop_assert_eq!(result.len(), keys.len());
-        for key in &keys {
+        // All unique keys should be preserved
+        let unique_keys: std::collections::HashSet<_> = keys.iter().collect();
+        prop_assert_eq!(result.len(), unique_keys.len());
+        for key in unique_keys {
             prop_assert!(result.contains_key(key), "key {} should be in result", key);
         }
     }
@@ -357,6 +358,7 @@ proptest! {
                 status: "running".to_string(),
                 ports: vec![],
                 created: "2025-01-01T00:00:00Z".to_string(),
+                ip: None,
             })
             .collect();
 

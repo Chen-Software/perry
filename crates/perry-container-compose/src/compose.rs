@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use crate::backend::ContainerBackend;
 
-static COMPOSE_ENGINES: once_cell::sync::Lazy<std::sync::Mutex<IndexMap<u64, Arc<ComposeEngine>>>> =
+pub static COMPOSE_ENGINES: once_cell::sync::Lazy<std::sync::Mutex<IndexMap<u64, Arc<ComposeEngine>>>> =
     once_cell::sync::Lazy::new(|| std::sync::Mutex::new(IndexMap::new()));
 
 static NEXT_STACK_ID: AtomicU64 = AtomicU64::new(1);
@@ -45,6 +45,10 @@ pub struct ComposeEngine {
 }
 
 impl ComposeEngine {
+    pub fn resolve_startup_order(&self) -> crate::error::Result<Vec<String>> {
+        resolve_startup_order(&self.spec)
+    }
+
     pub fn new(
         spec: ComposeSpec,
         project_name: String,

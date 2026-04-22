@@ -86,6 +86,10 @@ pub fn drop_container_handle(id: u64) -> bool {
     handle::drop_handle(id as Handle)
 }
 
+pub fn register_handle<T: 'static + Send + Sync>(val: T) -> u64 {
+    handle::register_handle(val) as u64
+}
+
 // ============ Error Types ============
 
 /// Container module errors.
@@ -115,6 +119,18 @@ pub enum ContainerError {
         name: String,
         reason: String,
     },
+    WorkloadRefResolutionFailed {
+        node_id: String,
+        projection: String,
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityGrants {
+    pub network: bool,
+    pub read_only: bool,
+    pub env: std::collections::HashMap<String, String>,
 }
 
 impl std::fmt::Display for ContainerError {
@@ -139,6 +155,9 @@ impl std::fmt::Display for ContainerError {
             }
             ContainerError::BackendNotAvailable { name, reason } => {
                 write!(f, "Backend '{}' not available: {}", name, reason)
+            }
+            ContainerError::WorkloadRefResolutionFailed { node_id, projection, reason } => {
+                write!(f, "Failed to resolve workload reference for node {} (projection {}): {}", node_id, projection, reason)
             }
         }
     }

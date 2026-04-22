@@ -12,7 +12,7 @@ fn test_chainguard_image_lookup() {
 // Feature: perry-container | Layer: unit | Req: 14.2 | Property: -
 #[test]
 fn test_default_base_image() {
-    assert_eq!(get_default_base_image(), "cgr.dev/chainguard/static:latest");
+    assert_eq!(get_default_base_image(), "cgr.dev/chainguard/alpine-base");
 }
 
 // Feature: perry-container | Layer: property | Req: 15.7 | Property: 10

@@ -105,6 +105,24 @@ struct DockerInspectOutput {
     state: DockerInspectState,
     #[serde(rename = "Created")]
     created: String,
+    #[serde(rename = "NetworkSettings")]
+    network_settings: DockerNetworkSettings,
+}
+
+#[derive(Debug, Deserialize)]
+struct DockerNetworkSettings {
+    #[serde(rename = "IPAddress")]
+    ip_address: String,
+    #[serde(rename = "Ports")]
+    ports: HashMap<String, Option<Vec<DockerPortBinding>>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DockerPortBinding {
+    #[serde(rename = "HostIp")]
+    host_ip: String,
+    #[serde(rename = "HostPort")]
+    host_port: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -293,19 +311,31 @@ impl CliProtocol for DockerProtocol {
             status: e.status,
             ports: e.ports,
             created: e.created,
+            ip: None,
         }).collect())
     }
 
     fn parse_inspect_output(&self, stdout: &str) -> Result<ContainerInfo> {
         let entries: Vec<DockerInspectOutput> = serde_json::from_str(stdout)?;
         let e = entries.into_iter().next().ok_or_else(|| ComposeError::NotFound("Inspect output empty".into()))?;
+
+        let mut ports = Vec::new();
+        for (container_port, bindings) in &e.network_settings.ports {
+            if let Some(bindings) = bindings {
+                for b in bindings {
+                    ports.push(format!("{}:{}:{}", b.host_ip, b.host_port, container_port));
+                }
+            }
+        }
+
         Ok(ContainerInfo {
             id: e.id,
             name: e.name,
             image: e.config.image,
             status: e.state.status,
-            ports: vec![],
+            ports,
             created: e.created,
+            ip: Some(e.network_settings.ip_address),
         })
     }
 
@@ -688,10 +718,22 @@ async fn probe_candidate(name: &str) -> std::result::Result<CliBackend, String> 
             let bin = which_bin("orb")
                 .or_else(|_| which_bin("docker"))
                 .map_err(|_| "orbstack not found")?;
+            // Check for OrbStack socket
+            let home = std::env::var("HOME").unwrap_or_default();
+            let socket = std::path::PathBuf::from(home).join(".orbstack/run/docker.sock");
+            if !socket.exists() {
+                return Err("orbstack socket not found".into());
+            }
             Ok(CliBackend::new(bin, Box::new(DockerProtocol)))
         }
         "rancher-desktop" => {
-            let bin = which_bin("nerdctl").map_err(|_| "rancher-desktop (nerdctl) not found")?;
+            let bin = which_bin("nerdctl").map_err(|_| "nerdctl not found for rancher-desktop")?;
+            // Check for Rancher Desktop socket
+            let home = std::env::var("HOME").unwrap_or_default();
+            let socket = std::path::PathBuf::from(home).join(".rd/run/containerd-shim.sock");
+            if !socket.exists() {
+                return Err("rancher-desktop socket not found".into());
+            }
             Ok(CliBackend::new(bin, Box::new(DockerProtocol)))
         }
         "colima" => {

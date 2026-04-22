@@ -30,19 +30,42 @@ impl BackendInstaller {
                 let name = candidates[index];
                 println!("Installation instructions for {}:", style(name).cyan());
 
-                // Simplified for brevity, in a real implementation we would have
-                // a map of name -> (command, docs_url)
-                match name {
-                    "apple/container" => println!("Run: brew install container\nDocs: https://github.com/apple/container"),
-                    "podman" => println!("Run: brew install podman && podman machine init && podman machine start\nDocs: https://podman.io"),
-                    _ => println!("Please refer to the documentation for {}", name),
+                let (cmd_str, docs_url) = match name {
+                    "apple/container" => ("brew install container", "https://github.com/apple/container"),
+                    "podman" => ("brew install podman && podman machine init && podman machine start", "https://podman.io"),
+                    "orbstack" => ("brew install --cask orbstack", "https://orbstack.dev"),
+                    "colima" => ("brew install colima", "https://github.com/abiosoft/colima"),
+                    "docker" => ("brew install --cask docker", "https://docs.docker.com/desktop/mac"),
+                    _ => ("", ""),
+                };
+
+                if !cmd_str.is_empty() {
+                    println!("Run: {}\nDocs: {}", style(cmd_str).cyan(), docs_url);
+                } else {
+                    println!("Please refer to the documentation for {}", name);
                 }
 
                 println!("\nInstall now? [y/N]");
                 let mut input = String::new();
                 std::io::stdin().read_line(&mut input).ok();
-                if input.trim().to_lowercase() == "y" {
-                    // Logic to execute install command would go here
+                if input.trim().to_lowercase() == "y" && !cmd_str.is_empty() {
+                    let parts: Vec<&str> = cmd_str.split("&&").map(|s| s.trim()).collect();
+                    for part in parts {
+                        let mut args: Vec<&str> = part.split_whitespace().collect();
+                        let cmd = args.remove(0);
+                        let status = tokio::process::Command::new(cmd)
+                            .args(args)
+                            .status()
+                            .await
+                            .map_err(|e| ComposeError::IoError(e))?;
+
+                        if !status.success() {
+                            return Err(ComposeError::BackendError {
+                                code: status.code().unwrap_or(-1),
+                                message: format!("Installation command failed: {}", part)
+                            });
+                        }
+                    }
                     return detect_backend().await.map_err(|probed| ComposeError::NoBackendFound { probed });
                 }
             }

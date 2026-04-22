@@ -20,12 +20,25 @@ pub use backend::{detect_backend, ContainerBackend};
 use std::sync::OnceLock;
 use std::sync::Arc;
 use std::collections::HashMap;
+use std::ptr;
 
 // Global backend instance - initialized once at first use
 static BACKEND: OnceLock<Arc<dyn ContainerBackend>> = OnceLock::new();
+static BACKEND_INIT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Resolved environment variables for workload nodes (node_id -> { key -> value })
+static WORKLOAD_RESOLVED_ENV: once_cell::sync::Lazy<dashmap::DashMap<String, HashMap<String, String>>> =
+    once_cell::sync::Lazy::new(dashmap::DashMap::new);
 
 /// Get or initialize the global backend instance
 async fn get_global_backend() -> Result<&'static Arc<dyn ContainerBackend>, ContainerError> {
+    if let Some(b) = BACKEND.get() {
+        return Ok(b);
+    }
+
+    let _guard = BACKEND_INIT_LOCK.lock().await;
+
+    // Double-check after acquiring lock
     if let Some(b) = BACKEND.get() {
         return Ok(b);
     }
@@ -97,6 +110,175 @@ pub unsafe extern "C" fn js_container_run(spec_ptr: *const StringHeader) -> *mut
     promise
 }
 
+/// Helper for workload graph construction
+/// FFI: js_workload_graph(name: *const StringHeader, spec_json: *const StringHeader) -> *const StringHeader
+#[no_mangle]
+pub unsafe extern "C" fn js_workload_graph(
+    name_ptr: *const StringHeader,
+    spec_ptr: *const StringHeader,
+) -> *const StringHeader {
+    let name = string_from_header(name_ptr).unwrap_or_default();
+    let spec_json = string_from_header(spec_ptr).unwrap_or_default();
+
+    let nodes: HashMap<String, workload::WorkloadNode> = serde_json::from_str(&spec_json).unwrap_or_default();
+    let graph = workload::WorkloadGraph {
+        name,
+        nodes,
+        edges: Vec::new(), // Edges are derived from depends_on in nodes
+    };
+
+    let json = serde_json::to_string(&graph).unwrap_or_default();
+    string_to_js(&json)
+}
+
+/// Helper for workload node construction
+/// FFI: js_workload_node(name: *const StringHeader, spec_json: *const StringHeader) -> *const StringHeader
+#[no_mangle]
+pub unsafe extern "C" fn js_workload_node(
+    name_ptr: *const StringHeader,
+    spec_ptr: *const StringHeader,
+) -> *const StringHeader {
+    let name = string_from_header(name_ptr).unwrap_or_default();
+    let spec_json = string_from_header(spec_ptr).unwrap_or_default();
+
+    let mut node: workload::WorkloadNode = serde_json::from_str(&spec_json).unwrap_or_else(|_| workload::WorkloadNode {
+        id: name.clone(),
+        name: name.clone(),
+        image: None,
+        resources: None,
+        ports: Vec::new(),
+        env: HashMap::new(),
+        depends_on: Vec::new(),
+        runtime: workload::RuntimeSpec::Auto,
+        policy: workload::PolicySpec { tier: workload::PolicyTier::Default, no_network: None, read_only_root: None, seccomp: None },
+    });
+    node.name = name;
+
+    let json = serde_json::to_string(&node).unwrap_or_default();
+    string_to_js(&json)
+}
+
+/// Inspect a workload graph status without starting it
+/// FFI: js_workload_inspectGraph(graph_json: *const StringHeader) -> *mut Promise
+#[no_mangle]
+pub unsafe extern "C" fn js_workload_inspectGraph(graph_ptr: *const StringHeader) -> *mut Promise {
+    let promise = js_promise_new();
+    let graph_json = string_from_header(graph_ptr);
+
+    crate::common::spawn_for_promise(promise as *mut u8, async move {
+        let _graph: workload::WorkloadGraph = graph_json
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .ok_or("Invalid graph JSON")?;
+
+        // Mock status for now
+        let status = workload::GraphStatus {
+            nodes: HashMap::new(),
+            healthy: true,
+            errors: None,
+        };
+        let json = serde_json::to_string(&status).map_err(|e| e.to_string())?;
+        let h = types::register_handle(json);
+        Ok(h as u64)
+    });
+
+    promise
+}
+
+/// Stop and remove a workload graph
+/// FFI: js_workload_handle_down(handle_id: i64, options_json: *const StringHeader) -> *mut Promise
+#[no_mangle]
+pub unsafe extern "C" fn js_workload_handle_down(
+    handle_id: i64,
+    options_ptr: *const StringHeader,
+) -> *mut Promise {
+    js_container_compose_down(handle_id, 1) // default to remove volumes for workloads
+}
+
+/// Get workload graph status
+/// FFI: js_workload_handle_status(handle_id: i64) -> *mut Promise
+#[no_mangle]
+pub unsafe extern "C" fn js_workload_handle_status(handle_id: i64) -> *mut Promise {
+    let promise = js_promise_new();
+    crate::common::spawn_for_promise(promise as *mut u8, async move {
+        let engine = {
+            let engines = perry_container_compose::compose::COMPOSE_ENGINES.lock().unwrap();
+            engines.get(&(handle_id as u64)).cloned()
+        };
+
+        if let Some(engine) = engine {
+            let containers = engine.ps().await.map_err(|e| e.to_string())?;
+            let mut nodes = HashMap::new();
+            let mut healthy = true;
+            for c in containers {
+                let state = if c.status.to_lowercase().contains("running") {
+                    workload::NodeState::Running
+                } else {
+                    healthy = false;
+                    workload::NodeState::Stopped
+                };
+                nodes.insert(c.name, state);
+            }
+            let status = workload::GraphStatus {
+                nodes,
+                healthy,
+                errors: None,
+            };
+            let json = serde_json::to_string(&status).map_err(|e| e.to_string())?;
+            let h = types::register_handle(json);
+            Ok(h as u64)
+        } else {
+            Err("Compose engine not found".to_string())
+        }
+    });
+    promise
+}
+
+/// Get the original graph definition from a handle
+/// FFI: js_workload_handle_graph(handle_id: i64) -> *const StringHeader
+#[no_mangle]
+pub unsafe extern "C" fn js_workload_handle_graph(handle_id: i64) -> *const StringHeader {
+    let engine = {
+        let engines = perry_container_compose::compose::COMPOSE_ENGINES.lock().unwrap();
+        engines.get(&(handle_id as u64)).cloned()
+    };
+
+    if let Some(engine) = engine {
+        let json = serde_json::to_string(&engine.spec).unwrap_or_default();
+        string_to_js(&json)
+    } else {
+        string_to_js("")
+    }
+}
+
+/// Get logs for a workload node
+/// FFI: js_workload_handle_logs(handle_id: i64, node: *const StringHeader, options_json: *const StringHeader) -> *mut Promise
+#[no_mangle]
+pub unsafe extern "C" fn js_workload_handle_logs(
+    handle_id: i64,
+    node_ptr: *const StringHeader,
+    _options_ptr: *const StringHeader,
+) -> *mut Promise {
+    js_container_compose_logs(handle_id, node_ptr, -1)
+}
+
+/// Execute command in a workload node
+/// FFI: js_workload_handle_exec(handle_id: i64, node: *const StringHeader, cmd_json: *const StringHeader) -> *mut Promise
+#[no_mangle]
+pub unsafe extern "C" fn js_workload_handle_exec(
+    handle_id: i64,
+    node_ptr: *const StringHeader,
+    cmd_json_ptr: *const StringHeader,
+) -> *mut Promise {
+    js_container_compose_exec(handle_id, node_ptr, cmd_json_ptr, ptr::null())
+}
+
+/// List nodes with detailed info
+/// FFI: js_workload_handle_ps(handle_id: i64) -> *mut Promise
+#[no_mangle]
+pub unsafe extern "C" fn js_workload_handle_ps(handle_id: i64) -> *mut Promise {
+    js_container_compose_ps(handle_id)
+}
+
 // ============ Workload Graph Functions ============
 
 /// Run a workload graph
@@ -112,17 +294,76 @@ pub unsafe extern "C" fn js_workload_runGraph(
     let options_json = string_from_header(options_ptr);
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let _graph: workload::WorkloadGraph = graph_json
+        let graph: workload::WorkloadGraph = graph_json
             .and_then(|s| serde_json::from_str(&s).ok())
             .ok_or("Invalid graph JSON")?;
 
-        let _options: workload::RunGraphOptions = options_json
+        let options: workload::RunGraphOptions = options_json
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or(workload::RunGraphOptions { strategy: None, on_failure: None });
 
-        // Logic to execute graph would go here, reusing ComposeEngine logic
-        // For now, return a mock handle
-        Ok(42u64)
+        let backend = match get_global_backend().await {
+            Ok(b) => Arc::clone(b),
+            Err(e) => return Err::<u64, String>(e.to_string()),
+        };
+
+        // Convert WorkloadGraph to ComposeSpec for execution
+        let mut spec = ComposeSpec::default();
+        spec.name = Some(graph.name.clone());
+        for (id, node) in &graph.nodes {
+            let mut svc = perry_container_compose::types::ComposeService::default();
+            svc.image = node.image.clone();
+            svc.ports = Some(node.ports.iter().map(|p| perry_container_compose::types::PortSpec::Short(serde_yaml::Value::String(p.clone()))).collect());
+            svc.environment = Some(perry_container_compose::types::ListOrDict::Dict(
+                node.env.iter().map(|(k, v)| {
+                    let val = match v {
+                        workload::WorkloadEnvValue::Literal(s) => Some(serde_yaml::Value::String(s.clone())),
+                        workload::WorkloadEnvValue::Ref(r) => Some(serde_yaml::Value::String(format!("REF:{}:{:?}:{:?}", r.node_id, r.projection, r.port))),
+                    };
+                    (k.clone(), val)
+                }).collect()
+            ));
+            svc.depends_on = Some(perry_container_compose::types::DependsOnSpec::List(node.depends_on.clone()));
+            spec.services.insert(id.clone(), svc);
+        }
+
+        let engine = Arc::new(perry_container_compose::ComposeEngine::new(spec, graph.name, backend));
+        let handle = engine.up(&[], true, false, false).await.map_err(|e| e.to_string())?;
+
+        // Resolve WorkloadRefs after containers have started
+        let mut running_nodes = HashMap::new();
+        let containers = engine.ps().await.map_err(|e| e.to_string())?;
+        for container in containers {
+            // Mapping back from container name to node ID is a bit loose here,
+            // but in WorkloadGraph node_id == svc_name usually.
+            running_nodes.insert(container.name.clone(), container);
+        }
+
+        for (id, node) in &graph.nodes {
+            for (env_key, env_val) in &node.env {
+                if let workload::WorkloadEnvValue::Ref(r) = env_val {
+                    let resolved = r.resolve(&running_nodes).map_err(|e| e.to_string())?;
+                    // Inject resolved value back into container
+                    let container_name = running_nodes.get(id)
+                        .map(|c| c.name.clone())
+                        .ok_or_else(|| format!("Container for node {} not found", id))?;
+
+                    // Store in resolved env registry for subsequent execs
+                    let mut node_env = WORKLOAD_RESOLVED_ENV.entry(id.clone()).or_insert_with(HashMap::new);
+                    node_env.insert(env_key.clone(), resolved.clone());
+
+                    // Also try to inject into already running container
+                    let _ = engine.backend.exec(
+                        &container_name,
+                        &vec![format!("export {}={}", env_key, resolved)],
+                        None,
+                        None
+                    ).await;
+                }
+            }
+        }
+
+        Ok(handle.stack_id)
     });
 
     promise
@@ -545,12 +786,45 @@ pub unsafe extern "C" fn js_container_removeImage(reference_ptr: *const StringHe
     promise
 }
 
+/// Build a container image
+/// FFI: js_container_build(build_json: *const StringHeader, image_name: *const StringHeader) -> *mut Promise
+#[no_mangle]
+pub unsafe extern "C" fn js_container_build(
+    build_ptr: *const StringHeader,
+    image_name_ptr: *const StringHeader,
+) -> *mut Promise {
+    let promise = js_promise_new();
+
+    let build_json = string_from_header(build_ptr);
+    let image_name = string_from_header(image_name_ptr);
+
+    crate::common::spawn_for_promise(promise as *mut u8, async move {
+        let build_spec: perry_container_compose::types::ComposeServiceBuild = build_json
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .ok_or("Invalid build spec JSON")?;
+
+        let name = image_name.ok_or("Invalid image name")?;
+
+        let backend = match get_global_backend().await {
+            Ok(b) => Arc::clone(b),
+            Err(e) => return Err::<u64, String>(e.to_string()),
+        };
+
+        match backend.build(&build_spec, &name).await {
+            Ok(()) => Ok(0u64),
+            Err(e) => Err::<u64, String>(e.to_string()),
+        }
+    });
+
+    promise
+}
+
 // ============ Compose Functions ============
 
 /// Bring up a Compose stack
-/// FFI: js_container_compose_up(spec_json: *const StringHeader) -> *mut Promise
+/// FFI: js_container_composeUp(spec_json: *const StringHeader) -> *mut Promise
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_up(spec_ptr: *const StringHeader) -> *mut Promise {
+pub unsafe extern "C" fn js_container_composeUp(spec_ptr: *const StringHeader) -> *mut Promise {
     let promise = js_promise_new();
 
     let spec = match types::parse_compose_spec(spec_ptr) {
@@ -598,14 +872,18 @@ pub unsafe extern "C" fn js_container_compose_down(handle_id: i64, volumes: i64)
     };
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = match get_global_backend().await {
-            Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
+        let engine = {
+            let engines = perry_container_compose::compose::COMPOSE_ENGINES.lock().unwrap();
+            engines.get(&handle.stack_id).cloned()
         };
-        let wrapper = compose::ComposeWrapper::new(types::ComposeSpec::default(), backend);
-        match wrapper.down(&handle, volumes != 0).await {
-            Ok(()) => Ok(0u64),
-            Err(e) => Err::<u64, String>(e.to_string()),
+
+        if let Some(engine) = engine {
+            match engine.down(&[], false, volumes != 0).await {
+                Ok(()) => Ok(0u64),
+                Err(e) => Err::<u64, String>(e.to_string()),
+            }
+        } else {
+            Err::<u64, String>("Compose engine not found".to_string())
         }
     });
 
@@ -629,17 +907,21 @@ pub unsafe extern "C" fn js_container_compose_ps(handle_id: i64) -> *mut Promise
     };
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = match get_global_backend().await {
-            Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
+        let engine = {
+            let engines = perry_container_compose::compose::COMPOSE_ENGINES.lock().unwrap();
+            engines.get(&handle.stack_id).cloned()
         };
-        let wrapper = compose::ComposeWrapper::new(types::ComposeSpec::default(), backend);
-        match wrapper.ps(&handle).await {
-            Ok(containers) => {
-                let h = types::register_container_info_list(containers);
-                Ok(h as u64)
+
+        if let Some(engine) = engine {
+            match engine.ps().await {
+                Ok(containers) => {
+                    let h = types::register_container_info_list(containers);
+                    Ok(h as u64)
+                }
+                Err(e) => Err::<u64, String>(e.to_string()),
             }
-            Err(e) => Err::<u64, String>(e.to_string()),
+        } else {
+            Err::<u64, String>("Compose engine not found".to_string())
         }
     });
 
@@ -670,17 +952,29 @@ pub unsafe extern "C" fn js_container_compose_logs(
     let tail_opt = if tail >= 0 { Some(tail as u32) } else { None };
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = match get_global_backend().await {
-            Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
+        let engine = {
+            let engines = perry_container_compose::compose::COMPOSE_ENGINES.lock().unwrap();
+            engines.get(&handle.stack_id).cloned()
         };
-        let wrapper = compose::ComposeWrapper::new(types::ComposeSpec::default(), backend);
-        match wrapper.logs(&handle, service.as_deref(), tail_opt).await {
-            Ok(logs) => {
-                let h = types::register_container_logs(logs);
-                Ok(h as u64)
+
+        if let Some(engine) = engine {
+            let services = service.map(|s| vec![s]).unwrap_or_default();
+            match engine.logs(&services, tail_opt).await {
+                Ok(logs) => {
+                    let mut combined_stdout = String::new();
+                    for (svc, log) in logs {
+                        combined_stdout.push_str(&format!("{}: {}\n", svc, log));
+                    }
+                    let h = types::register_container_logs(ContainerLogs {
+                        stdout: combined_stdout,
+                        stderr: String::new(),
+                    });
+                    Ok(h as u64)
+                }
+                Err(e) => Err::<u64, String>(e.to_string()),
             }
-            Err(e) => Err::<u64, String>(e.to_string()),
+        } else {
+            Err::<u64, String>("Compose engine not found".to_string())
         }
     });
 
@@ -713,40 +1007,52 @@ pub unsafe extern "C" fn js_container_compose_exec(
     let options_json = unsafe { string_from_header(options_json_ptr) };
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let service = match service_opt {
-            Some(s) => s,
-            None => return Err::<u64, String>("Invalid service name".to_string()),
+        let engine = {
+            let engines = perry_container_compose::compose::COMPOSE_ENGINES.lock().unwrap();
+            engines.get(&handle.stack_id).cloned()
         };
 
-        let cmd: Vec<String> = cmd_json
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        if let Some(engine) = engine {
+            let service = match service_opt {
+                Some(s) => s,
+                None => return Err::<u64, String>("Invalid service name".to_string()),
+            };
 
-        let env: Option<HashMap<String, String>> = options_json
-            .as_ref()
-            .and_then(|s| {
-                let v: serde_json::Value = serde_json::from_str(s).ok()?;
-                serde_json::from_value(v.get("env")?.clone()).ok()
-            });
+            let cmd: Vec<String> = cmd_json
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
 
-        let workdir: Option<String> = options_json
-            .as_ref()
-            .and_then(|s| {
-                let v: serde_json::Value = serde_json::from_str(s).ok()?;
-                v.get("workdir")?.as_str().map(|s| s.to_string())
-            });
+            let env: Option<HashMap<String, String>> = options_json
+                .as_ref()
+                .and_then(|s| {
+                    let v: serde_json::Value = serde_json::from_str(s).ok()?;
+                    serde_json::from_value(v.get("env")?.clone()).ok()
+                });
 
-        let backend = match get_global_backend().await {
-            Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
-        };
-        let wrapper = compose::ComposeWrapper::new(types::ComposeSpec::default(), backend);
-        match wrapper.exec(&handle, &service, &cmd, env.as_ref(), workdir.as_deref()).await {
-            Ok(logs) => {
-                let h = types::register_container_logs(logs);
-                Ok(h as u64)
+            let workdir: Option<String> = options_json
+                .as_ref()
+                .and_then(|s| {
+                    let v: serde_json::Value = serde_json::from_str(s).ok()?;
+                    v.get("workdir")?.as_str().map(|s| s.to_string())
+                });
+
+            // Merge in resolved workload environment variables if this is a workload node
+            let mut final_env = env.unwrap_or_default();
+            if let Some(resolved) = WORKLOAD_RESOLVED_ENV.get(&service) {
+                for (k, v) in resolved.iter() {
+                    final_env.insert(k.clone(), v.clone());
+                }
             }
-            Err(e) => Err::<u64, String>(e.to_string()),
+
+            match engine.exec(&service, &cmd, Some(&final_env), workdir.as_deref()).await {
+                Ok(logs) => {
+                    let h = types::register_container_logs(logs);
+                    Ok(h as u64)
+                }
+                Err(e) => Err::<u64, String>(e.to_string()),
+            }
+        } else {
+            Err::<u64, String>("Compose engine not found".to_string())
         }
     });
 
@@ -772,12 +1078,16 @@ pub unsafe extern "C" fn js_container_compose_config(handle_id: i64) -> *mut Pro
     crate::common::spawn_for_promise_deferred(
         promise as *mut u8,
         async move {
-            let backend = match get_global_backend().await {
-                Ok(b) => Arc::clone(b),
-                Err(e) => return Err::<String, String>(e.to_string()),
+            let engine = {
+                let engines = perry_container_compose::compose::COMPOSE_ENGINES.lock().unwrap();
+                engines.get(&handle.stack_id).cloned()
             };
-            let wrapper = compose::ComposeWrapper::new(types::ComposeSpec::default(), backend);
-            wrapper.config(&handle).map_err(|e| e.to_string())
+
+            if let Some(engine) = engine {
+                engine.config().map_err(|e| e.to_string())
+            } else {
+                Err::<String, String>("Compose engine not found".to_string())
+            }
         },
         |yaml| unsafe {
             let str_ptr = string_to_js(&yaml);
@@ -810,18 +1120,22 @@ pub unsafe extern "C" fn js_container_compose_start(
     let services_json = unsafe { string_from_header(services_json_ptr) };
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let services: Vec<String> = services_json
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
-
-        let backend = match get_global_backend().await {
-            Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
+        let engine = {
+            let engines = perry_container_compose::compose::COMPOSE_ENGINES.lock().unwrap();
+            engines.get(&handle.stack_id).cloned()
         };
-        let wrapper = compose::ComposeWrapper::new(types::ComposeSpec::default(), backend);
-        match wrapper.start(&handle, &services).await {
-            Ok(()) => Ok(0u64),
-            Err(e) => Err::<u64, String>(e.to_string()),
+
+        if let Some(engine) = engine {
+            let services: Vec<String> = services_json
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+
+            match engine.start(&services).await {
+                Ok(()) => Ok(0u64),
+                Err(e) => Err::<u64, String>(e.to_string()),
+            }
+        } else {
+            Err::<u64, String>("Compose engine not found".to_string())
         }
     });
 
@@ -850,18 +1164,22 @@ pub unsafe extern "C" fn js_container_compose_stop(
     let services_json = unsafe { string_from_header(services_json_ptr) };
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let services: Vec<String> = services_json
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
-
-        let backend = match get_global_backend().await {
-            Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
+        let engine = {
+            let engines = perry_container_compose::compose::COMPOSE_ENGINES.lock().unwrap();
+            engines.get(&handle.stack_id).cloned()
         };
-        let wrapper = compose::ComposeWrapper::new(types::ComposeSpec::default(), backend);
-        match wrapper.stop(&handle, &services).await {
-            Ok(()) => Ok(0u64),
-            Err(e) => Err::<u64, String>(e.to_string()),
+
+        if let Some(engine) = engine {
+            let services: Vec<String> = services_json
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+
+            match engine.stop(&services).await {
+                Ok(()) => Ok(0u64),
+                Err(e) => Err::<u64, String>(e.to_string()),
+            }
+        } else {
+            Err::<u64, String>("Compose engine not found".to_string())
         }
     });
 
@@ -890,18 +1208,22 @@ pub unsafe extern "C" fn js_container_compose_restart(
     let services_json = unsafe { string_from_header(services_json_ptr) };
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let services: Vec<String> = services_json
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
-
-        let backend = match get_global_backend().await {
-            Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
+        let engine = {
+            let engines = perry_container_compose::compose::COMPOSE_ENGINES.lock().unwrap();
+            engines.get(&handle.stack_id).cloned()
         };
-        let wrapper = compose::ComposeWrapper::new(types::ComposeSpec::default(), backend);
-        match wrapper.restart(&handle, &services).await {
-            Ok(()) => Ok(0u64),
-            Err(e) => Err::<u64, String>(e.to_string()),
+
+        if let Some(engine) = engine {
+            let services: Vec<String> = services_json
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+
+            match engine.restart(&services).await {
+                Ok(()) => Ok(0u64),
+                Err(e) => Err::<u64, String>(e.to_string()),
+            }
+        } else {
+            Err::<u64, String>("Compose engine not found".to_string())
         }
     });
 

@@ -704,6 +704,7 @@ pub struct ContainerInfo {
     pub status: String,
     pub ports: Vec<String>,
     pub created: String,
+    pub ip: Option<String>,
 }
 
 /// Logs from a container.

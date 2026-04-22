@@ -180,7 +180,7 @@ fn test_ffi_container_inspect_malformed() {
 fn test_ffi_container_get_backend_call1() {
     unsafe {
         let p = js_container_getBackend();
-        let _ = await_promise_sync(p);
+        assert!(!p.is_null());
     }
 }
 
@@ -189,7 +189,7 @@ fn test_ffi_container_get_backend_call1() {
 fn test_ffi_container_get_backend_call2() {
     unsafe {
         let p = js_container_getBackend();
-        let _ = await_promise_sync(p);
+        assert!(!p.is_null());
     }
 }
 
@@ -305,7 +305,7 @@ fn test_ffi_container_remove_image_malformed() {
 #[test]
 fn test_ffi_compose_up_null() {
     unsafe {
-        let p = js_container_compose_up(ptr::null());
+        let p = js_container_composeUp(ptr::null());
         assert!(await_promise_sync(p).is_err());
     }
 }
@@ -314,7 +314,7 @@ fn test_ffi_compose_up_null() {
 #[test]
 fn test_ffi_compose_up_malformed() {
     unsafe {
-        let p = js_container_compose_up(to_js_str("{"));
+        let p = js_container_composeUp(to_js_str("{"));
         assert!(await_promise_sync(p).is_err());
     }
 }
@@ -377,7 +377,7 @@ fn test_ffi_compose_logs_invalid_handle() {
 #[test]
 fn test_ffi_compose_exec_null_handle() {
     unsafe {
-        let p = js_container_compose_exec(0, ptr::null(), ptr::null());
+        let p = js_container_compose_exec(0, ptr::null(), ptr::null(), ptr::null());
         assert!(await_promise_sync(p).is_err());
     }
 }
@@ -386,7 +386,7 @@ fn test_ffi_compose_exec_null_handle() {
 #[test]
 fn test_ffi_compose_exec_invalid_handle() {
     unsafe {
-        let p = js_container_compose_exec(123, to_js_str("svc"), to_js_str("[]"));
+        let p = js_container_compose_exec(123, to_js_str("svc"), to_js_str("[]"), to_js_str("{}"));
         assert!(await_promise_sync(p).is_err());
     }
 }

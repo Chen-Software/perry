@@ -139,3 +139,74 @@ pub struct NodeInfo {
 pub struct GraphHandle {
     pub id: u64,
 }
+
+impl WorkloadRef {
+    pub fn resolve(&self, running_nodes: &HashMap<String, ContainerInfo>) -> Result<String, crate::container::types::ContainerError> {
+        let container = running_nodes.get(&self.node_id).ok_or_else(|| {
+            crate::container::types::ContainerError::WorkloadRefResolutionFailed {
+                node_id: self.node_id.clone(),
+                projection: format!("{:?}", self.projection),
+                reason: "Node not found in running set".into(),
+            }
+        })?;
+
+        match self.projection {
+            RefProjection::Endpoint => {
+                let port = self.port.as_deref().ok_or_else(|| {
+                    crate::container::types::ContainerError::WorkloadRefResolutionFailed {
+                        node_id: self.node_id.clone(),
+                        projection: "endpoint".into(),
+                        reason: "Port not specified for endpoint projection".into(),
+                    }
+                })?;
+
+                // container.ports format is "host_ip:host_port:container_port"
+                for p_mapping in &container.ports {
+                    let parts: Vec<&str> = p_mapping.split(':').collect();
+                    if parts.len() == 3 && parts[2] == port {
+                        return Ok(format!("{}:{}", parts[0], parts[1]));
+                    }
+                }
+
+                Err(crate::container::types::ContainerError::WorkloadRefResolutionFailed {
+                    node_id: self.node_id.clone(),
+                    projection: "endpoint".into(),
+                    reason: format!("Port {} not mapped for node", port),
+                })
+            }
+            RefProjection::Ip => {
+                container.ip.clone().ok_or_else(|| {
+                    crate::container::types::ContainerError::WorkloadRefResolutionFailed {
+                        node_id: self.node_id.clone(),
+                        projection: "ip".into(),
+                        reason: "IP address not available for node".into(),
+                    }
+                })
+            }
+            RefProjection::InternalUrl => {
+                let ip = container.ip.as_deref().ok_or_else(|| {
+                    crate::container::types::ContainerError::WorkloadRefResolutionFailed {
+                        node_id: self.node_id.clone(),
+                        projection: "internalUrl".into(),
+                        reason: "IP address not available for node".into(),
+                    }
+                })?;
+
+                let port = if let Some(p) = &self.port {
+                    p.clone()
+                } else if let Some(p_mapping) = container.ports.first() {
+                    let parts: Vec<&str> = p_mapping.split(':').collect();
+                    if parts.len() == 3 {
+                        parts[2].to_string()
+                    } else {
+                        "80".to_string()
+                    }
+                } else {
+                    "80".to_string()
+                };
+
+                Ok(format!("http://{}:{}", ip, port))
+            }
+        }
+    }
+}
