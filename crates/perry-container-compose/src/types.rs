@@ -675,14 +675,15 @@ pub struct ComposeHandle {
 // ============ Container types (for single-container API) ============
 
 /// Specification for running a single container.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// Canonical fields from SPEC.md §2.3: image, name, ports, volumes, env, cmd, entrypoint, network, rm.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ContainerSpec {
     pub image: String,
     pub name: Option<String>,
     pub ports: Option<Vec<String>>,
     pub volumes: Option<Vec<String>>,
     pub env: Option<std::collections::HashMap<String, String>>,
-    pub labels: Option<std::collections::HashMap<String, String>>,
     pub cmd: Option<Vec<String>>,
     pub entrypoint: Option<Vec<String>>,
     pub network: Option<String>,
@@ -690,14 +691,16 @@ pub struct ContainerSpec {
 }
 
 /// Handle returned after creating/running a container.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ContainerHandle {
     pub id: String,
     pub name: Option<String>,
 }
 
 /// Information about a running (or stopped) container.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ContainerInfo {
     pub id: String,
     pub name: String,
@@ -709,18 +712,40 @@ pub struct ContainerInfo {
 }
 
 /// Logs from a container.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ContainerLogs {
     pub stdout: String,
     pub stderr: String,
 }
 
 /// Information about a container image.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ImageInfo {
     pub id: String,
     pub repository: String,
     pub tag: String,
     pub size: u64,
     pub created: String,
+}
+
+/// Isolation level for container execution.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum IsolationLevel {
+    Default,
+    Process,
+    Hyperv,
+}
+
+/// Information about a container backend.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BackendInfo {
+    pub name: String,
+    pub available: bool,
+    pub reason: String,
+    pub version: String,
+    pub mode: String,
+    pub isolation_level: IsolationLevel,
 }

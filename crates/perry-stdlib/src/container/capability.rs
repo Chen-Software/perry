@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use crate::container::types::{ContainerSpec, ContainerLogs};
 use crate::container::verification;
-use crate::container::mod_private::get_global_backend_instance;
+use crate::container::get_global_backend;
 
 pub struct CapabilityGrants {
     pub network: bool,
@@ -17,7 +17,7 @@ pub async fn alloy_container_run_capability(
     grants: &CapabilityGrants,
 ) -> Result<ContainerLogs, String> {
     // 1. Verify image
-    let _digest = verification::verify_image(image).await?;
+    let _digest = verification::verify_image(image).await.map_err(|e| e.to_string())?;
 
     // 2. Build spec
     let spec = ContainerSpec {
@@ -25,14 +25,13 @@ pub async fn alloy_container_run_capability(
         name: Some(format!("alloy-cap-{}-{}", name, rand::random::<u32>())),
         network: if grants.network { None } else { Some("none".to_string()) },
         rm: Some(true),
-        read_only: Some(true),
         env: grants.env.clone(),
         cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
         ..Default::default()
     };
 
     // 3. Run
-    let backend = get_global_backend_instance().await.map_err(|e| e.to_string())?;
+    let backend = get_global_backend().await.map_err(|e| e.to_string())?;
     let handle = backend.run(&perry_container_compose::types::ContainerSpec {
         image: spec.image,
         name: spec.name,
@@ -43,11 +42,10 @@ pub async fn alloy_container_run_capability(
         entrypoint: spec.entrypoint,
         network: spec.network,
         rm: spec.rm,
-        read_only: spec.read_only,
     }).await.map_err(|e| e.to_string())?;
 
-    // 4. Logs (simplified: wait for completion should be here)
-    let logs = backend.logs(&handle.id, None).await.map_err(|e| e.to_string())?;
+    // 4. Wait for completion and collect logs
+    let logs = backend.wait_and_logs(&handle.id).await.map_err(|e| e.to_string())?;
 
     Ok(ContainerLogs {
         stdout: logs.stdout,

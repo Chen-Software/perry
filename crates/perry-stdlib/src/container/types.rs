@@ -2,6 +2,8 @@
 
 use perry_runtime::StringHeader;
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, OnceLock};
+use dashmap::DashMap;
 
 use crate::common::handle::{self, Handle};
 
@@ -10,6 +12,11 @@ pub use perry_container_compose::types::{
     ComposeHandle, ComposeSpec, ContainerHandle, ContainerInfo, ContainerLogs, ContainerSpec,
     ImageInfo, ListOrDict,
 };
+
+#[derive(Clone)]
+pub struct ArcComposeEngine(pub Arc<perry_container_compose::ComposeEngine>);
+
+pub static COMPOSE_ENGINES: OnceLock<DashMap<u64, ArcComposeEngine>> = OnceLock::new();
 
 // ============ Handle Registry ============
 
@@ -54,15 +61,15 @@ pub fn take_compose_handle(id: u64) -> Option<ComposeHandle> {
     handle::take_handle(id as Handle)
 }
 
-pub fn register_compose_wrapper(w: crate::container::compose::ComposeWrapper) -> u64 {
+pub fn register_compose_wrapper(w: perry_container_compose::ComposeEngine) -> u64 {
     handle::register_handle(w) as u64
 }
 
-pub fn get_compose_wrapper(id: u64) -> Option<&'static crate::container::compose::ComposeWrapper> {
+pub fn get_compose_wrapper(id: u64) -> Option<&'static perry_container_compose::ComposeEngine> {
     handle::get_handle(id as Handle)
 }
 
-pub fn take_compose_wrapper(id: u64) -> Option<crate::container::compose::ComposeWrapper> {
+pub fn take_compose_wrapper(id: u64) -> Option<perry_container_compose::ComposeEngine> {
     handle::take_handle(id as Handle)
 }
 

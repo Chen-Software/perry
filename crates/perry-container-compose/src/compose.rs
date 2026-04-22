@@ -17,11 +17,33 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Global registry of running compose engines, keyed by stack ID.
-static COMPOSE_ENGINES: once_cell::sync::Lazy<std::sync::Mutex<IndexMap<u64, Arc<ComposeEngine>>>> =
+static COMPOSE_STACKS: once_cell::sync::Lazy<std::sync::Mutex<IndexMap<u64, Arc<ComposeEngine>>>> =
     once_cell::sync::Lazy::new(|| std::sync::Mutex::new(IndexMap::new()));
 
 /// Next available stack ID
 static NEXT_STACK_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Graph topology representation.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ServiceGraph {
+    pub nodes: Vec<String>,
+    pub edges: Vec<(String, String)>,
+}
+
+/// Status of a compose stack.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StackStatus {
+    pub services: HashMap<String, ServiceStatus>,
+    pub healthy: bool,
+}
+
+/// Status of a single service.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ServiceStatus {
+    pub state: String,
+    pub container_id: Option<String>,
+    pub error: Option<String>,
+}
 
 /// The compose orchestration engine.
 pub struct ComposeEngine {
@@ -56,7 +78,7 @@ impl ComposeEngine {
             project_name: self.project_name.clone(),
             services,
         };
-        let _ = COMPOSE_ENGINES
+        let _ = COMPOSE_STACKS
             .lock()
             .unwrap()
             .insert(stack_id, Arc::new(ComposeEngine::new(
@@ -69,12 +91,21 @@ impl ComposeEngine {
 
     /// Look up an engine by stack ID.
     pub fn get_engine(stack_id: u64) -> Option<Arc<ComposeEngine>> {
-        COMPOSE_ENGINES.lock().unwrap().get(&stack_id).cloned()
+        COMPOSE_STACKS.lock().unwrap().get(&stack_id).cloned()
+    }
+
+    /// Look up an engine by stack ID, returning a Result.
+    pub fn from_registry(
+        stack_id: u64,
+        _fallback_backend: Arc<dyn ContainerBackend>,
+    ) -> Result<Arc<ComposeEngine>> {
+        Self::get_engine(stack_id)
+            .ok_or_else(|| ComposeError::NotFound(format!("Stack handle {}", stack_id)))
     }
 
     /// Remove an engine from the registry.
     pub fn unregister(stack_id: u64) {
-        COMPOSE_ENGINES.lock().unwrap().shift_remove(&stack_id);
+        COMPOSE_STACKS.lock().unwrap().shift_remove(&stack_id);
     }
 
     // ============ up / start ============
@@ -226,7 +257,6 @@ impl ComposeEngine {
                         ports: Some(svc.port_strings()),
                         volumes: Some(svc.volume_strings()),
                         env: Some(svc.resolved_env()),
-                        labels: Some(labels),
                         cmd: svc.command_list(),
                         rm: Some(false),
                         ..Default::default()
@@ -515,6 +545,53 @@ impl ComposeEngine {
     pub async fn restart(&self, services: &[String]) -> Result<()> {
         self.stop(services).await?;
         self.start(services).await
+    }
+
+    /// Resolve startup order using Kahn's algorithm. Delegate to free function.
+    pub fn resolve_startup_order(&self) -> Result<Vec<String>> {
+        resolve_startup_order(&self.spec)
+    }
+
+    /// Get the service graph.
+    pub fn graph(&self) -> Result<ServiceGraph> {
+        let order = resolve_startup_order(&self.spec)?;
+        let mut edges = Vec::new();
+        for (name, svc) in &self.spec.services {
+            if let Some(deps) = &svc.depends_on {
+                for dep in deps.service_names() {
+                    edges.push((dep, name.clone()));
+                }
+            }
+        }
+        Ok(ServiceGraph { nodes: order, edges })
+    }
+
+    /// Get the stack status.
+    pub async fn status(&self) -> Result<StackStatus> {
+        let mut services = HashMap::new();
+        let mut healthy = true;
+
+        for svc_name in self.spec.services.keys() {
+            let info = self.find_container_for_service(svc_name).await?;
+            let status = match info {
+                Some(i) => ServiceStatus {
+                    state: i.status.clone(),
+                    container_id: Some(i.id),
+                    error: None,
+                },
+                None => {
+                    healthy = false;
+                    ServiceStatus {
+                        state: "not found".to_string(),
+                        container_id: None,
+                        error: Some("Container not found".to_string()),
+                    }
+                }
+            };
+            services.insert(svc_name.clone(), status);
+        }
+
+        Ok(StackStatus { services, healthy })
     }
 }
 

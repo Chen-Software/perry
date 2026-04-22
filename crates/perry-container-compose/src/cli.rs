@@ -128,9 +128,8 @@ pub async fn run(cli: Cli) -> Result<()> {
     );
     let project = ComposeProject::load(&config)?;
     let backend = crate::backend::detect_backend()
-        .await
-        .map_err(|probed| crate::error::ComposeError::NoBackendFound { probed })?;
-    let engine = ComposeEngine::new(project.spec.clone(), project.project_name.clone(), backend);
+        .await?;
+    let engine = ComposeEngine::new(project.spec.clone(), project.project_name.clone(), backend.into());
 
     match cli.command {
         Commands::Up(args) => {
@@ -163,22 +162,18 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
 
         Commands::Logs(args) => {
-            let logs_map = engine.logs(&args.services, args.tail).await?;
+            let service = if args.services.is_empty() {
+                None
+            } else {
+                Some(args.services[0].as_str())
+            };
+            let logs = engine.logs(service, args.tail).await?;
 
-            let mut names: Vec<&String> = logs_map.keys().collect();
-            names.sort();
-            for name in names {
-                let log = &logs_map[name];
-                if !log.stdout.is_empty() {
-                    for line in log.stdout.lines() {
-                        println!("{} | {}", name, line);
-                    }
-                }
-                if !log.stderr.is_empty() {
-                    for line in log.stderr.lines() {
-                        eprintln!("{} | {}", name, line);
-                    }
-                }
+            if !logs.stdout.is_empty() {
+                print!("{}", logs.stdout);
+            }
+            if !logs.stderr.is_empty() {
+                eprint!("{}", logs.stderr);
             }
         }
 

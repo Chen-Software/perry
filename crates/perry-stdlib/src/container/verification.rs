@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
-use super::types::ComposeError;
+use perry_container_compose::error::ComposeError;
+use tokio::process::Command;
+use std::process::Stdio;
 
 pub const CHAINGUARD_IDENTITY: &str =
     "https://github.com/chainguard-images/images/.github/workflows/sign.yaml@refs/heads/main";
@@ -14,6 +16,19 @@ enum VerificationResult {
 }
 
 static VERIFICATION_CACHE: OnceLock<RwLock<HashMap<String, VerificationResult>>> = OnceLock::new();
+
+pub fn get_default_base_image() -> &'static str {
+    "cgr.dev/chainguard/alpine-base"
+}
+
+pub fn get_chainguard_image(tool: &str) -> String {
+    match tool {
+        "node" => "cgr.dev/chainguard/node:latest".to_string(),
+        "python" => "cgr.dev/chainguard/python:latest".to_string(),
+        "go" => "cgr.dev/chainguard/go:latest".to_string(),
+        _ => get_default_base_image().to_string(),
+    }
+}
 
 pub async fn verify_image(reference: &str) -> Result<String, ComposeError> {
     // 1. Resolve digest (simulation for now)
@@ -38,8 +53,37 @@ pub async fn verify_image(reference: &str) -> Result<String, ComposeError> {
         }
     }
 
-    // 3. Simulate cosign verify
-    let result = VerificationResult::Verified(digest.clone());
+    // 3. Real cosign verify
+    let output = Command::new("cosign")
+        .args([
+            "verify",
+            "--certificate-identity", CHAINGUARD_IDENTITY,
+            "--certificate-oidc-issuer", CHAINGUARD_ISSUER,
+            reference,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await;
+
+    let result = match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            // Parse digest from output (usually contains JSON with critical data)
+            if let Some(caps) = regex::Regex::new(r"sha256:[a-f0-9]{64}").unwrap().find(&stdout) {
+                VerificationResult::Verified(caps.as_str().to_string())
+            } else {
+                VerificationResult::Verified(digest.clone()) // Fallback to resolved digest
+            }
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            VerificationResult::Failed(stderr.to_string())
+        }
+        Err(e) => {
+            VerificationResult::Failed(e.to_string())
+        }
+    };
 
     // 4. Cache result
     {

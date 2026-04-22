@@ -3091,6 +3091,33 @@ fn lower_fetch_native_method(
     object: Option<&Expr>,
     args: &[Expr],
 ) -> Result<Option<String>> {
+    // ── perry/container / perry/compose / perry/workloads static factories (no receiver) ──
+    if (module == "perry/container" || module == "perry/compose" || module == "perry/container-compose" || module == "perry/workloads") && object.is_none() {
+        let table = match module {
+            "perry/container" => PERRY_CONTAINER_TABLE,
+            "perry/workloads" => PERRY_WORKLOADS_TABLE,
+            _ => PERRY_COMPOSE_TABLE,
+        };
+        if let Some((_, runtime_fn)) = table.iter().find(|(m, _)| *m == method) {
+            let mut lowered_args: Vec<String> = Vec::with_capacity(args.len());
+            for a in args {
+                lowered_args.push(lower_expr(ctx, a)?);
+            }
+            let blk = ctx.block();
+            let arg_slices: Vec<(crate::types::LlvmType, &str)> =
+                lowered_args.iter().map(|s| (DOUBLE, s.as_str())).collect();
+            // All container FFI functions return *mut Promise (boxed as POINTER)
+            // except getBackend (sync, returns *mut StringHeader).
+            if method == "getBackend" {
+                let str_handle = blk.call(I64, runtime_fn, &arg_slices);
+                return Ok(Some(nanbox_string_inline(blk, &str_handle)));
+            } else {
+                let promise_handle = blk.call(I64, runtime_fn, &arg_slices);
+                return Ok(Some(nanbox_pointer_inline(blk, &promise_handle)));
+            }
+        }
+    }
+
     // ── Response static factories (no receiver) ──
     if module == "fetch" && object.is_none() {
         match method {
@@ -3353,6 +3380,34 @@ fn lower_fetch_native_method(
     }
 
     // ── axios: response property access (response.status, .data, .statusText, .headers) ──
+    // ── perry/compose: handle method dispatch (down, ps, logs, exec, start, stop, restart) ──
+    if module == "perry/compose" || module == "perry/container-compose" {
+        if let Some(recv) = object {
+            let recv_handle = lower_expr(ctx, recv)?;
+            let mut lowered_args: Vec<String> = Vec::with_capacity(args.len() + 1);
+            let blk = ctx.block();
+            // All compose handle methods take the raw i64 stack handle as the first argument.
+            lowered_args.push(unbox_to_i64(blk, &recv_handle));
+            for a in args {
+                lowered_args.push(lower_expr(ctx, a)?);
+            }
+
+            if let Some((_, runtime_fn)) = PERRY_COMPOSE_TABLE.iter().find(|(m, _)| *m == method) {
+                // FFI signature in lower_call uses NA_F64 to match the i64 stack handle.
+                let mut arg_types = vec![I64];
+                for _ in args { arg_types.push(DOUBLE); }
+                ctx.pending_declares.push((runtime_fn.to_string(), I64, arg_types.clone()));
+
+                let arg_slices: Vec<(crate::types::LlvmType, &str)> =
+                    arg_types.iter().zip(lowered_args.iter()).map(|(t, s)| (*t, s.as_str())).collect();
+
+                let blk = ctx.block();
+                let promise_handle = blk.call(I64, runtime_fn, &arg_slices);
+                return Ok(Some(nanbox_pointer_inline(blk, &promise_handle)));
+            }
+        }
+    }
+
     if module == "axios" {
         if let Some(recv) = object {
             let recv_handle = lower_expr(ctx, recv)?;
@@ -3463,20 +3518,27 @@ static PERRY_CONTAINER_TABLE: &[(&str, &str)] = &[
     ("listImages",  "js_container_listImages"),
     ("removeImage", "js_container_removeImage"),
     ("getBackend",  "js_container_getBackend"),
-    ("composeUp",   "js_container_composeUp"),
+    ("composeUp",   "js_container_compose_up"),
+    ("detectBackend", "js_container_detectBackend"),
+];
+
+/// Maps perry/workloads TypeScript function names to their FFI symbols.
+static PERRY_WORKLOADS_TABLE: &[(&str, &str)] = &[
+    ("graph",    "js_workload_graph"),
+    ("runGraph", "js_workload_runGraph"),
 ];
 
 /// Maps perry/compose TypeScript function names to their FFI symbols.
 static PERRY_COMPOSE_TABLE: &[(&str, &str)] = &[
-    ("up",      "js_compose_up"),
-    ("down",    "js_compose_down"),
-    ("ps",      "js_compose_ps"),
-    ("logs",    "js_compose_logs"),
-    ("exec",    "js_compose_exec"),
-    ("config",  "js_compose_config"),
-    ("start",   "js_compose_start"),
-    ("stop",    "js_compose_stop"),
-    ("restart", "js_compose_restart"),
+    ("up",      "js_container_compose_up"),
+    ("down",    "js_container_compose_down"),
+    ("ps",      "js_container_compose_ps"),
+    ("logs",    "js_container_compose_logs"),
+    ("exec",    "js_container_compose_exec"),
+    ("config",  "js_container_compose_config"),
+    ("start",   "js_container_compose_start"),
+    ("stop",    "js_container_compose_stop"),
+    ("restart", "js_container_compose_restart"),
 ];
 
 const PERRY_UI_TABLE: &[UiSig] = &[

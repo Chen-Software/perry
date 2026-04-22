@@ -98,7 +98,7 @@ pub unsafe extern "C" fn js_compose_stop(file_ptr: *const StringHeader) -> *cons
     let files: Vec<PathBuf> = parse_compose_file(file_ptr).into_iter().collect();
     match make_engine(files) {
         Err(e) => json_err(&e),
-        Ok(engine) => match block(engine.down(false, false)) {
+        Ok(engine) => match block(engine.down(&[], false, false)) {
             Ok(_) => json_ok("null"),
             Err(e) => json_err(&e.to_string()),
         },

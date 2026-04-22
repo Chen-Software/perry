@@ -19,7 +19,7 @@ pub fn service_container_name(service: &crate::types::ComposeService, service_na
         .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
         .collect();
 
-    format!("{}-{}-{:08x}", safe_name, short_hash, random_suffix)
+    format!("{}_{}_{:08x}", safe_name, short_hash, random_suffix)
 }
 
 pub struct ServiceState {

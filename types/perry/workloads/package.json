@@ -1,0 +1,6 @@
+{
+  "name": "perry/workloads",
+  "version": "0.1.0",
+  "main": "index.d.ts",
+  "types": "index.d.ts"
+}

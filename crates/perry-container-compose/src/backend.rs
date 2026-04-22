@@ -301,14 +301,6 @@ pub fn docker_run_flags(spec: &ContainerSpec, include_detach: bool) -> Vec<Strin
             args.push(format!("{}={}", k, v));
         }
     }
-    if let Some(labels) = &spec.labels {
-        let mut pairs: Vec<(&String, &String)> = labels.iter().collect();
-        pairs.sort_by_key(|(k, _)| k.as_str());
-        for (k, v) in pairs {
-            args.push("--label".into());
-            args.push(format!("{}={}", k, v));
-        }
-    }
     if let Some(ep) = &spec.entrypoint {
         args.push("--entrypoint".into());
         args.push(ep.join(" "));
@@ -1078,7 +1070,7 @@ pub async fn probe_candidate(
                     async move { probe_run(&b_str, &["--version"]).await.is_ok() }
                 });
             let sock_ok = std::path::Path::new(
-                &shellexpand::tilde("~/.orbstack/run/docker.sock").to_string(),
+                shellexpand::tilde("~/.orbstack/run/docker.sock").as_ref(),
             )
             .exists();
             let orb_available = match orb_ok {
@@ -1118,7 +1110,7 @@ pub async fn probe_candidate(
                 .await
                 .map_err(|e| format!("nerdctl --version failed: {}", e))?;
             let sock = std::path::Path::new(
-                &shellexpand::tilde("~/.rd/run/containerd-shim.sock").to_string(),
+                shellexpand::tilde("~/.rd/run/containerd-shim.sock").as_ref(),
             )
             .exists();
             if sock {
@@ -1211,6 +1203,9 @@ pub async fn probe_candidate(
 pub async fn detect_backend() -> std::result::Result<Box<dyn ContainerBackend>, ComposeError> {
     use std::time::Duration;
 
+    // ── Mode selection ───────────────────────────────────────────────────
+    let mode = std::env::var("PERRY_CONTAINER_MODE").unwrap_or_else(|_| "local-first".to_string());
+
     // ── Override via env var ──────────────────────────────────────────────
     if let Ok(override_name) = std::env::var("PERRY_CONTAINER_BACKEND") {
         let name = override_name.trim().to_string();
@@ -1224,9 +1219,19 @@ pub async fn detect_backend() -> std::result::Result<Box<dyn ContainerBackend>, 
     }
 
     // ── Platform probe sequence ───────────────────────────────────────────
+    let mut candidates = platform_candidates().to_vec();
+
+    if mode == "server-first" {
+        // Prioritize docker/podman over platform-specific local ones
+        candidates.sort_by_key(|&c| match c {
+            "docker" | "podman" => 0,
+            _ => 1,
+        });
+    }
+
     let mut probed: Vec<BackendProbeResult> = Vec::new();
 
-    for &candidate in platform_candidates() {
+    for candidate in candidates {
         debug!("probing container backend: {}", candidate);
         match tokio::time::timeout(
             Duration::from_secs(PROBE_TIMEOUT_SECS),
@@ -1279,7 +1284,6 @@ mod tests {
                 m.insert("FOO".into(), "bar".into());
                 m
             }),
-            labels: None,
             cmd: Some(vec!["sh".into(), "-c".into(), "echo hi".into()]),
             entrypoint: None,
             network: Some("mynet".into()),
