@@ -677,9 +677,9 @@ pub struct ComposeHandle {
 /// Specification for running a single container.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ContainerSpec {
-    pub image: String,
+    pub image: String,               // required
     pub name: Option<String>,
-    pub ports: Option<Vec<String>>,
+    pub ports: Option<Vec<String>>,  // "host:container" format
     pub volumes: Option<Vec<String>>,
     pub env: Option<std::collections::HashMap<String, String>>,
     pub cmd: Option<Vec<String>>,

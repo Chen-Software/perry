@@ -19,6 +19,9 @@ pub enum ComposeError {
     #[error("Dependency cycle detected in services: {services:?}")]
     DependencyCycle { services: Vec<String> },
 
+    #[error("Image pull failed for '{image}': {message}")]
+    ImagePullFailed { image: String, message: String },
+
     #[error("Service '{service}' failed to start: {message}")]
     ServiceStartupFailed { service: String, message: String },
 
@@ -77,6 +80,9 @@ pub fn compose_error_to_js(e: &ComposeError) -> String {
         ComposeError::VerificationFailed { .. } => 403,
         ComposeError::NoBackendFound { .. } => 503,
         ComposeError::BackendNotAvailable { .. } => 503,
+        ComposeError::ServiceStartupFailed { .. } => 500,
+        ComposeError::ImagePullFailed { .. } => 500,
+        ComposeError::IoError(_) => 500,
         _ => 500,
     };
     serde_json::json!({
