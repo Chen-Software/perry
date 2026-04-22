@@ -2,96 +2,56 @@
 
 use perry_runtime::StringHeader;
 use serde::{Deserialize, Serialize};
-
-use crate::common::handle::{self, Handle};
+use std::sync::OnceLock;
+use dashmap::DashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // Re-export core types from the compose crate to avoid duplication and mismatch.
 pub use perry_container_compose::types::{
     ComposeHandle, ComposeSpec, ContainerHandle, ContainerInfo, ContainerLogs, ContainerSpec,
     ImageInfo, ListOrDict,
 };
+pub use perry_container_compose::ComposeEngine;
 
-// ============ Handle Registry ============
+// ============ Global Registries ============
+
+pub static CONTAINER_HANDLES: OnceLock<DashMap<u64, ContainerHandle>> = OnceLock::new();
+pub static COMPOSE_HANDLES: OnceLock<DashMap<u64, ArcComposeEngine>> = OnceLock::new();
+static NEXT_HANDLE_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone)]
+pub struct ArcComposeEngine(pub std::sync::Arc<ComposeEngine>);
 
 pub fn register_container_handle(h: ContainerHandle) -> u64 {
-    handle::register_handle(h) as u64
+    let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
+    CONTAINER_HANDLES.get_or_init(DashMap::new).insert(id, h);
+    id
 }
 
-pub fn get_container_handle(id: u64) -> Option<Handle> {
-    let h = id as Handle;
-    if handle::handle_exists(h) {
-        Some(h)
-    } else {
-        None
-    }
-}
-
-pub fn register_container_info(info: ContainerInfo) -> u64 {
-    handle::register_handle(info) as u64
-}
-
+pub static INFO_LIST_HANDLES: OnceLock<DashMap<u64, Vec<ContainerInfo>>> = OnceLock::new();
 pub fn register_container_info_list(list: Vec<ContainerInfo>) -> u64 {
-    handle::register_handle(list) as u64
+    let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
+    INFO_LIST_HANDLES.get_or_init(DashMap::new).insert(id, list);
+    id
 }
-
-pub fn with_container_info_list<R>(id: u64, f: impl FnOnce(&Vec<ContainerInfo>) -> R) -> Option<R> {
-    handle::with_handle(id as Handle, f)
-}
-
 pub fn take_container_info_list(id: u64) -> Option<Vec<ContainerInfo>> {
-    handle::take_handle(id as Handle)
+    INFO_LIST_HANDLES.get_or_init(DashMap::new).remove(&id).map(|(_, v)| v)
 }
 
-pub fn register_compose_handle(h: ComposeHandle) -> u64 {
-    handle::register_handle(h) as u64
-}
-
-pub fn get_compose_handle(id: u64) -> Option<&'static ComposeHandle> {
-    handle::get_handle(id as Handle)
-}
-
-pub fn take_compose_handle(id: u64) -> Option<ComposeHandle> {
-    handle::take_handle(id as Handle)
-}
-
-pub fn register_compose_wrapper(w: crate::container::compose::ComposeWrapper) -> u64 {
-    handle::register_handle(w) as u64
-}
-
-pub fn get_compose_wrapper(id: u64) -> Option<&'static crate::container::compose::ComposeWrapper> {
-    handle::get_handle(id as Handle)
-}
-
-pub fn take_compose_wrapper(id: u64) -> Option<crate::container::compose::ComposeWrapper> {
-    handle::take_handle(id as Handle)
-}
-
+pub static LOG_HANDLES: OnceLock<DashMap<u64, ContainerLogs>> = OnceLock::new();
 pub fn register_container_logs(logs: ContainerLogs) -> u64 {
-    handle::register_handle(logs) as u64
+    let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
+    LOG_HANDLES.get_or_init(DashMap::new).insert(id, logs);
+    id
 }
-
-pub fn with_container_logs<R>(id: u64, f: impl FnOnce(&ContainerLogs) -> R) -> Option<R> {
-    handle::with_handle(id as Handle, f)
-}
-
 pub fn take_container_logs(id: u64) -> Option<ContainerLogs> {
-    handle::take_handle(id as Handle)
+    LOG_HANDLES.get_or_init(DashMap::new).remove(&id).map(|(_, v)| v)
 }
 
-pub fn register_image_info_list(list: Vec<ImageInfo>) -> u64 {
-    handle::register_handle(list) as u64
-}
-
-pub fn with_image_info_list<R>(id: u64, f: impl FnOnce(&Vec<ImageInfo>) -> R) -> Option<R> {
-    handle::with_handle(id as Handle, f)
-}
-
-pub fn take_image_info_list(id: u64) -> Option<Vec<ImageInfo>> {
-    handle::take_handle(id as Handle)
-}
-
-pub fn drop_container_handle(id: u64) -> bool {
-    handle::drop_handle(id as Handle)
+pub fn register_compose_handle(engine: ComposeEngine) -> u64 {
+    let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
+    COMPOSE_HANDLES.get_or_init(DashMap::new).insert(id, ArcComposeEngine(std::sync::Arc::new(engine)));
+    id
 }
 
 // ============ Error Types ============
@@ -198,6 +158,12 @@ impl From<perry_container_compose::error::ComposeError> for ContainerError {
             perry_container_compose::error::ComposeError::FileNotFound { path } => {
                 ContainerError::NotFound(format!("File not found: {}", path))
             }
+            perry_container_compose::error::ComposeError::ImagePullFailed { service, image, message } => {
+                ContainerError::ServiceStartupFailed {
+                    service: format!("{} (pull: {})", service, image),
+                    error: message,
+                }
+            }
         }
     }
 }
@@ -205,7 +171,7 @@ impl From<perry_container_compose::error::ComposeError> for ContainerError {
 // ============ JSON Parsing ============
 
 /// Helper to extract string from StringHeader pointer
-unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
+pub unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
     if ptr.is_null() || (ptr as usize) < 0x1000 {
         return None;
     }
@@ -222,7 +188,7 @@ pub fn parse_container_spec(spec_ptr: *const StringHeader) -> Result<ContainerSp
 }
 
 /// Convert a `ContainerError` to a JSON error string for TS.
-pub fn compose_error_to_json(e: ContainerError) -> String {
+pub fn container_error_to_json(e: ContainerError) -> String {
     let code = match &e {
         ContainerError::NotFound(_) => 404,
         ContainerError::BackendError { code, .. } => *code,

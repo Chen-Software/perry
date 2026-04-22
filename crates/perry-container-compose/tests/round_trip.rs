@@ -7,7 +7,7 @@
 use indexmap::IndexMap;
 use perry_container_compose::compose::resolve_startup_order;
 use perry_container_compose::error::ComposeError;
-use perry_container_compose::backend::OciCommandBuilder;
+use perry_container_compose::backend::CliProtocol;
 use perry_container_compose::error::compose_error_to_js;
 use perry_container_compose::types::{
     ComposeService, ComposeSpec, ContainerSpec, DependsOnCondition, DependsOnSpec, VolumeType,
@@ -204,8 +204,8 @@ proptest! {
 
     #[test]
     fn prop_container_spec_cli_round_trip(spec in arb_container_spec()) {
-        let drv = perry_container_compose::backend::BackendDriver::Docker { bin: "docker".into() };
-        let args = OciCommandBuilder::run_args(&drv, &spec);
+        let proto = perry_container_compose::backend::DockerProtocol;
+        let args = proto.run_args(&spec);
 
         // Manual verification of some fields since we don't have a full inverse parser yet
         if let Some(name) = &spec.name {

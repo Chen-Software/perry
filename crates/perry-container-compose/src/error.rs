@@ -22,6 +22,9 @@ pub enum ComposeError {
     #[error("Service '{service}' failed to start: {message}")]
     ServiceStartupFailed { service: String, message: String },
 
+    #[error("Image pull failed for service '{service}' (image '{image}'): {message}")]
+    ImagePullFailed { service: String, image: String, message: String },
+
     #[error("Backend error (exit {code}): {message}")]
     BackendError { code: i32, message: String },
 
@@ -78,6 +81,7 @@ pub fn compose_error_to_js(e: &ComposeError) -> String {
         ComposeError::NoBackendFound { .. } => 503,
         ComposeError::BackendNotAvailable { .. } => 503,
         ComposeError::ServiceStartupFailed { .. } => 500,
+        ComposeError::ImagePullFailed { .. } => 500,
         ComposeError::IoError(_) => 500,
     };
     serde_json::json!({
