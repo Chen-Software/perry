@@ -97,7 +97,7 @@ pub enum DependsOnCondition {
 /// Per-dependency entry in the object form of depends_on
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComposeDependsOn {
-    pub condition: DependsOnCondition,
+    pub condition: Option<DependsOnCondition>,
     #[serde(default)]
     pub required: Option<bool>,
     #[serde(default)]
@@ -134,6 +134,15 @@ pub enum VolumeType {
     Cluster,
     Npipe,
     Image,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum IsolationLevel {
+    None,
+    Process,
+    Container,
+    MicroVm,
+    Wasm,
 }
 
 /// Long-form volume mount (compose-spec §service.volumes[])
@@ -441,7 +450,7 @@ pub struct ComposeSecret {
 
 /// Top-level config definition (compose-spec `config` object)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ComposeConfig {
+pub struct ComposeConfigObj {
     pub name: Option<String>,
     pub content: Option<String>,
     pub environment: Option<String>,
@@ -589,7 +598,7 @@ pub struct ComposeSpec {
     pub networks: Option<IndexMap<String, Option<ComposeNetwork>>>,
     pub volumes: Option<IndexMap<String, Option<ComposeVolume>>>,
     pub secrets: Option<IndexMap<String, Option<ComposeSecret>>>,
-    pub configs: Option<IndexMap<String, Option<ComposeConfig>>>,
+    pub configs: Option<IndexMap<String, Option<ComposeConfigObj>>>,
     pub include: Option<Vec<serde_yaml::Value>>,
     pub models: Option<IndexMap<String, serde_yaml::Value>>,
     #[serde(flatten)]
@@ -672,22 +681,52 @@ pub struct ComposeHandle {
     pub services: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceGraph {
+    pub nodes: Vec<String>,
+    pub edges: Vec<ServiceEdge>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceEdge {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StackStatus {
+    pub services: Vec<ServiceStatus>,
+    pub healthy: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceStatus {
+    pub service: String,
+    pub state: String, // "running" | "stopped" | "failed" | "pending" | "unknown"
+    pub container_id: Option<String>,
+    pub error: Option<String>,
+}
+
 // ============ Container types (for single-container API) ============
 
 /// Specification for running a single container.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ContainerSpec {
     pub image: String,
     pub name: Option<String>,
     pub ports: Option<Vec<String>>,
     pub volumes: Option<Vec<String>>,
     pub env: Option<std::collections::HashMap<String, String>>,
-    pub labels: Option<std::collections::HashMap<String, String>>,
     pub cmd: Option<Vec<String>>,
     pub entrypoint: Option<Vec<String>>,
     pub network: Option<String>,
     pub rm: Option<bool>,
     pub read_only: Option<bool>,
+    pub seccomp: Option<String>,
+    pub labels: Option<std::collections::HashMap<String, String>>,
 }
 
 /// Handle returned after creating/running a container.
@@ -705,7 +744,6 @@ pub struct ContainerInfo {
     pub image: String,
     pub status: String,
     pub ports: Vec<String>,
-    pub labels: std::collections::HashMap<String, String>,
     pub created: String,
 }
 
@@ -717,11 +755,80 @@ pub struct ContainerLogs {
 }
 
 /// Information about a container image.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ImageInfo {
     pub id: String,
     pub repository: String,
     pub tag: String,
     pub size: u64,
     pub created: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackendInfo {
+    pub name: String,
+    pub available: bool,
+    pub reason: Option<String>,
+    pub version: Option<String>,
+    pub mode: String, // "local" | "remote"
+    pub isolation_level: IsolationLevel,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // Feature: alloy-container, Property 4: Data model JSON round-trip
+    proptest! {
+        #[test]
+        fn test_container_spec_roundtrip(image in ".*", name in prop::option::of(".*"), rm in prop::option::of(any::<bool>())) {
+            let spec = ContainerSpec {
+                image,
+                name,
+                rm,
+                ..Default::default()
+            };
+            let json = serde_json::to_string(&spec).unwrap();
+            let de: ContainerSpec = serde_json::from_str(&json).unwrap();
+            assert_eq!(spec, de);
+        }
+
+        #[test]
+        fn test_image_info_roundtrip(id in ".*", repository in ".*", tag in ".*", size in any::<u64>(), created in ".*") {
+            let info = ImageInfo { id, repository, tag, size, created };
+            let json = serde_json::to_string(&info).unwrap();
+            let de: ImageInfo = serde_json::from_str(&json).unwrap();
+            assert_eq!(info, de);
+        }
+    }
+
+    // Feature: alloy-container, Property 12: depends_on condition validation
+    #[test]
+    fn test_depends_on_condition_validation() {
+        let valid = vec!["service_started", "service_healthy", "service_completed_successfully"];
+        for v in valid {
+            let json = format!("\"{}\"", v);
+            let _: DependsOnCondition = serde_json::from_str(&json).unwrap();
+        }
+
+        let invalid = "\"invalid_condition\"";
+        let res: std::result::Result<DependsOnCondition, _> = serde_json::from_str(invalid);
+        assert!(res.is_err());
+    }
+
+    // Feature: alloy-container, Property 13: Volume type validation
+    #[test]
+    fn test_volume_type_validation() {
+        let valid = vec!["bind", "volume", "tmpfs", "cluster", "npipe", "image"];
+        for v in valid {
+            let json = format!("\"{}\"", v);
+            let _: VolumeType = serde_json::from_str(&json).unwrap();
+        }
+
+        let invalid = "\"invalid_type\"";
+        let res: std::result::Result<VolumeType, _> = serde_json::from_str(invalid);
+        assert!(res.is_err());
+    }
 }

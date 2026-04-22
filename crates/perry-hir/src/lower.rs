@@ -4651,8 +4651,9 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                 if module_name == "perry/container" || module_name == "perry/compose" || module_name == "perry/container-compose" {
                     if let Some(method) = method_name {
                         return Ok(Expr::ExternFuncRef {
-                            module: module_name.to_string(),
                             name: method.to_string(),
+                            param_types: Vec::new(),
+                            return_type: Type::Any,
                         });
                     }
                 }

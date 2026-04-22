@@ -48,6 +48,8 @@ pub struct ContainerSpec {
     pub network: Option<String>,
     pub rm: Option<bool>,
     pub read_only: Option<bool>,
+    pub seccomp: Option<String>,
+    pub labels: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,7 +87,7 @@ pub struct ComposeHandle {
 // ============ Helper for StringHeader ============
 
 pub unsafe fn string_from_header(header: *const StringHeader) -> Option<String> {
-    if header.is_null() {
+    if header.is_null() || (header as usize) < 0x1000 {
         return None;
     }
     let s = (*header).as_str();
