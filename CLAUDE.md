@@ -26,11 +26,15 @@ Tracked via the gap test suite (`test-files/test_gap_*.ts`, 22 tests). Compared 
 
 ## Workflow Requirements
 
-**IMPORTANT:** Follow these practices for every code change:
+**IMPORTANT:** Follow these practices for every code change made directly on `main` (maintainer workflow):
 
 1. **Update CLAUDE.md**: Add 1-2 line entry in "Recent Changes" for new features/fixes
 2. **Increment Version**: Bump patch version (e.g., 0.5.48 → 0.5.49)
 3. **Commit Changes**: Include code changes and CLAUDE.md updates together
+
+### External contributor PRs
+
+PRs from outside contributors should **not** touch `[workspace.package] version` in `Cargo.toml`, the `**Current Version:**` line in `CLAUDE.md`, or add a "Recent Changes" entry. The maintainer bumps the version and writes the changelog entry at merge time — usually by rebasing the PR branch and amending. This avoids the patch-version collisions that happen when Perry's `main` ships several commits while a PR is in review (each on-main commit bumps the version; a PR that bumped to the same patch on day 1 is already behind by merge day). Contributors just write code; let the maintainer fold in the metadata last.
 
 ## Build Commands
 
