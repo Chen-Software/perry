@@ -830,8 +830,9 @@ pub fn platform_candidates() -> &'static [&'static str] {
             "orbstack",
             "colima",
             "rancher-desktop",
-            "podman",
             "lima",
+            "podman",
+            "nerdctl",
             "docker",
         ]
     } else {
@@ -873,6 +874,10 @@ async fn probe_candidate(name: &str) -> std::result::Result<Arc<dyn ContainerBac
             let bin = which_bin("orb")
                 .or_else(|_| which_bin("docker"))
                 .map_err(|_| "orbstack not found")?;
+            Ok(Arc::new(CliBackend::new(bin, DockerProtocol)))
+        }
+        "rancher-desktop" => {
+            let bin = which_bin("nerdctl").map_err(|_| "rancher-desktop (nerdctl) not found")?;
             Ok(Arc::new(CliBackend::new(bin, DockerProtocol)))
         }
         "colima" => {
