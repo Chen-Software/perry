@@ -5,7 +5,23 @@ use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 use serde_json::Value;
 pub use crate::error::{ComposeError, Result, BackendProbeResult};
-use crate::types::{ContainerSpec, ContainerHandle, ContainerInfo, ContainerLogs, ImageInfo, ComposeNetwork, ComposeVolume};
+use crate::types::{ContainerSpec, ContainerHandle, ContainerInfo, ContainerLogs, ImageInfo};
+
+pub fn which_helper(bin: &str) -> std::result::Result<PathBuf, which::Error> {
+    which::which(bin)
+}
+
+pub struct NetworkConfig {
+    pub driver: Option<String>,
+    pub labels: Option<HashMap<String, String>>,
+    pub internal: bool,
+    pub enable_ipv6: bool,
+}
+
+pub struct VolumeConfig {
+    pub driver: Option<String>,
+    pub labels: Option<HashMap<String, String>>,
+}
 
 #[async_trait]
 pub trait ContainerBackend: Send + Sync {
@@ -23,9 +39,9 @@ pub trait ContainerBackend: Send + Sync {
     async fn pull_image(&self, reference: &str) -> Result<()>;
     async fn list_images(&self) -> Result<Vec<ImageInfo>>;
     async fn remove_image(&self, reference: &str, force: bool) -> Result<()>;
-    async fn create_network(&self, name: &str, config: &ComposeNetwork) -> Result<()>;
+    async fn create_network(&self, name: &str, config: &NetworkConfig) -> Result<()>;
     async fn remove_network(&self, name: &str) -> Result<()>;
-    async fn create_volume(&self, name: &str, config: &ComposeVolume) -> Result<()>;
+    async fn create_volume(&self, name: &str, config: &VolumeConfig) -> Result<()>;
     async fn remove_volume(&self, name: &str) -> Result<()>;
 }
 
@@ -217,9 +233,9 @@ impl ContainerBackend for OciBackend {
         self.exec_cli(&args).await?;
         Ok(())
     }
-    async fn create_network(&self, name: &str, _config: &ComposeNetwork) -> Result<()> { self.exec_cli(&["network".into(), "create".into(), name.into()]).await?; Ok(()) }
+    async fn create_network(&self, name: &str, _config: &NetworkConfig) -> Result<()> { self.exec_cli(&["network".into(), "create".into(), name.into()]).await?; Ok(()) }
     async fn remove_network(&self, name: &str) -> Result<()> { self.exec_cli(&["network".into(), "rm".into(), name.into()]).await?; Ok(()) }
-    async fn create_volume(&self, name: &str, _config: &ComposeVolume) -> Result<()> { self.exec_cli(&["volume".into(), "create".into(), name.into()]).await?; Ok(()) }
+    async fn create_volume(&self, name: &str, _config: &VolumeConfig) -> Result<()> { self.exec_cli(&["volume".into(), "create".into(), name.into()]).await?; Ok(()) }
     async fn remove_volume(&self, name: &str) -> Result<()> { self.exec_cli(&["volume".into(), "rm".into(), name.into()]).await?; Ok(()) }
 }
 
@@ -240,7 +256,7 @@ fn parse_image_info_from_json(json: &Value) -> Result<ImageInfo> {
     Ok(ImageInfo { id, repository: json["Repository"].as_str().unwrap_or("").to_string(), tag: json["Tag"].as_str().unwrap_or("").to_string(), size: json["Size"].as_u64().unwrap_or(0), created: json["Created"].as_str().unwrap_or("").to_string() })
 }
 
-pub async fn detect_backend() -> std::result::Result<Box<dyn ContainerBackend>, Vec<BackendProbeResult>> {
+pub async fn detect_backend() -> std::result::Result<Box<dyn ContainerBackend + Send + Sync>, Vec<BackendProbeResult>> {
     if let Ok(name) = std::env::var("PERRY_CONTAINER_BACKEND") {
         let res = probe_candidate(&name).await;
         if res.available { return Ok(make_backend(&name, PathBuf::from(res.reason))); }
@@ -272,7 +288,7 @@ async fn probe_candidate(name: &str) -> BackendProbeResult {
         "docker" => ("docker", vec!["--version"]),
         _ => return BackendProbeResult { name: name.into(), available: false, reason: "unknown candidate".into() },
     };
-    let bin = match which::which(check.0) {
+    let bin = match which_helper(check.0) {
         Ok(p) => p,
         Err(_) => return BackendProbeResult { name: name.into(), available: false, reason: format!("{} not found", check.0) },
     };
@@ -343,7 +359,7 @@ async fn probe_candidate(name: &str) -> BackendProbeResult {
     }
 }
 
-fn make_backend(name: &str, bin: PathBuf) -> Box<dyn ContainerBackend> {
+fn make_backend(name: &str, bin: PathBuf) -> Box<dyn ContainerBackend + Send + Sync> {
     let driver = match name {
         "apple/container" => BackendDriver::AppleContainer { bin },
         "podman" => BackendDriver::Podman { bin },
@@ -375,8 +391,8 @@ impl ContainerBackend for MockBackend {
     async fn pull_image(&self, _reference: &str) -> Result<()> { Ok(()) }
     async fn list_images(&self) -> Result<Vec<ImageInfo>> { Ok(vec![]) }
     async fn remove_image(&self, _reference: &str, _force: bool) -> Result<()> { Ok(()) }
-    async fn create_network(&self, _name: &str, _config: &ComposeNetwork) -> Result<()> { Ok(()) }
+    async fn create_network(&self, _name: &str, _config: &NetworkConfig) -> Result<()> { Ok(()) }
     async fn remove_network(&self, _name: &str) -> Result<()> { Ok(()) }
-    async fn create_volume(&self, _name: &str, _config: &ComposeVolume) -> Result<()> { Ok(()) }
+    async fn create_volume(&self, _name: &str, _config: &VolumeConfig) -> Result<()> { Ok(()) }
     async fn remove_volume(&self, _name: &str) -> Result<()> { Ok(()) }
 }

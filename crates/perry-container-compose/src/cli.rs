@@ -2,6 +2,7 @@ use crate::compose::ComposeEngine;
 use crate::error::{ComposeError, Result};
 use crate::project::ComposeProject;
 use crate::config::ProjectConfig;
+use crate::backend::ContainerBackend;
 use clap::{Args, Parser, Subcommand};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -118,9 +119,9 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     let project = ComposeProject::load(&config)?;
 
-    let backend = crate::backend::detect_backend().await
+    let backend_boxed = crate::backend::detect_backend().await
         .map_err(|probed| ComposeError::NoBackendFound { probed })?;
-    let backend = Arc::new(backend);
+    let backend: Arc<dyn ContainerBackend + Send + Sync> = Arc::from(backend_boxed);
 
     let engine = ComposeEngine::new(project.spec.clone(), project.project_name.clone(), backend);
 
@@ -150,8 +151,11 @@ pub async fn run(cli: Cli) -> Result<()> {
             names.sort();
             for name in names {
                 let log = &logs_map[name];
-                for line in log.lines() {
+                for line in log.stdout.lines() {
                     println!("{:<12} | {}", name, line);
+                }
+                for line in log.stderr.lines() {
+                    eprintln!("{:<12} | {}", name, line);
                 }
             }
         }
