@@ -18,6 +18,7 @@ static INFO_LIST_HANDLES: OnceLock<DashMap<u64, Vec<ContainerInfo>>> = OnceLock:
 static LOG_HANDLES: OnceLock<DashMap<u64, ContainerLogs>> = OnceLock::new();
 static IMAGE_INFO_LIST_HANDLES: OnceLock<DashMap<u64, Vec<ImageInfo>>> = OnceLock::new();
 static COMPOSE_HANDLES: OnceLock<DashMap<u64, ComposeHandle>> = OnceLock::new();
+pub static CONTAINER_LOGS_MAP: OnceLock<DashMap<u64, std::collections::HashMap<String, ContainerLogs>>> = OnceLock::new();
 
 fn next_id() -> u64 {
     NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst)
@@ -50,6 +51,12 @@ pub fn register_compose_handle(handle: ComposeHandle) -> u64 {
 pub fn register_container_logs(logs: ContainerLogs) -> u64 {
     let id = next_id();
     LOG_HANDLES.get_or_init(DashMap::new).insert(id, logs);
+    id
+}
+
+pub fn register_container_logs_map(map: std::collections::HashMap<String, ContainerLogs>) -> u64 {
+    let id = next_id();
+    CONTAINER_LOGS_MAP.get_or_init(DashMap::new).insert(id, map);
     id
 }
 

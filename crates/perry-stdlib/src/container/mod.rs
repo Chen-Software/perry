@@ -445,11 +445,15 @@ pub unsafe extern "C" fn js_compose_exec(stack_id: i64, service_ptr: *const Stri
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_config(spec_json_ptr: *const StringHeader) -> *mut Promise {
+pub unsafe extern "C" fn js_compose_config(stack_id: i64) -> *mut Promise {
     let promise = js_promise_new();
-    let spec_json = string_from_header(spec_json_ptr).unwrap_or_else(|| "{}".into());
+    let id = stack_id as u64;
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        Ok(types::register_container_logs(ContainerLogs { stdout: spec_json, stderr: "".into() }))
+        let engine = COMPOSE_ENGINES.get().and_then(|m| m.get(&id).map(|e| e.clone())).ok_or_else(|| backend_err_to_js("Stack not found".into()))?;
+        match engine.config() {
+            Ok(yaml) => Ok(types::register_container_logs(ContainerLogs { stdout: yaml, stderr: "".into() })),
+            Err(e) => Err(compose_error_to_js(e)),
+        }
     });
     promise
 }

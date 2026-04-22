@@ -52,6 +52,10 @@ impl ComposeEngine {
     pub async fn restart(&self, services: &[String]) -> Result<()> {
         self.inner.restart(services).await
     }
+
+    pub fn config(&self) -> Result<String> {
+        self.inner.config()
+    }
 }
 
 pub async fn compose_up(spec: ComposeSpec, backend: Arc<dyn ContainerBackend>) -> Result<(ComposeHandle, ComposeEngine)> {
