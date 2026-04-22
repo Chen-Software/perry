@@ -49,10 +49,10 @@ run_and_capture() {
     shift
     local logfile="$WORK/${label}.log"
     echo "=== $label ===" >&2
-    PERRY_CACHE_VERBOSE=1 "$PERRY" compile "$MAIN_ENTRY" -o "$BIN" "$@" >"$logfile" 2>&1 \
+    PERRY_DEV_VERBOSE=1 "$PERRY" compile "$MAIN_ENTRY" -o "$BIN" "$@" >"$logfile" 2>&1 \
         || { echo "compile failed ($label):"; cat "$logfile"; exit 1; }
     "$BIN" > "$WORK/${label}.out"
-    cat "$logfile" | grep -E "• object cache" || echo "  (no cache line)"
+    cat "$logfile" | grep -E "• codegen cache" || echo "  (no cache line)"
 }
 
 # 1. Baseline with --no-cache.
@@ -66,15 +66,17 @@ rm -rf .perry-cache
 run_and_capture cold
 COLD_OUT="$(cat "$WORK/cold.out")"
 [ "$COLD_OUT" = "$BASELINE_OUT" ] || { echo "FAIL: cold output differs from baseline" >&2; exit 1; }
-grep -E "• object cache: 0/[0-9]+ hit" "$WORK/cold.log" >/dev/null \
+grep -E "• codegen cache: 0/[0-9]+ hit" "$WORK/cold.log" >/dev/null \
     || { echo "FAIL: cold build should have 0 hits" >&2; cat "$WORK/cold.log" | grep cache >&2; exit 1; }
 
 # 3. Warm cache: every module should be a hit.
 run_and_capture warm
 WARM_OUT="$(cat "$WORK/warm.out")"
 [ "$WARM_OUT" = "$BASELINE_OUT" ] || { echo "FAIL: warm output differs from baseline" >&2; exit 1; }
-# Expect full hits: "N/N hit (0 miss, 0 store, ...)"
-if ! grep -E "• object cache: [0-9]+/[0-9]+ hit \(0 miss, 0 store" "$WORK/warm.log" >/dev/null; then
+# Expect full hits: "N/N hit (0 miss)"
+# (Note: N == M because hits == total when misses == 0. The `codegen cache:`
+# label format matches V2.1's `parse cache:` format — see commands/dev.rs.)
+if ! grep -E "• codegen cache: ([0-9]+)/\1 hit \(0 miss\)" "$WORK/warm.log" >/dev/null; then
     echo "FAIL: warm build should be all hits" >&2
     cat "$WORK/warm.log" | grep cache >&2
     exit 1
@@ -88,8 +90,8 @@ cp registry.ts registry.ts.orig
 sed -i.bak 's/MISSING/NOTFOUND/' registry.ts
 rm -f registry.ts.bak
 run_and_capture partial
-if ! grep -E "• object cache: [0-9]+/[0-9]+ hit \(1 miss, 1 store" "$WORK/partial.log" >/dev/null; then
-    echo "FAIL: partial rebuild should be 1 miss / 1 store" >&2
+if ! grep -E "• codegen cache: [0-9]+/[0-9]+ hit \(1 miss\)" "$WORK/partial.log" >/dev/null; then
+    echo "FAIL: partial rebuild should be 1 miss" >&2
     cat "$WORK/partial.log" | grep cache >&2
     exit 1
 fi
@@ -105,7 +107,7 @@ rm -f registry.ts.orig
 run_and_capture rewarm
 REWARM_OUT="$(cat "$WORK/rewarm.out")"
 [ "$REWARM_OUT" = "$BASELINE_OUT" ] || { echo "FAIL: post-restore output differs from baseline" >&2; exit 1; }
-if ! grep -E "• object cache: [0-9]+/[0-9]+ hit \(0 miss, 0 store" "$WORK/rewarm.log" >/dev/null; then
+if ! grep -E "• codegen cache: ([0-9]+)/\1 hit \(0 miss\)" "$WORK/rewarm.log" >/dev/null; then
     echo "FAIL: after restoring source, rebuild should be all hits" >&2
     cat "$WORK/rewarm.log" | grep cache >&2
     exit 1

@@ -300,7 +300,7 @@ fn build_once(
         no_cache: false,
     };
     parse_cache.reset_counters();
-    super::compile::run_with_parse_cache(
+    let result = super::compile::run_with_parse_cache(
         args,
         Some(parse_cache),
         OutputFormat::Text,
@@ -319,6 +319,18 @@ fn build_once(
                 total,
                 misses
             );
+        }
+        if let Some((h, m, _stores, _errs)) = result.codegen_cache_stats {
+            let total = h + m;
+            if total > 0 {
+                eprintln!(
+                    "  {} codegen cache: {}/{} hit ({} miss)",
+                    paint("•", "dim", use_color),
+                    h,
+                    total,
+                    m
+                );
+            }
         }
     }
     Ok(())

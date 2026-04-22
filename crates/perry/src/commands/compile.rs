@@ -18,6 +18,10 @@ pub struct CompileResult {
     pub target: String,
     pub bundle_id: Option<String>,
     pub is_dylib: bool,
+    /// V2.2 codegen cache stats from this build, when the cache was enabled.
+    /// `None` when disabled (`--no-cache`, `PERRY_NO_CACHE=1`, or bitcode-link mode).
+    /// Tuple is `(hits, misses, stores, store_errors)`.
+    pub codegen_cache_stats: Option<(usize, usize, usize, usize)>,
 }
 
 /// In-memory TypeScript AST cache used by `perry dev` to skip reparsing
@@ -3147,6 +3151,7 @@ fn compile_for_ios_widget(ctx: &CompilationContext, args: &CompileArgs, format: 
         target: target_str,
         bundle_id: Some(app_bundle_id.to_string()),
         is_dylib: false,
+        codegen_cache_stats: None,
     })
 }
 
@@ -3234,6 +3239,7 @@ fn compile_for_watchos_widget(ctx: &CompilationContext, args: &CompileArgs, form
         target: target_str,
         bundle_id: Some(app_bundle_id.to_string()),
         is_dylib: false,
+        codegen_cache_stats: None,
     })
 }
 
@@ -3469,6 +3475,7 @@ fn compile_for_android_widget(ctx: &CompilationContext, args: &CompileArgs, form
         target: "android-widget".to_string(),
         bundle_id: Some(app_package.to_string()),
         is_dylib: false,
+        codegen_cache_stats: None,
     })
 }
 
@@ -3548,6 +3555,7 @@ fn compile_for_wearos_tile(ctx: &CompilationContext, args: &CompileArgs, format:
         target: "wearos-tile".to_string(),
         bundle_id: Some(app_package.to_string()),
         is_dylib: false,
+        codegen_cache_stats: None,
     })
 }
 
@@ -3659,6 +3667,7 @@ fn compile_for_web(ctx: &CompilationContext, args: &CompileArgs, format: OutputF
         target: "web".to_string(),
         bundle_id: None,
         is_dylib: false,
+        codegen_cache_stats: None,
     })
 }
 
@@ -3776,6 +3785,7 @@ fn compile_for_wasm(ctx: &CompilationContext, args: &CompileArgs, format: Output
         target: "wasm".to_string(),
         bundle_id: None,
         is_dylib: false,
+        codegen_cache_stats: None,
     })
 }
 
@@ -5340,26 +5350,6 @@ pub fn run_with_parse_cache(
         })
         .collect();
 
-    // V2.2 verbose cache reporting. Only surface when the user opted into
-    // diagnostics via `PERRY_CACHE_VERBOSE=1` so normal builds stay quiet.
-    if object_cache.is_enabled()
-        && std::env::var("PERRY_CACHE_VERBOSE").ok().as_deref() == Some("1")
-    {
-        let (h, m, s, e) = (
-            object_cache.hits(),
-            object_cache.misses(),
-            object_cache.stores(),
-            object_cache.store_errors(),
-        );
-        let total = h + m;
-        if total > 0 {
-            eprintln!(
-                "• object cache: {}/{} hit ({} miss, {} store, {} store-err)",
-                h, total, m, s, e
-            );
-        }
-    }
-
     // Write object files and collect results (sequential — I/O + error reporting)
     let mut failed_modules: Vec<String> = Vec::new();
     for result in compile_results {
@@ -5387,6 +5377,27 @@ pub fn run_with_parse_cache(
                     failed_modules.push(name.to_string());
                 }
             }
+        }
+    }
+
+    // Verbose codegen-cache stats. We print here (rather than in dev.rs
+    // alongside the parse-cache line) only when `parse_cache` is `None`
+    // — i.e. batch `perry compile` / `perry run` invocations. In the
+    // `perry dev` hot path, `run_with_parse_cache` is called with a
+    // `Some(cache)` and `dev.rs` prints both `parse cache:` and
+    // `codegen cache:` lines together after we return, so printing here
+    // would duplicate the codegen line. The env var matches the one
+    // `perry dev` uses so a single `PERRY_DEV_VERBOSE=1` turns on cache
+    // diagnostics everywhere.
+    if parse_cache.is_none()
+        && object_cache.is_enabled()
+        && std::env::var("PERRY_DEV_VERBOSE").ok().as_deref() == Some("1")
+    {
+        let h = object_cache.hits();
+        let m = object_cache.misses();
+        let total = h + m;
+        if total > 0 {
+            eprintln!("  • codegen cache: {}/{} hit ({} miss)", h, total, m);
         }
     }
 
@@ -5764,11 +5775,15 @@ pub fn run_with_parse_cache(
     }
 
     if args.no_link {
+        let codegen_cache_stats = if object_cache.is_enabled() {
+            Some((object_cache.hits(), object_cache.misses(), object_cache.stores(), object_cache.store_errors()))
+        } else { None };
         return Ok(CompileResult {
             output_path: exe_path,
             target: target.clone().unwrap_or_else(|| "native".to_string()),
             bundle_id: None,
             is_dylib,
+            codegen_cache_stats,
         });
     }
 
@@ -5835,11 +5850,15 @@ pub fn run_with_parse_cache(
             }
         }
 
+        let codegen_cache_stats = if object_cache.is_enabled() {
+            Some((object_cache.hits(), object_cache.misses(), object_cache.stores(), object_cache.store_errors()))
+        } else { None };
         return Ok(CompileResult {
             output_path: exe_path,
             target: target.clone().unwrap_or_else(|| "native".to_string()),
             bundle_id: None,
             is_dylib: true,
+            codegen_cache_stats,
         });
     }
 
@@ -7905,11 +7924,16 @@ pub fn run_with_parse_cache(
 
     let final_output_path = result_app_dir.unwrap_or(exe_path);
 
+    let codegen_cache_stats = if object_cache.is_enabled() {
+        Some((object_cache.hits(), object_cache.misses(), object_cache.stores(), object_cache.store_errors()))
+    } else { None };
+
     Ok(CompileResult {
         output_path: final_output_path,
         target: target.unwrap_or_else(|| "native".to_string()),
         bundle_id: result_bundle_id,
         is_dylib,
+        codegen_cache_stats,
     })
 }
 
