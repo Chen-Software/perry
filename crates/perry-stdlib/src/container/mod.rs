@@ -17,7 +17,7 @@ pub(crate) mod mod_private {
     use super::*;
     pub static BACKEND: OnceLock<Arc<dyn ContainerBackend + Send + Sync>> = OnceLock::new();
 
-    pub async fn get_global_backend_instance() -> Result<Arc<dyn ContainerBackend + Send + Sync>, String> {
+    pub async fn get_global_backend_instance() -> Result<Arc<dyn ContainerBackend + Send + Sync>, perry_container_compose::error::ComposeError> {
         if let Some(b) = BACKEND.get() {
             return Ok(Arc::clone(b));
         }
@@ -29,7 +29,7 @@ pub(crate) mod mod_private {
                 let _ = BACKEND.set(Arc::clone(&b));
                 Ok(b)
             }
-            Err(probed) => Err(format!("No backend found: {:?}", probed)),
+            Err(probed) => Err(perry_container_compose::error::ComposeError::NoBackendFound { probed }),
         }
     }
 }
@@ -60,7 +60,7 @@ pub unsafe extern "C" fn js_container_run(spec_json_ptr: *const StringHeader) ->
     };
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = get_global_backend_instance().await.map_err(|e| e.to_string())?;
+        let backend = get_global_backend_instance().await.map_err(|e| compose_error_to_js(&e))?;
         let internal_spec = perry_container_compose::types::ContainerSpec {
             image: spec.image,
             name: spec.name,
@@ -72,6 +72,8 @@ pub unsafe extern "C" fn js_container_run(spec_json_ptr: *const StringHeader) ->
             network: spec.network,
             rm: spec.rm,
             read_only: spec.read_only,
+            labels: spec.labels,
+            seccomp: spec.seccomp,
         };
         let handle = backend.run(&internal_spec).await.map_err(|e| compose_error_to_js(&e))?;
         let id = register_container_handle(ContainerHandle { id: handle.id, name: handle.name });
@@ -117,6 +119,8 @@ pub unsafe extern "C" fn js_container_create(spec_json_ptr: *const StringHeader)
             network: spec.network,
             rm: spec.rm,
             read_only: spec.read_only,
+            labels: spec.labels,
+            seccomp: spec.seccomp,
         };
         let handle = backend.create(&internal_spec).await.map_err(|e| compose_error_to_js(&e))?;
         let id = register_container_handle(ContainerHandle { id: handle.id, name: handle.name });
@@ -142,7 +146,7 @@ pub unsafe extern "C" fn js_container_start(id_ptr: *const StringHeader) -> *mut
     };
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = get_global_backend_instance().await.map_err(|e| e.to_string())?;
+        let backend = get_global_backend_instance().await.map_err(|e| compose_error_to_js(&e))?;
         backend.start(&id).await.map_err(|e| compose_error_to_js(&e))?;
         Ok(0)
     });
@@ -167,7 +171,7 @@ pub unsafe extern "C" fn js_container_stop(id_ptr: *const StringHeader, timeout:
     let t = if timeout >= 0.0 { Some(timeout as u32) } else { None };
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = get_global_backend_instance().await.map_err(|e| e.to_string())?;
+        let backend = get_global_backend_instance().await.map_err(|e| compose_error_to_js(&e))?;
         backend.stop(&id, t).await.map_err(|e| compose_error_to_js(&e))?;
         Ok(0)
     });
@@ -192,7 +196,7 @@ pub unsafe extern "C" fn js_container_remove(id_ptr: *const StringHeader, force:
     let f = force != 0.0;
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = get_global_backend_instance().await.map_err(|e| e.to_string())?;
+        let backend = get_global_backend_instance().await.map_err(|e| compose_error_to_js(&e))?;
         backend.remove(&id, f).await.map_err(|e| compose_error_to_js(&e))?;
         Ok(0)
     });
@@ -204,7 +208,7 @@ pub unsafe extern "C" fn js_container_list(all: f64) -> *mut Promise {
     let promise = js_promise_new();
     let a = all != 0.0;
     spawn_for_promise_deferred(promise as *mut u8, async move {
-        let backend = get_global_backend_instance().await.map_err(|e| e.to_string())?;
+        let backend = get_global_backend_instance().await.map_err(|e| compose_error_to_js(&e))?;
         backend.list(a).await.map_err(|e| compose_error_to_js(&e))
     }, |list| {
         let json = serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string());
@@ -230,7 +234,7 @@ pub unsafe extern "C" fn js_container_inspect(id_ptr: *const StringHeader) -> *m
     };
 
     spawn_for_promise_deferred(promise as *mut u8, async move {
-        let backend = get_global_backend_instance().await.map_err(|e| e.to_string())?;
+        let backend = get_global_backend_instance().await.map_err(|e| compose_error_to_js(&e))?;
         backend.inspect(&id).await.map_err(|e| compose_error_to_js(&e))
     }, |info| {
         let json = serde_json::to_string(&info).unwrap_or_else(|_| "{}".to_string());
@@ -258,7 +262,7 @@ pub unsafe extern "C" fn js_container_logs(id_ptr: *const StringHeader, tail: f6
     let t = if tail >= 0.0 { Some(tail as u32) } else { None };
 
     spawn_for_promise_deferred(promise as *mut u8, async move {
-        let backend = get_global_backend_instance().await.map_err(|e| e.to_string())?;
+        let backend = get_global_backend_instance().await.map_err(|e| compose_error_to_js(&e))?;
         backend.logs(&id, t).await.map_err(|e| compose_error_to_js(&e))
     }, |logs| {
         let json = serde_json::to_string(&logs).unwrap_or_else(|_| "{}".to_string());
@@ -294,7 +298,7 @@ pub unsafe extern "C" fn js_container_exec(
     let workdir = string_from_header(workdir_ptr);
 
     spawn_for_promise_deferred(promise as *mut u8, async move {
-        let backend = get_global_backend_instance().await.map_err(|e| e.to_string())?;
+        let backend = get_global_backend_instance().await.map_err(|e| compose_error_to_js(&e))?;
         backend.exec(&id, &cmd, env.as_ref(), workdir.as_deref()).await.map_err(|e| compose_error_to_js(&e))
     }, |logs| {
         let json = serde_json::to_string(&logs).unwrap_or_else(|_| "{}".to_string());
@@ -316,7 +320,7 @@ pub unsafe extern "C" fn js_container_pullImage(ref_ptr: *const StringHeader) ->
     };
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = get_global_backend_instance().await.map_err(|e| e.to_string())?;
+        let backend = get_global_backend_instance().await.map_err(|e| compose_error_to_js(&e))?;
         backend.pull_image(&reference).await.map_err(|e| compose_error_to_js(&e))?;
         Ok(0)
     });
@@ -327,7 +331,7 @@ pub unsafe extern "C" fn js_container_pullImage(ref_ptr: *const StringHeader) ->
 pub unsafe extern "C" fn js_container_listImages() -> *mut Promise {
     let promise = js_promise_new();
     spawn_for_promise_deferred(promise as *mut u8, async move {
-        let backend = get_global_backend_instance().await.map_err(|e| e.to_string())?;
+        let backend = get_global_backend_instance().await.map_err(|e| compose_error_to_js(&e))?;
         backend.list_images().await.map_err(|e| compose_error_to_js(&e))
     }, |list| {
         let json = serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string());
@@ -350,7 +354,7 @@ pub unsafe extern "C" fn js_container_removeImage(ref_ptr: *const StringHeader, 
     let f = force != 0.0;
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = get_global_backend_instance().await.map_err(|e| e.to_string())?;
+        let backend = get_global_backend_instance().await.map_err(|e| compose_error_to_js(&e))?;
         backend.remove_image(&reference, f).await.map_err(|e| compose_error_to_js(&e))?;
         Ok(0)
     });
@@ -392,7 +396,7 @@ pub unsafe extern "C" fn js_container_detectBackend() -> *mut Promise {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_composeUp(spec_json_ptr: *const StringHeader) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_up(spec_json_ptr: *const StringHeader) -> *mut Promise {
     let promise = js_promise_new();
     if spec_json_ptr.is_null() {
         crate::common::spawn_for_promise(promise as *mut u8, async move { Err("Null spec pointer".to_string()) });
@@ -424,11 +428,11 @@ pub unsafe extern "C" fn js_container_composeUp(spec_json_ptr: *const StringHead
 
 #[no_mangle]
 pub unsafe extern "C" fn js_compose_up(spec_json_ptr: *const StringHeader) -> *mut Promise {
-    js_container_composeUp(spec_json_ptr)
+    js_container_compose_up(spec_json_ptr)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_down(handle_id: f64, volumes: f64) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_down(handle_id: f64, volumes: f64) -> *mut Promise {
     let promise = js_promise_new();
     let id = handle_id as u64;
     let v = volumes != 0.0;
@@ -439,7 +443,7 @@ pub unsafe extern "C" fn js_compose_down(handle_id: f64, volumes: f64) -> *mut P
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_ps(handle_id: f64) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_ps(handle_id: f64) -> *mut Promise {
     let promise = js_promise_new();
     let id = handle_id as u64;
     spawn_for_promise_deferred(promise as *mut u8, async move {
@@ -453,7 +457,7 @@ pub unsafe extern "C" fn js_compose_ps(handle_id: f64) -> *mut Promise {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_logs(handle_id: f64, service_ptr: *const StringHeader, tail: f64) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_logs(handle_id: f64, service_ptr: *const StringHeader, tail: f64) -> *mut Promise {
     let promise = js_promise_new();
     let id = handle_id as u64;
     let service = string_from_header(service_ptr);
@@ -470,7 +474,12 @@ pub unsafe extern "C" fn js_compose_logs(handle_id: f64, service_ptr: *const Str
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_exec(handle_id: f64, service_ptr: *const StringHeader, cmd_json_ptr: *const StringHeader) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_exec(
+    handle_id: f64,
+    service_ptr: *const StringHeader,
+    cmd_json_ptr: *const StringHeader,
+    opts_json_ptr: *const StringHeader
+) -> *mut Promise {
     let promise = js_promise_new();
     let id = handle_id as u64;
     let service = match string_from_header(service_ptr) {
@@ -488,8 +497,18 @@ pub unsafe extern "C" fn js_compose_exec(handle_id: f64, service_ptr: *const Str
         }
     };
 
+    let opts: serde_json::Value = string_from_header(opts_json_ptr)
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::Value::Null);
+
+    let env: Option<std::collections::HashMap<String, String>> = opts.get("env")
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+    let workdir = opts.get("workdir")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     spawn_for_promise_deferred(promise as *mut u8, async move {
-        compose::compose_exec(id, service, cmd).await
+        compose::compose_exec(id, service, cmd, env, workdir).await
     }, |logs| {
         let json = serde_json::to_string(&logs).unwrap_or_else(|_| "{}".to_string());
         let str_ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
@@ -499,7 +518,7 @@ pub unsafe extern "C" fn js_compose_exec(handle_id: f64, service_ptr: *const Str
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_config(handle_id: f64) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_config(handle_id: f64) -> *mut Promise {
     let promise = js_promise_new();
     let id = handle_id as u64;
     spawn_for_promise_deferred(promise as *mut u8, async move {
@@ -512,7 +531,7 @@ pub unsafe extern "C" fn js_compose_config(handle_id: f64) -> *mut Promise {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_start(handle_id: f64, services_json_ptr: *const StringHeader) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_start(handle_id: f64, services_json_ptr: *const StringHeader) -> *mut Promise {
     let promise = js_promise_new();
     let id = handle_id as u64;
     let services: Vec<String> = string_from_header(services_json_ptr).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
@@ -524,7 +543,7 @@ pub unsafe extern "C" fn js_compose_start(handle_id: f64, services_json_ptr: *co
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_stop(handle_id: f64, services_json_ptr: *const StringHeader) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_stop(handle_id: f64, services_json_ptr: *const StringHeader) -> *mut Promise {
     let promise = js_promise_new();
     let id = handle_id as u64;
     let services: Vec<String> = string_from_header(services_json_ptr).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
@@ -536,13 +555,47 @@ pub unsafe extern "C" fn js_compose_stop(handle_id: f64, services_json_ptr: *con
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_restart(handle_id: f64, services_json_ptr: *const StringHeader) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_restart(handle_id: f64, services_json_ptr: *const StringHeader) -> *mut Promise {
     let promise = js_promise_new();
     let id = handle_id as u64;
     let services: Vec<String> = string_from_header(services_json_ptr).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         compose::compose_restart(id, services).await.map(|_| 0).map_err(|e| e.to_string())
+    });
+    promise
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_container_build(spec_json_ptr: *const StringHeader, image_name_ptr: *const StringHeader) -> *mut Promise {
+    let promise = js_promise_new();
+    let spec_json = match string_from_header(spec_json_ptr) {
+        Some(s) => s,
+        None => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move { Err("Invalid spec JSON".to_string()) });
+            return promise;
+        }
+    };
+    let image_name = match string_from_header(image_name_ptr) {
+        Some(s) => s,
+        None => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move { Err("Invalid image name".to_string()) });
+            return promise;
+        }
+    };
+
+    let spec: perry_container_compose::types::ComposeServiceBuild = match serde_json::from_str(&spec_json) {
+        Ok(s) => s,
+        Err(e) => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move { Err(format!("Invalid build spec: {}", e)) });
+            return promise;
+        }
+    };
+
+    crate::common::spawn_for_promise(promise as *mut u8, async move {
+        let backend = get_global_backend_instance().await.map_err(|e| compose_error_to_js(&e))?;
+        backend.build(&spec, &image_name).await.map_err(|e| compose_error_to_js(&e))?;
+        Ok(0)
     });
     promise
 }

@@ -18,7 +18,7 @@ pub enum VerificationResult {
 static VERIFICATION_CACHE: OnceLock<RwLock<HashMap<String, VerificationResult>>> = OnceLock::new();
 
 pub async fn fetch_image_digest(reference: &str) -> Result<String, String> {
-    let backend = get_global_backend_instance().await?;
+    let backend = get_global_backend_instance().await.map_err(|e| e.to_string())?;
     let info = backend.inspect_image(reference).await.map_err(|e| e.to_string())?;
     Ok(info.id)
 }
