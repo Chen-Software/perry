@@ -2,8 +2,15 @@
 //!
 //! Defines the canonical `ComposeError` enum and FFI error mapping.
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use crate::backend::BackendProbeResult;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackendProbeResult {
+    pub name: String,
+    pub available: bool,
+    pub reason: String,
+}
 
 /// Top-level crate error
 #[derive(Debug, Error)]
