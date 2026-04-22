@@ -4,9 +4,11 @@
 
 use thiserror::Error;
 use crate::backend::BackendProbeResult;
+use serde::{Serialize, Deserialize};
 
 /// Top-level crate error
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ComposeError {
     #[error("Dependency cycle detected in services: {services:?}")]
     DependencyCycle { services: Vec<String> },
@@ -21,12 +23,15 @@ pub enum ComposeError {
     NotFound(String),
 
     #[error("Parse error: {0}")]
+    #[serde(serialize_with = "serialize_error", skip_deserializing)]
     ParseError(#[from] serde_yaml::Error),
 
     #[error("JSON error: {0}")]
+    #[serde(serialize_with = "serialize_error", skip_deserializing)]
     JsonError(#[from] serde_json::Error),
 
     #[error("I/O error: {0}")]
+    #[serde(serialize_with = "serialize_error", skip_deserializing)]
     IoError(#[from] std::io::Error),
 
     #[error("Validation error: {message}")]
@@ -43,6 +48,14 @@ pub enum ComposeError {
 
     #[error("Specified backend '{name}' is not available: {reason}")]
     BackendNotAvailable { name: String, reason: String },
+}
+
+fn serialize_error<S, E>(e: &E, s: S) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+    E: std::fmt::Display,
+{
+    s.serialize_str(&e.to_string())
 }
 
 impl ComposeError {
