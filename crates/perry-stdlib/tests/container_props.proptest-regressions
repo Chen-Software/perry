@@ -4,4 +4,4 @@
 #
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
-cc cae4a4784909b2207f4c6e4c1f5bb79258d80c830378e01642c755965903e032 # shrinks to keys = ["B_", "B_"], int_val = 0, bool_val = false, str_val = "a"
+cc 71811b9dadaff598d2b1cd0a4620345d617efc0c8647218af7071e38d6de29ae # shrinks to keys = ["RC", "RC"], str_val = "_"
