@@ -1,0 +1,63 @@
+interface perry-container {
+    record container-info {
+        id: string,
+        name: string,
+        image: string,
+        status: string,
+        ports: list<string>,
+        created: string,
+    }
+
+    record container-logs {
+        stdout: string,
+        stderr: string,
+        exit-code: s32,
+    }
+
+    record container-spec {
+        image: string,
+        name: option<string>,
+        ports: option<list<string>>,
+        volumes: option<list<string>>,
+        env: option<list<tuple<string, string>>>,
+        cmd: option<list<string>>,
+        entrypoint: option<list<string>>,
+        network: option<string>,
+        rm: option<bool>,
+        read-only: option<bool>,
+    }
+
+    enum isolation-level {
+        none,
+        process,
+        container,
+        micro-vm,
+        wasm,
+    }
+
+    record backend-info {
+        name: string,
+        available: bool,
+        reason: string,
+        version: option<string>,
+    }
+
+    record workload-graph {
+        name: string,
+        nodes: list<tuple<string, workload-node>>,
+    }
+
+    record workload-node {
+        id: string,
+        name: string,
+        image: option<string>,
+        ports: list<string>,
+        env: list<tuple<string, string>>,
+        depends-on: list<string>,
+        isolation: isolation-level,
+    }
+
+    run-graph: func(graph: workload-graph, opts: string) -> result<u64, string>;
+    down: func(handle: u64) -> result<_, string>;
+    status: func(handle: u64) -> result<string, string>;
+}
