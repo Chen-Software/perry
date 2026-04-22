@@ -15,8 +15,10 @@ use super::types::{
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::process::Command;
+
+static GLOBAL_BACKEND: OnceLock<Arc<dyn ContainerBackend>> = OnceLock::new();
 
 // ─── ContainerBackend trait ───────────────────────────────────────────────────
 //
@@ -626,7 +628,13 @@ impl ContainerBackend for PodmanBackend {
             if let super::types::ListOrDict::Dict(map) = labels {
                 for (k, v) in map {
                     if let Some(val) = v {
-                        cmd.arg("--label").arg(format!("{}={}", k, val));
+                        let val_str = match val {
+                            serde_yaml::Value::String(s) => s.clone(),
+                            serde_yaml::Value::Number(n) => n.to_string(),
+                            serde_yaml::Value::Bool(b) => b.to_string(),
+                            _ => "unknown".to_string(),
+                        };
+                        cmd.arg("--label").arg(format!("{}={}", k, val_str));
                     }
                 }
             }
@@ -681,7 +689,13 @@ impl ContainerBackend for PodmanBackend {
             if let super::types::ListOrDict::Dict(map) = labels {
                 for (k, v) in map {
                     if let Some(val) = v {
-                        cmd.arg("--label").arg(format!("{}={}", k, val));
+                        let val_str = match val {
+                            serde_yaml::Value::String(s) => s.clone(),
+                            serde_yaml::Value::Number(n) => n.to_string(),
+                            serde_yaml::Value::Bool(b) => b.to_string(),
+                            _ => "unknown".to_string(),
+                        };
+                        cmd.arg("--label").arg(format!("{}={}", k, val_str));
                     }
                 }
             }
@@ -719,91 +733,51 @@ impl ContainerBackend for PodmanBackend {
 
 // ─── Backend Adapter ─────────────────────────────────────────────────────────
 
-/// Bridges stdlib's `ContainerBackend` with compose crate's legacy `Backend` trait.
+/// Bridges stdlib's `ContainerBackend` with compose crate's `ContainerBackend` trait.
 pub struct BackendAdapter {
     pub inner: Arc<dyn ContainerBackend>,
 }
 
 #[async_trait]
-impl perry_container_compose::backend::Backend for BackendAdapter {
-    fn name(&self) -> &'static str {
+impl perry_container_compose::backend::ContainerBackend for BackendAdapter {
+    fn backend_name(&self) -> &str {
         self.inner.name()
     }
 
-    async fn build(
-        &self,
-        _context: &str,
-        _dockerfile: Option<&str>,
-        _tag: &str,
-        _args: Option<&HashMap<String, String>>,
-        _target: Option<&str>,
-        _network: Option<&str>,
-    ) -> perry_container_compose::Result<()> {
-        // Build not yet implemented in PodmanBackend, but AppleContainerBackend has it.
-        // For now, return error if not implemented.
-        Err(perry_container_compose::error::ComposeError::BackendError {
-            code: 1,
-            message: "Build not implemented for this backend".to_string(),
-        })
+    async fn check_available(&self) -> perry_container_compose::Result<()> {
+        self.inner.check_available().await.map_err(to_compose_err)
     }
 
-    async fn run(
-        &self,
-        image: &str,
-        name: &str,
-        ports: Option<&[String]>,
-        env: Option<&HashMap<String, String>>,
-        volumes: Option<&[String]>,
-        _labels: Option<&HashMap<String, String>>,
-        cmd: Option<&[String]>,
-        detach: bool,
-    ) -> perry_container_compose::Result<()> {
-        let spec = ContainerSpec {
-            image: image.to_string(),
-            name: Some(name.to_string()),
-            ports: ports.map(|p| p.to_vec()),
-            volumes: volumes.map(|v| v.to_vec()),
-            env: env.cloned(),
-            cmd: cmd.map(|c| c.to_vec()),
-            entrypoint: None,
-            network: None,
-            rm: Some(true),
-        };
-        if detach {
-            self.inner.run(&spec).await.map(|_| ()).map_err(to_compose_err)
-        } else {
-            self.inner.run(&spec).await.map(|_| ()).map_err(to_compose_err)
-        }
+    async fn run(&self, spec: &perry_container_compose::types::ContainerSpec) -> perry_container_compose::Result<perry_container_compose::types::ContainerHandle> {
+        let s = stdlib_spec_from_compose(spec);
+        self.inner.run(&s).await.map(|h| perry_container_compose::types::ContainerHandle {
+            id: h.id,
+            name: h.name,
+        }).map_err(to_compose_err)
     }
 
-    async fn start(&self, name: &str) -> perry_container_compose::Result<()> {
-        self.inner.start(name).await.map_err(to_compose_err)
+    async fn create(&self, spec: &perry_container_compose::types::ContainerSpec) -> perry_container_compose::Result<perry_container_compose::types::ContainerHandle> {
+        let s = stdlib_spec_from_compose(spec);
+        self.inner.create(&s).await.map(|h| perry_container_compose::types::ContainerHandle {
+            id: h.id,
+            name: h.name,
+        }).map_err(to_compose_err)
     }
 
-    async fn stop(&self, name: &str) -> perry_container_compose::Result<()> {
-        self.inner.stop(name, None).await.map_err(to_compose_err)
+    async fn start(&self, id: &str) -> perry_container_compose::Result<()> {
+        self.inner.start(id).await.map_err(to_compose_err)
     }
 
-    async fn remove(&self, name: &str, force: bool) -> perry_container_compose::Result<()> {
-        self.inner.remove(name, force).await.map_err(to_compose_err)
+    async fn stop(&self, id: &str, timeout: Option<u32>) -> perry_container_compose::Result<()> {
+        self.inner.stop(id, timeout).await.map_err(to_compose_err)
     }
 
-    async fn inspect(&self, name: &str) -> perry_container_compose::Result<perry_container_compose::backend::ContainerStatus> {
-        match self.inner.inspect(name).await {
-            Ok(info) => {
-                if info.status.to_lowercase().contains("running") {
-                    Ok(perry_container_compose::backend::ContainerStatus::Running)
-                } else {
-                    Ok(perry_container_compose::backend::ContainerStatus::Stopped)
-                }
-            }
-            Err(ContainerError::NotFound(_)) => Ok(perry_container_compose::backend::ContainerStatus::NotFound),
-            Err(e) => Err(to_compose_err(e)),
-        }
+    async fn remove(&self, id: &str, force: bool) -> perry_container_compose::Result<()> {
+        self.inner.remove(id, force).await.map_err(to_compose_err)
     }
 
-    async fn list(&self, _label_filter: Option<&str>) -> perry_container_compose::Result<Vec<perry_container_compose::types::ContainerInfo>> {
-        let list = self.inner.list(true).await.map_err(to_compose_err)?;
+    async fn list(&self, all: bool) -> perry_container_compose::Result<Vec<perry_container_compose::types::ContainerInfo>> {
+        let list = self.inner.list(all).await.map_err(to_compose_err)?;
         Ok(list.into_iter().map(|i| perry_container_compose::types::ContainerInfo {
             id: i.id,
             name: i.name,
@@ -814,59 +788,99 @@ impl perry_container_compose::backend::Backend for BackendAdapter {
         }).collect())
     }
 
-    async fn logs(&self, name: &str, tail: Option<u32>, _follow: bool) -> perry_container_compose::Result<String> {
-        let logs = self.inner.logs(name, tail).await.map_err(to_compose_err)?;
-        Ok(format!("{}{}", logs.stdout, logs.stderr))
+    async fn inspect(&self, id: &str) -> perry_container_compose::Result<perry_container_compose::types::ContainerInfo> {
+        let info = self.inner.inspect(id).await.map_err(to_compose_err)?;
+        Ok(perry_container_compose::types::ContainerInfo {
+            id: info.id,
+            name: info.name,
+            image: info.image,
+            status: info.status,
+            ports: info.ports,
+            created: info.created,
+        })
+    }
+
+    async fn logs(&self, id: &str, tail: Option<u32>) -> perry_container_compose::Result<perry_container_compose::types::ContainerLogs> {
+        let logs = self.inner.logs(id, tail).await.map_err(to_compose_err)?;
+        Ok(perry_container_compose::types::ContainerLogs {
+            stdout: logs.stdout,
+            stderr: logs.stderr,
+        })
     }
 
     async fn exec(
         &self,
-        name: &str,
+        id: &str,
         cmd: &[String],
-        _user: Option<&str>,
-        workdir: Option<&str>,
         env: Option<&HashMap<String, String>>,
-    ) -> perry_container_compose::Result<perry_container_compose::backend::ExecResult> {
-        let logs = self.inner.exec(name, cmd, env, workdir).await.map_err(to_compose_err)?;
-        Ok(perry_container_compose::backend::ExecResult {
+        workdir: Option<&str>,
+    ) -> perry_container_compose::Result<perry_container_compose::types::ContainerLogs> {
+        let logs = self.inner.exec(id, cmd, env, workdir).await.map_err(to_compose_err)?;
+        Ok(perry_container_compose::types::ContainerLogs {
             stdout: logs.stdout,
             stderr: logs.stderr,
-            exit_code: 0, // We don't have exit code in ContainerLogs yet
         })
     }
 
-    async fn create_network(
-        &self,
-        name: &str,
-        driver: Option<&str>,
-        _labels: Option<&HashMap<String, String>>,
-    ) -> perry_container_compose::Result<()> {
-        let config = ComposeNetwork {
-            driver: driver.map(|s| s.to_string()),
+    async fn pull_image(&self, reference: &str) -> perry_container_compose::Result<()> {
+        self.inner.pull_image(reference).await.map_err(to_compose_err)
+    }
+
+    async fn list_images(&self) -> perry_container_compose::Result<Vec<perry_container_compose::types::ImageInfo>> {
+        let images = self.inner.list_images().await.map_err(to_compose_err)?;
+        Ok(images.into_iter().map(|img| perry_container_compose::types::ImageInfo {
+            id: img.id,
+            repository: img.repository,
+            tag: img.tag,
+            size: img.size,
+            created: img.created,
+        }).collect())
+    }
+
+    async fn remove_image(&self, reference: &str, force: bool) -> perry_container_compose::Result<()> {
+        self.inner.remove_image(reference, force).await.map_err(to_compose_err)
+    }
+
+    async fn create_network(&self, name: &str, config: &perry_container_compose::backend::NetworkConfig) -> perry_container_compose::Result<()> {
+        let c = perry_container_compose::types::ComposeNetwork {
+            driver: config.driver.clone(),
+            labels: if config.labels.is_empty() { None } else { Some(perry_container_compose::types::ListOrDict::Dict(config.labels.iter().map(|(k, v)| (k.clone(), Some(serde_yaml::Value::String(v.clone())))).collect())) },
+            internal: Some(config.internal),
+            enable_ipv6: Some(config.enable_ipv6),
             ..Default::default()
         };
-        self.inner.create_network(name, &config).await.map_err(to_compose_err)
+        self.inner.create_network(name, &c).await.map_err(to_compose_err)
     }
 
     async fn remove_network(&self, name: &str) -> perry_container_compose::Result<()> {
         self.inner.remove_network(name).await.map_err(to_compose_err)
     }
 
-    async fn create_volume(
-        &self,
-        name: &str,
-        driver: Option<&str>,
-        _labels: Option<&HashMap<String, String>>,
-    ) -> perry_container_compose::Result<()> {
-        let config = ComposeVolume {
-            driver: driver.map(|s| s.to_string()),
+    async fn create_volume(&self, name: &str, config: &perry_container_compose::backend::VolumeConfig) -> perry_container_compose::Result<()> {
+        let c = perry_container_compose::types::ComposeVolume {
+            driver: config.driver.clone(),
+            labels: if config.labels.is_empty() { None } else { Some(perry_container_compose::types::ListOrDict::Dict(config.labels.iter().map(|(k, v)| (k.clone(), Some(serde_yaml::Value::String(v.clone())))).collect())) },
             ..Default::default()
         };
-        self.inner.create_volume(name, &config).await.map_err(to_compose_err)
+        self.inner.create_volume(name, &c).await.map_err(to_compose_err)
     }
 
     async fn remove_volume(&self, name: &str) -> perry_container_compose::Result<()> {
         self.inner.remove_volume(name).await.map_err(to_compose_err)
+    }
+}
+
+fn stdlib_spec_from_compose(s: &perry_container_compose::types::ContainerSpec) -> ContainerSpec {
+    ContainerSpec {
+        image: s.image.clone(),
+        name: s.name.clone(),
+        ports: s.ports.clone(),
+        volumes: s.volumes.clone(),
+        env: s.env.clone(),
+        cmd: s.cmd.clone(),
+        entrypoint: s.entrypoint.clone(),
+        network: s.network.clone(),
+        rm: s.rm,
     }
 }
 
@@ -893,6 +907,12 @@ pub fn get_backend() -> Result<Arc<dyn ContainerBackend>, ContainerError> {
         _ => Arc::new(PodmanBackend::new()),
     };
     Ok(backend)
+}
+
+pub fn get_global_backend() -> Arc<dyn ContainerBackend> {
+    GLOBAL_BACKEND.get_or_init(|| {
+        get_backend().expect("Failed to initialize container backend")
+    }).clone()
 }
 
 #[cfg(test)]

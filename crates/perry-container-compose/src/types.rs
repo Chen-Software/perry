@@ -706,8 +706,8 @@ pub struct ContainerInfo {
     pub created: String,
 }
 
-/// Logs from a container.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Stdout + stderr captured from a container operation.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ContainerLogs {
     pub stdout: String,
     pub stderr: String,

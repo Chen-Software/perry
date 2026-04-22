@@ -5,7 +5,6 @@
 //! - Results are serialised to JSON strings before being handed back to JS
 
 use crate::compose::ComposeEngine;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 // ──────────────────────────────────────────────────────────────
@@ -64,29 +63,38 @@ fn block<F: std::future::Future<Output = T>, T>(fut: F) -> T {
         .block_on(fut)
 }
 
-fn parse_compose_file(file_ptr: *const StringHeader) -> Option<PathBuf> {
-    unsafe { string_from_header(file_ptr) }.map(PathBuf::from)
-}
-
-fn make_engine(files: Vec<PathBuf>) -> Result<Arc<ComposeEngine>, String> {
-    let proj = crate::project::ComposeProject::load_from_files(&files, None, &[])
-        .map_err(|e| e.to_string())?;
-    let backend: Arc<dyn crate::backend::ContainerBackend> = block(crate::backend::detect_backend())
-        .map(Arc::from)
-        .map_err(|e| e.to_string())?;
-    Ok(Arc::new(ComposeEngine::new(proj.spec, proj.project_name, backend)))
-}
 
 // ──────────────────────────────────────────────────────────────
 // Exported FFI functions
 // ──────────────────────────────────────────────────────────────
 
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_start(file_ptr: *const StringHeader) -> *const StringHeader {
-    let files: Vec<PathBuf> = parse_compose_file(file_ptr).into_iter().collect();
-    match make_engine(files) {
-        Err(e) => json_err(&e),
-        Ok(engine) => match block(engine.up(&[], true, false, false)) {
+pub unsafe extern "C" fn js_container_compose_up(spec_json: *const StringHeader) -> *const StringHeader {
+    let spec_str = match string_from_header(spec_json) {
+        Some(s) => s,
+        None => return json_err("missing spec JSON"),
+    };
+    let spec: crate::types::ComposeSpec = match serde_json::from_str(&spec_str) {
+        Ok(s) => s,
+        Err(e) => return json_err(&format!("invalid ComposeSpec: {}", e)),
+    };
+    let backend = match block(crate::backend::detect_backend()) {
+        Ok(b) => b,
+        Err(e) => return json_err(&format!("no backend found: {:?}", e)),
+    };
+    let project_name = spec.name.clone().unwrap_or_else(|| "perry-stack".to_string());
+    let engine = Arc::new(ComposeEngine::new(spec, project_name, backend));
+    match block(engine.up(&[], true, false, false)) {
+        Ok(handle) => json_ok(&serde_json::to_string(&handle).unwrap_or_default()),
+        Err(e) => json_err(&e.to_string()),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_container_compose_down(handle_id: u64, volumes: bool) -> *const StringHeader {
+    match crate::compose::get_compose_engine(handle_id) {
+        None => json_err("invalid stack handle"),
+        Some(engine) => match block(engine.down(&[], false, volumes)) {
             Ok(_) => json_ok("null"),
             Err(e) => json_err(&e.to_string()),
         },
@@ -94,60 +102,34 @@ pub unsafe extern "C" fn js_compose_start(file_ptr: *const StringHeader) -> *con
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_stop(file_ptr: *const StringHeader) -> *const StringHeader {
-    let files: Vec<PathBuf> = parse_compose_file(file_ptr).into_iter().collect();
-    match make_engine(files) {
-        Err(e) => json_err(&e),
-        Ok(engine) => match block(engine.down(false, false)) {
-            Ok(_) => json_ok("null"),
+pub unsafe extern "C" fn js_container_compose_ps(handle_id: u64) -> *const StringHeader {
+    match crate::compose::get_compose_engine(handle_id) {
+        None => json_err("invalid stack handle"),
+        Some(engine) => match block(engine.ps()) {
             Err(e) => json_err(&e.to_string()),
+            Ok(infos) => json_ok(&serde_json::to_string(&infos).unwrap_or_default()),
         },
     }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_ps(file_ptr: *const StringHeader) -> *const StringHeader {
-    let files: Vec<PathBuf> = parse_compose_file(file_ptr).into_iter().collect();
-    match make_engine(files) {
-        Err(e) => json_err(&e),
-        Ok(engine) => match block(engine.ps()) {
-            Err(e) => json_err(&e.to_string()),
-            Ok(infos) => {
-                let items: Vec<String> = infos
-                    .iter()
-                    .map(|i| {
-                        format!(
-                            "{{\"service\":\"{}\",\"container\":\"{}\",\"status\":\"{}\"}}",
-                            i.name, i.id, i.status
-                        )
-                    })
-                    .collect();
-                let array = format!("[{}]", items.join(","));
-                json_ok(&array)
-            }
-        },
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn js_compose_logs(
-    file_ptr: *const StringHeader,
+pub unsafe extern "C" fn js_container_compose_logs(
+    handle_id: u64,
     services_ptr: *const StringHeader,
-    _follow: bool,
+    tail: f64,
 ) -> *const StringHeader {
-    let files: Vec<PathBuf> = parse_compose_file(file_ptr).into_iter().collect();
-    let service: Option<String> = string_from_header(services_ptr)
+    let services: Vec<String> = string_from_header(services_ptr)
         .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
-        .and_then(|v| v.into_iter().next());
+        .unwrap_or_default();
+    let t = if tail < 0.0 { None } else { Some(tail as u32) };
 
-    match make_engine(files) {
-        Err(e) => json_err(&e),
-        Ok(engine) => match block(engine.logs(service.as_deref(), None)) {
+    match crate::compose::get_compose_engine(handle_id) {
+        None => json_err("invalid stack handle"),
+        Some(engine) => match block(engine.logs(&services, t)) {
             Err(e) => json_err(&e.to_string()),
             Ok(logs) => {
-                let stdout = logs.stdout.replace('"', "\\\"").replace('\n', "\\n");
-                let stderr = logs.stderr.replace('"', "\\\"").replace('\n', "\\n");
-                let payload = format!("{{\"stdout\":\"{}\",\"stderr\":\"{}\"}}", stdout, stderr);
+                let combined = logs.values().cloned().collect::<Vec<_>>().join("\n");
+                let payload = serde_json::json!({ "stdout": combined, "stderr": "" }).to_string();
                 json_ok(&payload)
             }
         },
@@ -155,12 +137,11 @@ pub unsafe extern "C" fn js_compose_logs(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_exec(
-    file_ptr: *const StringHeader,
+pub unsafe extern "C" fn js_container_compose_exec(
+    handle_id: u64,
     service_ptr: *const StringHeader,
     cmd_ptr: *const StringHeader,
 ) -> *const StringHeader {
-    let files: Vec<PathBuf> = parse_compose_file(file_ptr).into_iter().collect();
     let service = match string_from_header(service_ptr) {
         Some(s) => s,
         None => return json_err("service name is required"),
@@ -169,32 +150,64 @@ pub unsafe extern "C" fn js_compose_exec(
         .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
         .unwrap_or_default();
 
-    match make_engine(files) {
-        Err(e) => json_err(&e),
-        Ok(engine) => match block(engine.exec(&service, &cmd)) {
+    match crate::compose::get_compose_engine(handle_id) {
+        None => json_err("invalid stack handle"),
+        Some(engine) => match block(engine.exec(&service, &cmd, None, None)) {
             Err(e) => json_err(&e.to_string()),
-            Ok(result) => {
-                let stdout = result.stdout.replace('"', "\\\"").replace('\n', "\\n");
-                let stderr = result.stderr.replace('"', "\\\"").replace('\n', "\\n");
-                let payload = format!(
-                    "{{\"stdout\":\"{}\",\"stderr\":\"{}\"}}",
-                    stdout, stderr
-                );
-                json_ok(&payload)
-            }
+            Ok(result) => json_ok(&serde_json::to_string(&result).unwrap_or_default()),
         },
     }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_config(file_ptr: *const StringHeader) -> *const StringHeader {
-    let files: Vec<PathBuf> = parse_compose_file(file_ptr).into_iter().collect();
-    match crate::project::ComposeProject::load_from_files(&files, None, &[]) {
-        Err(e) => json_err(&e.to_string()),
-        Ok(proj) => {
-            let yaml = proj.spec.to_yaml().unwrap_or_default();
-            let escaped = yaml.replace('"', "\\\"").replace('\n', "\\n");
-            json_ok(&format!("\"{}\"", escaped))
-        }
+pub unsafe extern "C" fn js_container_compose_config(handle_id: u64) -> *const StringHeader {
+    match crate::compose::get_compose_engine(handle_id) {
+        None => json_err("invalid stack handle"),
+        Some(engine) => match engine.config() {
+            Err(e) => json_err(&e.to_string()),
+            Ok(yaml) => json_ok(&serde_json::to_string(&yaml).unwrap_or_default()),
+        },
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_container_compose_start(handle_id: u64, services_ptr: *const StringHeader) -> *const StringHeader {
+    let services: Vec<String> = string_from_header(services_ptr)
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default();
+    match crate::compose::get_compose_engine(handle_id) {
+        None => json_err("invalid stack handle"),
+        Some(engine) => match block(engine.start(&services)) {
+            Ok(_) => json_ok("null"),
+            Err(e) => json_err(&e.to_string()),
+        },
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_container_compose_stop(handle_id: u64, services_ptr: *const StringHeader) -> *const StringHeader {
+    let services: Vec<String> = string_from_header(services_ptr)
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default();
+    match crate::compose::get_compose_engine(handle_id) {
+        None => json_err("invalid stack handle"),
+        Some(engine) => match block(engine.stop(&services)) {
+            Ok(_) => json_ok("null"),
+            Err(e) => json_err(&e.to_string()),
+        },
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_container_compose_restart(handle_id: u64, services_ptr: *const StringHeader) -> *const StringHeader {
+    let services: Vec<String> = string_from_header(services_ptr)
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default();
+    match crate::compose::get_compose_engine(handle_id) {
+        None => json_err("invalid stack handle"),
+        Some(engine) => match block(engine.restart(&services)) {
+            Ok(_) => json_ok("null"),
+            Err(e) => json_err(&e.to_string()),
+        },
     }
 }
