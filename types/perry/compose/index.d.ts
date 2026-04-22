@@ -6,6 +6,8 @@
  * @module perry/compose
  */
 
+import { ContainerInfo, ContainerLogs } from "perry/container";
+
 // ============ Configuration Types ============
 
 /**
@@ -84,42 +86,10 @@ export interface ComposeSpec {
   volumes?: Record<string, ComposeVolume>;
 }
 
-// ============ Operation Result Types ============
-
 /**
- * Status of a service container.
+ * Opaque handle to a running compose stack.
  */
-export type ContainerStatusString = "running" | "stopped" | "not_found";
-
-/**
- * Service status entry from the `ps` command.
- */
-export interface ServiceStatus {
-  /** Service name as defined in the compose file */
-  service: string;
-  /** Container name */
-  container: string;
-  /** Current container status */
-  status: ContainerStatusString;
-}
-
-/**
- * Result of an exec call inside a container.
- */
-export interface ExecResult {
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-}
-
-/**
- * Generic FFI result wrapper.
- */
-export interface ComposeResult<T> {
-  ok: boolean;
-  result?: T;
-  error?: string;
-}
+export type ComposeHandle = number;
 
 // ============ Options Types ============
 
@@ -137,158 +107,86 @@ export interface UpOptions {
 export interface DownOptions {
   /** Remove named volumes */
   volumes?: boolean;
-  /** Remove orphaned containers */
-  removeOrphans?: boolean;
-  /** Services to remove (empty = all) */
-  services?: string[];
 }
 
 export interface LogsOptions {
-  /** Follow log output */
-  follow?: boolean;
+  /** Service name to get logs from (optional) */
+  service?: string;
   /** Number of lines to show from the end */
   tail?: number;
-  /** Show timestamps */
-  timestamps?: boolean;
-}
-
-export interface ExecOptions {
-  /** User context */
-  user?: string;
-  /** Working directory */
-  workdir?: string;
-  /** Additional environment variables */
-  env?: Record<string, string>;
-}
-
-export interface ConfigOptions {
-  /** Output format: "yaml" | "json" */
-  format?: "yaml" | "json";
 }
 
 // ============ API Functions ============
 
 /**
- * Bring up services defined in a compose file.
- *
- * @param file - Path to compose file (default: "compose.yaml")
- * @param options - Up options
- *
- * @example
- * ```typescript
- * import { up } from 'perry/compose';
- * await up('compose.yaml', { detach: true });
- * ```
+ * Bring up services defined in a compose spec.
+ * @param spec Compose specification object
+ * @returns Promise resolving to the stack handle
  */
-export function up(file?: string, options?: UpOptions): Promise<void>;
+export function up(spec: ComposeSpec): Promise<ComposeHandle>;
 
 /**
- * Stop and remove services.
- *
- * @param file - Path to compose file
- * @param options - Down options
- *
- * @example
- * ```typescript
- * import { down } from 'perry/compose';
- * await down('compose.yaml', { volumes: true });
- * ```
+ * Stop and remove services in a stack.
+ * @param handle Stack handle returned by up()
+ * @param options Down options
  */
-export function down(file?: string, options?: DownOptions): Promise<void>;
+export function down(handle: ComposeHandle, options?: DownOptions): Promise<void>;
 
 /**
- * List service statuses.
- *
- * @param file - Path to compose file
- * @returns Array of ServiceStatus entries
- *
- * @example
- * ```typescript
- * import { ps } from 'perry/compose';
- * const statuses = await ps('compose.yaml');
- * console.table(statuses);
- * ```
+ * List service statuses in a stack.
+ * @param handle Stack handle
+ * @returns Array of ContainerInfo entries
  */
-export function ps(file?: string): Promise<ServiceStatus[]>;
+export function ps(handle: ComposeHandle): Promise<ContainerInfo[]>;
 
 /**
- * Get logs from services.
- *
- * @param file - Path to compose file
- * @param services - Services to get logs from (empty = all)
- * @param options - Log options
- * @returns Map of service name → log output
- *
- * @example
- * ```typescript
- * import { logs } from 'perry/compose';
- * const output = await logs('compose.yaml', ['web'], { tail: 100 });
- * ```
+ * Get logs from services in a stack.
+ * @param handle Stack handle
+ * @param options Log options
+ * @returns Promise resolving to ContainerLogs
  */
 export function logs(
-  file?: string,
-  services?: string[],
+  handle: ComposeHandle,
   options?: LogsOptions
-): Promise<Record<string, string>>;
+): Promise<ContainerLogs>;
 
 /**
- * Execute a command in a running service container.
- *
- * @param file - Path to compose file
- * @param service - Service name
- * @param cmd - Command and arguments to execute
- * @param options - Exec options
- *
- * @example
- * ```typescript
- * import { exec } from 'perry/compose';
- * const result = await exec('compose.yaml', 'web', ['sh', '-c', 'ls /app']);
- * console.log(result.stdout);
- * ```
+ * Execute a command in a running service container within a stack.
+ * @param handle Stack handle
+ * @param service Service name
+ * @param cmd Command and arguments to execute
+ * @returns Promise resolving to ContainerLogs
  */
 export function exec(
-  file: string,
+  handle: ComposeHandle,
   service: string,
-  cmd: string[],
-  options?: ExecOptions
-): Promise<ExecResult>;
+  cmd: string[]
+): Promise<ContainerLogs>;
 
 /**
- * Validate and display the parsed compose configuration.
- *
- * @param file - Path to compose file
- * @param options - Config options
- * @returns Validated configuration as YAML or JSON string
- *
- * @example
- * ```typescript
- * import { config } from 'perry/compose';
- * const yaml = await config('compose.yaml');
- * console.log(yaml);
- * ```
+ * Get the resolved compose configuration.
+ * @param handle Stack handle
+ * @returns Validated configuration as YAML string
  */
-export function config(file?: string, options?: ConfigOptions): Promise<string>;
+export function config(handle: ComposeHandle): Promise<string>;
 
 /**
- * Start existing stopped services (does not create new containers).
- *
- * @param file - Path to compose file
- * @param services - Services to start (empty = all)
+ * Start existing stopped services in a stack.
+ * @param handle Stack handle
+ * @param services Services to start (empty = all)
  */
-export function start(file?: string, services?: string[]): Promise<void>;
+export function start(handle: ComposeHandle, services?: string[]): Promise<void>;
 
 /**
- * Stop running services (does not remove containers).
- *
- * @param file - Path to compose file
- * @param services - Services to stop (empty = all)
+ * Stop running services in a stack.
+ * @param handle Stack handle
+ * @param services Services to stop (empty = all)
  */
-export function stop(file?: string, services?: string[]): Promise<void>;
+export function stop(handle: ComposeHandle, services?: string[]): Promise<void>;
 
 /**
- * Restart services.
- *
- * @param file - Path to compose file
- * @param services - Services to restart (empty = all)
+ * Restart services in a stack.
+ * @param handle Stack handle
+ * @param services Services to restart (empty = all)
  */
-export function restart(file?: string, services?: string[]): Promise<void>;
+export function restart(handle: ComposeHandle, services?: string[]): Promise<void>;

@@ -76,7 +76,15 @@ pub fn get_chainguard_image(tool: &str) -> Option<String> {
     match tool {
         "git" => Some("cgr.dev/chainguard/git".to_string()),
         "curl" => Some("cgr.dev/chainguard/curl".to_string()),
+        "wget" => Some("cgr.dev/chainguard/wget".to_string()),
+        "openssl" => Some("cgr.dev/chainguard/openssl".to_string()),
         "bash" => Some("cgr.dev/chainguard/bash".to_string()),
+        "sh" => Some("cgr.dev/chainguard/busybox".to_string()),
+        "node" => Some("cgr.dev/chainguard/node".to_string()),
+        "python" => Some("cgr.dev/chainguard/python".to_string()),
+        "ruby" => Some("cgr.dev/chainguard/ruby".to_string()),
+        "go" => Some("cgr.dev/chainguard/go".to_string()),
+        "rust" => Some("cgr.dev/chainguard/rust".to_string()),
         _ => None,
     }
 }

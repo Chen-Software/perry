@@ -292,43 +292,11 @@ export interface ComposeVolume {
 }
 
 /**
- * Handle to a Compose stack.
- */
-export interface ComposeHandle {
-  /** Stop and remove all resources in the stack */
-  down(options?: {
-    /** If true, also remove named volumes */
-    volumes?: boolean;
-  }): Promise<void>;
-
-  /** Get container info for all services in the stack */
-  ps(): Promise<ContainerInfo[]>;
-
-  /** Get logs from the stack */
-  logs(options?: {
-    /** Get logs only from this service */
-    service?: string;
-    /** Number of lines to return from the end */
-    tail?: number;
-  }): Promise<ContainerLogs>;
-
-  /** Execute a command in a service container */
-  exec(
-    service: string,
-    cmd: string[],
-    options?: {
-      /** Environment variables */
-      env?: Record<string, string>;
-    }
-  ): Promise<ContainerLogs>;
-}
-
-/**
  * Bring up a Compose stack.
  * @param spec Compose specification
- * @returns Promise resolving to ComposeHandle
+ * @returns Promise resolving to the stack ID (number)
  */
-export function composeUp(spec: ComposeSpec): Promise<ComposeHandle>;
+export function composeUp(spec: ComposeSpec): Promise<number>;
 
 // ---------------------------------------------------------------------------
 // Platform Information
@@ -339,3 +307,9 @@ export function composeUp(spec: ComposeSpec): Promise<ComposeHandle>;
  * @returns "apple/container" on macOS/iOS, "podman" on all other platforms
  */
 export function getBackend(): string;
+
+/**
+ * Probe for available container runtimes and return details about each.
+ * @returns Promise resolving to a JSON array of backend probe results
+ */
+export function detectBackend(): Promise<string>;

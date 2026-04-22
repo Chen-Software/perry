@@ -4607,6 +4607,16 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
             } else if let Some(id) = ctx.lookup_func(&name) {
                 Ok(Expr::FuncRef(id))
             } else if let Some((module_name, method_name)) = ctx.lookup_native_module(&name) {
+                // Feature: perry-container | Layer: HIR | Req: 1.1, 11.2
+                // Special handling for container and compose named imports
+                if module_name == "perry/container" || module_name == "perry/compose" || module_name == "perry/container-compose" {
+                    if let Some(method) = method_name {
+                        return Ok(Expr::ExternFuncRef {
+                            module: module_name.to_string(),
+                            name: method.to_string(),
+                        });
+                    }
+                }
                 // Special handling for worker_threads named imports
                 if module_name == "worker_threads" {
                     if let Some(method) = method_name {
