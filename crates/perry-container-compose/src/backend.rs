@@ -879,6 +879,11 @@ async fn probe_candidate(name: &str) -> std::result::Result<Arc<dyn ContainerBac
         "rancher-desktop" => {
             let bin = which_bin("nerdctl").map_err(|_| "rancher-desktop (nerdctl) not found")?;
             Ok(Arc::new(CliBackend::new(bin, DockerProtocol)))
+            Ok(CliBackend::new(bin, Box::new(DockerProtocol)))
+        }
+        "rancher-desktop" => {
+            let bin = which_bin("nerdctl").map_err(|_| "rancher-desktop (nerdctl) not found")?;
+            Ok(CliBackend::new(bin, Box::new(DockerProtocol)))
         }
         "colima" => {
             let bin = which_bin("colima")?;

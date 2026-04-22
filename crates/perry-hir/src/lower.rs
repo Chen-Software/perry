@@ -2457,9 +2457,16 @@ fn lower_module_decl(
                             })
                             .unwrap_or_else(|| local.clone());
                         if is_native {
+                            // Handle module aliases: perry/compose is an alias for perry/container-compose
+                            let source_aliased = if source == "perry/compose" {
+                                "perry/container-compose".to_string()
+                            } else {
+                                source.clone()
+                            };
+
                             // Register as native module function with the original method name
                             // e.g., import { v4 as uuid } from 'uuid' -> uuid maps to uuid.v4
-                            ctx.register_native_module(local.clone(), source.clone(), Some(imported.clone()));
+                            ctx.register_native_module(local.clone(), source_aliased.clone(), Some(imported.clone()));
                             // Auto-register parentPort from worker_threads as a native instance
                             // (it's a singleton, not created via `new`)
                             if source == "worker_threads" && imported == "parentPort" {
@@ -2474,9 +2481,16 @@ fn lower_module_decl(
                     ast::ImportSpecifier::Default(default) => {
                         let local = default.local.sym.to_string();
                         if is_native {
+                            // Handle module aliases
+                            let source_aliased = if source == "perry/compose" {
+                                "perry/container-compose".to_string()
+                            } else {
+                                source.clone()
+                            };
+
                             // Default import of native module (e.g., import mysql from 'mysql2/promise')
                             // Default exports don't have a method name
-                            ctx.register_native_module(local.clone(), source.clone(), None);
+                            ctx.register_native_module(local.clone(), source_aliased, None);
                         } else {
                             // Default import from JS module - register so calls resolve to ExternFuncRef
                             // Use "default" as the original name since default imports map to the "default" export
@@ -2487,12 +2501,19 @@ fn lower_module_decl(
                     ast::ImportSpecifier::Namespace(ns) => {
                         let local = ns.local.sym.to_string();
                         if is_native {
+                            // Handle module aliases
+                            let source_aliased = if source == "perry/compose" {
+                                "perry/container-compose".to_string()
+                            } else {
+                                source.clone()
+                            };
+
                             // Namespace import of native module (e.g., import * as mysql from 'mysql2')
                             // Methods are called via the namespace, so no specific method name
-                            ctx.register_native_module(local.clone(), source.clone(), None);
+                            ctx.register_native_module(local.clone(), source_aliased.clone(), None);
                             // Also register as builtin module alias so method-level
                             // recognition works (child_process, fs, os, etc.)
-                            ctx.register_builtin_module_alias(local.clone(), source.clone());
+                            ctx.register_builtin_module_alias(local.clone(), source_aliased);
                         } else {
                             // Namespace import from JS module - register so calls resolve to ExternFuncRef
                             ctx.register_imported_func(local.clone(), local.clone());

@@ -66,14 +66,17 @@ pub type Result<T> = std::result::Result<T, ComposeError>;
 /// suitable for passing across the FFI boundary.
 pub fn compose_error_to_js(e: &ComposeError) -> String {
     let code = match e {
-        ComposeError::NotFound(_) => 404,
-        ComposeError::BackendError { code, .. } => *code,
         ComposeError::DependencyCycle { .. } => 422,
+        ComposeError::ServiceStartupFailed { .. } => 500,
+        ComposeError::BackendError { code, .. } => *code,
+        ComposeError::NotFound(_) => 404,
         ComposeError::ValidationError { .. } => 400,
         ComposeError::VerificationFailed { .. } => 403,
         ComposeError::NoBackendFound { .. } => 503,
         ComposeError::BackendNotAvailable { .. } => 503,
-        _ => 500,
+        ComposeError::ParseError(_) | ComposeError::JsonError(_) => 400,
+        ComposeError::IoError(_) => 500,
+        ComposeError::FileNotFound { .. } => 404,
     };
     serde_json::json!({
         "message": e.to_string(),
@@ -108,6 +111,6 @@ mod tests {
         assert_eq!(compose_error_to_js(&err).contains("\"code\":403"), true);
 
         let err = ComposeError::ParseError(serde_yaml::from_str::<serde_yaml::Value>("bad: [1,2").unwrap_err());
-        assert_eq!(compose_error_to_js(&err).contains("\"code\":500"), true);
+        assert_eq!(compose_error_to_js(&err).contains("\"code\":400"), true);
     }
 }
