@@ -63,3 +63,19 @@ pub fn take_container_info_list(id: u64) -> Option<Vec<ContainerInfo>> {
 pub fn take_container_logs(id: u64) -> Option<ContainerLogs> {
     CONTAINER_LOGS_REGISTRY.remove(&id).map(|(_, v)| v)
 }
+
+pub static GRAPH_STATUS_REGISTRY: Lazy<DashMap<u64, GraphStatus>> = Lazy::new(DashMap::new);
+
+pub fn register_graph_status(status: GraphStatus) -> u64 {
+    let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
+    GRAPH_STATUS_REGISTRY.insert(id, status);
+    id
+}
+
+pub static NODE_INFO_LIST_REGISTRY: Lazy<DashMap<u64, Vec<NodeInfo>>> = Lazy::new(DashMap::new);
+
+pub fn register_node_info_list(list: Vec<NodeInfo>) -> u64 {
+    let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
+    NODE_INFO_LIST_REGISTRY.insert(id, list);
+    id
+}

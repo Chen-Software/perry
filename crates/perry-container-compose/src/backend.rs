@@ -325,7 +325,7 @@ pub async fn detect_backend() -> Result<Box<dyn ContainerBackend>> {
         return probe_candidate(&name).await.map_err(|reason| ComposeError::BackendNotAvailable { name, reason });
     }
     let candidates: &[&str] = match std::env::consts::OS {
-        "macos" | "ios" => &["apple/container", "orbstack", "colima", "rancher-desktop", "podman", "lima", "docker"],
+        "macos" | "ios" => &["apple/container", "orbstack", "colima", "rancher-desktop", "lima", "podman", "nerdctl", "docker"],
         "linux" => &["podman", "nerdctl", "docker"],
         _ => &["podman", "nerdctl", "docker"],
     };

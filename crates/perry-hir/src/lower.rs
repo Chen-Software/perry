@@ -2463,6 +2463,24 @@ fn lower_module_decl(
                             if source == "perry/container" && imported_name == "composeUp" {
                                 imported_name = "composeUp".to_string();
                             }
+                            if source == "perry/workloads" {
+                                // Workload handle methods (down, status, logs, etc.) need to be
+                                // registered with the receiver-based dispatch.
+                                match imported_name.as_str() {
+                                    "down" | "status" | "graph" | "logs" | "exec" | "ps" => {
+                                        ctx.register_native_instance(local.clone(), source.clone(), "WorkloadHandle".to_string());
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            if source == "perry/compose" || source == "perry/container-compose" {
+                                match imported_name.as_str() {
+                                    "down" | "ps" | "logs" | "exec" | "start" | "stop" | "restart" => {
+                                        ctx.register_native_instance(local.clone(), source.clone(), "ComposeHandle".to_string());
+                                    }
+                                    _ => {}
+                                }
+                            }
                             ctx.register_native_module(local.clone(), source.clone(), Some(imported_name));
                             // Auto-register parentPort from worker_threads as a native instance
                             // (it's a singleton, not created via `new`)

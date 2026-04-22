@@ -1,12 +1,13 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use indexmap::IndexMap;
 use std::sync::Arc;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{ComposeError, Result};
-use crate::types::{ComposeSpec, ComposeHandle, ContainerInfo, ContainerLogs, ContainerSpec, DependsOnSpec};
-use crate::backend::{ContainerBackend, NetworkConfig, VolumeConfig};
+use crate::types::*;
+use crate::backend::{ContainerBackend, NetworkConfig, VolumeConfig, detect_backend};
 use crate::service;
 
 static COMPOSE_HANDLES: Lazy<DashMap<u64, Arc<ComposeEngine>>> = Lazy::new(DashMap::new);
@@ -14,6 +15,12 @@ static NEXT_HANDLE_ID: AtomicU64 = AtomicU64::new(1);
 
 pub struct ComposeEngine {
     pub spec: ComposeSpec,
+    pub project_name: String,
+    pub backend: Arc<dyn ContainerBackend>,
+}
+
+pub struct WorkloadGraphEngine {
+    pub graph: WorkloadGraph,
     pub project_name: String,
     pub backend: Arc<dyn ContainerBackend>,
 }
@@ -305,6 +312,116 @@ impl ComposeEngine {
     pub async fn restart(&self, services: &[String]) -> Result<()> {
         self.stop(services).await?;
         self.start(services).await?;
+        Ok(())
+    }
+}
+
+impl WorkloadGraphEngine {
+    pub fn new(graph: WorkloadGraph, project_name: String, backend: Arc<dyn ContainerBackend>) -> Self {
+        Self { graph, project_name, backend }
+    }
+
+    pub async fn run(&self, opts: &RunGraphOptions) -> Result<ComposeHandle> {
+        let strategy = opts.strategy.clone().unwrap_or(ExecutionStrategy::DependencyAware);
+        let _on_failure = opts.on_failure.clone().unwrap_or(FailureStrategy::RollbackAll);
+
+        // Convert WorkloadGraph to ComposeSpec to reuse orchestration
+        let mut services = IndexMap::new();
+        for (id, node) in &self.graph.nodes {
+            let mut service = ComposeService::default();
+            service.image = node.image.clone();
+            service.container_name = Some(node.name.clone());
+            service.ports = node.ports.as_ref().map(|p| p.iter().map(|s| PortSpec::Short(serde_yaml::Value::String(s.clone()))).collect());
+            service.depends_on = node.depends_on.as_ref().map(|d| DependsOnSpec::List(d.clone()));
+
+            // Handle environment variables and WorkloadRefs
+            if let Some(env) = &node.env {
+                let mut dict = IndexMap::new();
+                for (k, v) in env {
+                    match v {
+                        WorkloadEnvValue::Literal(s) => {
+                            dict.insert(k.clone(), Some(serde_yaml::Value::String(s.clone())));
+                        }
+                        WorkloadEnvValue::Ref(r) => {
+                            // Placeholders for resolution later
+                            dict.insert(k.clone(), Some(serde_yaml::Value::String(format!("__PERRY_REF__{}:{}:{}__", r.node_id, match r.projection {
+                                RefProjection::Endpoint => "endpoint",
+                                RefProjection::Ip => "ip",
+                                RefProjection::InternalUrl => "internalUrl",
+                            }, r.port.as_deref().unwrap_or("")))));
+                        }
+                    }
+                }
+                service.environment = Some(ListOrDict::Dict(dict));
+            }
+
+            services.insert(id.clone(), service);
+        }
+
+        let spec = ComposeSpec {
+            name: Some(self.project_name.clone()),
+            services,
+            ..Default::default()
+        };
+
+        let engine = ComposeEngine::new(spec, self.project_name.clone(), Arc::clone(&self.backend));
+
+        // Apply parallel strategy if needed (simplified for MVP)
+        match strategy {
+            ExecutionStrategy::Sequential => {
+                // To be implemented: true sequential
+            }
+            _ => {}
+        }
+
+        let handle = engine.up(false).await?;
+
+        // Resolve WorkloadRefs after startup
+        self.resolve_refs(&handle).await?;
+
+        Ok(handle)
+    }
+
+    async fn resolve_refs(&self, _handle: &ComposeHandle) -> Result<()> {
+        let mut node_info = HashMap::new();
+        for (id, node) in &self.graph.nodes {
+            let container_name = format!("{}_{}", self.project_name, id);
+            if let Ok(info) = self.backend.inspect(&container_name).await {
+                node_info.insert(id.clone(), info);
+            }
+        }
+
+        for (id, node) in &self.graph.nodes {
+            if let Some(env) = &node.env {
+                for (k, v) in env {
+                    if let WorkloadEnvValue::Ref(r) = v {
+                        let info = node_info.get(&r.node_id).ok_or_else(|| ComposeError::validation(format!("Ref node '{}' not found", r.node_id)))?;
+                        let val = match r.projection {
+                            RefProjection::Endpoint => {
+                                let port_str = r.port.as_ref().ok_or_else(|| ComposeError::validation("Port required for endpoint projection".into()))?;
+                                // Look up mapped port in inspect info
+                                let mapped = info.ports.iter().find(|p| p.contains(port_str))
+                                    .cloned()
+                                    .unwrap_or_else(|| format!("{}:{}", "127.0.0.1", port_str));
+                                mapped
+                            }
+                            RefProjection::Ip => {
+                                // In a real setup, extract IP from inspect JSON
+                                "127.0.0.1".into()
+                            }
+                            RefProjection::InternalUrl => {
+                                let port = r.port.as_deref().unwrap_or("80");
+                                format!("http://{}:{}", "127.0.0.1", port)
+                            }
+                        };
+
+                        // Inject into container
+                        let container_name = format!("{}_{}", self.project_name, id);
+                        self.backend.exec(&container_name, &["sh".into(), "-c".into(), format!("export {}={}", k, val)], None, None).await?;
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }

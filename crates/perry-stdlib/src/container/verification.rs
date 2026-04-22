@@ -38,8 +38,39 @@ pub async fn verify_image(reference: &str) -> Result<String, ComposeError> {
         }
     }
 
-    // 3. Simulate cosign verify (in a real implementation this would call out to `cosign`)
-    let result = VerificationResult::Verified(digest.clone());
+    // 3. Perform cosign verify via backend callout per Requirement 15
+    let result = if reference.starts_with("cgr.dev/chainguard/") {
+        // Mocking the successful verification for chainguard images if cosign is not present,
+        // but adding real shell logic for production readiness.
+        let mut cmd = tokio::process::Command::new("cosign");
+        cmd.args([
+            "verify",
+            "--certificate-identity", CHAINGUARD_IDENTITY,
+            "--certificate-oidc-issuer", CHAINGUARD_ISSUER,
+            reference
+        ]);
+
+        match cmd.output().await {
+            Ok(output) if output.status.success() => {
+                VerificationResult::Verified(digest.clone())
+            }
+            Ok(output) => {
+                VerificationResult::Failed(String::from_utf8_lossy(&output.stderr).to_string())
+            }
+            Err(_) => {
+                // If cosign is missing, we fail secure for production readiness
+                // unless we are in a testing environment.
+                if std::env::var("PERRY_SKIP_IMAGE_VERIFY").is_ok() {
+                    VerificationResult::Verified(digest.clone())
+                } else {
+                    VerificationResult::Failed("cosign binary not found in PATH".into())
+                }
+            }
+        }
+    } else {
+        // Non-chainguard images are rejected for capability tasks per Requirement 15.5
+        VerificationResult::Failed("Only cryptographically verified Chainguard images are permitted for capability tasks".into())
+    };
 
     // 4. Cache result
     {
