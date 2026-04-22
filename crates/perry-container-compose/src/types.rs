@@ -675,7 +675,7 @@ pub struct ComposeHandle {
 // ============ Container types (for single-container API) ============
 
 /// Specification for running a single container.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct ContainerSpec {
     pub image: String,
     pub name: Option<String>,
@@ -688,6 +688,8 @@ pub struct ContainerSpec {
     pub network: Option<String>,
     pub rm: Option<bool>,
     pub read_only: Option<bool>,
+    pub seccomp: Option<String>,
+    pub labels: Option<std::collections::HashMap<String, String>>,
 }
 
 /// Handle returned after creating/running a container.

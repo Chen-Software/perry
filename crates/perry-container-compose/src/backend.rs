@@ -44,12 +44,8 @@ pub trait ContainerBackend: Send + Sync {
     /// Build an image from a context.
     async fn build(
         &self,
-        context: &str,
-        dockerfile: Option<&str>,
-        tag: &str,
-        args: Option<&HashMap<String, String>>,
-        target: Option<&str>,
-        network: Option<&str>,
+        spec: &crate::types::ComposeServiceBuild,
+        image_name: &str,
     ) -> Result<()>;
 
     /// Run a container (create + start). Returns a handle.
@@ -111,6 +107,9 @@ pub trait ContainerBackend: Send + Sync {
 
     /// Remove a volume.
     async fn remove_volume(&self, name: &str) -> Result<()>;
+
+    /// Inspect a network.
+    async fn inspect_network(&self, name: &str) -> Result<()>;
 }
 
 /// Layer 2: CLI Protocol trait.
@@ -128,29 +127,25 @@ pub trait CliProtocol: Send + Sync {
 
     fn build_args(
         &self,
-        context: &str,
-        dockerfile: Option<&str>,
-        tag: &str,
-        args: Option<&HashMap<String, String>>,
-        target: Option<&str>,
-        network: Option<&str>,
+        spec: &crate::types::ComposeServiceBuild,
+        image_name: &str,
     ) -> Vec<String> {
-        let mut cmd_args = vec!["build".into(), "-t".into(), tag.into()];
-        if let Some(df) = dockerfile {
+        let mut cmd_args = vec!["build".into(), "-t".into(), image_name.into()];
+        if let Some(df) = &spec.dockerfile {
             cmd_args.extend(["-f".into(), df.into()]);
         }
-        if let Some(ba) = args {
-            for (k, v) in ba {
+        if let Some(ba) = &spec.args {
+            for (k, v) in ba.to_map() {
                 cmd_args.extend(["--build-arg".into(), format!("{}={}", k, v)]);
             }
         }
-        if let Some(t) = target {
+        if let Some(t) = &spec.target {
             cmd_args.extend(["--target".into(), t.into()]);
         }
-        if let Some(n) = network {
+        if let Some(n) = &spec.network {
             cmd_args.extend(["--network".into(), n.into()]);
         }
-        cmd_args.push(context.into());
+        cmd_args.push(spec.context.as_deref().unwrap_or(".").into());
         cmd_args
     }
 
@@ -290,6 +285,10 @@ pub trait CliProtocol: Send + Sync {
 
     fn remove_volume_args(&self, name: &str) -> Vec<String> {
         vec!["volume".into(), "rm".into(), name.into()]
+    }
+
+    fn inspect_network_args(&self, name: &str) -> Vec<String> {
+        vec!["network".into(), "inspect".into(), name.into()]
     }
 
     // ── Output parsers — all have Docker JSON defaults ────────────────────
@@ -508,14 +507,10 @@ impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
 
     async fn build(
         &self,
-        context: &str,
-        dockerfile: Option<&str>,
-        tag: &str,
-        args: Option<&HashMap<String, String>>,
-        target: Option<&str>,
-        network: Option<&str>,
+        spec: &crate::types::ComposeServiceBuild,
+        image_name: &str,
     ) -> Result<()> {
-        let args = self.protocol.build_args(context, dockerfile, tag, args, target, network);
+        let args = self.protocol.build_args(spec, image_name);
         self.exec_ok(args).await.map(|_| ())
     }
 
@@ -660,6 +655,11 @@ impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
             }
         }
     }
+
+    async fn inspect_network(&self, name: &str) -> Result<()> {
+        let args = self.protocol.inspect_network_args(name);
+        self.exec_ok(args).await.map(|_| ())
+    }
 }
 
 /// Detect the available container backend.
@@ -703,8 +703,9 @@ fn platform_candidates() -> &'static [&'static str] {
             "orbstack",
             "colima",
             "rancher-desktop",
-            "podman",
             "lima",
+            "podman",
+            "nerdctl",
             "docker",
         ]
     } else if cfg!(target_os = "linux") {
