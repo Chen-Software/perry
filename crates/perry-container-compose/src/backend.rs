@@ -844,33 +844,45 @@ async fn probe_candidate(name: &str) -> std::result::Result<BackendDriver, Strin
         }
         "orbstack" => {
             // Check orb binary or docker socket
-            let bin = which::which("orb").or_else(|_| which::which("docker"))
+            let bin = which::which("orb")
+                .or_else(|_| which::which("docker"))
                 .map_err(|_| "orb or docker binary not found")?;
 
             let mut available = run_version_check(&bin).await.is_ok();
             if !available {
-                let socket = dirs::home_dir().map(|h| h.join(".orbstack/run/docker.sock"));
-                if let Some(s) = socket {
-                    if s.exists() { available = true; }
+                if let Some(h) = dirs::home_dir() {
+                    let s = h.join(".orbstack/run/docker.sock");
+                    if s.exists() {
+                        available = tokio::net::UnixStream::connect(&s).await.is_ok();
+                    }
                 }
             }
-            if !available { return Err("orbstack not available".to_string()); }
+            if !available {
+                return Err("orbstack not available".to_string());
+            }
             Ok(BackendDriver::OrbStack { bin })
         }
         "colima" => {
             let colima_bin = which::which("colima").map_err(|_| "colima binary not found")?;
-            let output = Command::new(&colima_bin).arg("status").output().await.map_err(|e| e.to_string())?;
+            let output = Command::new(&colima_bin)
+                .arg("status")
+                .output()
+                .await
+                .map_err(|e| e.to_string())?;
             if !String::from_utf8_lossy(&output.stdout).contains("running") {
                 return Err("colima is not running".to_string());
             }
-            let bin = which::which("docker").map_err(|_| "docker binary not found (needed for colima)")?;
+            let bin = which::which("docker")
+                .map_err(|_| "docker binary not found (needed for colima)")?;
             Ok(BackendDriver::Colima { bin })
         }
         "rancher-desktop" => {
             let bin = which::which("nerdctl").map_err(|_| "nerdctl binary not found")?;
-            let socket = dirs::home_dir().map(|h| h.join(".rd/run/containerd-shim.sock"));
-            if let Some(s) = socket {
-                if !s.exists() { return Err("rancher-desktop socket not found".to_string()); }
+            if let Some(h) = dirs::home_dir() {
+                let s = h.join(".rd/run/containerd-shim.sock");
+                if !s.exists() || tokio::net::UnixStream::connect(&s).await.is_err() {
+                    return Err("rancher-desktop socket not found or not connectable".to_string());
+                }
             }
             Ok(BackendDriver::RancherDesktop { bin })
         }

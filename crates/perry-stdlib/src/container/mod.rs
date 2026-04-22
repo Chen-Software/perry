@@ -50,7 +50,7 @@ unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
 
 fn resolve_error(promise_ptr: usize, e: &ComposeError) {
     let json = compose_error_to_js(e);
-    let err_str = unsafe { js_string_from_bytes(json.as_ptr(), json.len() as u32) };
+    let err_str = js_string_from_bytes(json.as_ptr(), json.len() as u32);
     queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
 }
 
@@ -60,7 +60,7 @@ fn resolve_msg_error(promise_ptr: usize, msg: &str) {
         "code": 500
     })
     .to_string();
-    let err_str = unsafe { js_string_from_bytes(json.as_ptr(), json.len() as u32) };
+    let err_str = js_string_from_bytes(json.as_ptr(), json.len() as u32);
     queue_promise_resolution(promise_ptr, false, JSValue::string_ptr(err_str).bits());
 }
 
@@ -304,15 +304,32 @@ pub unsafe extern "C" fn js_container_exec(
     };
     let cmd_json = match string_from_header(cmd_json_ptr) {
         Some(s) => s,
-        None => "[]".to_string(),
+        None => {
+            resolve_msg_error(promise_ptr, "Invalid command JSON pointer");
+            return promise;
+        }
     };
     let env_json = string_from_header(env_json_ptr);
     let workdir = string_from_header(workdir_ptr);
 
     spawn(async move {
-        let cmd: Vec<String> = serde_json::from_str(&cmd_json).unwrap_or_default();
-        let env: Option<HashMap<String, String>> =
-            env_json.and_then(|s| serde_json::from_str(&s).ok());
+        let cmd: Vec<String> = match serde_json::from_str(&cmd_json) {
+            Ok(c) => c,
+            Err(e) => {
+                resolve_msg_error(promise_ptr, &format!("Invalid command JSON: {}", e));
+                return;
+            }
+        };
+        let env: Option<HashMap<String, String>> = match env_json {
+            Some(s) => match serde_json::from_str(&s) {
+                Ok(e) => Some(e),
+                Err(e) => {
+                    resolve_msg_error(promise_ptr, &format!("Invalid env JSON: {}", e));
+                    return;
+                }
+            },
+            None => None,
+        };
         let backend = get_global_backend().await;
         match backend.exec(&id, &cmd, env.as_ref(), workdir.as_deref()).await {
             Ok(logs) => {
@@ -523,7 +540,14 @@ pub unsafe extern "C" fn js_compose_logs(
     let promise = js_promise_new();
     let promise_ptr = promise as usize;
     let h = handle_id as i64;
-    let service = string_from_header(service_ptr);
+    let service = match string_from_header(service_ptr) {
+        Some(s) => Some(s),
+        None if service_ptr.is_null() => None,
+        None => {
+            resolve_msg_error(promise_ptr, "Invalid service name pointer");
+            return promise;
+        }
+    };
     let t = if tail >= 0 { Some(tail as u32) } else { None };
     spawn(async move {
         let services = match service {
@@ -626,11 +650,25 @@ pub unsafe extern "C" fn js_compose_start(
     let promise = js_promise_new();
     let promise_ptr = promise as usize;
     let h = handle_id as i64;
-    let services_json = string_from_header(services_json_ptr);
+    let services_json = match string_from_header(services_json_ptr) {
+        Some(s) => Some(s),
+        None if services_json_ptr.is_null() => None,
+        None => {
+            resolve_msg_error(promise_ptr, "Invalid services JSON pointer");
+            return promise;
+        }
+    };
     spawn(async move {
-        let services: Vec<String> = services_json
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let services: Vec<String> = match services_json {
+            Some(s) => match serde_json::from_str(&s) {
+                Ok(svcs) => svcs,
+                Err(e) => {
+                    resolve_msg_error(promise_ptr, &format!("Invalid services JSON: {}", e));
+                    return;
+                }
+            },
+            None => vec![],
+        };
         if let Some(engine) = get_handle::<ComposeEngine>(h) {
             match engine.start(&services).await {
                 Ok(_) => queue_promise_resolution(promise_ptr, true, JSValue::undefined().bits()),
@@ -651,11 +689,25 @@ pub unsafe extern "C" fn js_compose_stop(
     let promise = js_promise_new();
     let promise_ptr = promise as usize;
     let h = handle_id as i64;
-    let services_json = string_from_header(services_json_ptr);
+    let services_json = match string_from_header(services_json_ptr) {
+        Some(s) => Some(s),
+        None if services_json_ptr.is_null() => None,
+        None => {
+            resolve_msg_error(promise_ptr, "Invalid services JSON pointer");
+            return promise;
+        }
+    };
     spawn(async move {
-        let services: Vec<String> = services_json
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let services: Vec<String> = match services_json {
+            Some(s) => match serde_json::from_str(&s) {
+                Ok(svcs) => svcs,
+                Err(e) => {
+                    resolve_msg_error(promise_ptr, &format!("Invalid services JSON: {}", e));
+                    return;
+                }
+            },
+            None => vec![],
+        };
         if let Some(engine) = get_handle::<ComposeEngine>(h) {
             match engine.stop(&services).await {
                 Ok(_) => queue_promise_resolution(promise_ptr, true, JSValue::undefined().bits()),
@@ -676,11 +728,25 @@ pub unsafe extern "C" fn js_compose_pull(
     let promise = js_promise_new();
     let promise_ptr = promise as usize;
     let h = handle_id as i64;
-    let services_json = string_from_header(services_json_ptr);
+    let services_json = match string_from_header(services_json_ptr) {
+        Some(s) => Some(s),
+        None if services_json_ptr.is_null() => None,
+        None => {
+            resolve_msg_error(promise_ptr, "Invalid services JSON pointer");
+            return promise;
+        }
+    };
     spawn(async move {
-        let services: Vec<String> = services_json
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let services: Vec<String> = match services_json {
+            Some(s) => match serde_json::from_str(&s) {
+                Ok(svcs) => svcs,
+                Err(e) => {
+                    resolve_msg_error(promise_ptr, &format!("Invalid services JSON: {}", e));
+                    return;
+                }
+            },
+            None => vec![],
+        };
         if let Some(engine) = get_handle::<ComposeEngine>(h) {
             match engine.pull(&services).await {
                 Ok(_) => queue_promise_resolution(promise_ptr, true, JSValue::undefined().bits()),
@@ -701,11 +767,25 @@ pub unsafe extern "C" fn js_compose_restart(
     let promise = js_promise_new();
     let promise_ptr = promise as usize;
     let h = handle_id as i64;
-    let services_json = string_from_header(services_json_ptr);
+    let services_json = match string_from_header(services_json_ptr) {
+        Some(s) => Some(s),
+        None if services_json_ptr.is_null() => None,
+        None => {
+            resolve_msg_error(promise_ptr, "Invalid services JSON pointer");
+            return promise;
+        }
+    };
     spawn(async move {
-        let services: Vec<String> = services_json
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let services: Vec<String> = match services_json {
+            Some(s) => match serde_json::from_str(&s) {
+                Ok(svcs) => svcs,
+                Err(e) => {
+                    resolve_msg_error(promise_ptr, &format!("Invalid services JSON: {}", e));
+                    return;
+                }
+            },
+            None => vec![],
+        };
         if let Some(engine) = get_handle::<ComposeEngine>(h) {
             match engine.restart(&services).await {
                 Ok(_) => queue_promise_resolution(promise_ptr, true, JSValue::undefined().bits()),
