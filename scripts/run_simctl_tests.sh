@@ -30,6 +30,44 @@ PERRY_BIN="${PERRY_BIN:-$REPO_ROOT/target/release/perry}"
 BUNDLE_ID_PREFIX="${BUNDLE_ID_PREFIX:-com.perry.doctests}"
 LAUNCH_TIMEOUT="${LAUNCH_TIMEOUT:-30}"
 
+# macOS doesn't ship GNU `timeout`. Homebrew's coreutils provides it as
+# `gtimeout`. Fall back to a pure-bash `&+sleep+kill` watchdog if neither
+# is on PATH — slower startup, same guarantee.
+if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="gtimeout"
+else
+    TIMEOUT_CMD=""
+fi
+
+run_with_timeout() {
+    local secs=$1; shift
+    if [ -n "$TIMEOUT_CMD" ]; then
+        "$TIMEOUT_CMD" "$secs" "$@"
+    else
+        # Fallback: fork, sleep-kill watchdog. Preserves the child's
+        # exit code via `wait`.
+        "$@" &
+        local pid=$!
+        ( sleep "$secs" && kill -TERM -- "$pid" 2>/dev/null ) &
+        local watcher=$!
+        if wait "$pid" 2>/dev/null; then
+            kill -TERM -- "$watcher" 2>/dev/null
+            wait "$watcher" 2>/dev/null
+            return 0
+        else
+            local rc=$?
+            kill -TERM -- "$watcher" 2>/dev/null
+            wait "$watcher" 2>/dev/null
+            # Bash conventionally returns 124 for timeouts; emulate that
+            # when our child was killed after the deadline expired.
+            if [ "$rc" = "143" ]; then return 124; fi
+            return "$rc"
+        fi
+    fi
+}
+
 FILTER=""
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -115,13 +153,13 @@ while IFS= read -r -d '' src; do
     # Launch with PERRY_UI_TEST_MODE so the app self-exits after one frame.
     # --console-pty captures the app's stdout/stderr; we wait for the launch
     # command to return (happens when the app calls exit(0)).
-    if ! timeout "$LAUNCH_TIMEOUT" xcrun simctl launch --console-pty \
+    run_with_timeout "$LAUNCH_TIMEOUT" xcrun simctl launch --console-pty \
         --terminate-running-process \
         --setenv=PERRY_UI_TEST_MODE=1 \
         --setenv=PERRY_UI_TEST_EXIT_AFTER_MS=500 \
         "$UDID" "$bundle_id" >"$OUT_DIR/$stem.run.log" 2>&1
-    then
-        rc=$?
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
         if [ "$rc" = "124" ]; then
             echo "  TIMEOUT (> ${LAUNCH_TIMEOUT}s)"
             FAIL=$((FAIL+1)); FAILURES+=("$rel TIMEOUT")
