@@ -2538,62 +2538,111 @@ pub(crate) fn lower_native_method_call(
     };
     let _ = (module, method); // shut up unused warnings on the early-out path
 
-    // perry/ui instance method calls: `windowHandle.show()`, `windowHandle.setBody(w)`, etc.
-    // The HIR produces these with `object: Some(handle)` and `module: "perry/ui"`.
-    // Lower the receiver to get the widget/window handle, then dispatch.
-    if module == "perry/ui" || module == "perry/container" || module == "perry/container-compose" {
-        let recv_val = lower_expr(ctx, recv)?;
-        let blk = ctx.block();
-        let handle = unbox_to_i64(blk, &recv_val);
-        let sig_opt = if module == "perry/ui" {
-            perry_ui_instance_method_lookup(method)
-        } else if module == "perry/container" {
+    // Static functions for perry/container and perry/container-compose.
+    // (Receiver-less calls like `import { run } from 'perry/container'; run(...)`)
+    if (module == "perry/container" || module == "perry/container-compose") && object.is_none() {
+        let sig_opt = if module == "perry/container" {
             perry_container_table_lookup(method)
         } else {
             perry_container_compose_table_lookup(method)
         };
+        if let Some(sig) = sig_opt {
+            return lower_perry_ui_table_call(ctx, sig, args);
+        }
+    }
+
+    // perry/ui, container, and compose instance method calls.
+    // e.g. `windowHandle.show()`, `container.start()`, `stack.down()`.
+    // The HIR produces these with `object: Some(handle)` and the module name.
+    // Lower the receiver to get the raw i64 handle or double ID, then dispatch.
+    if module == "perry/ui" || module == "perry/container" || module == "perry/container-compose" {
+        let recv_val = lower_expr(ctx, recv)?;
+        let blk = ctx.block();
+
+        // UI handles are pointers (i64), container/compose handles are numeric IDs (f64).
+        let is_ui = module == "perry/ui";
+        let handle = if is_ui { unbox_to_i64(blk, &recv_val) } else { recv_val.clone() };
+        let handle_type = if is_ui { I64 } else { DOUBLE };
+
+        let sig_opt = if module == "perry/ui" {
+            perry_ui_instance_method_lookup(method)
+        } else if module == "perry/container" {
+            PERRY_CONTAINER_HANDLE_TABLE.iter().find(|s| s.method == method)
+        } else {
+            PERRY_COMPOSE_HANDLE_TABLE.iter().find(|s| s.method == method)
+        };
 
         if let Some(sig) = sig_opt {
-            // Build args: handle is the first arg, then the call args.
-            let mut llvm_args: Vec<(crate::types::LlvmType, String)> = Vec::with_capacity(1 + args.len());
-            let mut runtime_param_types: Vec<crate::types::LlvmType> = Vec::with_capacity(1 + args.len());
-            llvm_args.push((I64, handle));
-            runtime_param_types.push(I64);
-            for (kind, arg) in sig.args.iter().zip(args.iter()) {
-                match kind {
-                    UiArgKind::Widget => {
-                        let v = lower_expr(ctx, arg)?;
-                        let blk = ctx.block();
-                        let h = unbox_to_i64(blk, &v);
-                        llvm_args.push((I64, h));
-                        runtime_param_types.push(I64);
+            // Arity check: allow fewer args and pad with null/undefined.
+            if args.len() > sig.args.len() {
+                for a in args { let _ = lower_expr(ctx, a)?; }
+                return Ok(double_literal(0.0));
+            }
+
+            // Build args: handle is the first arg, followed by coerced call args.
+            let mut llvm_args: Vec<(crate::types::LlvmType, String)> = Vec::with_capacity(1 + sig.args.len());
+            let mut runtime_param_types: Vec<crate::types::LlvmType> = Vec::with_capacity(1 + sig.args.len());
+            llvm_args.push((handle_type, handle));
+            runtime_param_types.push(handle_type);
+
+            for i in 0..sig.args.len() {
+                let kind = sig.args[i];
+                if i < args.len() {
+                    let arg = &args[i];
+                    match kind {
+                        UiArgKind::Widget => {
+                            let v = lower_expr(ctx, arg)?;
+                            let blk = ctx.block();
+                            let h = unbox_to_i64(blk, &v);
+                            llvm_args.push((I64, h));
+                            runtime_param_types.push(I64);
+                        }
+                        UiArgKind::Str => {
+                            let h = get_raw_string_ptr(ctx, arg)?;
+                            llvm_args.push((I64, h));
+                            runtime_param_types.push(I64);
+                        }
+                        UiArgKind::F64 => {
+                            let v = lower_expr(ctx, arg)?;
+                            llvm_args.push((DOUBLE, v));
+                            runtime_param_types.push(DOUBLE);
+                        }
+                        UiArgKind::Closure => {
+                            let v = lower_expr(ctx, arg)?;
+                            llvm_args.push((DOUBLE, v));
+                            runtime_param_types.push(DOUBLE);
+                        }
+                        UiArgKind::I64Raw => {
+                            let v = lower_expr(ctx, arg)?;
+                            let blk = ctx.block();
+                            let i = blk.fptosi(DOUBLE, &v, I64);
+                            llvm_args.push((I64, i));
+                            runtime_param_types.push(I64);
+                        }
+                        UiArgKind::Json => {
+                            let json_expr = Expr::JsonStringifyFull(Box::new(arg.clone()));
+                            let h = get_raw_string_ptr(ctx, &json_expr)?;
+                            llvm_args.push((I64, h));
+                            runtime_param_types.push(I64);
+                        }
                     }
-                    UiArgKind::Str => {
-                        let h = get_raw_string_ptr(ctx, arg)?;
-                        llvm_args.push((I64, h));
-                        runtime_param_types.push(I64);
-                    }
-                    UiArgKind::F64 => {
-                        let v = lower_expr(ctx, arg)?;
-                        llvm_args.push((DOUBLE, v));
-                        runtime_param_types.push(DOUBLE);
-                    }
-                    UiArgKind::Closure => {
-                        let v = lower_expr(ctx, arg)?;
-                        llvm_args.push((DOUBLE, v));
-                        runtime_param_types.push(DOUBLE);
-                    }
-                    UiArgKind::I64Raw => {
-                        let v = lower_expr(ctx, arg)?;
-                        let blk = ctx.block();
-                        let i = blk.fptosi(DOUBLE, &v, I64);
-                        llvm_args.push((I64, i));
-                        runtime_param_types.push(I64);
+                } else {
+                    // Padding
+                    match kind {
+                        UiArgKind::Widget | UiArgKind::Str | UiArgKind::Closure | UiArgKind::I64Raw | UiArgKind::Json => {
+                            llvm_args.push((I64, "0".to_string()));
+                            runtime_param_types.push(I64);
+                        }
+                        UiArgKind::F64 => {
+                            llvm_args.push((DOUBLE, double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED))));
+                            runtime_param_types.push(DOUBLE);
+                        }
                     }
                 }
             }
+
             let return_type = match sig.ret {
-        UiReturnKind::Widget | UiReturnKind::Promise | UiReturnKind::Str => I64,
+                UiReturnKind::Widget | UiReturnKind::Promise | UiReturnKind::Str => I64,
                 UiReturnKind::F64 => DOUBLE,
                 UiReturnKind::Void => crate::types::VOID,
             };
@@ -2620,7 +2669,7 @@ pub(crate) fn lower_native_method_call(
             };
         }
         // Unknown instance method — warn and lower args for side effects.
-        eprintln!("perry/ui warning: instance method '{}' not in dispatch table (args: {})", method, args.len());
+        eprintln!("perry-codegen warning: instance method '{}.{}' not in dispatch table", module, method);
         for a in args {
             let _ = lower_expr(ctx, a)?;
         }
@@ -3425,6 +3474,9 @@ enum UiArgKind {
     Closure,
     /// Raw i64 (rare; some setters take an enum tag as i64).
     I64Raw,
+    /// JSON stringify: automatically call JSON.stringify on the argument
+    /// and pass the resulting StringHeader pointer as i64.
+    Json,
 }
 
 /// What the perry/ui FFI function returns and how to box it.
@@ -3925,12 +3977,12 @@ fn perry_system_table_lookup(method: &str) -> Option<&'static UiSig> {
 // perry/container dispatch tables
 // =============================================================================
 
-/// Maps perry/container TypeScript function names to their FFI symbols.
+/// Static functions in 'perry/container'
 static PERRY_CONTAINER_TABLE: &[UiSig] = &[
     UiSig { method: "run", runtime: "js_container_run",
-            args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
+            args: &[UiArgKind::Json], ret: UiReturnKind::Promise },
     UiSig { method: "create", runtime: "js_container_create",
-            args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
+            args: &[UiArgKind::Json], ret: UiReturnKind::Promise },
     UiSig { method: "start", runtime: "js_container_start",
             args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
     UiSig { method: "stop", runtime: "js_container_stop",
@@ -3944,22 +3996,7 @@ static PERRY_CONTAINER_TABLE: &[UiSig] = &[
     UiSig { method: "logs", runtime: "js_container_logs",
             args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
     UiSig { method: "exec", runtime: "js_container_exec",
-            args: &[UiArgKind::Str, UiArgKind::Str, UiArgKind::Str, UiArgKind::Str],
-            ret: UiReturnKind::Promise },
-
-    // ---- ContainerHandle instance methods ----
-    UiSig { method: "handle_start", runtime: "js_container_handle_start",
-            args: &[UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "handle_stop", runtime: "js_container_handle_stop",
-            args: &[UiArgKind::F64, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "handle_remove", runtime: "js_container_handle_remove",
-            args: &[UiArgKind::F64, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "handle_inspect", runtime: "js_container_handle_inspect",
-            args: &[UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "handle_logs", runtime: "js_container_handle_logs",
-            args: &[UiArgKind::F64, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "handle_exec", runtime: "js_container_handle_exec",
-            args: &[UiArgKind::F64, UiArgKind::Str, UiArgKind::Str, UiArgKind::Str],
+            args: &[UiArgKind::Str, UiArgKind::Json, UiArgKind::Json, UiArgKind::Str],
             ret: UiReturnKind::Promise },
     UiSig { method: "pullImage", runtime: "js_container_pullImage",
             args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
@@ -3972,29 +4009,50 @@ static PERRY_CONTAINER_TABLE: &[UiSig] = &[
     UiSig { method: "detectBackend", runtime: "js_container_detectBackend",
             args: &[], ret: UiReturnKind::Promise },
     UiSig { method: "composeUp", runtime: "js_container_composeUp",
-            args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
+            args: &[UiArgKind::Json], ret: UiReturnKind::Promise },
 ];
 
-/// Maps perry/container-compose TypeScript function names to their FFI symbols.
+/// Instance methods on ContainerHandle
+static PERRY_CONTAINER_HANDLE_TABLE: &[UiSig] = &[
+    UiSig { method: "start", runtime: "js_container_handle_start",
+            args: &[], ret: UiReturnKind::Promise },
+    UiSig { method: "stop", runtime: "js_container_handle_stop",
+            args: &[UiArgKind::F64], ret: UiReturnKind::Promise },
+    UiSig { method: "remove", runtime: "js_container_handle_remove",
+            args: &[UiArgKind::F64], ret: UiReturnKind::Promise },
+    UiSig { method: "inspect", runtime: "js_container_handle_inspect",
+            args: &[], ret: UiReturnKind::Promise },
+    UiSig { method: "logs", runtime: "js_container_handle_logs",
+            args: &[UiArgKind::F64], ret: UiReturnKind::Promise },
+    UiSig { method: "exec", runtime: "js_container_handle_exec",
+            args: &[UiArgKind::Json, UiArgKind::Json, UiArgKind::Str],
+            ret: UiReturnKind::Promise },
+];
+
+/// Static functions in 'perry/container-compose'
 static PERRY_CONTAINER_COMPOSE_TABLE: &[UiSig] = &[
     UiSig { method: "up", runtime: "js_container_compose_up",
-            args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "down", runtime: "js_container_compose_down",
-            args: &[UiArgKind::F64, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "ps", runtime: "js_container_compose_ps",
-            args: &[UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "logs", runtime: "js_container_compose_logs",
-            args: &[UiArgKind::F64, UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "exec", runtime: "js_container_compose_exec",
-            args: &[UiArgKind::F64, UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Promise },
+            args: &[UiArgKind::Json], ret: UiReturnKind::Promise },
     UiSig { method: "config", runtime: "js_container_compose_config",
-            args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
+            args: &[UiArgKind::Json], ret: UiReturnKind::Promise },
+];
+
+/// Instance methods on ComposeHandle
+static PERRY_COMPOSE_HANDLE_TABLE: &[UiSig] = &[
+    UiSig { method: "down", runtime: "js_container_compose_down",
+            args: &[UiArgKind::F64], ret: UiReturnKind::Promise },
+    UiSig { method: "ps", runtime: "js_container_compose_ps",
+            args: &[], ret: UiReturnKind::Promise },
+    UiSig { method: "logs", runtime: "js_container_compose_logs",
+            args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
+    UiSig { method: "exec", runtime: "js_container_compose_exec",
+            args: &[UiArgKind::Str, UiArgKind::Json], ret: UiReturnKind::Promise },
     UiSig { method: "start", runtime: "js_container_compose_start",
-            args: &[UiArgKind::F64, UiArgKind::Str], ret: UiReturnKind::Promise },
+            args: &[UiArgKind::Json], ret: UiReturnKind::Promise },
     UiSig { method: "stop", runtime: "js_container_compose_stop",
-            args: &[UiArgKind::F64, UiArgKind::Str], ret: UiReturnKind::Promise },
+            args: &[UiArgKind::Json], ret: UiReturnKind::Promise },
     UiSig { method: "restart", runtime: "js_container_compose_restart",
-            args: &[UiArgKind::F64, UiArgKind::Str], ret: UiReturnKind::Promise },
+            args: &[UiArgKind::Json], ret: UiReturnKind::Promise },
 ];
 
 fn perry_container_table_lookup(method: &str) -> Option<&'static UiSig> {
@@ -4073,6 +4131,13 @@ fn lower_perry_ui_table_call(
                 let blk = ctx.block();
                 let i = blk.fptosi(DOUBLE, &v, I64);
                 llvm_args.push((I64, i));
+                runtime_param_types.push(I64);
+            }
+            UiArgKind::Json => {
+                // Automatically stringify the argument.
+                let json_expr = Expr::JsonStringifyFull(Box::new(arg.clone()));
+                let h = get_raw_string_ptr(ctx, &json_expr)?;
+                llvm_args.push((I64, h));
                 runtime_param_types.push(I64);
             }
         }

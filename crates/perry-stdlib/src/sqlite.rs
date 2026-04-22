@@ -407,6 +407,7 @@ pub unsafe extern "C" fn js_sqlite_pragma(
 
 /// The transaction wrapper function — called when the returned closure is invoked.
 /// Captures: [0] = db_handle (as f64), [1] = original closure ptr (as i64)
+#[cfg(all(not(test), feature = "sqlite_tx"))]
 unsafe extern "C" fn sqlite_tx_wrapper(
     wrapper_closure: *const perry_runtime::ClosureHeader,
     arg0: f64,
@@ -431,8 +432,8 @@ unsafe extern "C" fn sqlite_tx_wrapper(
 
 /// db.transaction(fn) -> wrapping closure
 ///
-/// Returns a closure that wraps fn in BEGIN/COMMIT.
 #[no_mangle]
+#[cfg(all(not(test), feature = "sqlite_tx"))]
 pub unsafe extern "C" fn js_sqlite_transaction(
     db_handle: Handle,
     closure_ptr: i64,
