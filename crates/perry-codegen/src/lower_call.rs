@@ -3417,6 +3417,8 @@ enum UiArgKind {
     Closure,
     /// Raw i64 (rare; some setters take an enum tag as i64).
     I64Raw,
+    /// Raw i32.
+    I32Raw,
 }
 
 /// What the perry/ui FFI function returns and how to box it.
@@ -3921,18 +3923,18 @@ static PERRY_CONTAINER_TABLE: &[UiSig] = &[
     UiSig { method: "run", runtime: "js_container_run", args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
     UiSig { method: "create", runtime: "js_container_create", args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
     UiSig { method: "start", runtime: "js_container_start", args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "stop", runtime: "js_container_stop", args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "remove", runtime: "js_container_remove", args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "list", runtime: "js_container_list", args: &[UiArgKind::F64], ret: UiReturnKind::Promise },
+    UiSig { method: "stop", runtime: "js_container_stop", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Promise },
+    UiSig { method: "remove", runtime: "js_container_remove", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Promise },
+    UiSig { method: "list", runtime: "js_container_list", args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
     UiSig { method: "inspect", runtime: "js_container_inspect", args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "logs", runtime: "js_container_logs", args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
+    UiSig { method: "logs", runtime: "js_container_logs", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Promise },
     UiSig { method: "exec", runtime: "js_container_exec", args: &[UiArgKind::Str, UiArgKind::Str, UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Promise },
     UiSig { method: "pullImage", runtime: "js_container_pullImage", args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
     UiSig { method: "listImages", runtime: "js_container_listImages", args: &[], ret: UiReturnKind::Promise },
-    UiSig { method: "removeImage", runtime: "js_container_removeImage", args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
+    UiSig { method: "removeImage", runtime: "js_container_removeImage", args: &[UiArgKind::Str, UiArgKind::I32Raw], ret: UiReturnKind::Promise },
     UiSig { method: "getBackend", runtime: "js_container_getBackend", args: &[], ret: UiReturnKind::Str },
     UiSig { method: "detectBackend", runtime: "js_container_detectBackend", args: &[], ret: UiReturnKind::Promise },
-    UiSig { method: "composeUp", runtime: "js_container_composeUp", args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
+    UiSig { method: "build", runtime: "js_container_build", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Promise },
 ];
 
 fn perry_container_table_lookup(method: &str) -> Option<&'static UiSig> {
@@ -3944,15 +3946,15 @@ fn perry_container_table_lookup(method: &str) -> Option<&'static UiSig> {
 // =============================================================================
 
 static PERRY_COMPOSE_TABLE: &[UiSig] = &[
-    UiSig { method: "up", runtime: "js_compose_up", args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "down", runtime: "js_compose_down", args: &[UiArgKind::F64, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "ps", runtime: "js_compose_ps", args: &[UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "logs", runtime: "js_compose_logs", args: &[UiArgKind::F64, UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "exec", runtime: "js_compose_exec", args: &[UiArgKind::F64, UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "config", runtime: "js_compose_config", args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "start", runtime: "js_compose_start", args: &[UiArgKind::F64, UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "stop", runtime: "js_compose_stop", args: &[UiArgKind::F64, UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "restart", runtime: "js_compose_restart", args: &[UiArgKind::F64, UiArgKind::Str], ret: UiReturnKind::Promise },
+    UiSig { method: "up", runtime: "js_container_composeUp", args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
+    UiSig { method: "down", runtime: "js_container_compose_down", args: &[UiArgKind::I64Raw, UiArgKind::I32Raw], ret: UiReturnKind::Promise },
+    UiSig { method: "ps", runtime: "js_container_compose_ps", args: &[UiArgKind::I64Raw], ret: UiReturnKind::Promise },
+    UiSig { method: "logs", runtime: "js_container_compose_logs", args: &[UiArgKind::I64Raw, UiArgKind::Str], ret: UiReturnKind::Promise },
+    UiSig { method: "exec", runtime: "js_container_compose_exec", args: &[UiArgKind::I64Raw, UiArgKind::Str, UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Promise },
+    UiSig { method: "config", runtime: "js_container_compose_config", args: &[UiArgKind::I64Raw], ret: UiReturnKind::Promise },
+    UiSig { method: "start", runtime: "js_container_compose_start", args: &[UiArgKind::I64Raw, UiArgKind::Str], ret: UiReturnKind::Promise },
+    UiSig { method: "stop", runtime: "js_container_compose_stop", args: &[UiArgKind::I64Raw, UiArgKind::Str], ret: UiReturnKind::Promise },
+    UiSig { method: "restart", runtime: "js_container_compose_restart", args: &[UiArgKind::I64Raw, UiArgKind::Str], ret: UiReturnKind::Promise },
 ];
 
 fn perry_compose_table_lookup(method: &str) -> Option<&'static UiSig> {
@@ -4028,6 +4030,13 @@ fn lower_perry_ui_table_call(
                 let i = blk.fptosi(DOUBLE, &v, I64);
                 llvm_args.push((I64, i));
                 runtime_param_types.push(I64);
+            }
+            UiArgKind::I32Raw => {
+                let v = lower_expr(ctx, arg)?;
+                let blk = ctx.block();
+                let i = blk.fptosi(DOUBLE, &v, I32);
+                llvm_args.push((I32, i));
+                runtime_param_types.push(I32);
             }
         }
     }
