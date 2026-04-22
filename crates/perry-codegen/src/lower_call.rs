@@ -2372,25 +2372,7 @@ pub(crate) fn lower_native_method_call(
         }
     }
 
-    if module == "perry/compose" && object.is_none() {
-        if let Some(sig) = perry_container_compose_table_lookup(method) {
-            return lower_perry_ui_table_call(ctx, sig, args);
-        }
-    }
-
-    if module == "perry/container-compose" && object.is_none() {
-        if let Some(sig) = perry_container_compose_table_lookup(method) {
-            return lower_perry_ui_table_call(ctx, sig, args);
-        }
-    }
-
-    if module == "perry/compose" && object.is_none() {
-        if let Some(sig) = perry_container_compose_table_lookup(method) {
-            return lower_perry_ui_table_call(ctx, sig, args);
-        }
-    }
-
-    if module == "perry/container-compose" && object.is_none() {
+    if (module == "perry/compose" || module == "perry/container-compose") && object.is_none() {
         if let Some(sig) = perry_container_compose_table_lookup(method) {
             return lower_perry_ui_table_call(ctx, sig, args);
         }
@@ -2610,9 +2592,9 @@ pub(crate) fn lower_native_method_call(
             }
             let return_type = match sig.ret {
                 UiReturnKind::Widget => I64,
-                UiReturnKind::Widget => DOUBLE,
+                UiReturnKind::F64 => DOUBLE,
                 UiReturnKind::Void => crate::types::VOID,
-                UiReturnKind::Widget => I64,
+                UiReturnKind::Str => I64,
             };
             ctx.pending_declares.push((sig.runtime.to_string(), return_type, runtime_param_types));
             let ref_args: Vec<(crate::types::LlvmType, &str)> =
@@ -2627,10 +2609,10 @@ pub(crate) fn lower_native_method_call(
                     let raw = blk.call(I64, sig.runtime, &ref_args);
                     Ok(crate::expr::nanbox_pointer_inline(blk, &raw))
                 }
-                UiReturnKind::Widget => {
+                UiReturnKind::F64 => {
                     Ok(blk.call(DOUBLE, sig.runtime, &ref_args))
                 }
-                UiReturnKind::Widget => {
+                UiReturnKind::Str => {
                     let raw = blk.call(I64, sig.runtime, &ref_args);
                     Ok(crate::expr::nanbox_string_inline(blk, &raw))
                 }
@@ -3525,7 +3507,7 @@ const PERRY_UI_TABLE: &[UiSig] = &[
     UiSig { method: "scrollViewSetChild", runtime: "perry_ui_scrollview_set_child",
             args: &[UiArgKind::Widget, UiArgKind::Widget], ret: UiReturnKind::Void },
     UiSig { method: "scrollViewGetOffset", runtime: "perry_ui_scrollview_get_offset",
-            args: &[UiArgKind::Widget], ret: UiReturnKind::Widget },
+            args: &[UiArgKind::Widget], ret: UiReturnKind::F64 },
     UiSig { method: "scrollViewSetOffset", runtime: "perry_ui_scrollview_set_offset",
             args: &[UiArgKind::Widget, UiArgKind::F64, UiArgKind::F64], ret: UiReturnKind::Void },
     UiSig { method: "scrollViewScrollTo", runtime: "perry_ui_scrollview_scroll_to",
@@ -3620,7 +3602,7 @@ const PERRY_UI_TABLE: &[UiSig] = &[
     UiSig { method: "stateCreate", runtime: "perry_ui_state_create",
             args: &[UiArgKind::F64], ret: UiReturnKind::Widget },
     UiSig { method: "stateGet", runtime: "perry_ui_state_get",
-            args: &[UiArgKind::Widget], ret: UiReturnKind::Widget },
+            args: &[UiArgKind::Widget], ret: UiReturnKind::F64 },
     UiSig { method: "stateSet", runtime: "perry_ui_state_set",
             args: &[UiArgKind::Widget, UiArgKind::F64], ret: UiReturnKind::Void },
     UiSig { method: "stateOnChange", runtime: "perry_ui_state_on_change",
@@ -3640,7 +3622,7 @@ const PERRY_UI_TABLE: &[UiSig] = &[
 
     // ---- TextField extras ----
     UiSig { method: "textfieldGetString", runtime: "perry_ui_textfield_get_string",
-            args: &[UiArgKind::Widget], ret: UiReturnKind::Widget },
+            args: &[UiArgKind::Widget], ret: UiReturnKind::Str },
     UiSig { method: "textfieldFocus", runtime: "perry_ui_textfield_focus",
             args: &[UiArgKind::Widget], ret: UiReturnKind::Void },
     UiSig { method: "textfieldBlurAll", runtime: "perry_ui_textfield_blur_all",
@@ -3662,7 +3644,7 @@ const PERRY_UI_TABLE: &[UiSig] = &[
             args: &[UiArgKind::Widget, UiArgKind::F64, UiArgKind::F64, UiArgKind::F64, UiArgKind::F64],
             ret: UiReturnKind::Void },
     UiSig { method: "textareaGetString", runtime: "perry_ui_textarea_get_string",
-            args: &[UiArgKind::Widget], ret: UiReturnKind::Widget },
+            args: &[UiArgKind::Widget], ret: UiReturnKind::Str },
 
     // ---- Text extras ----
     UiSig { method: "textSetSelectable", runtime: "perry_ui_text_set_selectable",
@@ -3879,7 +3861,7 @@ const PERRY_UI_INSTANCE_TABLE: &[UiSig] = &[
 
     // ---- State instance methods ----
     UiSig { method: "value", runtime: "perry_ui_state_get",
-            args: &[], ret: UiReturnKind::Widget },
+            args: &[], ret: UiReturnKind::F64 },
     UiSig { method: "set", runtime: "perry_ui_state_set",
             args: &[UiArgKind::F64], ret: UiReturnKind::Void },
 ];
@@ -3940,30 +3922,30 @@ static PERRY_CONTAINER_TABLE: &[UiSig] = &[
     UiSig { method: "run", runtime: "js_container_run", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
     UiSig { method: "create", runtime: "js_container_create", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
     UiSig { method: "start", runtime: "js_container_start", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
-    UiSig { method: "stop", runtime: "js_container_stop", args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Widget },
-    UiSig { method: "remove", runtime: "js_container_remove", args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Widget },
-    UiSig { method: "list", runtime: "js_container_list", args: &[UiArgKind::F64], ret: UiReturnKind::Widget },
+    UiSig { method: "stop", runtime: "js_container_stop", args: &[UiArgKind::Str, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
+    UiSig { method: "remove", runtime: "js_container_remove", args: &[UiArgKind::Str, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
+    UiSig { method: "list", runtime: "js_container_list", args: &[UiArgKind::I64Raw], ret: UiReturnKind::Widget },
     UiSig { method: "inspect", runtime: "js_container_inspect", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
-    UiSig { method: "logs", runtime: "js_container_logs", args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Widget },
+    UiSig { method: "logs", runtime: "js_container_logs", args: &[UiArgKind::Str, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
     UiSig { method: "exec", runtime: "js_container_exec", args: &[UiArgKind::Str, UiArgKind::Str, UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Widget },
     UiSig { method: "pullImage", runtime: "js_container_pullImage", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
     UiSig { method: "listImages", runtime: "js_container_listImages", args: &[], ret: UiReturnKind::Widget },
     UiSig { method: "imageExists", runtime: "js_container_imageExists", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
-    UiSig { method: "removeImage", runtime: "js_container_removeImage", args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Widget },
+    UiSig { method: "removeImage", runtime: "js_container_removeImage", args: &[UiArgKind::Str, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
     UiSig { method: "getBackend", runtime: "js_container_getBackend", args: &[], ret: UiReturnKind::Str },
-    UiSig { method: "composeUp", runtime: "js_compose_up", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "composeUp", runtime: "js_container_composeUp", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
 ];
 
 static PERRY_CONTAINER_COMPOSE_TABLE: &[UiSig] = &[
     UiSig { method: "up", runtime: "js_compose_up", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
-    UiSig { method: "down", runtime: "js_compose_down", args: &[UiArgKind::F64, UiArgKind::F64], ret: UiReturnKind::Widget },
-    UiSig { method: "ps", runtime: "js_compose_ps", args: &[UiArgKind::F64], ret: UiReturnKind::Widget },
-    UiSig { method: "logs", runtime: "js_compose_logs", args: &[UiArgKind::F64, UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Widget },
+    UiSig { method: "down", runtime: "js_compose_down", args: &[UiArgKind::I64Raw, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
+    UiSig { method: "ps", runtime: "js_compose_ps", args: &[UiArgKind::I64Raw], ret: UiReturnKind::Widget },
+    UiSig { method: "logs", runtime: "js_compose_logs", args: &[UiArgKind::I64Raw, UiArgKind::Str, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
     UiSig { method: "config", runtime: "js_compose_config", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
-    UiSig { method: "start", runtime: "js_compose_start", args: &[UiArgKind::F64, UiArgKind::Str], ret: UiReturnKind::Widget },
-    UiSig { method: "stop", runtime: "js_compose_stop", args: &[UiArgKind::F64, UiArgKind::Str], ret: UiReturnKind::Widget },
-    UiSig { method: "restart", runtime: "js_compose_restart", args: &[UiArgKind::F64, UiArgKind::Str], ret: UiReturnKind::Widget },
-    UiSig { method: "exec", runtime: "js_compose_exec", args: &[UiArgKind::F64, UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "start", runtime: "js_compose_start", args: &[UiArgKind::I64Raw, UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "stop", runtime: "js_compose_stop", args: &[UiArgKind::I64Raw, UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "restart", runtime: "js_compose_restart", args: &[UiArgKind::I64Raw, UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "exec", runtime: "js_compose_exec", args: &[UiArgKind::I64Raw, UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Widget },
 ];
 
 fn perry_container_table_lookup(method: &str) -> Option<&'static UiSig> {
@@ -4052,9 +4034,9 @@ fn lower_perry_ui_table_call(
     // cross-module call site uses for `perry_fn_*`.
     let return_type = match sig.ret {
         UiReturnKind::Widget => I64,
-        UiReturnKind::Widget => DOUBLE,
+        UiReturnKind::F64 => DOUBLE,
         UiReturnKind::Void => crate::types::VOID,
-        UiReturnKind::Widget => I64,
+        UiReturnKind::Str => I64,
     };
     ctx.pending_declares.push((
         sig.runtime.to_string(),
@@ -4072,14 +4054,14 @@ fn lower_perry_ui_table_call(
             let handle = blk.call(I64, sig.runtime, &arg_slices);
             Ok(nanbox_pointer_inline(blk, &handle))
         }
-        UiReturnKind::Widget => {
+        UiReturnKind::F64 => {
             Ok(ctx.block().call(DOUBLE, sig.runtime, &arg_slices))
         }
         UiReturnKind::Void => {
             ctx.block().call_void(sig.runtime, &arg_slices);
             Ok(double_literal(0.0))
         }
-        UiReturnKind::Widget => {
+        UiReturnKind::Str => {
             let blk = ctx.block();
             let handle = blk.call(I64, sig.runtime, &arg_slices);
             Ok(nanbox_string_inline(blk, &handle))

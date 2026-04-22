@@ -91,7 +91,7 @@ pub unsafe extern "C" fn js_container_start(id_ptr: *const StringHeader) -> *mut
 
 /// Stop a running container
 #[no_mangle]
-pub unsafe extern "C" fn js_container_stop(id_ptr: *const StringHeader, timeout: i32) -> *mut Promise {
+pub unsafe extern "C" fn js_container_stop(id_ptr: *const StringHeader, timeout: i64) -> *mut Promise {
     let promise = js_promise_new();
     let id = match string_from_header(id_ptr) { Some(s) => s, None => { crate::common::spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid ID".into()) }); return promise; } };
     crate::common::spawn_for_promise(promise as *mut u8, async move {
@@ -104,7 +104,7 @@ pub unsafe extern "C" fn js_container_stop(id_ptr: *const StringHeader, timeout:
 
 /// Remove a container
 #[no_mangle]
-pub unsafe extern "C" fn js_container_remove(id_ptr: *const StringHeader, force: i32) -> *mut Promise {
+pub unsafe extern "C" fn js_container_remove(id_ptr: *const StringHeader, force: i64) -> *mut Promise {
     let promise = js_promise_new();
     let id = match string_from_header(id_ptr) { Some(s) => s, None => { crate::common::spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid ID".into()) }); return promise; } };
     crate::common::spawn_for_promise(promise as *mut u8, async move {
@@ -116,7 +116,7 @@ pub unsafe extern "C" fn js_container_remove(id_ptr: *const StringHeader, force:
 
 /// List containers
 #[no_mangle]
-pub unsafe extern "C" fn js_container_list(all: i32) -> *mut Promise {
+pub unsafe extern "C" fn js_container_list(all: i64) -> *mut Promise {
     let promise = js_promise_new();
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         let backend = get_global_backend().await.map_err(|e| error_mapping::compose_error_to_js(e))?;
@@ -168,7 +168,7 @@ pub unsafe extern "C" fn js_container_detectBackend() -> *mut Promise {
 
 /// Get logs from a container
 #[no_mangle]
-pub unsafe extern "C" fn js_container_logs(id_ptr: *const StringHeader, tail: i32) -> *mut Promise {
+pub unsafe extern "C" fn js_container_logs(id_ptr: *const StringHeader, tail: i64) -> *mut Promise {
     let promise = js_promise_new();
     let id = match string_from_header(id_ptr) { Some(s) => s, None => { crate::common::spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid ID".into()) }); return promise; } };
     crate::common::spawn_for_promise(promise as *mut u8, async move {
@@ -244,7 +244,7 @@ pub unsafe extern "C" fn js_container_listImages() -> *mut Promise {
 
 /// Remove an image
 #[no_mangle]
-pub unsafe extern "C" fn js_container_removeImage(reference_ptr: *const StringHeader, force: i32) -> *mut Promise {
+pub unsafe extern "C" fn js_container_removeImage(reference_ptr: *const StringHeader, force: i64) -> *mut Promise {
     let promise = js_promise_new();
     let reference = match string_from_header(reference_ptr) { Some(s) => s, None => { crate::common::spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid reference".into()) }); return promise; } };
     crate::common::spawn_for_promise(promise as *mut u8, async move {
@@ -276,8 +276,14 @@ pub unsafe extern "C" fn js_compose_up(spec_ptr: *const StringHeader) -> *mut Pr
     promise
 }
 
+/// Alias for js_compose_up for perry/container.composeUp
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_down(handle_id: i64, volumes: i32) -> *mut Promise {
+pub unsafe extern "C" fn js_container_composeUp(spec_ptr: *const StringHeader) -> *mut Promise {
+    js_compose_up(spec_ptr)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_down(handle_id: i64, volumes: i64) -> *mut Promise {
     let promise = js_promise_new();
     let handle = match types::take_compose_handle(handle_id as u64) { Some(h) => h, None => { crate::common::spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid handle".into()) }); return promise; } };
     crate::common::spawn_for_promise(promise as *mut u8, async move {
@@ -302,7 +308,7 @@ pub unsafe extern "C" fn js_compose_ps(handle_id: i64) -> *mut Promise {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_logs(handle_id: i64, service_ptr: *const StringHeader, tail: i32) -> *mut Promise {
+pub unsafe extern "C" fn js_compose_logs(handle_id: i64, service_ptr: *const StringHeader, tail: i64) -> *mut Promise {
     let promise = js_promise_new();
     let handle = match types::get_compose_handle(handle_id as u64) { Some(h) => h, None => { crate::common::spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid handle".into()) }); return promise; } };
     let service = string_from_header(service_ptr);
