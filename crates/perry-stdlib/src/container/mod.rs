@@ -405,8 +405,7 @@ pub unsafe extern "C" fn js_container_detectBackend() -> *mut Promise {
     spawn_for_promise(promise as *mut u8, async move {
         let results = probe_all_backends().await;
         let json = serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string());
-        let ptr = js_string_from_bytes(json.as_ptr(), json.len() as u32);
-        Ok(box_string_ptr(ptr))
+        Ok(js_string_from_bytes(json.as_ptr(), json.len() as u32) as usize as u64)
     });
 
     promise
@@ -644,8 +643,7 @@ pub unsafe extern "C" fn js_compose_config(spec_json_ptr: *const StringHeader) -
 
     spawn_for_promise(promise as *mut u8, async move {
         let validated_json = serde_json::to_string(&spec).unwrap_or_default();
-        let ptr = js_string_from_bytes(validated_json.as_ptr(), validated_json.len() as u32);
-        Ok(box_string_ptr(ptr))
+        Ok(js_string_from_bytes(validated_json.as_ptr(), validated_json.len() as u32) as usize as u64)
     });
 
     promise

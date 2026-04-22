@@ -301,6 +301,16 @@ where
                         error_msg.as_ptr(),
                         error_msg.len() as u32,
                     );
+
+                    // If the message starts with '{', try to parse it as a JSON error object
+                    // so TypeScript gets a structured Error instead of just a string.
+                    if error_msg.starts_with('{') {
+                        let val = perry_runtime::js_json_parse(str_ptr);
+                        if !val.is_number() || !val.as_number().is_nan() {
+                            return val.bits();
+                        }
+                    }
+
                     // Use string_ptr for proper type identification (STRING_TAG, not POINTER_TAG)
                     perry_runtime::JSValue::string_ptr(str_ptr).bits()
                 });
@@ -353,6 +363,14 @@ where
                         error_msg.as_ptr(),
                         error_msg.len() as u32,
                     );
+
+                    if error_msg.starts_with('{') {
+                        let val = perry_runtime::js_json_parse(str_ptr);
+                        if !val.is_number() || !val.as_number().is_nan() {
+                            return val.bits();
+                        }
+                    }
+
                     // Use string_ptr for proper type identification (STRING_TAG, not POINTER_TAG)
                     perry_runtime::JSValue::string_ptr(str_ptr).bits()
                 });

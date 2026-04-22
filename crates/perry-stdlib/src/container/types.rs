@@ -14,7 +14,7 @@ pub use perry_container_compose::types::{
 pub use perry_container_compose::error::ComposeError as ContainerError;
 
 use perry_container_compose::ComposeEngine;
-use perry_runtime::{JSValue, STRING_TAG};
+use perry_runtime::{STRING_TAG, JSValue};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use dashmap::DashMap;
@@ -30,7 +30,9 @@ pub fn unbox_id(bits: f64) -> u64 {
 
 /// Box a u64 ID into f64 bits for JS.
 pub fn box_id(id: u64) -> u64 {
-    // IDs are passed as numbers to JS
+    // Standard integer-to-f64 bits conversion for simple numbers.
+    // We return the bit pattern of the f64 double so it can be correctly
+    // reconstructed by f64::from_bits on the resolution path.
     (id as f64).to_bits()
 }
 
@@ -63,27 +65,33 @@ pub fn box_string_ptr(ptr: *const perry_runtime::StringHeader) -> u64 {
     (ptr as usize as u64) | STRING_TAG
 }
 
-// FFI Helpers - returning JSON strings for now as it's easier than manual object construction
+// FFI Helpers - returning real JS Objects via JSON parsing for now as it's
+// easier than manual object construction in Rust.
+
 pub fn register_container_info_list(list: Vec<ContainerInfo>) -> u64 {
     let json = serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string());
-    let ptr = unsafe { perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32) };
-    box_string_ptr(ptr)
+    let ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
+    let val = unsafe { perry_runtime::js_json_parse(ptr) };
+    val.bits()
 }
 
 pub fn register_container_info(info: ContainerInfo) -> u64 {
     let json = serde_json::to_string(&info).unwrap_or_else(|_| "{}".to_string());
-    let ptr = unsafe { perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32) };
-    box_string_ptr(ptr)
+    let ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
+    let val = unsafe { perry_runtime::js_json_parse(ptr) };
+    val.bits()
 }
 
 pub fn register_container_logs(logs: ContainerLogs) -> u64 {
     let json = serde_json::to_string(&logs).unwrap_or_else(|_| "{\"stdout\":\"\",\"stderr\":\"\"}".to_string());
-    let ptr = unsafe { perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32) };
-    box_string_ptr(ptr)
+    let ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
+    let val = unsafe { perry_runtime::js_json_parse(ptr) };
+    val.bits()
 }
 
 pub fn register_image_info_list(list: Vec<ImageInfo>) -> u64 {
     let json = serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string());
-    let ptr = unsafe { perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32) };
-    box_string_ptr(ptr)
+    let ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
+    let val = unsafe { perry_runtime::js_json_parse(ptr) };
+    val.bits()
 }

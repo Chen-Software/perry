@@ -26,7 +26,7 @@ impl ComposeWrapper {
     }
 
     pub async fn down(&self, handle: &ComposeHandle, volumes: bool) -> Result<(), ContainerError> {
-        let mut engine = perry_container_compose::ComposeEngine::new(
+        let engine = perry_container_compose::ComposeEngine::new(
             self.spec.clone(),
             handle.project_name.clone(),
             self.backend.clone(),
@@ -36,7 +36,7 @@ impl ComposeWrapper {
     }
 
     pub async fn ps(&self, handle: &ComposeHandle) -> Result<Vec<ContainerInfo>, ContainerError> {
-        let mut engine = perry_container_compose::ComposeEngine::new(
+        let engine = perry_container_compose::ComposeEngine::new(
             self.spec.clone(),
             handle.project_name.clone(),
             self.backend.clone(),
@@ -45,7 +45,7 @@ impl ComposeWrapper {
     }
 
     pub async fn logs(&self, handle: &ComposeHandle, service: Option<&str>, tail: Option<u32>) -> Result<ContainerLogs, ContainerError> {
-        let mut engine = perry_container_compose::ComposeEngine::new(
+        let engine = perry_container_compose::ComposeEngine::new(
             self.spec.clone(),
             handle.project_name.clone(),
             self.backend.clone(),
@@ -54,7 +54,7 @@ impl ComposeWrapper {
     }
 
     pub async fn exec(&self, handle: &ComposeHandle, service: &str, cmd: &[String]) -> Result<ContainerLogs, ContainerError> {
-        let mut engine = perry_container_compose::ComposeEngine::new(
+        let engine = perry_container_compose::ComposeEngine::new(
             self.spec.clone(),
             handle.project_name.clone(),
             self.backend.clone(),
