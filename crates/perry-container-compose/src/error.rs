@@ -22,6 +22,9 @@ pub enum ComposeError {
     #[error("Service '{service}' failed to start: {message}")]
     ServiceStartupFailed { service: String, message: String },
 
+    #[error("Image pull failed: {message}")]
+    ImagePullFailed { message: String },
+
     #[error("Backend error (exit {code}): {message}")]
     BackendError { code: i32, message: String },
 
@@ -78,6 +81,7 @@ pub fn compose_error_to_js(e: &ComposeError) -> String {
         ComposeError::NoBackendFound { .. } => 503,
         ComposeError::BackendNotAvailable { .. } => 503,
         ComposeError::ServiceStartupFailed { .. } => 500,
+        ComposeError::ImagePullFailed { .. } => 500,
         ComposeError::IoError(_) => 500,
     };
     serde_json::json!({
@@ -129,5 +133,23 @@ mod tests {
             reason: "machine not running".into(),
         };
         assert_eq!(compose_error_to_js(&err).contains("\"code\":503"), true);
+    }
+}
+
+#[cfg(test)]
+mod tests_v2 {
+    use super::*;
+    use proptest::prelude::*;
+
+    // Feature: alloy-container, Property 14: Error propagation preserves code and message
+    proptest! {
+        #[test]
+        fn test_error_code_preservation(code in any::<i32>(), message in ".*") {
+            let err = ComposeError::BackendError { code, message: message.clone() };
+            let json = compose_error_to_js(&err);
+            let val: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(val["code"], code);
+            assert!(val["message"].as_str().unwrap().contains(&message));
+        }
     }
 }

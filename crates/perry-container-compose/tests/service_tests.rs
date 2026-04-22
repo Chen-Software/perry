@@ -1,54 +1,26 @@
-//! Unit tests for service name generation and state tracking.
+use perry_container_compose::service::generate_name;
 
-use perry_container_compose::service::*;
-use perry_container_compose::types::ComposeService;
-
-// Feature: perry-container | Layer: unit | Req: 6.13 | Property: -
 #[test]
 fn test_generate_name_format() {
-    let name = generate_name("nginx:latest", "web");
+    let name = generate_name("image: nginx");
+    // Format: {md5_8chars}-{random_hex}
     let parts: Vec<&str> = name.split('-').collect();
-    // {service_name}-{md5_8chars}-{random_hex}
-    assert_eq!(parts.len(), 3);
-    assert_eq!(parts[0], "web");
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0].len(), 8);
     assert_eq!(parts[1].len(), 8);
-    assert_eq!(parts[2].len(), 8);
 }
 
-// Feature: perry-container | Layer: unit | Req: 6.13 | Property: -
 #[test]
-fn test_generate_name_sanitization() {
-    let name = generate_name("img", "my.service");
-    let parts: Vec<&str> = name.split('-').collect();
-    assert_eq!(parts[0], "my_service");
+fn test_generate_name_stable_per_yaml() {
+    let name1 = generate_name("image: nginx");
+    let name2 = generate_name("image: nginx");
+    // Prefix is md5 hash, so same input → same prefix
+    assert_eq!(name1.split('-').next().unwrap(), name2.split('-').next().unwrap());
 }
 
-// Feature: perry-container | Layer: unit | Req: 6.13 | Property: -
 #[test]
-fn test_service_container_name_explicit() {
-    let mut svc = ComposeService::default();
-    svc.container_name = Some("custom-name".to_string());
-    let name = service_container_name(&svc, "web");
-    assert_eq!(name, "custom-name");
+fn test_generate_name_different_per_yaml() {
+    let name1 = generate_name("image: nginx");
+    let name2 = generate_name("image: redis");
+    assert_ne!(name1.split('-').next().unwrap(), name2.split('-').next().unwrap());
 }
-
-// Feature: perry-container | Layer: unit | Req: 6.13 | Property: -
-#[test]
-fn test_service_container_name_generated() {
-    let svc = ComposeService::default();
-    let name = service_container_name(&svc, "web");
-    assert!(name.starts_with("web-"));
-}
-
-/*
-Coverage Table:
-| Requirement | Test name | Layer |
-|-------------|-----------|-------|
-| 6.13        | test_generate_name_format | unit |
-| 6.13        | test_generate_name_sanitization | unit |
-| 6.13        | test_service_container_name_explicit | unit |
-| 6.13        | test_service_container_name_generated | unit |
-
-Deferred Requirements:
-- none
-*/

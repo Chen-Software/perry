@@ -231,6 +231,9 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
         if let Some(sig) = perry_compose_table_lookup(name) {
             return lower_perry_ui_table_call(ctx, sig, args);
         }
+        if let Some(sig) = perry_workloads_table_lookup(name) {
+            return lower_perry_ui_table_call(ctx, sig, args);
+        }
         // Built-in runtime extern functions (`js_weakmap_set`,
         // `js_regexp_exec`, etc.) that start with `js_` are resolved
         // directly against the runtime library — bypass the import-
@@ -3537,36 +3540,6 @@ struct UiSig {
 /// returns the zero-sentinel). That's the behavior the entire perry/ui
 /// surface had pre-v0.5.10 — adding a row here flips one method from
 /// "silent no-op" to "real call into libperry_ui_macos.a".
-/// Maps perry/container TypeScript function names to their FFI symbols.
-static PERRY_CONTAINER_TABLE: &[(&str, &str)] = &[
-    ("run",         "js_container_run"),
-    ("create",      "js_container_create"),
-    ("start",       "js_container_start"),
-    ("stop",        "js_container_stop"),
-    ("remove",      "js_container_remove"),
-    ("list",        "js_container_list"),
-    ("inspect",     "js_container_inspect"),
-    ("logs",        "js_container_logs"),
-    ("exec",        "js_container_exec"),
-    ("pullImage",   "js_container_pullImage"),
-    ("listImages",  "js_container_listImages"),
-    ("removeImage", "js_container_removeImage"),
-    ("getBackend",  "js_container_getBackend"),
-    ("composeUp",   "js_container_composeUp"),
-];
-
-/// Maps perry/compose TypeScript function names to their FFI symbols.
-static PERRY_COMPOSE_TABLE: &[(&str, &str)] = &[
-    ("up",      "js_compose_up"),
-    ("down",    "js_compose_down"),
-    ("ps",      "js_compose_ps"),
-    ("logs",    "js_compose_logs"),
-    ("exec",    "js_compose_exec"),
-    ("config",  "js_compose_config"),
-    ("start",   "js_compose_start"),
-    ("stop",    "js_compose_stop"),
-    ("restart", "js_compose_restart"),
-];
 
 const PERRY_UI_TABLE: &[UiSig] = &[
     // ---- Constructors (return widget handle) ----
@@ -4076,7 +4049,7 @@ static PERRY_CONTAINER_TABLE: &[UiSig] = &[
     UiSig { method: "removeImage", runtime: "js_container_removeImage", args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
     UiSig { method: "getBackend", runtime: "js_container_getBackend", args: &[], ret: UiReturnKind::Str },
     UiSig { method: "detectBackend", runtime: "js_container_detectBackend", args: &[], ret: UiReturnKind::Promise },
-    UiSig { method: "composeUp", runtime: "js_container_composeUp", args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
+    UiSig { method: "build", runtime: "js_container_build", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Promise },
 ];
 
 fn perry_container_table_lookup(method: &str) -> Option<&'static UiSig> {
@@ -4092,8 +4065,8 @@ static PERRY_COMPOSE_TABLE: &[UiSig] = &[
     UiSig { method: "down", runtime: "js_compose_down", args: &[UiArgKind::F64, UiArgKind::F64], ret: UiReturnKind::Promise },
     UiSig { method: "ps", runtime: "js_compose_ps", args: &[UiArgKind::F64], ret: UiReturnKind::Promise },
     UiSig { method: "logs", runtime: "js_compose_logs", args: &[UiArgKind::F64, UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "exec", runtime: "js_compose_exec", args: &[UiArgKind::F64, UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "config", runtime: "js_compose_config", args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
+    UiSig { method: "exec", runtime: "js_compose_exec", args: &[UiArgKind::F64, UiArgKind::Str, UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Promise },
+    UiSig { method: "config", runtime: "js_compose_config", args: &[UiArgKind::F64], ret: UiReturnKind::Promise },
     UiSig { method: "start", runtime: "js_compose_start", args: &[UiArgKind::F64, UiArgKind::Str], ret: UiReturnKind::Promise },
     UiSig { method: "stop", runtime: "js_compose_stop", args: &[UiArgKind::F64, UiArgKind::Str], ret: UiReturnKind::Promise },
     UiSig { method: "restart", runtime: "js_compose_restart", args: &[UiArgKind::F64, UiArgKind::Str], ret: UiReturnKind::Promise },
@@ -4923,4 +4896,25 @@ fn lower_native_module_dispatch(
             Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
         }
     }
+}
+
+// =============================================================================
+// perry/workloads dispatch table
+// =============================================================================
+
+static PERRY_WORKLOADS_TABLE: &[UiSig] = &[
+    UiSig { method: "graph", runtime: "js_workload_graph", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Str },
+    UiSig { method: "node", runtime: "js_workload_node", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Str },
+    UiSig { method: "runGraph", runtime: "js_workload_runGraph", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Promise },
+    UiSig { method: "inspectGraph", runtime: "js_workload_inspectGraph", args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
+    UiSig { method: "down", runtime: "js_workload_handle_down", args: &[UiArgKind::F64, UiArgKind::Str], ret: UiReturnKind::Promise },
+    UiSig { method: "status", runtime: "js_workload_handle_status", args: &[UiArgKind::F64], ret: UiReturnKind::Promise },
+    UiSig { method: "graph", runtime: "js_workload_handle_graph", args: &[UiArgKind::F64], ret: UiReturnKind::Str },
+    UiSig { method: "logs", runtime: "js_workload_handle_logs", args: &[UiArgKind::F64, UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Promise },
+    UiSig { method: "exec", runtime: "js_workload_handle_exec", args: &[UiArgKind::F64, UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Promise },
+    UiSig { method: "ps", runtime: "js_workload_handle_ps", args: &[UiArgKind::F64], ret: UiReturnKind::Promise },
+];
+
+fn perry_workloads_table_lookup(method: &str) -> Option<&'static UiSig> {
+    PERRY_WORKLOADS_TABLE.iter().find(|s| s.method == method)
 }

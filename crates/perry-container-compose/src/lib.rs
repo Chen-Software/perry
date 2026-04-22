@@ -16,6 +16,8 @@ pub mod service;
 pub mod types;
 pub mod yaml;
 
+pub use indexmap;
+
 // FFI exports (Perry TypeScript integration)
 #[cfg(feature = "ffi")]
 pub mod ffi;

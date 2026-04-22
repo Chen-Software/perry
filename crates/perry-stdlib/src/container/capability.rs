@@ -48,6 +48,8 @@ pub async fn alloy_container_run_capability(
         network: spec.network,
         rm: spec.rm,
         read_only: spec.read_only,
+        labels: spec.labels,
+        seccomp: spec.seccomp,
     }).await.map_err(|e| e.to_string())?;
 
     // 4. Wait for completion and collect output

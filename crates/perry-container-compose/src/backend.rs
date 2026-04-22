@@ -41,17 +41,6 @@ pub trait ContainerBackend: Send + Sync {
     /// Check whether the backend binary is available and functional.
     async fn check_available(&self) -> Result<()>;
 
-    /// Build an image from a context.
-    async fn build(
-        &self,
-        context: &str,
-        dockerfile: Option<&str>,
-        tag: &str,
-        args: Option<&HashMap<String, String>>,
-        target: Option<&str>,
-        network: Option<&str>,
-    ) -> Result<()>;
-
     /// Run a container (create + start). Returns a handle.
     async fn run(&self, spec: &ContainerSpec) -> Result<ContainerHandle>;
 
@@ -73,14 +62,8 @@ pub trait ContainerBackend: Send + Sync {
     /// Inspect a container.
     async fn inspect(&self, id: &str) -> Result<ContainerInfo>;
 
-    /// Inspect an image.
-    async fn inspect_image(&self, reference: &str) -> Result<ImageInfo>;
-
     /// Fetch logs from a container.
     async fn logs(&self, id: &str, tail: Option<u32>) -> Result<ContainerLogs>;
-
-    /// Wait for a container to exit.
-    async fn wait(&self, id: &str) -> Result<i32>;
 
     /// Execute a command inside a running container.
     async fn exec(
@@ -90,6 +73,13 @@ pub trait ContainerBackend: Send + Sync {
         env: Option<&HashMap<String, String>>,
         workdir: Option<&str>,
     ) -> Result<ContainerLogs>;
+
+    /// Build an image from a context.
+    async fn build(
+        &self,
+        spec: &crate::types::ComposeServiceBuild,
+        image_name: &str,
+    ) -> Result<()>;
 
     /// Pull an image.
     async fn pull_image(&self, reference: &str) -> Result<()>;
@@ -111,6 +101,12 @@ pub trait ContainerBackend: Send + Sync {
 
     /// Remove a volume.
     async fn remove_volume(&self, name: &str) -> Result<()>;
+
+    /// Inspect a network.
+    async fn inspect_network(&self, name: &str) -> Result<()>;
+
+    async fn wait(&self, id: &str) -> Result<i32>;
+    async fn inspect_image(&self, reference: &str) -> Result<ImageInfo>;
 }
 
 /// Layer 2: CLI Protocol trait.
@@ -128,29 +124,25 @@ pub trait CliProtocol: Send + Sync {
 
     fn build_args(
         &self,
-        context: &str,
-        dockerfile: Option<&str>,
-        tag: &str,
-        args: Option<&HashMap<String, String>>,
-        target: Option<&str>,
-        network: Option<&str>,
+        spec: &crate::types::ComposeServiceBuild,
+        image_name: &str,
     ) -> Vec<String> {
-        let mut cmd_args = vec!["build".into(), "-t".into(), tag.into()];
-        if let Some(df) = dockerfile {
+        let mut cmd_args = vec!["build".into(), "-t".into(), image_name.into()];
+        if let Some(df) = &spec.containerfile {
             cmd_args.extend(["-f".into(), df.into()]);
         }
-        if let Some(ba) = args {
-            for (k, v) in ba {
+        if let Some(ba) = &spec.args {
+            for (k, v) in ba.to_map() {
                 cmd_args.extend(["--build-arg".into(), format!("{}={}", k, v)]);
             }
         }
-        if let Some(t) = target {
+        if let Some(t) = &spec.target {
             cmd_args.extend(["--target".into(), t.into()]);
         }
-        if let Some(n) = network {
+        if let Some(n) = &spec.network {
             cmd_args.extend(["--network".into(), n.into()]);
         }
-        cmd_args.push(context.into());
+        cmd_args.push(spec.context.as_deref().unwrap_or(".").into());
         cmd_args
     }
 
@@ -196,16 +188,6 @@ pub trait CliProtocol: Send + Sync {
         vec!["inspect".into(), "--format".into(), "json".into(), id.into()]
     }
 
-    fn inspect_image_args(&self, reference: &str) -> Vec<String> {
-        vec![
-            "image".into(),
-            "inspect".into(),
-            "--format".into(),
-            "json".into(),
-            reference.into(),
-        ]
-    }
-
     fn logs_args(&self, id: &str, tail: Option<u32>) -> Vec<String> {
         let mut args = vec!["logs".into()];
         if let Some(t) = tail {
@@ -213,10 +195,6 @@ pub trait CliProtocol: Send + Sync {
         }
         args.push(id.into());
         args
-    }
-
-    fn wait_args(&self, id: &str) -> Vec<String> {
-        vec!["wait".into(), id.into()]
     }
 
     fn exec_args(
@@ -292,6 +270,24 @@ pub trait CliProtocol: Send + Sync {
         vec!["volume".into(), "rm".into(), name.into()]
     }
 
+    fn inspect_network_args(&self, name: &str) -> Vec<String> {
+        vec!["network".into(), "inspect".into(), name.into()]
+    }
+
+    fn wait_args(&self, id: &str) -> Vec<String> {
+        vec!["wait".into(), id.into()]
+    }
+
+    fn inspect_image_args(&self, reference: &str) -> Vec<String> {
+        vec![
+            "image".into(),
+            "inspect".into(),
+            "--format".into(),
+            "json".into(),
+            reference.into(),
+        ]
+    }
+
     // ── Output parsers — all have Docker JSON defaults ────────────────────
 
     fn parse_list_output(&self, stdout: &str) -> Result<Vec<ContainerInfo>> {
@@ -312,6 +308,22 @@ pub trait CliProtocol: Send + Sync {
                 image: e["Image"].as_str().unwrap_or_default().to_string(),
                 status: e["Status"].as_str().unwrap_or_default().to_string(),
                 ports: vec![e["Ports"].as_str().unwrap_or_default().to_string()],
+                labels: e["Labels"]
+                    .as_object()
+                    .map(|obj| {
+                        obj.iter()
+                            .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
+                            .collect()
+                    })
+                    .or_else(|| {
+                        e["Labels"].as_str().map(|s| {
+                            s.split(',')
+                                .filter_map(|pair| pair.split_once('='))
+                                .map(|(k, v)| (k.to_string(), v.to_string()))
+                                .collect()
+                        })
+                    })
+                    .unwrap_or_default(),
                 created: e["CreatedAt"].as_str().unwrap_or_default().to_string(),
             })
             .collect())
@@ -321,25 +333,25 @@ pub trait CliProtocol: Send + Sync {
         let val: serde_json::Value = serde_json::from_str(stdout).map_err(ComposeError::JsonError)?;
         let e = if val.is_array() { &val[0] } else { &val };
 
+        let labels = if let Some(obj) = e["Config"]["Labels"].as_object() {
+            obj.iter()
+                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
+                .collect()
+        } else {
+            HashMap::new()
+        };
+
         Ok(ContainerInfo {
             id: e["Id"].as_str().unwrap_or_default().to_string(),
-            name: e["Name"].as_str().unwrap_or_default().trim_start_matches('/').to_string(),
+            name: e["Name"]
+                .as_str()
+                .unwrap_or_default()
+                .trim_start_matches('/')
+                .to_string(),
             image: e["Config"]["Image"].as_str().unwrap_or_default().to_string(),
             status: e["State"]["Status"].as_str().unwrap_or_default().to_string(),
             ports: vec![],
-            created: e["Created"].as_str().unwrap_or_default().to_string(),
-        })
-    }
-
-    fn parse_inspect_image_output(&self, stdout: &str) -> Result<ImageInfo> {
-        let val: serde_json::Value = serde_json::from_str(stdout).map_err(ComposeError::JsonError)?;
-        let e = if val.is_array() { &val[0] } else { &val };
-
-        Ok(ImageInfo {
-            id: e["Id"].as_str().unwrap_or_default().to_string(),
-            repository: String::new(),
-            tag: String::new(),
-            size: e["Size"].as_u64().unwrap_or(0),
+            labels,
             created: e["Created"].as_str().unwrap_or_default().to_string(),
         })
     }
@@ -356,7 +368,7 @@ pub trait CliProtocol: Send + Sync {
                 id: e["ID"].as_str().unwrap_or_default().to_string(),
                 repository: e["Repository"].as_str().unwrap_or_default().to_string(),
                 tag: e["Tag"].as_str().unwrap_or_default().to_string(),
-                size: 0, // Not always easy to parse from common JSON formats
+                size: 0,
                 created: e["CreatedAt"].as_str().unwrap_or_default().to_string(),
             })
             .collect())
@@ -364,6 +376,19 @@ pub trait CliProtocol: Send + Sync {
 
     fn parse_container_id(&self, stdout: &str) -> Result<String> {
         Ok(stdout.trim().to_string())
+    }
+
+    fn parse_inspect_image_output(&self, stdout: &str) -> Result<ImageInfo> {
+        let val: serde_json::Value = serde_json::from_str(stdout).map_err(ComposeError::JsonError)?;
+        let e = if val.is_array() { &val[0] } else { &val };
+
+        Ok(ImageInfo {
+            id: e["Id"].as_str().unwrap_or_default().to_string(),
+            repository: String::new(),
+            tag: String::new(),
+            size: e["Size"].as_u64().unwrap_or(0),
+            created: e["Created"].as_str().unwrap_or_default().to_string(),
+        })
     }
 }
 
@@ -388,6 +413,11 @@ pub fn docker_run_flags(spec: &ContainerSpec, include_detach: bool) -> Vec<Strin
     if let Some(env) = &spec.env {
         for (k, v) in env {
             args.extend(["-e".into(), format!("{k}={v}")]);
+        }
+    }
+    if let Some(labels) = &spec.labels {
+        for (k, v) in labels {
+            args.extend(["--label".into(), format!("{k}={v}")]);
         }
     }
     if let Some(net) = &spec.network {
@@ -427,7 +457,6 @@ impl CliProtocol for AppleContainerProtocol {
     }
 
     fn run_args(&self, spec: &ContainerSpec) -> Vec<String> {
-        // Apple Container might not support --detach
         docker_run_flags(spec, false)
     }
 }
@@ -456,6 +485,8 @@ pub struct CliBackend<P: CliProtocol> {
 pub type DockerBackend = CliBackend<DockerProtocol>;
 pub type AppleBackend = CliBackend<AppleContainerProtocol>;
 pub type LimaBackend = CliBackend<LimaProtocol>;
+
+pub trait SecurityProfile: Send + Sync {}
 
 impl<P: CliProtocol> CliBackend<P> {
     pub fn new(bin: PathBuf, protocol: P) -> Self {
@@ -498,24 +529,11 @@ struct CliOutput {
 #[async_trait]
 impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
     fn backend_name(&self) -> &str {
-        self.bin.file_name().and_then(|n| n.to_str()).unwrap_or("unknown")
+        self.protocol.protocol_name()
     }
 
     async fn check_available(&self) -> Result<()> {
         let args = vec!["--version".to_string()];
-        self.exec_ok(args).await.map(|_| ())
-    }
-
-    async fn build(
-        &self,
-        context: &str,
-        dockerfile: Option<&str>,
-        tag: &str,
-        args: Option<&HashMap<String, String>>,
-        target: Option<&str>,
-        network: Option<&str>,
-    ) -> Result<()> {
-        let args = self.protocol.build_args(context, dockerfile, tag, args, target, network);
         self.exec_ok(args).await.map(|_| ())
     }
 
@@ -566,6 +584,17 @@ impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
         self.protocol.parse_inspect_output(&stdout)
     }
 
+    async fn wait(&self, id: &str) -> Result<i32> {
+        let args = self.protocol.wait_args(id);
+        let out = self.exec_raw(args).await?;
+        out.stdout.trim().parse::<i32>().map_err(|e| {
+            ComposeError::BackendError {
+                code: -1,
+                message: format!("Failed to parse wait output: {}", e),
+            }
+        })
+    }
+
     async fn inspect_image(&self, reference: &str) -> Result<ImageInfo> {
         let args = self.protocol.inspect_image_args(reference);
         let stdout = self.exec_ok(args).await?;
@@ -578,17 +607,6 @@ impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
         Ok(ContainerLogs {
             stdout: out.stdout,
             stderr: out.stderr,
-        })
-    }
-
-    async fn wait(&self, id: &str) -> Result<i32> {
-        let args = self.protocol.wait_args(id);
-        let out = self.exec_raw(args).await?;
-        out.stdout.trim().parse::<i32>().map_err(|e| {
-            ComposeError::BackendError {
-                code: -1,
-                message: format!("Failed to parse wait output: {}", e),
-            }
         })
     }
 
@@ -605,6 +623,15 @@ impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
             stdout: out.stdout,
             stderr: out.stderr,
         })
+    }
+
+    async fn build(
+        &self,
+        spec: &crate::types::ComposeServiceBuild,
+        image_name: &str,
+    ) -> Result<()> {
+        let args = self.protocol.build_args(spec, image_name);
+        self.exec_ok(args).await.map(|_| ())
     }
 
     async fn pull_image(&self, reference: &str) -> Result<()> {
@@ -660,6 +687,11 @@ impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
             }
         }
     }
+
+    async fn inspect_network(&self, name: &str) -> Result<()> {
+        let args = self.protocol.inspect_network_args(name);
+        self.exec_ok(args).await.map(|_| ())
+    }
 }
 
 /// Detect the available container backend.
@@ -703,8 +735,9 @@ fn platform_candidates() -> &'static [&'static str] {
             "orbstack",
             "colima",
             "rancher-desktop",
-            "podman",
             "lima",
+            "podman",
+            "nerdctl",
             "docker",
         ]
     } else if cfg!(target_os = "linux") {
