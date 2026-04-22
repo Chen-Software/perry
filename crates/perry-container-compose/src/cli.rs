@@ -5,7 +5,6 @@ use crate::config::ProjectConfig;
 use clap::{Args, Parser, Subcommand};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 #[derive(Parser, Debug)]
 #[command(name = "perry-compose", version, about = "Docker Compose-like CLI for container backends")]
@@ -118,9 +117,9 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     let project = ComposeProject::load(&config)?;
 
-    let backend = crate::backend::detect_backend().await
+    let backend = crate::backend::detect_backend()
+        .await
         .map_err(|probed| ComposeError::NoBackendFound { probed })?;
-    let backend = Arc::new(backend);
 
     let engine = ComposeEngine::new(project.spec.clone(), project.project_name.clone(), backend);
 

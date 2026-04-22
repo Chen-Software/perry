@@ -1,13 +1,11 @@
+use crate::backend::ContainerBackend;
 use crate::error::{ComposeError, Result};
 use crate::service;
-use crate::types::{
-    ComposeHandle, ComposeSpec, ContainerInfo, ContainerLogs, ContainerSpec,
-};
+use crate::types::{ComposeHandle, ComposeSpec, ContainerInfo, ContainerLogs, ContainerSpec};
 use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use crate::backend::ContainerBackend;
 
 static COMPOSE_ENGINES: once_cell::sync::Lazy<std::sync::Mutex<IndexMap<u64, Arc<ComposeEngine>>>> =
     once_cell::sync::Lazy::new(|| std::sync::Mutex::new(IndexMap::new()));
@@ -20,12 +18,12 @@ pub struct ComposeEngine {
     pub backend: Arc<dyn ContainerBackend>,
 }
 
+pub fn get_engine(stack_id: u64) -> Option<Arc<ComposeEngine>> {
+    COMPOSE_ENGINES.lock().unwrap().get(&stack_id).cloned()
+}
+
 impl ComposeEngine {
-    pub fn new(
-        spec: ComposeSpec,
-        project_name: String,
-        backend: Arc<dyn ContainerBackend>,
-    ) -> Self {
+    pub fn new(spec: ComposeSpec, project_name: String, backend: Arc<dyn ContainerBackend>) -> Self {
         ComposeEngine {
             spec,
             project_name,
@@ -41,12 +39,19 @@ impl ComposeEngine {
             project_name: self.project_name.clone(),
             services,
         };
-        COMPOSE_ENGINES.lock().unwrap().insert(stack_id, Arc::new(ComposeEngine::new(
-            self.spec.clone(),
-            self.project_name.clone(),
-            Arc::clone(&self.backend),
-        )));
+        COMPOSE_ENGINES.lock().unwrap().insert(
+            stack_id,
+            Arc::new(ComposeEngine::new(
+                self.spec.clone(),
+                self.project_name.clone(),
+                Arc::clone(&self.backend),
+            )),
+        );
         handle
+    }
+
+    pub fn resolve_startup_order(&self) -> Result<Vec<String>> {
+        resolve_startup_order(&self.spec)
     }
 
     pub async fn up(
@@ -73,7 +78,8 @@ impl ComposeEngine {
                     Err(e) => {
                         let msg = e.to_string().to_lowercase();
                         if !msg.contains("already exists") {
-                            self.rollback(&started_containers, &created_networks, &created_volumes).await;
+                            self.rollback(&started_containers, &created_networks, &created_volumes)
+                                .await;
                             return Err(e);
                         }
                     }
@@ -94,7 +100,8 @@ impl ComposeEngine {
                     Err(e) => {
                         let msg = e.to_string().to_lowercase();
                         if !msg.contains("already exists") {
-                            self.rollback(&started_containers, &created_networks, &created_volumes).await;
+                            self.rollback(&started_containers, &created_networks, &created_volumes)
+                                .await;
                             return Err(e);
                         }
                     }
@@ -103,7 +110,7 @@ impl ComposeEngine {
         }
 
         // 3. Resolve order and start services
-        let order = resolve_startup_order(&self.spec)?;
+        let order = self.resolve_startup_order()?;
         let target: Vec<&String> = if services.is_empty() {
             order.iter().collect()
         } else {
@@ -124,43 +131,81 @@ impl ComposeEngine {
             let container_spec = ContainerSpec {
                 image: svc.image.clone().unwrap_or_default(),
                 name: Some(container_name.clone()),
-                ports: Some(svc.ports.as_ref().map(|p| p.iter().map(|ps| match ps {
-                    crate::types::PortSpec::Short(v) => match v {
-                        serde_yaml::Value::String(s) => s.clone(),
-                        serde_yaml::Value::Number(n) => n.to_string(),
-                        _ => v.as_str().unwrap_or_default().to_string(),
-                    },
-                    crate::types::PortSpec::Long(lp) => {
-                        let publ = lp.published.as_ref().map(|v| match v {
-                            serde_yaml::Value::String(s) => s.clone(),
-                            serde_yaml::Value::Number(n) => n.to_string(),
-                            _ => v.as_str().unwrap_or_default().to_string(),
-                        }).unwrap_or_default();
-                        let target = match &lp.target {
-                            serde_yaml::Value::String(s) => s.clone(),
-                            serde_yaml::Value::Number(n) => n.to_string(),
-                            _ => lp.target.as_str().unwrap_or_default().to_string(),
-                        };
-                        format!("{}:{}", publ, target)
-                    },
-                }).collect()).unwrap_or_default()),
-                volumes: Some(svc.volumes.as_ref().map(|v| v.iter().map(|vs| match vs {
-                    serde_yaml::Value::String(s) => s.clone(),
-                    _ => vs.as_str().unwrap_or_default().to_string(),
-                }).collect()).unwrap_or_default()),
+                ports: Some(
+                    svc.ports
+                        .as_ref()
+                        .map(|p| {
+                            p.iter()
+                                .map(|ps| match ps {
+                                    crate::types::PortSpec::Short(v) => match v {
+                                        serde_yaml::Value::String(s) => s.clone(),
+                                        serde_yaml::Value::Number(n) => n.to_string(),
+                                        _ => v.as_str().unwrap_or_default().to_string(),
+                                    },
+                                    crate::types::PortSpec::Long(lp) => {
+                                        let publ = lp
+                                            .published
+                                            .as_ref()
+                                            .map(|v| match v {
+                                                serde_yaml::Value::String(s) => s.clone(),
+                                                serde_yaml::Value::Number(n) => n.to_string(),
+                                                _ => v.as_str().unwrap_or_default().to_string(),
+                                            })
+                                            .unwrap_or_default();
+                                        let target = match &lp.target {
+                                            serde_yaml::Value::String(s) => s.clone(),
+                                            serde_yaml::Value::Number(n) => n.to_string(),
+                                            _ => lp.target.as_str().unwrap_or_default().to_string(),
+                                        };
+                                        format!("{}:{}", publ, target)
+                                    }
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                ),
+                volumes: Some(
+                    svc.volumes
+                        .as_ref()
+                        .map(|v| {
+                            v.iter()
+                                .map(|vs| match vs {
+                                    serde_yaml::Value::String(s) => s.clone(),
+                                    _ => vs.as_str().unwrap_or_default().to_string(),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                ),
                 env: Some(match &svc.environment {
-                    Some(crate::types::ListOrDict::Dict(d)) => d.iter().map(|(k, v)| (k.clone(), v.as_ref().map(|vv| match vv {
-                        serde_yaml::Value::String(s) => s.clone(),
-                        serde_yaml::Value::Number(n) => n.to_string(),
-                        serde_yaml::Value::Bool(b) => b.to_string(),
-                        _ => vv.as_str().unwrap_or_default().to_string(),
-                    }).unwrap_or_default())).collect(),
-                    Some(crate::types::ListOrDict::List(l)) => l.iter().filter_map(|s| s.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+                    Some(crate::types::ListOrDict::Dict(d)) => d
+                        .iter()
+                        .map(|(k, v)| {
+                            (
+                                k.clone(),
+                                v.as_ref()
+                                    .map(|vv| match vv {
+                                        serde_yaml::Value::String(s) => s.clone(),
+                                        serde_yaml::Value::Number(n) => n.to_string(),
+                                        serde_yaml::Value::Bool(b) => b.to_string(),
+                                        _ => vv.as_str().unwrap_or_default().to_string(),
+                                    })
+                                    .unwrap_or_default(),
+                            )
+                        })
+                        .collect(),
+                    Some(crate::types::ListOrDict::List(l)) => l
+                        .iter()
+                        .filter_map(|s| s.split_once('='))
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect(),
                     None => HashMap::new(),
                 }),
                 cmd: Some(match &svc.command {
                     Some(serde_yaml::Value::String(s)) => vec![s.clone()],
-                    Some(serde_yaml::Value::Sequence(seq)) => seq.iter().map(|v| v.as_str().unwrap_or_default().to_string()).collect(),
+                    Some(serde_yaml::Value::Sequence(seq)) => {
+                        seq.iter().map(|v| v.as_str().unwrap_or_default().to_string()).collect()
+                    }
                     _ => vec![],
                 }),
                 entrypoint: None,
@@ -173,7 +218,8 @@ impl ComposeEngine {
                     started_containers.push(container_name);
                 }
                 Err(e) => {
-                    self.rollback(&started_containers, &created_networks, &created_volumes).await;
+                    self.rollback(&started_containers, &created_networks, &created_volumes)
+                        .await;
                     return Err(ComposeError::ServiceStartupFailed {
                         service: svc_name.clone(),
                         message: e.to_string(),
@@ -204,7 +250,7 @@ impl ComposeEngine {
         _remove_orphans: bool,
         remove_volumes: bool,
     ) -> Result<()> {
-        let order = resolve_startup_order(&self.spec)?;
+        let order = self.resolve_startup_order()?;
         let target: Vec<&String> = if services.is_empty() {
             order.iter().collect()
         } else {
@@ -262,7 +308,13 @@ impl ComposeEngine {
             let svc = self.spec.services.get(svc_name).unwrap();
             let container_name = service::service_container_name(svc, svc_name);
             if let Ok(logs) = self.backend.logs(&container_name, tail).await {
-                all_logs.insert(svc_name.clone(), format!("STDOUT:\n{}\nSTDERR:\n{}", logs.stdout, logs.stderr));
+                all_logs.insert(
+                    svc_name.clone(),
+                    format!(
+                        "STDOUT:\n{}\nSTDERR:\n{}",
+                        logs.stdout, logs.stderr
+                    ),
+                );
             }
         }
         Ok(all_logs)
@@ -275,13 +327,17 @@ impl ComposeEngine {
         env: Option<&HashMap<String, String>>,
         workdir: Option<&str>,
     ) -> Result<ContainerLogs> {
-        let svc = self.spec.services.get(service).ok_or_else(|| ComposeError::NotFound(service.into()))?;
+        let svc = self
+            .spec
+            .services
+            .get(service)
+            .ok_or_else(|| ComposeError::NotFound(service.into()))?;
         let container_name = service::service_container_name(svc, service);
         self.backend.exec(&container_name, cmd, env, workdir).await
     }
 
     pub fn config(&self) -> Result<String> {
-        serde_yaml::to_string(&self.spec).map_err(ComposeError::ParseError)
+        self.spec.to_yaml()
     }
 
     pub async fn start(&self, services: &[String]) -> Result<()> {
@@ -332,7 +388,10 @@ pub fn resolve_startup_order(spec: &ComposeSpec) -> Result<Vec<String>> {
             for dep in deps.service_names() {
                 if !spec.services.contains_key(&dep) {
                     return Err(ComposeError::ValidationError {
-                        message: format!("Service '{}' depends on '{}' which is not defined", name, dep)
+                        message: format!(
+                            "Service '{}' depends on '{}' which is not defined",
+                            name, dep
+                        ),
                     });
                 }
                 *in_degree.get_mut(name).unwrap() += 1;
@@ -365,7 +424,9 @@ pub fn resolve_startup_order(spec: &ComposeSpec) -> Result<Vec<String>> {
             .filter(|(_, &deg)| deg > 0)
             .map(|(name, _)| name.clone())
             .collect();
-        return Err(ComposeError::DependencyCycle { services: cycle_services });
+        return Err(ComposeError::DependencyCycle {
+            services: cycle_services,
+        });
     }
 
     Ok(order)

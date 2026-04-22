@@ -1,6 +1,8 @@
-use perry_runtime::{Promise, StringHeader, js_string_from_bytes, js_promise_state, js_promise_run_microtasks};
-use perry_stdlib::container::*;
+use perry_runtime::{
+    js_promise_run_microtasks, js_promise_state, js_string_from_bytes, Promise, StringHeader,
+};
 use perry_stdlib::common::async_bridge::js_stdlib_process_pending;
+use perry_stdlib::container::*;
 use std::ptr;
 
 /// Helper to drive a promise to completion in a synchronous test
@@ -8,14 +10,16 @@ fn await_promise_sync(promise: *mut Promise) -> Result<u64, String> {
     assert!(!promise.is_null(), "FFI function returned null promise");
     for _ in 0..10000 {
         let state = unsafe { js_promise_state(promise) };
-        if state == 1 { // Fulfilled
+        if state == 1 {
+            // Fulfilled
             return Ok(unsafe { perry_runtime::js_promise_value(promise) }.to_bits());
-        } else if state == 2 { // Rejected
+        } else if state == 2 {
+            // Rejected
             return Err("Rejected".to_string());
         }
         unsafe {
             js_promise_run_microtasks();
-            js_stdlib_process_pending();
+            let _ = js_stdlib_process_pending();
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
@@ -107,7 +111,7 @@ fn test_ffi_container_start_malformed() {
 #[test]
 fn test_ffi_container_stop_null() {
     unsafe {
-        let p = js_container_stop(ptr::null(), 10);
+        let p = js_container_stop(ptr::null(), ptr::null());
         assert!(await_promise_sync(p).is_err());
     }
 }
@@ -116,7 +120,7 @@ fn test_ffi_container_stop_null() {
 #[test]
 fn test_ffi_container_stop_malformed() {
     unsafe {
-        let p = js_container_stop(to_js_str("id"), -1);
+        let p = js_container_stop(to_js_str("id"), to_js_str("{\"timeout\": -1}"));
         let _ = await_promise_sync(p);
     }
 }
@@ -125,7 +129,7 @@ fn test_ffi_container_stop_malformed() {
 #[test]
 fn test_ffi_container_remove_null() {
     unsafe {
-        let p = js_container_remove(ptr::null(), 0);
+        let p = js_container_remove(ptr::null(), ptr::null());
         assert!(await_promise_sync(p).is_err());
     }
 }
@@ -134,7 +138,7 @@ fn test_ffi_container_remove_null() {
 #[test]
 fn test_ffi_container_remove_malformed() {
     unsafe {
-        let p = js_container_remove(to_js_str("id"), 1);
+        let p = js_container_remove(to_js_str("id"), to_js_str("{\"force\": true}"));
         let _ = await_promise_sync(p);
     }
 }
@@ -143,7 +147,7 @@ fn test_ffi_container_remove_malformed() {
 #[test]
 fn test_ffi_container_list_zero() {
     unsafe {
-        let p = js_container_list(0);
+        let p = js_container_list(to_js_str("{}"));
         let _ = await_promise_sync(p);
     }
 }
@@ -152,7 +156,7 @@ fn test_ffi_container_list_zero() {
 #[test]
 fn test_ffi_container_list_one() {
     unsafe {
-        let p = js_container_list(1);
+        let p = js_container_list(to_js_str("{\"all\": true}"));
         let _ = await_promise_sync(p);
     }
 }
@@ -180,7 +184,7 @@ fn test_ffi_container_inspect_malformed() {
 fn test_ffi_container_get_backend_call1() {
     unsafe {
         let p = js_container_getBackend();
-        let _ = await_promise_sync(p);
+        assert!(!p.is_null());
     }
 }
 
@@ -189,7 +193,7 @@ fn test_ffi_container_get_backend_call1() {
 fn test_ffi_container_get_backend_call2() {
     unsafe {
         let p = js_container_getBackend();
-        let _ = await_promise_sync(p);
+        assert!(!p.is_null());
     }
 }
 
@@ -215,7 +219,7 @@ fn test_ffi_container_detect_backend_call2() {
 #[test]
 fn test_ffi_container_logs_null() {
     unsafe {
-        let p = js_container_logs(ptr::null(), 0);
+        let p = js_container_logs(ptr::null(), ptr::null());
         assert!(await_promise_sync(p).is_err());
     }
 }
@@ -224,7 +228,7 @@ fn test_ffi_container_logs_null() {
 #[test]
 fn test_ffi_container_logs_malformed() {
     unsafe {
-        let p = js_container_logs(to_js_str("id"), -1);
+        let p = js_container_logs(to_js_str("id"), to_js_str("{}"));
         let _ = await_promise_sync(p);
     }
 }
@@ -323,7 +327,7 @@ fn test_ffi_compose_up_malformed() {
 #[test]
 fn test_ffi_compose_down_invalid_handle() {
     unsafe {
-        let p = js_container_compose_down(0, 0);
+        let p = js_container_compose_down(0, to_js_str("{}"));
         assert!(await_promise_sync(p).is_err());
     }
 }
@@ -332,7 +336,7 @@ fn test_ffi_compose_down_invalid_handle() {
 #[test]
 fn test_ffi_compose_down_invalid_handle_volumes() {
     unsafe {
-        let p = js_container_compose_down(-1, 1);
+        let p = js_container_compose_down(-1, to_js_str("{\"volumes\": true}"));
         assert!(await_promise_sync(p).is_err());
     }
 }
@@ -359,7 +363,7 @@ fn test_ffi_compose_ps_invalid_handle_2() {
 #[test]
 fn test_ffi_compose_logs_null_handle() {
     unsafe {
-        let p = js_container_compose_logs(0, ptr::null(), 0);
+        let p = js_container_compose_logs(0, ptr::null());
         assert!(await_promise_sync(p).is_err());
     }
 }
@@ -368,7 +372,7 @@ fn test_ffi_compose_logs_null_handle() {
 #[test]
 fn test_ffi_compose_logs_invalid_handle() {
     unsafe {
-        let p = js_container_compose_logs(123, to_js_str("svc"), 10);
+        let p = js_container_compose_logs(123, to_js_str("{}"));
         assert!(await_promise_sync(p).is_err());
     }
 }
@@ -377,7 +381,7 @@ fn test_ffi_compose_logs_invalid_handle() {
 #[test]
 fn test_ffi_compose_exec_null_handle() {
     unsafe {
-        let p = js_container_compose_exec(0, ptr::null(), ptr::null());
+        let p = js_container_compose_exec(0, ptr::null(), ptr::null(), ptr::null());
         assert!(await_promise_sync(p).is_err());
     }
 }
@@ -386,7 +390,7 @@ fn test_ffi_compose_exec_null_handle() {
 #[test]
 fn test_ffi_compose_exec_invalid_handle() {
     unsafe {
-        let p = js_container_compose_exec(123, to_js_str("svc"), to_js_str("[]"));
+        let p = js_container_compose_exec(123, to_js_str("svc"), to_js_str("[]"), ptr::null());
         assert!(await_promise_sync(p).is_err());
     }
 }
