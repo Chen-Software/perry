@@ -16,6 +16,7 @@ pub static CONTAINER_INFO_LIST: OnceLock<DashMap<u64, Vec<ContainerInfo>>> = Onc
 pub static CONTAINER_LOGS: OnceLock<DashMap<u64, ContainerLogs>> = OnceLock::new();
 pub static IMAGE_INFO_LIST: OnceLock<DashMap<u64, Vec<ImageInfo>>> = OnceLock::new();
 pub static CONTAINER_LOGS_MAP: OnceLock<DashMap<u64, HashMap<String, ContainerLogs>>> = OnceLock::new();
+pub static STRING_MAP: OnceLock<DashMap<u64, String>> = OnceLock::new();
 
 static NEXT_HANDLE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -62,5 +63,11 @@ pub fn register_image_info_list(list: Vec<ImageInfo>) -> u64 {
 pub fn register_container_logs_map(map: HashMap<String, ContainerLogs>) -> u64 {
     let id = next_id();
     CONTAINER_LOGS_MAP.get_or_init(DashMap::new).insert(id, map);
+    id
+}
+
+pub fn register_string(s: String) -> u64 {
+    let id = next_id();
+    STRING_MAP.get_or_init(DashMap::new).insert(id, s);
     id
 }

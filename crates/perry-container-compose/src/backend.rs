@@ -5,7 +5,7 @@ use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 use serde_json::Value;
 pub use crate::error::{ComposeError, Result, BackendProbeResult};
-use crate::types::{ContainerSpec, ContainerHandle, ContainerInfo, ContainerLogs, ImageInfo};
+use crate::types::{ContainerSpec, ContainerHandle, ContainerInfo, ContainerLogs, ImageInfo, ComposeServiceBuild};
 
 pub fn which_helper(bin: &str) -> std::result::Result<PathBuf, which::Error> {
     which::which(bin)
@@ -43,6 +43,8 @@ pub trait ContainerBackend: Send + Sync {
     async fn remove_network(&self, name: &str) -> Result<()>;
     async fn create_volume(&self, name: &str, config: &VolumeConfig) -> Result<()>;
     async fn remove_volume(&self, name: &str) -> Result<()>;
+    async fn build(&self, spec: &ComposeServiceBuild, image_name: &str) -> Result<()>;
+    async fn inspect_network(&self, name: &str) -> Result<()>;
 }
 
 #[derive(Debug, Clone)]
@@ -237,6 +239,17 @@ impl ContainerBackend for OciBackend {
     async fn remove_network(&self, name: &str) -> Result<()> { self.exec_cli(&["network".into(), "rm".into(), name.into()]).await?; Ok(()) }
     async fn create_volume(&self, name: &str, _config: &VolumeConfig) -> Result<()> { self.exec_cli(&["volume".into(), "create".into(), name.into()]).await?; Ok(()) }
     async fn remove_volume(&self, name: &str) -> Result<()> { self.exec_cli(&["volume".into(), "rm".into(), name.into()]).await?; Ok(()) }
+    async fn build(&self, spec: &ComposeServiceBuild, image_name: &str) -> Result<()> {
+        let mut args = vec!["build".into(), "-t".into(), image_name.into()];
+        if let Some(ctx) = &spec.context { args.push(ctx.clone()); } else { args.push(".".into()); }
+        if let Some(df) = &spec.dockerfile { args.extend(["-f".into(), df.clone()]); }
+        self.exec_cli(&args).await?;
+        Ok(())
+    }
+    async fn inspect_network(&self, name: &str) -> Result<()> {
+        self.exec_cli(&["network".into(), "inspect".into(), name.into()]).await?;
+        Ok(())
+    }
 }
 
 fn parse_container_info_from_json(json: &Value) -> Result<ContainerInfo> {
@@ -263,7 +276,7 @@ pub async fn detect_backend() -> std::result::Result<Box<dyn ContainerBackend + 
         return Err(vec![res]);
     }
     let candidates: &[&str] = match std::env::consts::OS {
-        "macos" | "ios" => &["apple/container", "orbstack", "colima", "rancher-desktop", "podman", "lima", "docker"],
+        "macos" | "ios" => &["apple/container", "orbstack", "colima", "rancher-desktop", "lima", "podman", "nerdctl", "docker"],
         "linux" => &["podman", "nerdctl", "docker"],
         _ => &["podman", "nerdctl", "docker"],
     };
@@ -395,4 +408,6 @@ impl ContainerBackend for MockBackend {
     async fn remove_network(&self, _name: &str) -> Result<()> { Ok(()) }
     async fn create_volume(&self, _name: &str, _config: &VolumeConfig) -> Result<()> { Ok(()) }
     async fn remove_volume(&self, _name: &str) -> Result<()> { Ok(()) }
+    async fn build(&self, _spec: &ComposeServiceBuild, _image_name: &str) -> Result<()> { Ok(()) }
+    async fn inspect_network(&self, _name: &str) -> Result<()> { Ok(()) }
 }
