@@ -130,7 +130,9 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     let backend_res = crate::backend::detect_backend().await;
     let backend = match backend_res {
-        Ok(b) => std::sync::Arc::new(b) as std::sync::Arc<dyn crate::backend::ContainerBackend>,
+        Ok(b) => {
+            std::sync::Arc::new(b.to_backend()) as std::sync::Arc<dyn crate::backend::ContainerBackend>
+        }
         Err(probed) => return Err(crate::error::ComposeError::NoBackendFound { probed }),
     };
 

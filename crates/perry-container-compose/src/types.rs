@@ -686,6 +686,7 @@ pub struct ContainerSpec {
     pub entrypoint: Option<Vec<String>>,
     pub network: Option<String>,
     pub rm: Option<bool>,
+    pub isolation: Option<IsolationLevel>,
 }
 
 /// Handle returned after creating/running a container.
@@ -721,4 +722,20 @@ pub struct ImageInfo {
     pub tag: String,
     pub size: u64,
     pub created: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ExecutionStrategy {
+    CliExec,
+    ApiSocket,
+    VmSpawn,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum IsolationLevel {
+    None,
+    Process,
+    Container,
+    MicroVm,
+    Wasm,
 }

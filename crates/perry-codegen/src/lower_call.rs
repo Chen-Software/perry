@@ -4040,7 +4040,7 @@ static PERRY_CONTAINER_COMPOSE_TABLE: &[UiSig] = &[
 /// Instance methods on ComposeHandle
 static PERRY_COMPOSE_HANDLE_TABLE: &[UiSig] = &[
     UiSig { method: "down", runtime: "js_container_compose_down",
-            args: &[UiArgKind::F64], ret: UiReturnKind::Promise },
+            args: &[UiArgKind::F64, UiArgKind::F64], ret: UiReturnKind::Promise },
     UiSig { method: "ps", runtime: "js_container_compose_ps",
             args: &[], ret: UiReturnKind::Promise },
     UiSig { method: "logs", runtime: "js_container_compose_logs",

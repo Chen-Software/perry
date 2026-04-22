@@ -7,6 +7,7 @@
 //! 3. Via FFI from compiled Perry TypeScript code (requires `ffi` feature)
 
 pub mod backend;
+pub mod installer;
 pub mod cli;
 pub mod compose;
 pub mod config;

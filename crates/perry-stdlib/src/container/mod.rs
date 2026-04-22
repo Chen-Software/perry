@@ -30,7 +30,7 @@ async fn get_global_backend() -> Result<&'static Arc<dyn ContainerBackend>, Cont
     }
 
     let b = detect_backend().await
-        .map(|b| Arc::new(b) as Arc<dyn ContainerBackend>)
+        .map(|b| Arc::new(b.to_backend()) as Arc<dyn ContainerBackend>)
         .map_err(|probed| ContainerError::NoBackendFound { probed })?;
 
     let _ = BACKEND.set(b);
@@ -454,7 +454,7 @@ pub unsafe extern "C" fn js_container_detectBackend() -> *mut Promise {
     crate::common::spawn_for_promise_deferred(promise as *mut u8, async move {
         match detect_backend().await {
             Ok(b) => {
-                let name = b.backend_name().to_string();
+                let name = b.name().to_string();
                 let json = serde_json::json!([{
                     "name": name,
                     "available": true,

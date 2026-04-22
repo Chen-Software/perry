@@ -565,7 +565,7 @@ impl ContainerBackend for CliBackend {
     }
 }
 
-pub async fn detect_backend() -> std::result::Result<CliBackend, Vec<BackendProbeResult>> {
+pub async fn detect_backend() -> std::result::Result<BackendDriver, Vec<BackendProbeResult>> {
     if let Ok(name) = std::env::var("PERRY_CONTAINER_BACKEND") {
         return probe_candidate(&name).await
             .map_err(|reason| vec![BackendProbeResult { name: name.clone(), available: false, reason }]);
@@ -593,7 +593,7 @@ fn platform_candidates() -> &'static [&'static str] {
     }
 }
 
-async fn probe_candidate(name: &str) -> std::result::Result<CliBackend, String> {
+async fn probe_candidate(name: &str) -> std::result::Result<BackendDriver, String> {
     let which_bin = |name: &str| -> std::result::Result<PathBuf, String> {
         which::which(name).map_err(|_| format!("{} not found", name))
     };
@@ -601,7 +601,7 @@ async fn probe_candidate(name: &str) -> std::result::Result<CliBackend, String> 
     match name {
         "apple/container" => {
             let bin = which_bin("container")?;
-            Ok(CliBackend::new(bin, Box::new(AppleContainerProtocol)))
+            Ok(BackendDriver::AppleContainer { bin })
         }
         "podman" => {
             let bin = which_bin("podman")?;
@@ -612,11 +612,11 @@ async fn probe_candidate(name: &str) -> std::result::Result<CliBackend, String> 
                     return Err("no podman machine running".into());
                 }
             }
-            Ok(CliBackend::new(bin, Box::new(DockerProtocol)))
+            Ok(BackendDriver::Podman { bin })
         }
         "orbstack" => {
             let bin = which_bin("orb").or_else(|_| which_bin("docker")).map_err(|_| "orbstack not found")?;
-            Ok(CliBackend::new(bin, Box::new(DockerProtocol)))
+            Ok(BackendDriver::Podman { bin })
         }
         "colima" => {
             let bin = which_bin("colima")?;
@@ -625,7 +625,7 @@ async fn probe_candidate(name: &str) -> std::result::Result<CliBackend, String> 
                 return Err("colima not running".into());
             }
             let dbin = which_bin("docker").map_err(|_| "docker cli not found for colima")?;
-            Ok(CliBackend::new(dbin, Box::new(DockerProtocol)))
+            Ok(BackendDriver::Colima { bin: dbin })
         }
         "lima" => {
             let bin = which_bin("limactl")?;
@@ -635,16 +635,62 @@ async fn probe_candidate(name: &str) -> std::result::Result<CliBackend, String> 
                 .find(|v| v["status"] == "Running")
                 .and_then(|v| v["name"].as_str().map(|s| s.to_string()))
                 .ok_or("no running lima instance")?;
-            Ok(CliBackend::new(bin, Box::new(LimaProtocol { instance })))
+            Ok(BackendDriver::Lima { bin, instance })
         }
         "nerdctl" => {
             let bin = which_bin("nerdctl")?;
-            Ok(CliBackend::new(bin, Box::new(DockerProtocol)))
+            Ok(BackendDriver::Podman { bin })
         }
         "docker" => {
             let bin = which_bin("docker")?;
-            Ok(CliBackend::new(bin, Box::new(DockerProtocol)))
+            Ok(BackendDriver::Podman { bin })
         }
         _ => Err("unknown backend".into()),
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum BackendDriver {
+    AppleContainer { bin: PathBuf },
+    Orbstack { bin: PathBuf },
+    Colima { bin: PathBuf },
+    RancherDesktop { bin: PathBuf },
+    Podman { bin: PathBuf },
+    Lima { bin: PathBuf, instance: String },
+    Nerdctl { bin: PathBuf },
+    Docker { bin: PathBuf },
+}
+
+impl BackendDriver {
+    pub fn name(&self) -> &'static str {
+        match self {
+            BackendDriver::AppleContainer { .. } => "apple/container",
+            BackendDriver::Orbstack { .. } => "orbstack",
+            BackendDriver::Colima { .. } => "colima",
+            BackendDriver::RancherDesktop { .. } => "rancher-desktop",
+            BackendDriver::Podman { .. } => "podman",
+            BackendDriver::Lima { .. } => "lima",
+            BackendDriver::Nerdctl { .. } => "nerdctl",
+            BackendDriver::Docker { .. } => "docker",
+        }
+    }
+
+    pub fn to_backend(&self) -> CliBackend {
+        let protocol: Box<dyn CliProtocol> = match self {
+            BackendDriver::AppleContainer { .. } => Box::new(AppleContainerProtocol),
+            BackendDriver::Lima { instance, .. } => Box::new(LimaProtocol { instance: instance.clone() }),
+            _ => Box::new(DockerProtocol),
+        };
+        let bin = match self {
+            BackendDriver::AppleContainer { bin } => bin.clone(),
+            BackendDriver::Orbstack { bin } => bin.clone(),
+            BackendDriver::Colima { bin } => bin.clone(),
+            BackendDriver::RancherDesktop { bin } => bin.clone(),
+            BackendDriver::Podman { bin } => bin.clone(),
+            BackendDriver::Lima { bin, .. } => bin.clone(),
+            BackendDriver::Nerdctl { bin } => bin.clone(),
+            BackendDriver::Docker { bin } => bin.clone(),
+        };
+        CliBackend::new(bin, protocol)
     }
 }
