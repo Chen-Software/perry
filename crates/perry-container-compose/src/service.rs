@@ -1,6 +1,3 @@
-//! Service runtime state and name generation.
-
-use crate::backend::ContainerBackend;
 use crate::error::Result;
 use crate::types::{ComposeService, ContainerInfo, ContainerSpec};
 use md5::{Digest, Md5};
@@ -18,21 +15,9 @@ pub fn generate_name(image: &str, service_name: &str) -> String {
     format!("{}_{}_{:08x}", service_name, short_hash, random_suffix)
 }
 
-/// Compute a short hash of the service configuration.
-pub fn service_config_hash(svc: &ComposeService) -> String {
-    let service_yaml = serde_yaml::to_string(svc).unwrap_or_default();
-    let mut hasher = Md5::new();
-    hasher.update(service_yaml.as_bytes());
-    hex::encode(hasher.finalize())[..8].to_string()
-}
-
-/// Service runtime state tracking.
 pub struct ServiceState {
-    /// Container ID
-    pub container_id: String,
-    /// Container name
-    pub container_name: String,
-    /// Whether the service container is running
+    pub id: String,
+    pub name: String,
     pub running: bool,
 }
 
@@ -149,6 +134,7 @@ impl ComposeService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ComposeService;
 
     #[test]
     fn test_generate_name_format() {
@@ -162,10 +148,31 @@ mod tests {
     }
 
     #[test]
-    fn test_explicit_name() {
-        let mut svc = ComposeService::default();
-        svc.container_name = Some("my-container".to_string());
-        let name = service_container_name(&svc, "web");
-        assert_eq!(name, "my-container");
+    fn test_service_container_name_stability() {
+        let svc = ComposeService {
+            image: Some("postgres:16".to_string()),
+            ..Default::default()
+        };
+
+        let n1 = service_container_name(&svc, "db");
+        let n2 = service_container_name(&svc, "db");
+
+        let parts1: Vec<&str> = n1.split('-').collect();
+        let parts2: Vec<&str> = n2.split('-').collect();
+
+        // Image hash (part 1) should be stable for the same image
+        assert_eq!(parts1[1], parts2[1]);
+        // Random suffix (part 2) should vary
+        assert_ne!(parts1[2], parts2[2]);
+    }
+
+    #[test]
+    fn test_service_container_name_override() {
+        let svc = ComposeService {
+            container_name: Some("my-custom-name".to_string()),
+            ..Default::default()
+        };
+        let name = service_container_name(&svc, "ignored");
+        assert_eq!(name, "my-custom-name");
     }
 }
