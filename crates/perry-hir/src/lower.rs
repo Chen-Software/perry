@@ -10599,10 +10599,16 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                 ast::SuperProp::Ident(_ident) => {
                     // This is typically used in Call expressions like super.method()
                     // We return a placeholder that will be handled specially
-                    Err(anyhow!("Direct super property access not yet supported, use super.method()"))
+                    crate::lower_bail!(
+                        super_prop.span,
+                        "Direct super property access not yet supported, use super.method()"
+                    );
                 }
                 ast::SuperProp::Computed(_) => {
-                    Err(anyhow!("Computed super property access not supported"))
+                    crate::lower_bail!(
+                        super_prop.span,
+                        "Computed super property access not supported"
+                    );
                 }
             }
         }

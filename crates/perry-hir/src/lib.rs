@@ -3,6 +3,7 @@
 //! The HIR is a typed, simplified representation of TypeScript code
 //! that is easier to analyze and transform than the raw AST.
 
+pub mod error;
 pub mod ir;
 pub mod js_transform;
 pub mod lower;
