@@ -136,19 +136,23 @@ while IFS= read -r -d '' src; do
     rm -rf "$app_dir"
 
     echo "=== $rel ==="
+    echo "  [+] compile start $(date +%T)"
     if ! "$PERRY_BIN" compile --target ios-simulator --app-bundle-id "$bundle_id" "$src" -o "$bin_out" >"$OUT_DIR/$stem.compile.log" 2>&1; then
         echo "  COMPILE_FAIL (see $OUT_DIR/$stem.compile.log)"
         FAIL=$((FAIL+1)); FAILURES+=("$rel COMPILE_FAIL"); continue
     fi
+    echo "  [+] compile done $(date +%T)"
     if [ ! -d "$app_dir" ]; then
         echo "  NO_BUNDLE ($app_dir missing after compile)"
         FAIL=$((FAIL+1)); FAILURES+=("$rel NO_BUNDLE"); continue
     fi
 
+    echo "  [+] install start $(date +%T)"
     if ! xcrun simctl install "$UDID" "$app_dir" >/dev/null 2>&1; then
         echo "  INSTALL_FAIL"
         FAIL=$((FAIL+1)); FAILURES+=("$rel INSTALL_FAIL"); continue
     fi
+    echo "  [+] install done $(date +%T)"
 
     # Launch with PERRY_UI_TEST_MODE so the app self-exits after one frame.
     # simctl launch has NO --setenv flag. Env vars reach the spawned app by
@@ -169,12 +173,14 @@ while IFS= read -r -d '' src; do
     # exit timer ensures the app doesn't linger on the simulator between
     # examples. We trade "did the app cleanly exit?" for "did the bundle
     # at least launch?" — still a strong tier-2 signal.
+    echo "  [+] launch start $(date +%T)"
     SIMCTL_CHILD_PERRY_UI_TEST_MODE=1 \
     SIMCTL_CHILD_PERRY_UI_TEST_EXIT_AFTER_MS=500 \
     run_with_timeout "$LAUNCH_TIMEOUT" xcrun simctl launch \
         --terminate-running-process \
         "$UDID" "$bundle_id" >"$OUT_DIR/$stem.run.log" 2>&1
     rc=$?
+    echo "  [+] launch done $(date +%T) rc=$rc"
     if [ "$rc" -ne 0 ]; then
         if [ "$rc" = "124" ]; then
             echo "  TIMEOUT (> ${LAUNCH_TIMEOUT}s)"
@@ -190,7 +196,9 @@ while IFS= read -r -d '' src; do
 
     echo "  PASS"
     PASS=$((PASS+1))
+    echo "  [+] uninstall start $(date +%T)"
     xcrun simctl uninstall "$UDID" "$bundle_id" >/dev/null 2>&1 || true
+    echo "  [+] uninstall done $(date +%T)"
 done < <(find "$REPO_ROOT/docs/examples" -name "*.ts" -print0)
 
 echo

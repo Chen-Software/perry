@@ -27,6 +27,7 @@ env:
 jobs:
   simctl:
     runs-on: macos-14
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -53,6 +54,7 @@ jobs:
 
       - name: Run simctl doc-example verification
         run: ./scripts/run_simctl_tests.sh
+        timeout-minutes: 45
         env:
           DEVICE: ${{ github.event.inputs.device || 'iPhone 15' }}
 
