@@ -1,7 +1,6 @@
 use crate::error::Result;
 use crate::types::ComposeService;
 use md5::{Md5, Digest};
-use rand::Rng;
 
 pub struct ServiceState {
     pub container_id: Option<String>,
@@ -9,23 +8,26 @@ pub struct ServiceState {
     pub running: bool,
 }
 
-pub fn generate_name(service: &ComposeService) -> Result<String> {
+pub fn generate_name(project: &str, service_name: &str, service: &ComposeService) -> Result<String> {
     if let Some(name) = &service.container_name {
         return Ok(name.clone());
     }
 
-    // Stable prefix based on service config
+    // Stable name based on project and service name
+    // We can also incorporate a hash of the config for uniqueness if multiple versions exist,
+    // but typically compose just uses project_service_index.
+    // Requirement 6.17 mentioned MD5 hash of service YAML.
+
     let yaml = serde_yaml::to_string(service).map_err(|e| crate::error::ComposeError::ParseError(e.to_string()))?;
     let mut hasher = Md5::new();
+    hasher.update(project.as_bytes());
+    hasher.update(service_name.as_bytes());
     hasher.update(yaml.as_bytes());
     let hash = hasher.finalize();
-    let prefix = hex::encode(&hash[..4]); // 8 chars
+    let hash_str = hex::encode(&hash[..4]); // 8 chars
 
-    // Random suffix
-    let mut rng = rand::thread_rng();
-    let suffix: u32 = rng.gen();
-
-    Ok(format!("{}-{:08x}", prefix, suffix))
+    // For MVP, we'll use a stable name that includes the hash so it's unique to the config
+    Ok(format!("{}_{}_{}", project, service_name, hash_str))
 }
 
 pub fn needs_build(service: &ComposeService) -> bool {

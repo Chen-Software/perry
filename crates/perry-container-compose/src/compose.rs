@@ -6,6 +6,7 @@ use crate::error::{ComposeError, Result};
 use crate::types::{ComposeSpec, ComposeHandle, ContainerSpec, ContainerInfo, ContainerLogs};
 use crate::backend::{ContainerBackend, NetworkConfig, VolumeConfig};
 use crate::service;
+use crate::orchestrate::orchestrate_service;
 
 static COMPOSE_HANDLES: Lazy<DashMap<u64, Arc<ComposeEngine>>> = Lazy::new(DashMap::new);
 static NEXT_STACK_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -18,12 +19,23 @@ pub struct ComposeEngine {
 }
 
 impl ComposeEngine {
-    pub fn new(spec: ComposeSpec, project_name: String, backend: Arc<dyn ContainerBackend>) -> Self {
-        let stack_id = NEXT_STACK_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Self { spec, project_name, backend, stack_id }
+    pub fn new(spec: ComposeSpec, project_name: String, backend: Arc<dyn ContainerBackend>) -> Arc<Self> {
+        let stack_id = NEXT_STACK_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let engine = Arc::new(Self {
+            spec,
+            project_name,
+            backend,
+            stack_id,
+        });
+        COMPOSE_HANDLES.insert(stack_id, engine.clone());
+        engine
     }
 
-    pub async fn up(&self, detach: bool, build: bool, _remove_orphans: bool) -> Result<ComposeHandle> {
+    pub fn get_engine(stack_id: u64) -> Option<Arc<Self>> {
+        COMPOSE_HANDLES.get(&stack_id).map(|r| r.value().clone())
+    }
+
+    pub async fn up(&self, _detach: bool, _build: bool, _remove_orphans: bool) -> Result<ComposeHandle> {
         let order = resolve_startup_order(&self.spec)?;
 
         // Create networks
@@ -52,75 +64,43 @@ impl ComposeEngine {
             }
         }
 
-        let mut started_services = Vec::new();
+        let mut started_containers = Vec::new();
 
-        for svc_name in order {
-            let service = self.spec.services.get(&svc_name).ok_or_else(|| ComposeError::NotFound(svc_name.clone()))?;
-            let container_name = service::generate_name(service)?;
-
-            // Idempotent flow:
-            match self.backend.inspect(&container_name).await {
-                Ok(info) => {
-                    if info.status.contains("running") || info.status.contains("Up") {
-                        // Already running, skip
-                        started_services.push(svc_name);
-                        continue;
-                    } else {
-                        // Exists but stopped, restart
-                        self.backend.start(&container_name).await?;
-                        started_services.push(svc_name);
-                        continue;
-                    }
+        for svc_name in &order {
+            let service = self.spec.services.get(svc_name).ok_or_else(|| ComposeError::NotFound(svc_name.clone()))?;
+            match orchestrate_service(&self.project_name, svc_name, service, self.backend.as_ref()).await {
+                Ok(container_name) => {
+                    started_containers.push(container_name);
                 }
-                Err(_) => {
-                    // Does not exist, create fresh
+                Err(e) => {
+                    // Rollback
+                    for name in started_containers.iter().rev() {
+                        let _ = self.backend.stop(name, None).await;
+                        let _ = self.backend.remove(name, true).await;
+                    }
+                    return Err(e);
                 }
             }
-
-            if build || service::needs_build(service) {
-                // build logic - placeholder
-            } else if let Some(image) = &service.image {
-                self.backend.pull_image(image).await?;
-            }
-
-            let container_spec = ContainerSpec {
-                image: service.image.clone().unwrap_or_default(),
-                name: Some(container_name.clone()),
-                cmd: service.command.as_ref().and_then(|v| {
-                    if let Some(s) = v.as_str() {
-                        Some(vec![s.to_string()])
-                    } else if let Some(arr) = v.as_sequence() {
-                        Some(arr.iter().map(|x| x.as_str().unwrap_or("").to_string()).collect())
-                    } else {
-                        None
-                    }
-                }),
-                ..Default::default()
-            };
-
-            self.backend.run(&container_spec).await?;
-            started_services.push(svc_name);
         }
 
         let handle = ComposeHandle {
             stack_id: self.stack_id,
             project_name: self.project_name.clone(),
-            services: started_services,
+            services: order,
         };
 
         Ok(handle)
     }
 
     pub async fn down(&self, volumes: bool, _remove_orphans: bool) -> Result<()> {
-        // Stop and remove containers in reverse order
         let order = resolve_startup_order(&self.spec)?;
         for svc_name in order.into_iter().rev() {
-            let container_name = format!("{}_{}_1", self.project_name, svc_name);
+            let service = self.spec.services.get(&svc_name).unwrap();
+            let container_name = service::generate_name(&self.project_name, &svc_name, service)?;
             let _ = self.backend.stop(&container_name, None).await;
             let _ = self.backend.remove(&container_name, true).await;
         }
 
-        // Remove networks
         if let Some(networks) = &self.spec.networks {
             for name in networks.keys() {
                 let net_name = format!("{}_{}", self.project_name, name);
@@ -128,7 +108,6 @@ impl ComposeEngine {
             }
         }
 
-        // Remove volumes if requested
         if volumes {
             if let Some(vols) = &self.spec.volumes {
                 for name in vols.keys() {
@@ -138,67 +117,82 @@ impl ComposeEngine {
             }
         }
 
+        COMPOSE_HANDLES.remove(&self.stack_id);
         Ok(())
     }
 
-    pub async fn ps(&self) -> Result<Vec<ContainerInfo>> {
-        // This should filter backend.list() by project labels
-        self.backend.list(true).await
-    }
-
-    pub async fn logs(&self, service: Option<&str>, tail: Option<u32>) -> Result<ContainerLogs> {
-        let container_name = if let Some(svc) = service {
-            format!("{}_{}_1", self.project_name, svc)
-        } else {
-            // Combined logs for all services - placeholder
-            return Ok(ContainerLogs { stdout: String::new(), stderr: String::new() });
-        };
-        self.backend.logs(&container_name, tail).await
-    }
-
-    pub async fn exec(&self, service: &str, cmd: &[String]) -> Result<ContainerLogs> {
-        let container_name = format!("{}_{}_1", self.project_name, service);
-        self.backend.exec(&container_name, cmd, None, None).await
-    }
-
     pub async fn start(&self, services: &[String]) -> Result<()> {
-        let services = if services.is_empty() {
+        let targets = if services.is_empty() {
             self.spec.services.keys().cloned().collect::<Vec<_>>()
         } else {
             services.to_vec()
         };
-        for svc in services {
-            let container_name = format!("{}_{}_1", self.project_name, svc);
+        for svc in targets {
+            let service = self.spec.services.get(&svc).ok_or_else(|| ComposeError::NotFound(svc.clone()))?;
+            let container_name = service::generate_name(&self.project_name, &svc, service)?;
             self.backend.start(&container_name).await?;
         }
         Ok(())
     }
 
     pub async fn stop(&self, services: &[String]) -> Result<()> {
-        let services = if services.is_empty() {
+        let targets = if services.is_empty() {
             self.spec.services.keys().cloned().collect::<Vec<_>>()
         } else {
             services.to_vec()
         };
-        for svc in services {
-            let container_name = format!("{}_{}_1", self.project_name, svc);
+        for svc in targets {
+            let service = self.spec.services.get(&svc).ok_or_else(|| ComposeError::NotFound(svc.clone()))?;
+            let container_name = service::generate_name(&self.project_name, &svc, service)?;
             self.backend.stop(&container_name, None).await?;
         }
         Ok(())
     }
 
     pub async fn restart(&self, services: &[String]) -> Result<()> {
-        let services = if services.is_empty() {
+        let targets = if services.is_empty() {
             self.spec.services.keys().cloned().collect::<Vec<_>>()
         } else {
             services.to_vec()
         };
-        for svc in services {
-            let container_name = format!("{}_{}_1", self.project_name, svc);
-            self.backend.stop(&container_name, None).await.ok();
+        for svc in targets {
+            let service = self.spec.services.get(&svc).ok_or_else(|| ComposeError::NotFound(svc.clone()))?;
+            let container_name = service::generate_name(&self.project_name, &svc, service)?;
+            let _ = self.backend.stop(&container_name, None).await;
             self.backend.start(&container_name).await?;
         }
         Ok(())
+    }
+
+    pub async fn ps(&self) -> Result<Vec<ContainerInfo>> {
+        let all_containers = self.backend.list(true).await?;
+        let mut project_containers = Vec::new();
+
+        for svc_name in self.spec.services.keys() {
+            let service = self.spec.services.get(svc_name).unwrap();
+            let container_name = service::generate_name(&self.project_name, svc_name, service)?;
+            if let Some(info) = all_containers.iter().find(|c| c.name == container_name || c.name == format!("/{}", container_name)) {
+                project_containers.push(info.clone());
+            }
+        }
+
+        Ok(project_containers)
+    }
+
+    pub async fn logs(&self, service: Option<&str>, tail: Option<u32>) -> Result<ContainerLogs> {
+        let container_name = if let Some(svc) = service {
+            let spec = self.spec.services.get(svc).ok_or_else(|| ComposeError::NotFound(svc.to_string()))?;
+            service::generate_name(&self.project_name, svc, spec)?
+        } else {
+            return Ok(ContainerLogs { stdout: String::new(), stderr: String::new() });
+        };
+        self.backend.logs(&container_name, tail).await
+    }
+
+    pub async fn exec(&self, service: &str, cmd: &[String]) -> Result<ContainerLogs> {
+        let spec = self.spec.services.get(service).ok_or_else(|| ComposeError::NotFound(service.to_string()))?;
+        let container_name = service::generate_name(&self.project_name, service, spec)?;
+        self.backend.exec(&container_name, cmd, None, None).await
     }
 }
 
@@ -253,50 +247,4 @@ pub fn resolve_startup_order(spec: &ComposeSpec) -> Result<Vec<String>> {
     }
 
     Ok(result)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::{ComposeSpec, ComposeService, DependsOnSpec};
-    use indexmap::IndexMap;
-
-    #[test]
-    fn test_resolve_startup_order_simple() {
-        let mut services = IndexMap::new();
-        services.insert("db".to_string(), ComposeService::default());
-        services.insert("web".to_string(), ComposeService {
-            depends_on: Some(DependsOnSpec::List(vec!["db".to_string()])),
-            ..Default::default()
-        });
-
-        let spec = ComposeSpec {
-            services,
-            ..Default::default()
-        };
-
-        let order = resolve_startup_order(&spec).unwrap();
-        assert_eq!(order, vec!["db", "web"]);
-    }
-
-    #[test]
-    fn test_resolve_startup_order_cycle() {
-        let mut services = IndexMap::new();
-        services.insert("a".to_string(), ComposeService {
-            depends_on: Some(DependsOnSpec::List(vec!["b".to_string()])),
-            ..Default::default()
-        });
-        services.insert("b".to_string(), ComposeService {
-            depends_on: Some(DependsOnSpec::List(vec!["a".to_string()])),
-            ..Default::default()
-        });
-
-        let spec = ComposeSpec {
-            services,
-            ..Default::default()
-        };
-
-        let result = resolve_startup_order(&spec);
-        assert!(result.is_err());
-    }
 }

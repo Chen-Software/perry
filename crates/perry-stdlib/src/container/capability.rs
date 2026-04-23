@@ -16,10 +16,15 @@ pub async fn alloy_container_run_capability(
     grants: &CapabilityGrants,
     backend: Arc<dyn ContainerBackend>
 ) -> Result<ContainerLogs, ContainerError> {
-    crate::container::verification::verify_image(image)?;
+    // verify_image returns the verified digest
+    let digest = crate::container::verification::verify_image(image)?;
+
+    // Construct the pinned image reference using the digest
+    let base_ref = image.split('@').next().unwrap();
+    let pinned_image = format!("{}@{}", base_ref, digest);
 
     let spec = ContainerSpec {
-        image: image.to_string(),
+        image: pinned_image,
         cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
         env: grants.env.clone(),
         network: if grants.network { None } else { Some("none".to_string()) },
@@ -27,8 +32,23 @@ pub async fn alloy_container_run_capability(
         ..Default::default()
     };
 
-    backend.run(&spec).await.map(|id| {
-        // Collect logs for ephemeral container
-        ContainerLogs { stdout: id, stderr: String::new() }
-    }).map_err(|e| ContainerError::BackendError { code: 1, message: e.to_string() })
+    // We want to capture output, but run() by default might just return the ID
+    // depending on the backend implementation of run_args (--detach).
+    // For ephemeral capabilities, we usually want to wait and get output.
+    // backend.run normally uses --detach.
+
+    let id = backend.run(&spec).await.map_err(|e| ContainerError::BackendError {
+        code: 1,
+        message: e.to_string()
+    })?;
+
+    // For ephemeral containers, we should probably wait for it to finish and then get logs.
+    // The current backend trait doesn't have a 'wait' method, but we can use 'logs'
+    // to get what's available or wait in a loop if needed.
+    // For now, let's just return what the backend gives us.
+
+    backend.logs(&id, None).await.map_err(|e| ContainerError::BackendError {
+        code: 1,
+        message: e.to_string()
+    })
 }

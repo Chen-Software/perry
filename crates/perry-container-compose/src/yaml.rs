@@ -129,7 +129,7 @@ pub fn parse_and_merge_files(files: &[PathBuf], env: &HashMap<String, String>) -
         if !file.exists() {
             return Err(ComposeError::FileNotFound(file.to_string_lossy().to_string()));
         }
-        let content = std::fs::read_to_string(file).map_err(ComposeError::IoError)?;
+        let content = std::fs::read_to_string(file).map_err(|e| ComposeError::IoError(e.to_string()))?;
         let spec = parse_compose_yaml(&content, env)?;
 
         if let Some(mut root) = root_spec.take() {

@@ -304,7 +304,7 @@ impl<P: CliProtocol> CliBackend<P> {
         }
         cmd.args(args);
 
-        let output = cmd.output().await.map_err(ComposeError::IoError)?;
+        let output = cmd.output().await.map_err(|e| ComposeError::IoError(e.to_string()))?;
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let code = output.status.code().unwrap_or(-1);

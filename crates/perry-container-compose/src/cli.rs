@@ -5,6 +5,7 @@ use crate::project::ComposeProject;
 use crate::config::ProjectConfig;
 use crate::compose::ComposeEngine;
 use crate::backend::detect_backend;
+use crate::service;
 use std::sync::Arc;
 
 #[derive(Parser)]
@@ -107,12 +108,18 @@ pub async fn run_cli() -> Result<()> {
             }
         }
         Commands::Logs { services, tail, .. } => {
-            let logs = engine.logs(services.first().map(|s: &String| s.as_str()), tail).await?;
+            let container_name = if let Some(svc) = services.first() {
+                service::generate_name(&engine.project_name, svc, engine.spec.services.get(svc).unwrap())?
+            } else {
+                String::new()
+            };
+            let logs = engine.backend.logs(&container_name, tail).await?;
             print!("{}", logs.stdout);
             eprint!("{}", logs.stderr);
         }
         Commands::Exec { service, command, .. } => {
-            let logs = engine.exec(&service, &command).await?;
+            let container_name = service::generate_name(&engine.project_name, &service, engine.spec.services.get(&service).unwrap())?;
+            let logs = engine.backend.exec(&container_name, &command, None, None).await?;
             print!("{}", logs.stdout);
             eprint!("{}", logs.stderr);
         }
@@ -123,8 +130,14 @@ pub async fn run_cli() -> Result<()> {
                 println!("{}", serde_yaml::to_string(&engine.spec).unwrap());
             }
         }
-        _ => {
-            println!("Command not fully implemented in this MVP");
+        Commands::Start { services } => {
+            engine.start(&services).await?;
+        }
+        Commands::Stop { services } => {
+            engine.stop(&services).await?;
+        }
+        Commands::Restart { services } => {
+            engine.restart(&services).await?;
         }
     }
 

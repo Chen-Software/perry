@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use dashmap::DashMap;
 use perry_runtime::{Promise, StringHeader};
-use crate::container::backend::{ContainerBackend, detect_backend};
+use crate::container::backend::{ContainerBackend, detect_backend, BackendProbeResult};
 use crate::container::types::*;
 use crate::container::error::ContainerError;
 use crate::container::compose::ComposeEngine;
@@ -295,6 +295,29 @@ pub unsafe extern "C" fn js_container_getBackend() -> *const StringHeader {
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn js_container_detectBackend() -> *mut Promise {
+    let promise = perry_runtime::js_promise_new();
+    crate::common::spawn_for_promise(promise as *mut u8, async move {
+        let mut probed = Vec::new();
+        // This is a bit tricky as detect_backend only returns the success one.
+        // We might need a separate function in perry-container-compose to probe all.
+        // For now, let's just return the current backend if detected.
+        if let Ok(backend) = detect_backend().await {
+            probed.push(BackendProbeResult {
+                name: backend.name().to_string(),
+                available: true,
+                reason: None,
+                version: None,
+            });
+        }
+        let res = serde_json::to_string(&probed).unwrap();
+        let s_ptr = perry_runtime::js_string_from_bytes(res.as_ptr(), res.len() as u32);
+        Ok(perry_runtime::JSValue::string_ptr(s_ptr).bits())
+    });
+    promise
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn js_container_composeUp(spec_json: *const StringHeader) -> *mut Promise {
     let spec_str = string_from_header(spec_json).unwrap_or_default();
     let spec: perry_container_compose::types::ComposeSpec = match serde_json::from_str(&spec_str) {
@@ -311,7 +334,7 @@ pub unsafe extern "C" fn js_container_composeUp(spec_json: *const StringHeader) 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         let backend = get_backend().map_err(|e| e.to_string())?;
         let project_name = spec.name.clone().unwrap_or_else(|| "perry-stack".to_string());
-        let engine = Arc::new(ComposeEngine::new(spec, project_name, backend));
+        let engine = ComposeEngine::new(spec, project_name, backend);
         let handle = engine.up(true, false, false).await.map_err(|e| e.to_string())?;
 
         COMPOSE_HANDLES.get_or_init(DashMap::new).insert(handle.stack_id, engine);

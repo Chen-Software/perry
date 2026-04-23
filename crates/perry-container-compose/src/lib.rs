@@ -7,6 +7,8 @@ pub mod config;
 pub mod project;
 pub mod compose;
 pub mod cli;
+pub mod testing;
+pub mod orchestrate;
 
 pub use error::{ComposeError, Result};
 pub use types::{ComposeSpec, ComposeService, ComposeHandle};
