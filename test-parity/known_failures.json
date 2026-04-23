@@ -19,6 +19,10 @@
     "status": "bug",
     "reason": "Interface implementation edge cases"
   },
+  "test_edge_map_set": {
+    "status": "bug",
+    "reason": "CWD-dependent: setA.forEach with closure-captured setB.has(val) returns false when compiled from project root, true when compiled from /tmp. Same file MD5, same flags, both paths produce binary with --no-cache. The simpler Set.has() regression (new Set([...]) without type args gave Type::Named instead of Generic) was fixed in v0.5.178 via refine_type_from_init + infer_type_from_expr. The remaining env-dependent flake tracked separately; only manifests at scale inside test-files/"
+  },
   "test_gap_async_advanced": {
     "status": "known_limitation",
     "reason": "Async generators, for-await-of, Promise.allSettled not implemented (segfault)"

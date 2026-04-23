@@ -2433,7 +2433,7 @@ pub(crate) fn lower_native_method_call(
                 args.len()
             );
         }
-        let Expr::Object(props) = &args[0] else {
+        let Some(props) = extract_options_fields(ctx, &args[0]) else {
             bail!(
                 "perry/ui: App(...) requires a config object literal. Use \
                  `App({{ title: ..., width: ..., height: ..., body: ... }})` \
@@ -2445,7 +2445,7 @@ pub(crate) fn lower_native_method_call(
         let mut height_d: String = "768.0".to_string();
         let mut body_handle: String = "0".to_string();
         let mut icon_ptr: Option<String> = None;
-        for (key, val) in props {
+        for (key, val) in &props {
             match key.as_str() {
                 "title" => {
                     let v = lower_expr(ctx, val)?;

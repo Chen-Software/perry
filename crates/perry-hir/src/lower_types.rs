@@ -164,6 +164,13 @@ pub(crate) fn infer_type_from_expr(expr: &ast::Expr, ctx: &LoweringContext) -> T
         // `is_map_expr` / `is_set_expr` etc. match — they check `base == "Map"`
         // on the Generic variant). Phase 4.1 lets `new C().method()` flow
         // through the method-call inference path above.
+        //
+        // Builtin collection types (Map/Set/WeakMap/WeakSet/Array/Promise) are
+        // intrinsically generic — `new Set([1,2,3])` without explicit `<number>`
+        // must still return `Type::Generic { base: "Set" }` so downstream
+        // `is_set_expr` matches and dispatches through the Set fast path
+        // (otherwise `s.has(...)` falls back to dynamic-method lookup and
+        // returns `undefined`).
         ast::Expr::New(new_expr) => {
             if let ast::Expr::Ident(ident) = new_expr.callee.as_ref() {
                 let name = ident.sym.to_string();
@@ -175,7 +182,12 @@ pub(crate) fn infer_type_from_expr(expr: &ast::Expr, ctx: &LoweringContext) -> T
                         return Type::Generic { base: name, type_args: args };
                     }
                 }
-                Type::Named(name)
+                match name.as_str() {
+                    "Map" | "Set" | "WeakMap" | "WeakSet" | "Array" | "Promise" => {
+                        Type::Generic { base: name, type_args: Vec::new() }
+                    }
+                    _ => Type::Named(name),
+                }
             } else {
                 Type::Any
             }

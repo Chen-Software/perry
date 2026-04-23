@@ -77,8 +77,18 @@ pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirT
         Expr::StringSplit { .. } => Some(HirType::Array(Box::new(HirType::String))),
         // Set.values() / Set.keys() → iterable, but Array.from wraps it
         // into an Array. Without an Array.from wrap, it's still iterable.
-        Expr::SetNewFromArray(_) => Some(HirType::Named("Set".into())),
-        Expr::MapNewFromArray(_) | Expr::MapNew => Some(HirType::Named("Map".into())),
+        // Set/Map constructors refine to `Generic { base, type_args: [] }` —
+        // `is_set_expr` / `is_map_expr` check `base == "Set" / "Map"` on the
+        // Generic variant, so `Named("Set")` here used to silently miss the
+        // fast path and `s.has(v)` returned undefined.
+        Expr::SetNewFromArray(_) | Expr::SetNew => Some(HirType::Generic {
+            base: "Set".into(),
+            type_args: Vec::new(),
+        }),
+        Expr::MapNewFromArray(_) | Expr::MapNew => Some(HirType::Generic {
+            base: "Map".into(),
+            type_args: Vec::new(),
+        }),
         // Object.keys() always returns string handles.
         Expr::ObjectKeys(_) => Some(HirType::Array(Box::new(HirType::String))),
         Expr::ObjectGetOwnPropertyNames(_) => Some(HirType::Array(Box::new(HirType::String))),
