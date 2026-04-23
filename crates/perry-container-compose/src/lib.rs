@@ -5,6 +5,7 @@
 //! 1. As a standalone CLI binary (`perry-compose`)
 //! 2. As a library imported from Perry TypeScript applications
 //! 3. Via FFI from compiled Perry TypeScript code (requires `ffi` feature)
+pub mod workload;
 
 pub mod backend;
 pub mod cli;

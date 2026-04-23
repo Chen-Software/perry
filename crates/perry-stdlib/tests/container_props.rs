@@ -137,7 +137,8 @@ proptest! {
             map.insert(key.clone(), val);
         }
 
-        let lod = perry_stdlib::container::ListOrDict::Dict(map);
+        use perry_container_compose::types::ListOrDict;
+        let lod = ListOrDict::Dict(map);
         let result = lod.to_map();
 
         // All unique keys should be preserved
@@ -159,8 +160,9 @@ proptest! {
     fn prop_list_or_dict_to_map_list(
         entries in proptest::collection::vec("[A-Z][A-Z0-9_]{1,8}=[a-z0-9_]{0,10}", 1..=8),
     ) {
+        use perry_container_compose::types::ListOrDict;
         let list: Vec<String> = entries.clone();
-        let lod = perry_stdlib::container::ListOrDict::List(list);
+        let lod = ListOrDict::List(list);
         let result = lod.to_map();
 
         // All unique keys should be present with non-None values
@@ -189,15 +191,16 @@ proptest! {
     fn prop_list_or_dict_to_map_list_no_equals(
         keys in proptest::collection::vec("[A-Z][A-Z0-9_]{1,8}", 1..=5),
     ) {
+        use perry_container_compose::types::ListOrDict;
         let list: Vec<String> = keys.clone();
-        let lod = perry_stdlib::container::ListOrDict::List(list);
+        let lod = ListOrDict::List(list);
         let result = lod.to_map();
 
         // All unique keys should be present with empty values
         // (HashMap deduplicates keys, so len may be <= keys.len())
         for key in &keys {
             prop_assert_eq!(
-                result.get(key).map(|s| s.as_str()),
+                result.get(key).map(|s: &String| s.as_str()),
                 Some(""),
                 "key {} without '=' should have empty value",
                 key
@@ -228,7 +231,7 @@ proptest! {
             map.insert(
                 name.clone(),
                 ComposeDependsOn {
-                    condition: DependsOnCondition::ServiceStarted,
+                    condition: Some(DependsOnCondition::ServiceStarted),
                     required: None,
                     restart: None,
                 },
@@ -257,24 +260,25 @@ proptest! {
         variant in 0u8..=5,
         msg in "[a-z A-Z0-9_]{1,40}",
     ) {
+        use perry_stdlib::container::ContainerError;
         let error = match variant {
-            0 => perry_stdlib::container::ContainerError::NotFound(msg.clone()),
-            1 => perry_stdlib::container::ContainerError::BackendError {
+            0 => ContainerError::NotFound(msg.clone()),
+            1 => ContainerError::BackendError {
                 code: 1,
                 message: msg.clone(),
             },
-            2 => perry_stdlib::container::ContainerError::VerificationFailed {
+            2 => ContainerError::VerificationFailed {
                 image: msg.clone(),
                 reason: "test reason".to_string(),
             },
-            3 => perry_stdlib::container::ContainerError::DependencyCycle {
+            3 => ContainerError::DependencyCycle {
                 cycle: vec![msg.clone()],
             },
-            4 => perry_stdlib::container::ContainerError::ServiceStartupFailed {
+            4 => ContainerError::ServiceStartupFailed {
                 service: msg.clone(),
                 error: "test error".to_string(),
             },
-            _ => perry_stdlib::container::ContainerError::InvalidConfig(msg.clone()),
+            _ => ContainerError::InvalidConfig(msg.clone()),
         };
 
         let display = format!("{}", error);
@@ -345,7 +349,7 @@ proptest! {
         stdout in "[a-z0-9 ]{0,50}",
         stderr in "[a-z0-9 ]{0,50}",
     ) {
-        use perry_stdlib::container::{ContainerInfo, ContainerLogs};
+        use perry_stdlib::container::types::*;
 
         // Register a Vec<ContainerInfo> and take it back
         let infos: Vec<ContainerInfo> = ids
@@ -362,9 +366,9 @@ proptest! {
             })
             .collect();
 
-        let h = perry_stdlib::container::types::register_container_info_list(infos.clone());
+        let h = register_container_info_list(infos.clone());
         let taken: Option<Vec<ContainerInfo>> =
-            perry_stdlib::container::types::take_container_info_list(h);
+            take_container_info_list(h);
         prop_assert!(taken.is_some());
         let taken = taken.unwrap();
         prop_assert_eq!(taken.len(), infos.len());
@@ -378,9 +382,9 @@ proptest! {
             stdout: stdout.clone(),
             stderr: stderr.clone(),
         };
-        let lh = perry_stdlib::container::types::register_container_logs(logs);
+        let lh = register_container_logs(logs);
         let taken_logs: Option<ContainerLogs> =
-            perry_stdlib::container::types::take_container_logs(lh);
+            take_container_logs(lh);
         prop_assert!(taken_logs.is_some());
         let taken_logs = taken_logs.unwrap();
         prop_assert_eq!(taken_logs.stdout, stdout);

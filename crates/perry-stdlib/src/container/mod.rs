@@ -6,6 +6,7 @@ pub mod compose;
 pub mod workload;
 pub mod types;
 pub mod verification;
+pub use mod_private::ContainerError;
 
 use perry_container_compose::backend::{detect_backend, ContainerBackend};
 use perry_container_compose::error::compose_error_to_js;
@@ -18,6 +19,37 @@ use dashmap::DashMap;
 
 pub(crate) mod mod_private {
     use super::*;
+    use thiserror::Error;
+
+    #[derive(Debug, Error)]
+    pub enum ContainerError {
+        #[error("Not found: {0}")]
+        NotFound(String),
+        #[error("Backend error (exit {code}): {message}")]
+        BackendError { code: i32, message: String },
+        #[error("Image verification failed for '{image}': {reason}")]
+        VerificationFailed { image: String, reason: String },
+        #[error("Dependency cycle: {cycle:?}")]
+        DependencyCycle { cycle: Vec<String> },
+        #[error("Service '{service}' failed to start: {error}")]
+        ServiceStartupFailed { service: String, error: String },
+        #[error("Invalid configuration: {0}")]
+        InvalidConfig(String),
+    }
+
+    impl From<perry_container_compose::error::ComposeError> for ContainerError {
+        fn from(e: perry_container_compose::error::ComposeError) -> Self {
+            match e {
+                perry_container_compose::error::ComposeError::NotFound(s) => ContainerError::NotFound(s),
+                perry_container_compose::error::ComposeError::BackendError { code, message } => ContainerError::BackendError { code, message },
+                perry_container_compose::error::ComposeError::VerificationFailed { image, reason } => ContainerError::VerificationFailed { image, reason },
+                perry_container_compose::error::ComposeError::DependencyCycle { services } => ContainerError::DependencyCycle { cycle: services },
+                perry_container_compose::error::ComposeError::ServiceStartupFailed { service, message } => ContainerError::ServiceStartupFailed { service, error: message },
+                other => ContainerError::InvalidConfig(other.to_string()),
+            }
+        }
+    }
+
     use tokio::sync::Mutex;
 
     pub static BACKEND: OnceLock<Arc<dyn ContainerBackend + Send + Sync>> = OnceLock::new();
@@ -671,8 +703,8 @@ pub unsafe extern "C" fn js_workload_runGraph(graph_json_ptr: *const StringHeade
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         let backend = get_global_backend_instance().await.map_err(|e| e.to_string())?;
-        let engine = perry_container_compose::compose::WorkloadGraphEngine::new(backend);
-        engine.run(&graph_json, &opts_json).await.map_err(|e| e.to_string())
+        let engine = perry_container_compose::workload::WorkloadGraphEngine::new(backend);
+        engine.run(&graph_json, &opts_json).await.map(|_| 0u64).map_err(|e| e.to_string())
     });
     promise
 }
@@ -748,7 +780,7 @@ pub unsafe extern "C" fn js_container_module_init() {
     // Initialise the container module by triggerring backend detection.
     // This is called from the main entry point to ensure a backend is selected at startup.
     // Since detection is async, we spawn it.
-    crate::common::spawn_blocking(async move {
+    crate::common::spawn(async move {
         let _ = get_global_backend_instance().await;
     });
 }

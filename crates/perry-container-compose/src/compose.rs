@@ -469,6 +469,53 @@ impl ComposeEngine {
     pub fn resolve_startup_order(&self) -> Result<Vec<String>> {
         resolve_startup_order(&self.spec)
     }
+    /// Return the service graph.
+    pub fn graph(&self) -> Result<crate::types::ServiceGraph> {
+        let order = self.resolve_startup_order()?;
+        let mut edges = Vec::new();
+        for (name, svc) in &self.spec.services {
+            if let Some(deps) = &svc.depends_on {
+                for dep in deps.service_names() {
+                    edges.push(crate::types::ServiceEdge {
+                        from: dep,
+                        to: name.clone(),
+                    });
+                }
+            }
+        }
+        Ok(crate::types::ServiceGraph {
+            nodes: order,
+            edges,
+        })
+    }
+
+    /// Return the status of all services in the stack.
+    pub async fn status(&self) -> Result<crate::types::StackStatus> {
+        let mut services = Vec::new();
+        let mut healthy = true;
+
+        for (svc_name, svc) in &self.spec.services {
+            let container_name = crate::service::service_container_name(svc, svc_name);
+            let (state, container_id, error) = match self.backend.inspect(&container_name).await {
+                Ok(info) => (info.status, Some(info.id), None),
+                Err(e) => ("unknown".to_string(), None, Some(e.to_string())),
+            };
+
+            if state != "running" {
+                healthy = false;
+            }
+
+            services.push(crate::types::ServiceStatus {
+                service: svc_name.clone(),
+                state,
+                container_id,
+                error,
+            });
+        }
+
+        Ok(crate::types::StackStatus { services, healthy })
+    }
+
 
     // ============ start / stop / restart ============
 
@@ -519,6 +566,7 @@ impl ComposeEngine {
         self.stop(services).await?;
         self.start(services).await
     }
+
 }
 
 // ============ Dependency resolution (Kahn's algorithm) ============
