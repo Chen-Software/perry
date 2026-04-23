@@ -745,7 +745,12 @@ pub unsafe extern "C" fn js_workload_handle_ps(handle_id: f64) -> *mut Promise {
 
 #[no_mangle]
 pub unsafe extern "C" fn js_container_module_init() {
-    // Initialise the container module
+    // Initialise the container module by triggerring backend detection.
+    // This is called from the main entry point to ensure a backend is selected at startup.
+    // Since detection is async, we spawn it.
+    crate::common::spawn_blocking(async move {
+        let _ = get_global_backend_instance().await;
+    });
 }
 
 #[no_mangle]
