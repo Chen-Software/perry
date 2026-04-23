@@ -54,7 +54,7 @@ fn test_js_container_run_null() {
     unsafe {
         let p = js_container_run(ptr::null());
         assert!(!p.is_null());
-        drive_promise(p);
+        drive_promise(p); std::thread::sleep(std::time::Duration::from_millis(100));
         assert_eq!(js_promise_state(p), PROMISE_STATE_REJECTED);
     }
 }
@@ -66,7 +66,7 @@ fn test_js_container_run_malformed() {
     unsafe {
         let p = js_container_run(header.as_ptr() as *const StringHeader);
         assert!(!p.is_null());
-        drive_promise(p);
+        drive_promise(p); std::thread::sleep(std::time::Duration::from_millis(100));
         assert_eq!(js_promise_state(p), PROMISE_STATE_REJECTED);
     }
 }
@@ -79,7 +79,7 @@ fn test_js_container_composeUp_null() {
     unsafe {
         let p = js_container_composeUp(ptr::null());
         assert!(!p.is_null());
-        drive_promise(p);
+        drive_promise(p); std::thread::sleep(std::time::Duration::from_millis(100));
         assert_eq!(js_promise_state(p), PROMISE_STATE_REJECTED);
     }
 }
@@ -91,7 +91,7 @@ fn test_js_container_composeUp_malformed() {
     unsafe {
         let p = js_container_composeUp(header.as_ptr() as *const StringHeader);
         assert!(!p.is_null());
-        drive_promise(p);
+        drive_promise(p); std::thread::sleep(std::time::Duration::from_millis(100));
         assert_eq!(js_promise_state(p), PROMISE_STATE_REJECTED);
     }
 }
@@ -105,7 +105,7 @@ fn test_js_compose_ps_not_found() {
         // Stack ID 99999 should not exist
         let p = js_compose_ps(99999.0);
         assert!(!p.is_null());
-        drive_promise(p);
+        drive_promise(p); std::thread::sleep(std::time::Duration::from_millis(100));
         assert_eq!(js_promise_state(p), PROMISE_STATE_REJECTED);
     }
 }
@@ -118,7 +118,7 @@ fn test_js_container_inspect_null() {
     unsafe {
         let p = js_container_inspect(ptr::null());
         assert!(!p.is_null());
-        drive_promise(p);
+        drive_promise(p); std::thread::sleep(std::time::Duration::from_millis(100));
         assert_eq!(js_promise_state(p), PROMISE_STATE_REJECTED);
     }
 }
