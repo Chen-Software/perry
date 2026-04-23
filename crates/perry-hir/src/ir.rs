@@ -100,6 +100,10 @@ pub const NATIVE_MODULES: &[&str] = &[
     "perry/thread",
     // SQLite
     "better-sqlite3",
+    // Container Management
+    "perry/container",
+    "perry/container-compose",
+    "perry/compose",
 ];
 
 /// Check if a module path refers to a native stdlib module
@@ -135,6 +139,9 @@ pub fn requires_stdlib(module: &str) -> bool {
     let normalized = module.strip_prefix("node:").unwrap_or(module);
     if !is_native_module(normalized) {
         return false;
+    }
+    if normalized == "perry/container" || normalized == "perry/container-compose" || normalized == "perry/compose" {
+        return true;
     }
     !RUNTIME_ONLY_MODULES.contains(&normalized)
 }
