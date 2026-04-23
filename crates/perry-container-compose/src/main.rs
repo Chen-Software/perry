@@ -3,6 +3,8 @@ use perry_container_compose::cli;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    use clap::Parser;
     tracing_subscriber::fmt::init();
-    cli::run().await
+    let cli = cli::Cli::parse();
+    cli::run(cli).await
 }

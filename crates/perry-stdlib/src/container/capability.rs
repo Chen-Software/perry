@@ -16,8 +16,10 @@ pub async fn alloy_container_run_capability(
     cmd: &[&str],
     grants: &CapabilityGrants,
 ) -> Result<ContainerLogs, String> {
+    let backend = get_global_backend_instance().await.map_err(|e| e.to_string())?;
+
     // 1. Verify image signature before running
-    let digest = verification::verify_image(image).await?;
+    let digest = verification::verify_image(image, &backend).await.map_err(|e| e.to_string())?;
 
     // 2. Build ephemeral ContainerSpec with security constraints
     let spec = ContainerSpec {
@@ -36,7 +38,6 @@ pub async fn alloy_container_run_capability(
     };
 
     // 3. Run
-    let backend = get_global_backend_instance().await.map_err(|e| e.to_string())?;
     let handle = backend.run(&perry_container_compose::types::ContainerSpec {
         image: spec.image,
         name: spec.name,
