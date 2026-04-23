@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::env;
 
 pub struct ProjectConfig {
     pub files: Vec<PathBuf>,
@@ -7,46 +6,32 @@ pub struct ProjectConfig {
     pub env_files: Vec<PathBuf>,
 }
 
-impl ProjectConfig {
-    pub fn new(files: Vec<PathBuf>, project_name: Option<String>, env_files: Vec<PathBuf>) -> Self {
-        Self { files, project_name, env_files }
+pub fn resolve_project_name(project_dir: &Path, explicit_name: Option<String>) -> String {
+    if let Some(name) = explicit_name {
+        return name;
     }
-
-    pub fn resolve_project_name(&self, project_dir: &Path) -> String {
-        if let Some(name) = &self.project_name {
-            return name.clone();
-        }
-        if let Ok(name) = env::var("COMPOSE_PROJECT_NAME") {
-            return name;
-        }
-        project_dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("default")
-            .to_string()
+    if let Ok(name) = std::env::var("COMPOSE_PROJECT_NAME") {
+        return name;
     }
+    project_dir.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("default")
+        .to_string()
+}
 
-    pub fn resolve_compose_files(&self) -> Vec<PathBuf> {
-        if !self.files.is_empty() {
-            return self.files.clone();
-        }
-
-        if let Ok(files_env) = env::var("COMPOSE_FILE") {
-            let sep = if cfg!(windows) { ";" } else { ":" };
-            return files_env
-                .split(sep)
-                .map(PathBuf::from)
-                .collect();
-        }
-
-        let candidates = ["compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml"];
-        for c in candidates {
-            let path = PathBuf::from(c);
-            if path.exists() {
-                return vec![path];
-            }
-        }
-
-        vec![]
+pub fn resolve_compose_files(project_dir: &Path, explicit_files: Vec<PathBuf>) -> Vec<PathBuf> {
+    if !explicit_files.is_empty() {
+        return explicit_files;
     }
+    if let Ok(files) = std::env::var("COMPOSE_FILE") {
+        return files.split(':').map(PathBuf::from).collect();
+    }
+    let candidates = ["compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml"];
+    for c in candidates {
+        let p = project_dir.join(c);
+        if p.exists() {
+            return vec![p];
+        }
+    }
+    vec![]
 }

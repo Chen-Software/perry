@@ -75,16 +75,14 @@ pub fn module_to_features(module: &str) -> &'static [&'static str] {
         // ── IDs (uuid / nanoid) ───────────────────────────────────────
         "uuid" | "nanoid" => &["ids"],
 
-        // ── Container ─────────────────────────────────────────────────
-        "perry/container" | "perry/container-compose" | "perry/compose" | "perry/workloads" => &["container"],
-
         // Slugify is in the always-on stdlib core (no optional dep).
         "slugify" => &[],
         // dotenv has no optional dep.
         "dotenv" | "dotenv/config" => &[],
 
-        // ── Containers ────────────────────────────────────────────────
-        "perry/container" | "perry/container-compose" => &["container"],
+        "perry/container" | "perry/container-compose" | "perry/compose" | "perry/workloads" => {
+            &["container"]
+        }
 
         // Modules with no optional perry-stdlib dependency (decimal.js,
         // bignumber.js, lru-cache, commander, exponential-backoff, http,
