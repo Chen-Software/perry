@@ -67,7 +67,7 @@ validation = ["dep:validator", "dep:regex"]
 ids = ["dep:uuid", "dep:nanoid"]
 
 # Container module (OCI container management)
-container = ["dep:async-trait", "dep:tokio", "async-runtime", "perry-container-compose", "dep:indexmap", "dep:serde_yaml"]
+container = ["dep:async-trait", "dep:tokio", "async-runtime", "perry-container-compose", "dep:indexmap", "dep:serde_yaml", "dep:tracing", "dep:which"]
 
 # Async runtime (tokio) - internal feature
 async-runtime = ["dep:tokio"]
@@ -171,6 +171,8 @@ lru = "0.12"
 
 # CLI parsing (Commander)
 clap = { version = "4.4", features = ["derive"] }
+tracing = { version = "0.1", optional = true }
+which = { version = "6.0", optional = true }
 
 # Decimal math (Big.js / Decimal.js)
 rust_decimal = { version = "1.33", features = ["maths"] }

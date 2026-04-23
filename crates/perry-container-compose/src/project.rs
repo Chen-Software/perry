@@ -12,6 +12,15 @@ pub struct ComposeProject {
 }
 
 impl ComposeProject {
+    pub fn load_from_files(files: &[PathBuf], project_name: Option<&str>, env_files: &[PathBuf]) -> Result<Self> {
+        let config = ProjectConfig {
+            compose_files: files.to_vec(),
+            project_name: project_name.map(|s| s.to_string()),
+            env_files: env_files.to_vec(),
+        };
+        Self::load(&config)
+    }
+
     pub fn load(config: &ProjectConfig) -> Result<Self> {
         let compose_files = config::resolve_compose_files(&config.compose_files)?;
 

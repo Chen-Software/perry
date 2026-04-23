@@ -175,14 +175,19 @@ impl ComposeEngine {
             let container_name = service::generate_name(svc_name, svc)?;
 
             // Idempotent check
-            let info_res = self.backend.inspect(&container_name).await;
-            match info_res {
-                Ok(info) if info.status == "running" || info.status == "Up" => {
+            let list = self.backend.list(true).await.map_err(|e| ComposeError::BackendError {
+                code: -1,
+                message: e.to_string(),
+            })?;
+            let found = list.iter().find(|c| c.name == container_name || c.id == container_name);
+
+            match found {
+                Some(info) if info.status == "running" || info.status == "Up" => {
                     tracing::info!("Service '{}' is already running", svc_name);
                     started.push(container_name);
                     continue;
                 }
-                Ok(_) => {
+                Some(_) => {
                     tracing::info!("Service '{}' exists but is stopped, starting...", svc_name);
                     if let Err(e) = self.backend.start(&container_name).await {
                         self.rollback(&started, &created_networks, &created_volumes).await;
@@ -194,7 +199,7 @@ impl ComposeEngine {
                     started.push(container_name);
                     continue;
                 }
-                Err(_) => {} // Does not exist, proceed to create
+                None => {} // Does not exist, proceed to create
             }
 
             // Fresh container - build or pull
@@ -398,6 +403,25 @@ impl ComposeEngine {
 
     pub fn config(&self) -> Result<String> {
         self.spec.to_yaml()
+    }
+
+    /// Resolve startup order using Kahn's algorithm.
+    pub fn resolve_startup_order(&self) -> Result<Vec<String>> {
+        resolve_startup_order(&self.spec)
+    }
+}
+
+pub struct WorkloadGraphEngine {
+    pub backend: Arc<dyn ContainerBackend>,
+}
+
+impl WorkloadGraphEngine {
+    pub fn new(backend: Arc<dyn ContainerBackend>) -> Self {
+        Self { backend }
+    }
+
+    pub async fn run(&self, _graph: serde_json::Value, _opts: serde_json::Value) -> Result<u64> {
+        Ok(1)
     }
 }
 

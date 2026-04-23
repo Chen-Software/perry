@@ -2476,7 +2476,7 @@ fn lower_module_decl(
                                     "composeUp" => Some("js_container_composeUp"),
                                     _ => None,
                                 },
-                                "perry/container-compose" => match imported.as_str() {
+                                    "perry/container-compose" | "perry/compose" => match imported.as_str() {
                                     "up" => Some("js_container_compose_up"),
                                     "down" => Some("js_container_compose_down"),
                                     "ps" => Some("js_container_compose_ps"),
@@ -2488,6 +2488,13 @@ fn lower_module_decl(
                                     "restart" => Some("js_container_compose_restart"),
                                     _ => None,
                                 },
+                                    "perry/workloads" => match imported.as_str() {
+                                        "graph" => Some("js_workload_graph"),
+                                        "node" => Some("js_workload_node"),
+                                        "runGraph" => Some("js_workload_runGraph"),
+                                        "inspectGraph" => Some("js_workload_inspectGraph"),
+                                        _ => None,
+                                    },
                                 _ => None,
                             };
 

@@ -9,7 +9,7 @@ pub const CHAINGUARD_ISSUER: &str =
     "https://token.actions.githubusercontent.com";
 
 #[derive(Debug, Clone)]
-enum VerificationResult {
+pub enum VerificationResult {
     Verified(String), // digest
     Failed(String),   // reason
 }
@@ -35,12 +35,39 @@ pub async fn fetch_image_digest(reference: &str) -> Result<String, ContainerErro
 }
 
 pub async fn run_cosign_verify(reference: &str, digest: &str) -> VerificationResult {
-    // In a real implementation, we would shell out to `cosign verify`
-    // For now, we simulate success for Chainguard images
-    if reference.starts_with("cgr.dev/chainguard/") {
-        VerificationResult::Verified(digest.to_string())
-    } else {
-        VerificationResult::Failed("Not a Chainguard image".to_string())
+    // Requirements 15.1, 15.2, 15.3, 15.6
+    // In production readiness, we check if cosign is available, otherwise we log and return failure for security
+    let cosign_bin = match which::which("cosign") {
+        Ok(bin) => bin,
+        Err(_) => return VerificationResult::Failed("cosign binary not found".to_string()),
+    };
+
+    let mut cmd = tokio::process::Command::new(cosign_bin);
+    cmd.args([
+        "verify",
+        "--certificate-identity", CHAINGUARD_IDENTITY,
+        "--certificate-oidc-issuer", CHAINGUARD_ISSUER,
+        reference,
+    ]);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    match cmd.output().await {
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::debug!(
+                image = reference,
+                digest = digest,
+                output = ?stderr,
+                "cosign verification result"
+            );
+            if output.status.success() {
+                VerificationResult::Verified(digest.to_string())
+            } else {
+                VerificationResult::Failed(format!("cosign failed: {}", stderr))
+            }
+        }
+        Err(e) => VerificationResult::Failed(format!("failed to execute cosign: {}", e)),
     }
 }
 

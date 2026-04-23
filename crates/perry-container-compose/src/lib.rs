@@ -15,6 +15,10 @@ pub mod compose;
 pub mod backend;
 pub mod cli;
 pub mod config;
+pub mod commands;
+pub mod orchestrate;
+pub mod installer;
+pub mod testing;
 
 #[cfg(feature = "ffi")]
 pub mod ffi;
