@@ -897,6 +897,92 @@ pub unsafe extern "C" fn js_container_compose_config(handle_id: i64) -> *mut Pro
     promise
 }
 
+// ============ Workload Graph Functions ============
+
+/// Run a workload graph from the given spec
+/// FFI: js_workload_runGraph(spec_json: *const StringHeader) -> *mut Promise
+#[no_mangle]
+pub unsafe extern "C" fn js_workload_runGraph(
+    spec_ptr: *const perry_runtime::StringHeader,
+) -> *mut Promise {
+    let promise = js_promise_new();
+
+    let json = match string_from_header(spec_ptr) {
+        Some(s) => s,
+        None => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move {
+                Err::<u64, String>("Invalid workload graph spec pointer".to_string())
+            });
+            return promise;
+        }
+    };
+
+    let spec: perry_container_compose::workload::WorkloadGraphSpec = match serde_json::from_str(&json) {
+        Ok(s) => s,
+        Err(e) => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move {
+                Err::<u64, String>(format!("Failed to parse workload graph spec: {}", e))
+            });
+            return promise;
+        }
+    };
+
+    crate::common::spawn_for_promise(promise as *mut u8, async move {
+        let backend = match get_global_backend().await {
+            Ok(b) => b,
+            Err(e) => return Err::<u64, String>(e.to_json()),
+        };
+
+        let engine = Arc::new(perry_container_compose::workload::WorkloadGraphEngine::new(
+            spec, backend,
+        ));
+
+        match engine.run().await {
+            Ok(_) => {
+                let id = perry_container_compose::workload::register_instance(engine);
+                Ok(id)
+            }
+            Err(e) => Err::<u64, String>(ContainerError::from(e).to_json()),
+        }
+    });
+
+    promise
+}
+
+/// Inspect status of a workload graph
+/// FFI: js_workload_inspectGraph(handle_id: i64) -> *mut Promise
+#[no_mangle]
+pub unsafe extern "C" fn js_workload_inspectGraph(
+    handle_id: i64,
+) -> *mut Promise {
+    let promise = js_promise_new();
+
+    let id = handle_id as u64;
+
+    crate::common::spawn_for_promise_deferred(
+        promise as *mut u8,
+        async move {
+            let engine = match perry_container_compose::workload::get_instance(id) {
+                Some(e) => e,
+                None => return Err::<String, String>("Workload graph instance not found".to_string()),
+            };
+
+            let mut status_map: HashMap<String, String> = HashMap::new();
+            for entry in engine.node_states.iter() {
+                status_map.insert(entry.key().clone(), entry.value().status.clone());
+            }
+
+            serde_json::to_string(&status_map).map_err(|e| e.to_string())
+        },
+        |json| {
+            let str_ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
+            JSValue::string_ptr(str_ptr).bits()
+        },
+    );
+
+    promise
+}
+
 // ============ Module Initialization ============
 
 /// Initialize the container module (called during runtime startup)

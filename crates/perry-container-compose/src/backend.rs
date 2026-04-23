@@ -416,6 +416,7 @@ impl CliProtocol for LimaProtocol {
 }
 
 pub struct CliBackend<P: CliProtocol> {
+    pub name: String,
     pub bin: PathBuf,
     pub protocol: P,
     pub version: Option<String>,
@@ -426,8 +427,13 @@ pub type AppleBackend = CliBackend<AppleContainerProtocol>;
 pub type LimaBackend = CliBackend<LimaProtocol>;
 
 impl<P: CliProtocol> CliBackend<P> {
-    pub fn new(bin: PathBuf, protocol: P, version: Option<String>) -> Self {
-        Self { bin, protocol, version }
+    pub fn new(name: String, bin: PathBuf, protocol: P, version: Option<String>) -> Self {
+        Self {
+            name,
+            bin,
+            protocol,
+            version,
+        }
     }
 
     async fn exec_raw(&self, subcommand_args: Vec<String>) -> Result<(String, String)> {
@@ -456,7 +462,7 @@ impl<P: CliProtocol> CliBackend<P> {
 #[async_trait]
 impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
     fn backend_name(&self) -> &str {
-        self.bin.file_name().and_then(|n| n.to_str()).unwrap_or("unknown")
+        &self.name
     }
 
     fn backend_version(&self) -> Option<String> {
@@ -741,7 +747,9 @@ fn platform_candidates() -> &'static [&'static str] {
     }
 }
 
-async fn probe_candidate(name: &str) -> std::result::Result<(Box<dyn ContainerBackend>, Option<String>), String> {
+async fn probe_candidate(
+    name: &str,
+) -> std::result::Result<(Box<dyn ContainerBackend>, Option<String>), String> {
     let which_bin = |name: &str| -> std::result::Result<PathBuf, String> {
         which(name).map_err(|_| format!("{} not found", name))
     };
@@ -765,27 +773,70 @@ async fn probe_candidate(name: &str) -> std::result::Result<(Box<dyn ContainerBa
         "apple/container" => {
             let bin = which_bin("container")?;
             let version = get_version(bin.clone()).await;
-            Ok((Box::new(AppleBackend::new(bin, AppleContainerProtocol, version.clone())), version))
+            Ok((
+                Box::new(AppleBackend::new(
+                    "apple/container".into(),
+                    bin,
+                    AppleContainerProtocol,
+                    version.clone(),
+                )),
+                version,
+            ))
         }
         "podman" => {
             let bin = which_bin("podman")?;
             let version = get_version(bin.clone()).await;
             if std::env::consts::OS == "macos" {
-                let out = Command::new(&bin).args(&["machine", "list", "--format", "json"]).output().await.map_err(|_| "podman machine list failed")?;
-                let json: serde_json::Value = serde_json::from_slice(&out.stdout).map_err(|_| "invalid podman output")?;
-                if !json.as_array().map(|a| a.iter().any(|m| m["Running"].as_bool().unwrap_or(false))).unwrap_or(false) {
+                let out = Command::new(&bin)
+                    .args(&["machine", "list", "--format", "json"])
+                    .output()
+                    .await
+                    .map_err(|_| "podman machine list failed")?;
+                let json: serde_json::Value =
+                    serde_json::from_slice(&out.stdout).map_err(|_| "invalid podman output")?;
+                if !json
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .any(|m| m["Running"].as_bool().unwrap_or(false))
+                    })
+                    .unwrap_or(false)
+                {
                     return Err("no podman machine running".into());
                 }
             }
-            Ok((Box::new(DockerBackend::new(bin, DockerProtocol, version.clone())), version))
+            Ok((
+                Box::new(DockerBackend::new(
+                    "podman".into(),
+                    bin,
+                    DockerProtocol,
+                    version.clone(),
+                )),
+                version,
+            ))
         }
         "orbstack" => {
-            let bin = which_bin("orb")
-                .or_else(|_| which_bin("docker"))
-                .map_err(|_| "orbstack not found")?;
+            let bin = which_bin("orb").or_else(|_| -> std::result::Result<PathBuf, String> {
+                let dbin = which_bin("docker")?;
+                // Verify it's actually OrbStack if using 'docker' command
+                let out = std::process::Command::new(&dbin)
+                    .arg("info")
+                    .output()
+                    .map_err(|_| "docker info failed".to_string())?;
+                if String::from_utf8_lossy(&out.stdout).contains("OrbStack") {
+                    Ok(dbin)
+                } else {
+                    Err("docker is not orbstack".to_string())
+                }
+            })?;
             let version = get_version(bin.clone()).await;
             Ok((
-                Box::new(DockerBackend::new(bin, DockerProtocol, version.clone())),
+                Box::new(DockerBackend::new(
+                    "orbstack".into(),
+                    bin,
+                    DockerProtocol,
+                    version.clone(),
+                )),
                 version,
             ))
         }
@@ -802,38 +853,78 @@ async fn probe_candidate(name: &str) -> std::result::Result<(Box<dyn ContainerBa
             }
             let dbin = which_bin("docker").map_err(|_| "docker cli not found for colima")?;
             Ok((
-                Box::new(DockerBackend::new(dbin, DockerProtocol, version.clone())),
+                Box::new(DockerBackend::new(
+                    "colima".into(),
+                    dbin,
+                    DockerProtocol,
+                    version.clone(),
+                )),
                 version,
             ))
         }
         "rancher-desktop" => {
             let bin = which_bin("nerdctl").map_err(|_| "rancher-desktop (nerdctl) not found")?;
+            // Heuristic for Rancher Desktop: nerdctl is usually pointing to its containerd
             let version = get_version(bin.clone()).await;
             Ok((
-                Box::new(DockerBackend::new(bin, DockerProtocol, version.clone())),
+                Box::new(DockerBackend::new(
+                    "rancher-desktop".into(),
+                    bin,
+                    DockerProtocol,
+                    version.clone(),
+                )),
                 version,
             ))
         }
         "lima" => {
             let bin = which_bin("limactl")?;
             let version = get_version(bin.clone()).await;
-            let out = Command::new(&bin).args(&["list", "--json"]).output().await.map_err(|_| "limactl list failed")?;
-            let instance = String::from_utf8_lossy(&out.stdout).lines()
+            let out = Command::new(&bin)
+                .args(&["list", "--json"])
+                .output()
+                .await
+                .map_err(|_| "limactl list failed")?;
+            let instance = String::from_utf8_lossy(&out.stdout)
+                .lines()
                 .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
                 .find(|v| v["status"] == "Running")
                 .and_then(|v| v["name"].as_str().map(|s| s.to_string()))
                 .ok_or("no running lima instance")?;
-            Ok((Box::new(LimaBackend::new(bin, LimaProtocol { instance }, version.clone())), version))
+            Ok((
+                Box::new(LimaBackend::new(
+                    "lima".into(),
+                    bin,
+                    LimaProtocol { instance },
+                    version.clone(),
+                )),
+                version,
+            ))
         }
         "nerdctl" => {
             let bin = which_bin("nerdctl")?;
             let version = get_version(bin.clone()).await;
-            Ok((Box::new(DockerBackend::new(bin, DockerProtocol, version.clone())), version))
+            Ok((
+                Box::new(DockerBackend::new(
+                    "nerdctl".into(),
+                    bin,
+                    DockerProtocol,
+                    version.clone(),
+                )),
+                version,
+            ))
         }
         "docker" => {
             let bin = which_bin("docker")?;
             let version = get_version(bin.clone()).await;
-            Ok((Box::new(DockerBackend::new(bin, DockerProtocol, version.clone())), version))
+            Ok((
+                Box::new(DockerBackend::new(
+                    "docker".into(),
+                    bin,
+                    DockerProtocol,
+                    version.clone(),
+                )),
+                version,
+            ))
         }
         _ => Err("unknown backend".into()),
     }

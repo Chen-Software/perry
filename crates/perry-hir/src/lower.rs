@@ -2477,21 +2477,15 @@ fn lower_module_decl(
                                     _ => None,
                                 },
                                 "perry/compose" => match imported.as_str() {
-                                    "run" => Some("js_container_run"),
-                                    "create" => Some("js_container_create"),
-                                    "start" => Some("js_container_start"),
-                                    "stop" => Some("js_container_stop"),
-                                    "remove" => Some("js_container_remove"),
-                                    "list" => Some("js_container_list"),
-                                    "inspect" => Some("js_container_inspect"),
-                                    "logs" => Some("js_container_logs"),
-                                    "exec" => Some("js_container_exec"),
-                                    "pullImage" => Some("js_container_pullImage"),
-                                    "listImages" => Some("js_container_listImages"),
-                                    "removeImage" => Some("js_container_removeImage"),
-                                    "getBackend" => Some("js_container_getBackend"),
-                                    "detectBackend" => Some("js_container_detectBackend"),
-                                    "composeUp" => Some("js_container_composeUp"),
+                                    "up" => Some("js_container_composeUp"),
+                                    "down" => Some("js_container_compose_down"),
+                                    "ps" => Some("js_container_compose_ps"),
+                                    "logs" => Some("js_container_compose_logs"),
+                                    "exec" => Some("js_container_compose_exec"),
+                                    "config" => Some("js_container_compose_config"),
+                                    "start" => Some("js_container_compose_start"),
+                                    "stop" => Some("js_container_compose_stop"),
+                                    "restart" => Some("js_container_compose_restart"),
                                     _ => None,
                                 },
                                 "perry/container-compose" => match imported.as_str() {
@@ -2504,6 +2498,11 @@ fn lower_module_decl(
                                     "start" => Some("js_container_compose_start"),
                                     "stop" => Some("js_container_compose_stop"),
                                     "restart" => Some("js_container_compose_restart"),
+                                    _ => None,
+                                },
+                                "perry/workloads" => match imported.as_str() {
+                                    "runGraph" => Some("js_workload_runGraph"),
+                                    "inspectGraph" => Some("js_workload_inspectGraph"),
                                     _ => None,
                                 },
                                 _ => None,
@@ -4666,12 +4665,16 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
             } else if let Some((module_name, method_name)) = ctx.lookup_native_module(&name) {
                 // Feature: perry-container | Layer: HIR | Req: 1.1, 11.2
                 // Special handling for container and compose named imports
-                if module_name == "perry/container" || module_name == "perry/compose" || module_name == "perry/container-compose" {
+                if module_name == "perry/container"
+                    || module_name == "perry/compose"
+                    || module_name == "perry/container-compose"
+                    || module_name == "perry/workloads"
+                {
                     if let Some(method) = method_name {
                         return Ok(Expr::ExternFuncRef {
                             name: method.to_string(),
                             param_types: Vec::new(),
-                            return_type: Type::Any,
+                            return_type: Type::Promise(Box::new(Type::Any)),
                         });
                     }
                 }

@@ -2366,7 +2366,7 @@ pub(crate) fn lower_native_method_call(
         }
     }
 
-    if module == "perry/workloads" && object.is_none() {
+    if (module == "perry/workloads" || module == "perry/workload") && object.is_none() {
         if let Some(sig) = perry_workloads_table_lookup(method) {
             return lower_table_dispatch_call(ctx, sig, args);
         }
@@ -2393,7 +2393,7 @@ pub(crate) fn lower_native_method_call(
         }
     }
 
-    if module == "perry/compose" && object.is_none() {
+    if (module == "perry/compose" || module == "perry/container-compose") && object.is_none() {
         if let Some(sig) = perry_compose_table_lookup(method) {
             return lower_table_dispatch_call(ctx, sig, args);
         }
@@ -3896,7 +3896,7 @@ static PERRY_CONTAINER_TABLE: &[UiSig] = &[
     UiSig { method: "composeUp", runtime: "js_container_composeUp", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
 ];
 
-/// Dispatch table for perry/compose module.
+/// Dispatch table for perry/compose and perry/container-compose modules.
 static PERRY_COMPOSE_TABLE: &[UiSig] = &[
     UiSig { method: "up", runtime: "js_container_composeUp", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
     UiSig { method: "down", runtime: "js_container_compose_down", args: &[UiArgKind::I64Raw, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
@@ -3911,10 +3911,8 @@ static PERRY_COMPOSE_TABLE: &[UiSig] = &[
 
 /// Dispatch table for perry/workloads module.
 static PERRY_WORKLOADS_TABLE: &[UiSig] = &[
-    UiSig { method: "graph", runtime: "js_workload_graph", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Str },
-    UiSig { method: "node", runtime: "js_workload_node", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Str },
-    UiSig { method: "runGraph", runtime: "js_workload_runGraph", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Widget },
-    UiSig { method: "inspectGraph", runtime: "js_workload_inspectGraph", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "runGraph", runtime: "js_workload_runGraph", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "inspectGraph", runtime: "js_workload_inspectGraph", args: &[UiArgKind::I64Raw], ret: UiReturnKind::Widget },
 ];
 
 fn perry_container_table_lookup(method: &str) -> Option<&'static UiSig> {
