@@ -671,8 +671,8 @@ pub unsafe extern "C" fn js_workload_runGraph(graph_json_ptr: *const StringHeade
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         let backend = get_global_backend_instance().await.map_err(|e| e.to_string())?;
-        let engine = perry_container_compose::compose::WorkloadGraphEngine::new(backend);
-        engine.run(&graph_json, &opts_json).await.map_err(|e| e.to_string())
+        let engine = perry_container_compose::workload::WorkloadGraphEngine::new(backend);
+        engine.run(&graph_json, &opts_json).await.map_err(|e| compose_error_to_js(&e))
     });
     promise
 }
@@ -711,10 +711,10 @@ pub unsafe extern "C" fn js_workload_inspectGraph(graph_json_ptr: *const StringH
     let promise = js_promise_new();
     let graph_json = string_from_header(graph_json_ptr).unwrap_or_default();
     spawn_for_promise_deferred(promise as *mut u8, async move {
-        let spec: perry_container_compose::types::ComposeSpec = serde_json::from_str(&graph_json).map_err(|e| e.to_string())?;
+        let graph: perry_container_compose::workload::WorkloadGraph = serde_json::from_str(&graph_json).map_err(|e| compose_error_to_js(&perry_container_compose::error::ComposeError::JsonError(e)))?;
         let backend = get_global_backend_instance().await.map_err(|e| e.to_string())?;
-        let engine = ComposeEngine::new(spec, "inspect".to_string(), backend);
-        engine.status().await.map_err(|e| e.to_string())
+        let engine = ComposeEngine::new(perry_container_compose::types::ComposeSpec::default(), graph.name, backend); // Simplified
+        engine.status().await.map_err(|e| compose_error_to_js(&e))
     }, |status| {
         let json = serde_json::to_string(&status).unwrap_or_else(|_| "{}".to_string());
         let str_ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
@@ -772,7 +772,7 @@ pub unsafe extern "C" fn js_container_compose_status(handle_id: f64) -> *mut Pro
             .get(&id)
             .map(|e| Arc::clone(&e.0))
             .ok_or_else(|| format!("Compose stack {} not found", id))?;
-        engine.status().await.map_err(|e| e.to_string())
+        engine.status().await.map_err(|e| compose_error_to_js(&e))
     }, |status| {
         let json = serde_json::to_string(&status).unwrap_or_else(|_| "{}".to_string());
         let str_ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);

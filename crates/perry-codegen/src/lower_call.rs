@@ -4076,6 +4076,11 @@ fn perry_compose_table_lookup(method: &str) -> Option<&'static UiSig> {
     PERRY_COMPOSE_TABLE.iter().find(|s| s.method == method)
 }
 
+// =============================================================================
+// perry/workloads dispatch table
+// =============================================================================
+
+
 /// Lower a perry/ui call described by `sig`. Walks each arg, applies
 /// the per-kind coercion to produce an LLVM SSA value of the right type,
 /// lazy-declares the runtime function, emits the call, and boxes the
