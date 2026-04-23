@@ -2594,6 +2594,13 @@ pub(crate) fn lower_native_method_call(
                         llvm_args.push((I64, i));
                         runtime_param_types.push(I64);
                     }
+                    UiArgKind::I32Raw => {
+                        let v = lower_expr(ctx, arg)?;
+                        let blk = ctx.block();
+                        let i = blk.fptosi(DOUBLE, &v, I32);
+                        llvm_args.push((I32, i));
+                        runtime_param_types.push(I32);
+                    }
                     UiArgKind::Json => {
                         let v = lower_expr(ctx, arg)?;
                         let blk = ctx.block();
@@ -3443,6 +3450,8 @@ enum UiArgKind {
     Closure,
     /// Raw i64 (rare; some setters take an enum tag as i64).
     I64Raw,
+    /// Raw i32 (used for boolean flags or small enums).
+    I32Raw,
     /// JSON string: lower the JSValue, call JSON.stringify, then pass
     /// the StringHeader pointer as i64.
     Json,
@@ -3954,23 +3963,23 @@ static PERRY_CONTAINER_TABLE: &[UiSig] = &[
     UiSig { method: "start", runtime: "js_container_start",
             args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
     UiSig { method: "stop", runtime: "js_container_stop",
-            args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
+            args: &[UiArgKind::Str, UiArgKind::Json], ret: UiReturnKind::Promise },
     UiSig { method: "remove", runtime: "js_container_remove",
-            args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
+            args: &[UiArgKind::Str, UiArgKind::Json], ret: UiReturnKind::Promise },
     UiSig { method: "list", runtime: "js_container_list",
-            args: &[UiArgKind::F64], ret: UiReturnKind::Promise },
+            args: &[UiArgKind::Json], ret: UiReturnKind::Promise },
     UiSig { method: "inspect", runtime: "js_container_inspect",
             args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
     UiSig { method: "logs", runtime: "js_container_logs",
-            args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "exec", runtime: "js_container_exec",
             args: &[UiArgKind::Str, UiArgKind::Json], ret: UiReturnKind::Promise },
+    UiSig { method: "exec", runtime: "js_container_exec",
+            args: &[UiArgKind::Str, UiArgKind::Json, UiArgKind::Json, UiArgKind::Str], ret: UiReturnKind::Promise },
     UiSig { method: "pullImage", runtime: "js_container_pullImage",
             args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
     UiSig { method: "listImages", runtime: "js_container_listImages",
             args: &[], ret: UiReturnKind::Promise },
     UiSig { method: "removeImage", runtime: "js_container_removeImage",
-            args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
+            args: &[UiArgKind::Str, UiArgKind::I32Raw], ret: UiReturnKind::Promise },
     UiSig { method: "getBackend", runtime: "js_container_getBackend",
             args: &[], ret: UiReturnKind::Str },
     UiSig { method: "composeUp", runtime: "js_container_composeUp",
@@ -3991,13 +4000,13 @@ static PERRY_CONTAINER_COMPOSE_TABLE: &[UiSig] = &[
     UiSig { method: "up", runtime: "js_container_composeUp",
             args: &[UiArgKind::Json], ret: UiReturnKind::Promise },
     UiSig { method: "down", runtime: "js_container_compose_down",
-            args: &[UiArgKind::I64Raw, UiArgKind::F64], ret: UiReturnKind::Promise },
+            args: &[UiArgKind::I64Raw, UiArgKind::I32Raw], ret: UiReturnKind::Promise },
     UiSig { method: "ps", runtime: "js_container_compose_ps",
             args: &[UiArgKind::I64Raw], ret: UiReturnKind::Promise },
     UiSig { method: "logs", runtime: "js_container_compose_logs",
-            args: &[UiArgKind::I64Raw, UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
+            args: &[UiArgKind::I64Raw, UiArgKind::Json], ret: UiReturnKind::Promise },
     UiSig { method: "exec", runtime: "js_container_compose_exec",
-            args: &[UiArgKind::I64Raw, UiArgKind::Str, UiArgKind::Json], ret: UiReturnKind::Promise },
+            args: &[UiArgKind::I64Raw, UiArgKind::Str, UiArgKind::Json, UiArgKind::Json], ret: UiReturnKind::Promise },
     UiSig { method: "config", runtime: "js_container_compose_config",
             args: &[UiArgKind::I64Raw], ret: UiReturnKind::Promise },
     UiSig { method: "start", runtime: "js_container_compose_start",
@@ -4108,6 +4117,13 @@ fn lower_native_table_call(
                 let i = blk.fptosi(DOUBLE, &v, I64);
                 llvm_args.push((I64, i));
                 runtime_param_types.push(I64);
+            }
+            UiArgKind::I32Raw => {
+                let v = lower_expr(ctx, arg)?;
+                let blk = ctx.block();
+                let i = blk.fptosi(DOUBLE, &v, I32);
+                llvm_args.push((I32, i));
+                runtime_param_types.push(I32);
             }
             UiArgKind::Json => {
                 let v = lower_expr(ctx, arg)?;

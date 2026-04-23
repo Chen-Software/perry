@@ -5,7 +5,7 @@ use tokio;
 #[tokio::test]
 async fn test_get_chainguard_image() {
     assert_eq!(get_chainguard_image("git").unwrap(), "cgr.dev/chainguard/git");
-    assert_eq!(get_chainguard_image("python").unwrap(), "cgr.dev/chainguard/python");
+    assert_eq!(get_chainguard_image("curl").unwrap(), "cgr.dev/chainguard/curl");
     assert!(get_chainguard_image("unknown-tool").is_none());
 }
 

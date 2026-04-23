@@ -277,6 +277,7 @@ pub fn docker_run_flags(spec: &ContainerSpec, include_detach: bool) -> Vec<Strin
     for (k, v) in spec.env.as_ref().iter().flat_map(|m| m.iter()) { args.extend(["-e".into(), format!("{k}={v}")]); }
     if let Some(net) = &spec.network { args.extend(["--network".into(), net.clone()]); }
     if spec.rm.unwrap_or(false) { args.push("--rm".into()); }
+    if spec.read_only.unwrap_or(false) { args.push("--read-only".into()); }
     if let Some(ep) = &spec.entrypoint {
         args.push("--entrypoint".into());
         args.push(ep.join(" "));
@@ -519,7 +520,16 @@ pub async fn probe_all_candidates() -> Vec<BackendProbeResult> {
 
 fn platform_candidates() -> &'static [&'static str] {
     if cfg!(target_os = "macos") || cfg!(target_os = "ios") {
-        &["apple/container", "orbstack", "colima", "rancher-desktop", "podman", "lima", "docker"]
+        &[
+            "apple/container",
+            "orbstack",
+            "colima",
+            "rancher-desktop",
+            "lima",
+            "podman",
+            "nerdctl",
+            "docker",
+        ]
     } else {
         &["podman", "nerdctl", "docker"]
     }
@@ -538,31 +548,70 @@ pub async fn probe_candidate_driver(name: &str) -> std::result::Result<BackendDr
         "podman" => {
             let bin = which_bin("podman")?;
             if cfg!(target_os = "macos") {
-                let out = Command::new(&bin).args(&["machine", "list", "--format", "json"]).output().await.map_err(|_| "podman machine list failed")?;
-                let json: serde_json::Value = serde_json::from_slice(&out.stdout).map_err(|_| "invalid podman output")?;
-                if !json.as_array().map(|a| a.iter().any(|m| m["Running"].as_bool().unwrap_or(false))).unwrap_or(false) {
+                let out = Command::new(&bin)
+                    .args(&["machine", "list", "--format", "json"])
+                    .output()
+                    .await
+                    .map_err(|_| "podman machine list failed")?;
+                let json: serde_json::Value =
+                    serde_json::from_slice(&out.stdout).map_err(|_| "invalid podman output")?;
+                if !json
+                    .as_array()
+                    .map(|a| a.iter().any(|m| m["Running"].as_bool().unwrap_or(false)))
+                    .unwrap_or(false)
+                {
                     return Err("no podman machine running".into());
                 }
             }
             Ok(BackendDriver::Podman { bin })
         }
         "orbstack" => {
-            let bin = which_bin("orb").or_else(|_| which_bin("docker")).map_err(|_| "orbstack not found")?;
+            let bin = which_bin("orb")
+                .or_else(|_| which_bin("docker"))
+                .map_err(|_| "orbstack not found")?;
+            // Requirement 21.1: OrbStack socket check
+            if cfg!(target_os = "macos") {
+                let home = std::env::var("HOME").map_err(|_| "HOME not set")?;
+                let socket = PathBuf::from(home).join(".orbstack/run/docker.sock");
+                if !socket.exists() {
+                    return Err("orbstack socket not found".into());
+                }
+            }
             Ok(BackendDriver::Orbstack { bin })
         }
         "colima" => {
             let bin = which_bin("colima")?;
-            let out = Command::new(&bin).arg("status").output().await.map_err(|_| "colima status failed")?;
+            let out = Command::new(&bin)
+                .arg("status")
+                .output()
+                .await
+                .map_err(|_| "colima status failed")?;
             if !String::from_utf8_lossy(&out.stdout).contains("running") {
                 return Err("colima not running".into());
             }
             let dbin = which_bin("docker").map_err(|_| "docker cli not found for colima")?;
             Ok(BackendDriver::Colima { bin: dbin })
         }
+        "rancher-desktop" => {
+            let bin = which_bin("nerdctl").map_err(|_| "nerdctl (rancher-desktop) not found")?;
+            if cfg!(target_os = "macos") {
+                let home = std::env::var("HOME").map_err(|_| "HOME not set")?;
+                let socket = PathBuf::from(home).join(".rd/run/containerd-shim.sock");
+                if !socket.exists() {
+                    return Err("rancher-desktop socket not found".into());
+                }
+            }
+            Ok(BackendDriver::RancherDesktop { bin })
+        }
         "lima" => {
             let bin = which_bin("limactl")?;
-            let out = Command::new(&bin).args(&["list", "--json"]).output().await.map_err(|_| "limactl list failed")?;
-            let instance = String::from_utf8_lossy(&out.stdout).lines()
+            let out = Command::new(&bin)
+                .args(&["list", "--json"])
+                .output()
+                .await
+                .map_err(|_| "limactl list failed")?;
+            let instance = String::from_utf8_lossy(&out.stdout)
+                .lines()
                 .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
                 .find(|v| v["status"] == "Running")
                 .and_then(|v| v["name"].as_str().map(|s| s.to_string()))

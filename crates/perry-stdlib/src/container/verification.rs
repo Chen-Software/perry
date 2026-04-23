@@ -93,3 +93,10 @@ pub fn get_chainguard_image(tool: &str) -> Option<String> {
 pub fn get_default_base_image() -> String {
     "cgr.dev/chainguard/alpine-base".to_string()
 }
+
+pub fn clear_verification_cache() {
+    if let Some(cache) = VERIFICATION_CACHE.get() {
+        let mut wr = cache.write().unwrap();
+        wr.clear();
+    }
+}

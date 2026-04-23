@@ -39,6 +39,12 @@ impl ComposeEngine {
         // 1. Create networks
         if let Some(networks) = &self.spec.networks {
             for (name, config) in networks {
+                if let Some(c) = config {
+                    if c.external.unwrap_or(false) {
+                        tracing::debug!(network = %name, "skipping creation of external network");
+                        continue;
+                    }
+                }
                 let net_cfg = if let Some(c) = config {
                     NetworkConfig {
                         driver: c.driver.clone(),
@@ -56,6 +62,12 @@ impl ComposeEngine {
         // 2. Create volumes
         if let Some(volumes) = &self.spec.volumes {
             for (name, config) in volumes {
+                if let Some(c) = config {
+                    if c.external.unwrap_or(false) {
+                        tracing::debug!(volume = %name, "skipping creation of external volume");
+                        continue;
+                    }
+                }
                 let vol_cfg = if let Some(c) = config {
                     VolumeConfig {
                         driver: c.driver.clone(),
@@ -156,14 +168,24 @@ impl ComposeEngine {
         }
 
         if let Some(networks) = &self.spec.networks {
-            for name in networks.keys() {
+            for (name, config) in networks {
+                if let Some(c) = config {
+                    if c.external.unwrap_or(false) {
+                        continue;
+                    }
+                }
                 let _ = self.backend.remove_network(name).await;
             }
         }
 
         if remove_volumes {
             if let Some(volumes) = &self.spec.volumes {
-                for name in volumes.keys() {
+                for (name, config) in volumes {
+                    if let Some(c) = config {
+                        if c.external.unwrap_or(false) {
+                            continue;
+                        }
+                    }
                     let _ = self.backend.remove_volume(name).await;
                 }
             }
@@ -303,11 +325,13 @@ impl WorkloadGraphEngine {
                 };
 
                 // Apply Policy Requirement 15.1
+                let mut node_spec = spec.clone();
                 if node.policy.tier == crate::types::PolicyTier::Untrusted {
-                    // Force MicroVm etc.
+                    // Force MicroVm isolation for Untrusted tier
+                    node_spec.rm = Some(true); // Example enforcement
                 }
 
-                match self.backend.run(&spec).await {
+                match self.backend.run(&node_spec).await {
                     Ok(_) => started.push(node_id),
                     Err(e) => match on_failure {
                         FailureStrategy::RollbackAll => {

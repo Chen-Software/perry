@@ -72,6 +72,8 @@ pub struct ContainerSpec {
     pub entrypoint: Option<Vec<String>>,
     pub network: Option<String>,
     pub rm: Option<bool>,
+    pub read_only: Option<bool>,
+    pub isolation_level: Option<IsolationLevel>,
 }
 
 /// Handle returned after creating/running a container.
@@ -529,6 +531,10 @@ impl ComposeSpec {
     /// Parse from a YAML string.
     pub fn parse_str(yaml: &str) -> Result<Self, crate::error::ComposeError> {
         serde_yaml::from_str(yaml).map_err(crate::error::ComposeError::ParseError)
+    }
+
+    pub fn to_yaml(&self) -> Result<String, crate::error::ComposeError> {
+        serde_yaml::to_string(self).map_err(crate::error::ComposeError::ParseError)
     }
 
     /// Merge another ComposeSpec into this one (last-writer-wins for all maps).

@@ -47,12 +47,14 @@ impl Service {
     pub fn generate_name(image: &str, service_name: &str) -> String {
         let mut hasher = Md5::new();
         hasher.update(image.as_bytes());
-        let hash = hex::encode(hasher.finalize());
-        let short_hash = &hash[..8];
+        let image_hash = &hex::encode(hasher.finalize())[..8];
 
-        let random_suffix: u32 = rand::random();
+        let mut hasher = Md5::new();
+        hasher.update(service_name.as_bytes());
+        let svc_seed = &hex::encode(hasher.finalize())[..8];
+        let suffix = u32::from_str_radix(svc_seed, 16).unwrap_or(0);
 
-        format!("{}_{}_{}", service_name, short_hash, random_suffix)
+        format!("{}_{}", image_hash, suffix)
     }
 
     pub fn container_name(&self, service_name: &str) -> String {
@@ -103,6 +105,8 @@ impl Service {
             entrypoint: self.entrypoint.clone(),
             network: self.networks.as_ref().and_then(|n| n.first().cloned()),
             rm: Some(false),
+            read_only: self.read_only,
+            isolation_level: self.isolation_level.clone(),
         };
 
         backend.run(&spec).await?;

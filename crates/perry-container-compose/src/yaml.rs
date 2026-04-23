@@ -80,6 +80,20 @@ pub fn interpolate(yaml: &str, env: &HashMap<String, String>) -> String {
     interpolate_yaml(yaml, env)
 }
 
+pub fn parse_dotenv(content: &str) -> HashMap<String, String> {
+    let mut env = HashMap::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            env.insert(k.trim().to_string(), v.trim().to_string());
+        }
+    }
+    env
+}
+
 pub fn parse_and_merge_files(files: &[PathBuf], env: &HashMap<String, String>) -> Result<ComposeSpec> {
     let mut root_spec = ComposeSpec::default();
 

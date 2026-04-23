@@ -62,6 +62,7 @@ pub struct ContainerSpec {
     pub entrypoint: Option<Vec<String>>,
     pub network: Option<String>,
     pub rm: Option<bool>,
+    pub read_only: Option<bool>,
 }
 
 impl From<ContainerSpec> for perry_container_compose::types::ContainerSpec {
@@ -76,6 +77,8 @@ impl From<ContainerSpec> for perry_container_compose::types::ContainerSpec {
             entrypoint: spec.entrypoint,
             network: spec.network,
             rm: spec.rm,
+            read_only: spec.read_only,
+            isolation_level: None,
         }
     }
 }

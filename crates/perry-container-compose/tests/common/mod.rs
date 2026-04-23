@@ -24,9 +24,23 @@ pub struct MockBackend {
 
 #[async_trait]
 impl ContainerBackend for MockBackend {
-    fn backend_name(&self) -> &str { "mock" }
+    fn backend_name(&self) -> &str {
+        "mock"
+    }
 
-    async fn check_available(&self) -> Result<()> { Ok(()) }
+    fn strategy(&self) -> perry_container_compose::backend::ExecutionStrategy {
+        perry_container_compose::backend::ExecutionStrategy::CliExec {
+            bin: "mock".into(),
+        }
+    }
+
+    fn isolation_level(&self) -> perry_container_compose::types::IsolationLevel {
+        perry_container_compose::types::IsolationLevel::Container
+    }
+
+    async fn check_available(&self) -> Result<()> {
+        Ok(())
+    }
 
     async fn run(&self, spec: &ContainerSpec) -> Result<ContainerHandle> {
         let mut state = self.state.lock().unwrap();
@@ -48,11 +62,13 @@ impl ContainerBackend for MockBackend {
             image: spec.image.clone(),
             status: "running".to_string(),
             ports: spec.ports.clone().unwrap_or_default(),
-            labels: spec.labels.clone().unwrap_or_default(),
             created: "2025-01-01T00:00:00Z".to_string(),
         };
         state.containers.insert(name.clone(), info);
-        Ok(ContainerHandle { id: name.clone(), name: Some(name) })
+        Ok(ContainerHandle {
+            id: name.clone(),
+            name: Some(name),
+        })
     }
 
     async fn create(&self, spec: &ContainerSpec) -> Result<ContainerHandle> {
@@ -64,11 +80,13 @@ impl ContainerBackend for MockBackend {
             image: spec.image.clone(),
             status: "created".to_string(),
             ports: spec.ports.clone().unwrap_or_default(),
-            labels: spec.labels.clone().unwrap_or_default(),
             created: "2025-01-01T00:00:00Z".to_string(),
         };
         state.containers.insert(name.clone(), info);
-        Ok(ContainerHandle { id: name.clone(), name: Some(name) })
+        Ok(ContainerHandle {
+            id: name.clone(),
+            name: Some(name),
+        })
     }
 
     async fn start(&self, id: &str) -> Result<()> {
@@ -148,17 +166,6 @@ impl ContainerBackend for MockBackend {
         state.actions.push(format!("remove_volume:{}", name));
         state.volumes.retain(|v| v != name);
         Ok(())
-    }
-
-    async fn wait(&self, _id: &str) -> Result<i32> { Ok(0) }
-    async fn inspect_image(&self, _reference: &str) -> Result<ImageInfo> {
-        Ok(ImageInfo {
-            id: "id".into(),
-            repository: "repo".into(),
-            tag: "tag".into(),
-            size: 0,
-            created: "".into(),
-        })
     }
 
     async fn inspect_network(&self, _name: &str) -> Result<()> {

@@ -77,7 +77,7 @@ async fn test_compose_down_cleans_resources() {
     let _handle = Arc::clone(&engine).up(&[], true, false, false).await.unwrap();
 
     // session_containers is populated. down() should use it and clear it.
-    engine.down(&[], false, true).await.expect("down failed");
+    engine.down(true).await.expect("down failed");
 
     let state = backend.state.lock().unwrap();
     assert!(state.containers.is_empty(), "Containers should be empty, but found: {:?}", state.containers);

@@ -22,6 +22,9 @@ pub async fn orchestrate_service(
         if service.needs_build() {
             tracing::info!(service = %service_name, "building image");
             service.build_command(service_name, backend).await?;
+        } else if let Some(image) = &service.image {
+            tracing::info!(service = %service_name, image = %image, "pulling image");
+            let _ = backend.pull_image(image).await;
         }
         tracing::info!(service = %service_name, "creating and running");
         service.run_command(service_name, backend).await?;
