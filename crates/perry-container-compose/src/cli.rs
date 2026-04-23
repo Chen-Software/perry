@@ -118,7 +118,7 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     let project = ComposeProject::load(&config)?;
 
-    let backend = crate::backend::detect_backend().await
+    let (_driver, backend) = crate::backend::detect_backend().await
         .map_err(|probed| ComposeError::NoBackendFound { probed })?;
     let backend: Arc<dyn ContainerBackend> = Arc::from(backend);
 
@@ -126,7 +126,7 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     match cli.command {
         Commands::Up(args) => {
-            engine.up(&args.services, args.detach, args.build).await?;
+            engine.up(&args.services, args.detach, args.build, args.remove_orphans).await?;
         }
         Commands::Down(args) => {
             engine.down(&args.services, args.volumes).await?;
@@ -162,7 +162,13 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
         }
         Commands::Exec(args) => {
-            let logs = engine.exec(&args.service, &args.cmd).await?;
+            let mut env_map = std::collections::HashMap::new();
+            for e in args.env {
+                if let Some((k, v)) = e.split_once('=') {
+                    env_map.insert(k.to_string(), v.to_string());
+                }
+            }
+            let logs = engine.exec(&args.service, &args.cmd, Some(&env_map), args.workdir.as_deref()).await?;
             print!("{}", logs.stdout);
             eprint!("{}", logs.stderr);
         }

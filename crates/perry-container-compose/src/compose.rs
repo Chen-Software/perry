@@ -2,10 +2,23 @@ use indexmap::IndexMap;
 use crate::error::{ComposeError, Result};
 use crate::types::{ComposeSpec, ContainerInfo, ContainerLogs, ContainerSpec, ComposeHandle, ContainerHandle, ListOrDict};
 use crate::backend::{ContainerBackend, NetworkConfig, VolumeConfig};
-use crate::service::{service_container_name, needs_build};
+use crate::service::{service_container_name, needs_build, Service};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Compose {
+    pub services: IndexMap<String, Service>,
+}
+
+impl Compose {
+    pub fn parse(yaml: &str) -> Result<Self> {
+        serde_yaml::from_str(yaml).map_err(ComposeError::ParseError)
+    }
+}
+
 #[derive(Clone)]
 pub struct ComposeEngine {
     pub spec: ComposeSpec,
@@ -74,11 +87,16 @@ impl ComposeEngine {
         Ok(order)
     }
 
-    pub async fn up(self: Arc<Self>, services: &[String], _detach: bool, build: bool) -> Result<ComposeHandle> {
+    pub async fn up(self: Arc<Self>, services: &[String], _detach: bool, build: bool, remove_orphans: bool) -> Result<ComposeHandle> {
         let mut order = Self::resolve_startup_order(&self.spec)?;
         if !services.is_empty() {
              order.retain(|s| services.contains(s));
         }
+
+        if remove_orphans {
+            self.remove_orphans().await?;
+        }
+
         let mut created_networks = Vec::new();
         let mut created_volumes = Vec::new();
         let mut started_containers: Vec<String> = Vec::new();
@@ -283,13 +301,32 @@ impl ComposeEngine {
         Ok(ContainerLogs { stdout: "".into(), stderr: "".into() })
     }
 
-    pub async fn exec(&self, service: &str, cmd: &[String]) -> Result<ContainerLogs> {
+    pub async fn exec(&self, service: &str, cmd: &[String], env: Option<&HashMap<String, String>>, workdir: Option<&str>) -> Result<ContainerLogs> {
         let container_name = format!("{}-{}-", self.project_name, service);
         let containers = self.backend.list(true).await?;
         if let Some(c) = containers.into_iter().find(|c| c.name.starts_with(&container_name)) {
-             return self.backend.exec(&c.id, cmd, None, None).await;
+             return self.backend.exec(&c.id, cmd, env, workdir).await;
         }
         Err(ComposeError::NotFound(service.into()))
+    }
+
+    async fn remove_orphans(&self) -> Result<()> {
+        let containers = self.backend.list(true).await?;
+        for c in containers {
+            if c.name.contains(&self.project_name) {
+                // Try to see if it belongs to a service in the spec
+                let belongs = self.spec.services.keys().any(|s| {
+                    let prefix = format!("{}-{}-", self.project_name, s);
+                    c.name.starts_with(&prefix)
+                });
+                if !belongs {
+                    tracing::info!(container = %c.name, "removing orphan container");
+                    let _ = self.backend.stop(&c.id, None).await;
+                    let _ = self.backend.remove(&c.id, true).await;
+                }
+            }
+        }
+        Ok(())
     }
 
     pub async fn start(&self, services: &[String]) -> Result<()> {
@@ -329,4 +366,27 @@ impl ComposeEngine {
     pub fn config(&self) -> Result<String> {
         serde_yaml::to_string(&self.spec).map_err(Into::into)
     }
+
+    pub fn graph(&self) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({}))
+    }
+
+    pub async fn status(&self) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({}))
+    }
+}
+
+pub struct WorkloadGraphEngine {
+    pub project_name: String,
+    pub backend: Arc<dyn ContainerBackend>,
+}
+
+impl WorkloadGraphEngine {
+    pub fn new(project_name: String, backend: Arc<dyn ContainerBackend>) -> Self {
+        Self { project_name, backend }
+    }
+
+    // This would ideally live in perry-stdlib, but we implement the logic here
+    // to reuse backend access. For production readiness, we'd have a full
+    // implementation of strategies and policy enforcement.
 }

@@ -37,6 +37,15 @@ proptest = "1"
 default = []
 ffi = []
 integration-tests = []
+installer = ["dialoguer", "console"]
+
+[dependencies.dialoguer]
+version = "0.11"
+optional = true
+
+[dependencies.console]
+version = "0.15"
+optional = true
 
 [[bin]]
 name = "perry-compose"

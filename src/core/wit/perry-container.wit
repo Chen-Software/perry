@@ -1,0 +1,48 @@
+package perry:container;
+
+interface container {
+    // Container API
+    run: func(spec: string) -> s64; // returns Promise handle (nanboxed i64 bits)
+    create: func(spec: string) -> s64;
+    start: func(id: string) -> s64;
+    stop: func(id: string, timeout: f64) -> s64;
+    remove: func(id: string, force: f64) -> s64;
+    list: func(all: f64) -> s64;
+    inspect: func(id: string) -> s64;
+    logs: func(id: string, tail: f64) -> s64;
+    exec: func(id: string, cmd: string, env: string, workdir: string) -> s64;
+    pull-image: func(reference: string) -> s64;
+    list-images: func() -> s64;
+    remove-image: func(reference: string, force: f64) -> s64;
+    get-backend: func() -> string; // synchronous
+    detect-backend: func() -> s64;
+
+    // Compose API
+    compose-up: func(spec: string) -> s64;
+    compose-down: func(stack-id: s64, volumes: f64) -> s64;
+    compose-ps: func(stack-id: s64) -> s64;
+    compose-logs: func(stack-id: s64, service: string, tail: f64) -> s64;
+    compose-exec: func(stack-id: s64, service: string, cmd: string, workdir: string) -> s64;
+    compose-config: func(stack-id: s64) -> s64;
+    compose-start: func(stack-id: s64, services: string) -> s64;
+    compose-stop: func(stack-id: s64, services: string) -> s64;
+    compose-restart: func(stack-id: s64, services: string) -> s64;
+    compose-graph: func(stack-id: s64) -> string; // synchronous
+    compose-status: func(stack-id: s64) -> s64;
+
+    // Workload API
+    workload-graph: func(name: string, spec: string) -> string; // synchronous
+    workload-node: func(name: string, spec: string) -> string; // synchronous
+    workload-run-graph: func(graph: string, opts: string) -> s64;
+    workload-inspect-graph: func(graph: string) -> s64;
+    workload-handle-down: func(handle-id: s64, opts: string) -> s64;
+    workload-handle-status: func(handle-id: s64) -> s64;
+    workload-handle-graph: func(handle-id: s64) -> string; // synchronous
+    workload-handle-logs: func(handle-id: s64, node: string, opts: string) -> s64;
+    workload-handle-exec: func(handle-id: s64, node: string, cmd: string) -> s64;
+    workload-handle-ps: func(handle-id: s64) -> s64;
+}
+
+world perry {
+    import container;
+}

@@ -5,8 +5,16 @@ use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 use serde_json::Value;
 pub use crate::error::{ComposeError, Result, BackendProbeResult};
-use crate::types::{ContainerSpec, ContainerHandle, ContainerInfo, ContainerLogs, ImageInfo};
+use crate::types::{ContainerSpec, ContainerHandle, ContainerInfo, ContainerLogs, ImageInfo, IsolationLevel};
 use std::sync::Arc;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ExecutionStrategy {
+    CliExec { bin: PathBuf },
+    ApiSocket { socket: PathBuf },
+    VmSpawn { config: serde_json::Value },
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct NetworkConfig {
@@ -44,6 +52,7 @@ pub trait ContainerBackend: Send + Sync {
     async fn remove_volume(&self, name: &str) -> Result<()>;
     async fn wait(&self, id: &str) -> Result<i32>;
     async fn build(&self, context: &str, dockerfile: Option<&str>, tags: &[String]) -> Result<()>;
+    async fn inspect_network(&self, name: &str) -> Result<()>;
 }
 
 pub trait CliProtocol: Send + Sync {
@@ -137,6 +146,7 @@ pub trait CliProtocol: Send + Sync {
         args
     }
     fn rm_volume_args(&self, name: &str) -> Vec<String> { vec!["volume".into(), "rm".into(), name.into()] }
+    fn inspect_network_args(&self, name: &str) -> Vec<String> { vec!["network".into(), "inspect".into(), name.into()] }
     fn wait_args(&self, id: &str) -> Vec<String> { vec!["wait".into(), id.into()] }
     fn build_args(&self, context: &str, dockerfile: Option<&str>, tags: &[String]) -> Vec<String> {
         let mut args = vec!["build".into()];
@@ -302,36 +312,120 @@ impl<P: CliProtocol> ContainerBackend for CliBackend<P> {
         self.exec_ok(&self.protocol.build_args(context, dockerfile, tags)).await?;
         Ok(())
     }
+    async fn inspect_network(&self, name: &str) -> Result<()> {
+        self.exec_ok(&self.protocol.inspect_network_args(name)).await?;
+        Ok(())
+    }
 }
 
 pub type DockerBackend = CliBackend<DockerProtocol>;
 pub type AppleBackend = CliBackend<AppleContainerProtocol>;
 pub type LimaBackend = CliBackend<LimaProtocol>;
 
-pub async fn detect_backend() -> std::result::Result<Box<dyn ContainerBackend>, Vec<BackendProbeResult>> {
+#[derive(Debug, Clone)]
+pub enum BackendDriver {
+    AppleContainer { bin: PathBuf },
+    Orbstack { bin: PathBuf },
+    Colima { bin: PathBuf },
+    RancherDesktop { bin: PathBuf },
+    Podman { bin: PathBuf },
+    Lima { bin: PathBuf },
+    Nerdctl { bin: PathBuf },
+    Docker { bin: PathBuf },
+}
+
+impl BackendDriver {
+    pub fn name(&self) -> &'static str {
+        match self {
+            BackendDriver::AppleContainer { .. } => "apple/container",
+            BackendDriver::Orbstack { .. } => "orbstack",
+            BackendDriver::Colima { .. } => "colima",
+            BackendDriver::RancherDesktop { .. } => "rancher-desktop",
+            BackendDriver::Podman { .. } => "podman",
+            BackendDriver::Lima { .. } => "lima",
+            BackendDriver::Nerdctl { .. } => "nerdctl",
+            BackendDriver::Docker { .. } => "docker",
+        }
+    }
+
+    pub fn bin(&self) -> &PathBuf {
+        match self {
+            BackendDriver::AppleContainer { bin } => bin,
+            BackendDriver::Orbstack { bin } => bin,
+            BackendDriver::Colima { bin } => bin,
+            BackendDriver::RancherDesktop { bin } => bin,
+            BackendDriver::Podman { bin } => bin,
+            BackendDriver::Lima { bin } => bin,
+            BackendDriver::Nerdctl { bin } => bin,
+            BackendDriver::Docker { bin } => bin,
+        }
+    }
+
+    pub fn isolation_level(&self) -> IsolationLevel {
+        match self {
+            BackendDriver::AppleContainer { .. } => IsolationLevel::Container,
+            BackendDriver::Orbstack { .. } => IsolationLevel::MicroVm,
+            BackendDriver::Colima { .. } => IsolationLevel::MicroVm,
+            BackendDriver::RancherDesktop { .. } => IsolationLevel::Container,
+            BackendDriver::Podman { .. } => IsolationLevel::Container,
+            BackendDriver::Lima { .. } => IsolationLevel::MicroVm,
+            BackendDriver::Nerdctl { .. } => IsolationLevel::Container,
+            BackendDriver::Docker { .. } => IsolationLevel::Container,
+        }
+    }
+}
+
+pub async fn detect_backend() -> std::result::Result<(BackendDriver, Box<dyn ContainerBackend>), Vec<BackendProbeResult>> {
+    let mode = std::env::var("PERRY_CONTAINER_MODE").unwrap_or_else(|_| "local-first".to_string());
+
     if let Ok(name) = std::env::var("PERRY_CONTAINER_BACKEND") {
         let res = probe_candidate(&name).await;
-        if res.available { return Ok(make_backend(&name, PathBuf::from(res.reason))); }
+        if res.available {
+            let driver = driver_from_probe(&res);
+            return Ok((driver.clone(), make_backend_from_driver(driver)));
+        }
         return Err(vec![res]);
     }
+
+    // In server-first mode, we might want to prioritize remote backends.
+    // For now, we follow the prioritized platform candidates which already includes
+    // some socket checks.
 
     let results = probe_all_backends().await;
     for res in &results {
         if res.available {
-            return Ok(make_backend(&res.name, PathBuf::from(&res.reason)));
+            let driver = driver_from_probe(res);
+            return Ok((driver.clone(), make_backend_from_driver(driver)));
         }
     }
     Err(results)
 }
 
-pub async fn probe_all_backends() -> Vec<BackendProbeResult> {
-    let candidates: &[&str] = match std::env::consts::OS {
-        "macos" | "ios" => &["apple/container", "orbstack", "colima", "rancher-desktop", "podman", "lima", "docker"],
+fn driver_from_probe(res: &BackendProbeResult) -> BackendDriver {
+    let bin = PathBuf::from(&res.reason);
+    match res.name.as_str() {
+        "apple/container" => BackendDriver::AppleContainer { bin },
+        "orbstack" => BackendDriver::Orbstack { bin },
+        "colima" => BackendDriver::Colima { bin },
+        "rancher-desktop" => BackendDriver::RancherDesktop { bin },
+        "podman" => BackendDriver::Podman { bin },
+        "lima" => BackendDriver::Lima { bin },
+        "nerdctl" => BackendDriver::Nerdctl { bin },
+        _ => BackendDriver::Docker { bin },
+    }
+}
+
+pub fn platform_candidates() -> &'static [&'static str] {
+    match std::env::consts::OS {
+        "macos" | "ios" => &["apple/container", "orbstack", "colima", "rancher-desktop", "lima", "podman", "nerdctl", "docker"],
         "linux" => &["podman", "nerdctl", "docker"],
         _ => &["podman", "nerdctl", "docker"],
-    };
+    }
+}
+
+pub async fn probe_all_backends() -> Vec<BackendProbeResult> {
     let mut results = Vec::new();
-    for &name in candidates {
+    for &name in platform_candidates() {
         results.push(probe_candidate(name).await);
     }
     results
@@ -420,10 +514,11 @@ pub async fn probe_candidate(name: &str) -> BackendProbeResult {
     }
 }
 
-fn make_backend(name: &str, bin: PathBuf) -> Box<dyn ContainerBackend> {
-    match name {
-        "apple/container" => Box::new(CliBackend::new(bin, AppleContainerProtocol)),
-        "lima" => Box::new(CliBackend::new(bin, LimaProtocol { instance: "default".into() })),
+fn make_backend_from_driver(driver: BackendDriver) -> Box<dyn ContainerBackend> {
+    let bin = driver.bin().clone();
+    match driver {
+        BackendDriver::AppleContainer { .. } => Box::new(CliBackend::new(bin, AppleContainerProtocol)),
+        BackendDriver::Lima { .. } => Box::new(CliBackend::new(bin, LimaProtocol { instance: "default".into() })),
         _ => Box::new(CliBackend::new(bin, DockerProtocol)),
     }
 }
@@ -451,4 +546,5 @@ impl ContainerBackend for MockBackend {
     async fn remove_volume(&self, _name: &str) -> Result<()> { Ok(()) }
     async fn wait(&self, _id: &str) -> Result<i32> { Ok(0) }
     async fn build(&self, _context: &str, _dockerfile: Option<&str>, _tags: &[String]) -> Result<()> { Ok(()) }
+    async fn inspect_network(&self, _name: &str) -> Result<()> { Ok(()) }
 }

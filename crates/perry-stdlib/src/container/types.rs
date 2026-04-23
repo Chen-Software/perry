@@ -4,6 +4,7 @@ pub use perry_container_compose::types::*;
 pub use perry_container_compose::error::{ComposeError, Result};
 pub use perry_container_compose::ComposeEngine;
 
+use serde::{Deserialize, Serialize};
 use perry_runtime::JSValue;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock};
@@ -73,6 +74,30 @@ pub fn register_image_info_list(list: Vec<ImageInfo>) -> u64 {
     let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
     IMAGE_INFO_LISTS.get_or_init(DashMap::new).insert(id, list);
     id
+}
+
+// ============ Error Types ============
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ContainerError {
+    pub message: String,
+    pub code: i32,
+}
+
+impl From<ComposeError> for ContainerError {
+    fn from(err: ComposeError) -> Self {
+        let val = err.to_js_json();
+        ContainerError {
+            message: val["message"].as_str().unwrap_or("Unknown error").to_string(),
+            code: val["code"].as_i64().unwrap_or(500) as i32,
+        }
+    }
+}
+
+impl ContainerError {
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| r#"{"message":"Unknown error","code":500}"#.into())
+    }
 }
 
 // ============ JSValue Parsing Functions ============

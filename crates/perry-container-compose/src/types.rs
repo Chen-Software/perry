@@ -426,6 +426,26 @@ pub struct ComposeHandle {
     pub services: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum IsolationLevel {
+    None,
+    Process,
+    Container,
+    MicroVm,
+    Wasm,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackendInfo {
+    pub name: String,
+    pub available: bool,
+    pub reason: Option<String>,
+    pub version: Option<String>,
+    pub mode: String, // "local" | "remote"
+    pub isolation_level: IsolationLevel,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ContainerSpec {
