@@ -516,6 +516,54 @@ impl ComposeEngine {
     pub fn resolve_startup_order(&self) -> Result<Vec<String>> {
         resolve_startup_order(&self.spec)
     }
+
+    pub fn graph(&self) -> crate::types::ServiceGraph {
+        let order = resolve_startup_order(&self.spec).unwrap_or_default();
+        let mut edges = Vec::new();
+
+        for (name, service) in &self.spec.services {
+            if let Some(deps) = &service.depends_on {
+                for dep in deps.service_names() {
+                    edges.push(crate::types::GraphEdge {
+                        from: dep,
+                        to: name.clone(),
+                    });
+                }
+            }
+        }
+
+        crate::types::ServiceGraph {
+            nodes: order,
+            edges,
+        }
+    }
+
+    pub async fn status(&self) -> Result<crate::types::StackStatus> {
+        let mut services = HashMap::new();
+        let mut healthy = true;
+
+        for (name, service) in &self.spec.services {
+            let container_name = service::service_container_name(service, name);
+            let status = match self.backend.inspect(&container_name).await {
+                Ok(info) => crate::types::ServiceStatus {
+                    state: info.status.clone(),
+                    container_id: Some(info.id),
+                    error: None,
+                },
+                Err(e) => {
+                    healthy = false;
+                    crate::types::ServiceStatus {
+                        state: "not_found".to_string(),
+                        container_id: None,
+                        error: Some(e.to_string()),
+                    }
+                }
+            };
+            services.insert(name.clone(), status);
+        }
+
+        Ok(crate::types::StackStatus { services, healthy })
+    }
 }
 
 // ============ Dependency resolution (Kahn's algorithm) ============

@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run unit tests
+        run: cargo test --workspace --exclude perry-ui-macos --exclude perry-ui-ios --exclude perry-ui-tvos --exclude perry-ui-watchos
+
+  container-tests:
+    name: Container Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install Podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman
+      - name: Run perry-container-compose tests
+        run: cargo test -p perry-container-compose
+      - name: Run integration tests
+        env:
+          PERRY_INTEGRATION_TESTS: 1
+        run: cargo test -p perry-container-compose --features integration-tests

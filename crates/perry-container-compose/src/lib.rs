@@ -13,8 +13,11 @@ pub mod project;
 pub mod service;
 pub mod compose;
 pub mod backend;
+pub mod workload;
 pub mod cli;
 pub mod config;
+pub mod installer;
+pub mod testing;
 
 #[cfg(feature = "ffi")]
 pub mod ffi;

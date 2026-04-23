@@ -145,7 +145,7 @@ impl ContainerBackend for MockBackend {
 
     async fn inspect_network(&self, _name: &str) -> Result<serde_json::Value> { Ok(serde_json::json!({})) }
     async fn inspect_volume(&self, _name: &str) -> Result<serde_json::Value> { Ok(serde_json::json!({})) }
-    async fn build_image(&self, _image: &str, _context: &str, _dockerfile: Option<&str>, _args: Option<&HashMap<String, String>>) -> Result<()> { Ok(()) }
+    async fn build(&self, _spec: &perry_container_compose::types::ComposeServiceBuild, _image_name: &str) -> Result<()> { Ok(()) }
     async fn inspect_image(&self, _reference: &str) -> Result<serde_json::Value> { Ok(serde_json::json!({})) }
     async fn manifest_inspect(&self, _reference: &str) -> Result<serde_json::Value> { Ok(serde_json::json!({})) }
     async fn run_with_security(&self, spec: &ContainerSpec, _profile: &SecurityProfile) -> Result<ContainerHandle> { self.run(spec).await }

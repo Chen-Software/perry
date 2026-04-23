@@ -265,6 +265,9 @@ pub fn docker_run_flags(spec: &ContainerSpec, include_detach: bool) -> Vec<Strin
     if spec.rm.unwrap_or(false) {
         args.push("--rm".into());
     }
+    if spec.read_only.unwrap_or(false) {
+        args.push("--read-only".into());
+    }
     if include_detach {
         args.push("--detach".into());
     }
@@ -319,11 +322,11 @@ pub fn docker_run_flags(spec: &ContainerSpec, include_detach: bool) -> Vec<Strin
 #[derive(Debug, Clone)]
 pub enum BackendDriver {
     AppleContainer { bin: PathBuf },
-    Podman { bin: PathBuf },
-    OrbStack { bin: PathBuf },
+    Orbstack { bin: PathBuf },
     Colima { bin: PathBuf },
-    RancherDesktop { bin: PathBuf }, // uses nerdctl
-    Lima { bin: PathBuf, instance: String }, // uses limactl
+    RancherDesktop { bin: PathBuf },
+    Podman { bin: PathBuf },
+    Lima { bin: PathBuf, instance: String },
     Nerdctl { bin: PathBuf },
     Docker { bin: PathBuf },
 }
@@ -332,14 +335,14 @@ impl BackendDriver {
     /// Returns the human-readable name used in getBackend() and PERRY_CONTAINER_BACKEND.
     pub fn name(&self) -> &'static str {
         match self {
-            Self::AppleContainer { .. } => "apple/container",
-            Self::Podman { .. } => "podman",
-            Self::OrbStack { .. } => "orbstack",
-            Self::Colima { .. } => "colima",
-            Self::RancherDesktop { .. } => "rancher-desktop",
-            Self::Lima { .. } => "lima",
-            Self::Nerdctl { .. } => "nerdctl",
-            Self::Docker { .. } => "docker",
+            BackendDriver::AppleContainer { .. } => "apple/container",
+            BackendDriver::Orbstack { .. } => "orbstack",
+            BackendDriver::Colima { .. } => "colima",
+            BackendDriver::RancherDesktop { .. } => "rancher-desktop",
+            BackendDriver::Podman { .. } => "podman",
+            BackendDriver::Lima { .. } => "lima",
+            BackendDriver::Nerdctl { .. } => "nerdctl",
+            BackendDriver::Docker { .. } => "docker",
         }
     }
 
@@ -347,10 +350,10 @@ impl BackendDriver {
     pub fn bin(&self) -> &PathBuf {
         match self {
             Self::AppleContainer { bin }
-            | Self::Podman { bin }
-            | Self::OrbStack { bin }
+            | Self::Orbstack { bin }
             | Self::Colima { bin }
             | Self::RancherDesktop { bin }
+            | Self::Podman { bin }
             | Self::Lima { bin, .. }
             | Self::Nerdctl { bin }
             | Self::Docker { bin } => bin,
@@ -361,6 +364,10 @@ impl BackendDriver {
     /// All drivers except AppleContainer and Lima use Docker-compatible syntax.
     pub fn is_docker_compatible(&self) -> bool {
         !matches!(self, Self::AppleContainer { .. } | Self::Lima { .. })
+    }
+
+    pub fn instantiate(self) -> Box<dyn ContainerBackend> {
+        Box::new(OciBackend::new(self))
     }
 
     /// Optional prefix inserted before every subcommand.
@@ -1050,9 +1057,9 @@ async fn probe_run(bin: &str, args: &[&str]) -> std::result::Result<String, Stri
 
 /// Probe a single named runtime and return a type-erased `Box<dyn ContainerBackend>`
 /// if it is available, or a human-readable reason string if it is not.
-pub async fn probe_candidate(
+pub async fn probe_driver(
     name: &str,
-) -> std::result::Result<Box<dyn ContainerBackend>, String> {
+) -> std::result::Result<BackendDriver, String> {
     match name {
         // ── apple/container ──────────────────────────────────────────────
         "apple/container" => {
@@ -1061,7 +1068,7 @@ pub async fn probe_candidate(
             probe_run(bin.to_str().unwrap_or("container"), &["--version"])
                 .await
                 .map_err(|e| format!("apple/container --version failed: {}", e))?;
-            Ok(Box::new(OciBackend::new(BackendDriver::AppleContainer { bin })))
+            Ok(BackendDriver::AppleContainer { bin })
         }
 
         // ── orbstack ─────────────────────────────────────────────────────
@@ -1084,7 +1091,7 @@ pub async fn probe_candidate(
                 let bin = which::which("docker")
                     .or_else(|_| which::which("orb"))
                     .map_err(|_| "orbstack: neither docker nor orb found".to_string())?;
-                Ok(Box::new(OciBackend::new(BackendDriver::OrbStack { bin })))
+                Ok(BackendDriver::Orbstack { bin })
             } else {
                 Err("orbstack: neither `orb --version` succeeded nor socket found".into())
             }
@@ -1102,7 +1109,7 @@ pub async fn probe_candidate(
             }
             let docker_bin = which::which("docker")
                 .map_err(|_| "docker CLI not found (needed for colima)".to_string())?;
-            Ok(Box::new(OciBackend::new(BackendDriver::Colima { bin: docker_bin })))
+            Ok(BackendDriver::Colima { bin: docker_bin })
         }
 
         // ── rancher-desktop ──────────────────────────────────────────────
@@ -1117,7 +1124,7 @@ pub async fn probe_candidate(
             )
             .exists();
             if sock {
-                Ok(Box::new(OciBackend::new(BackendDriver::RancherDesktop { bin })))
+                Ok(BackendDriver::RancherDesktop { bin })
             } else {
                 Err("rancher-desktop: nerdctl found but containerd socket missing".into())
             }
@@ -1150,7 +1157,7 @@ pub async fn probe_candidate(
                 }
             }
 
-            Ok(Box::new(OciBackend::new(BackendDriver::Podman { bin })))
+            Ok(BackendDriver::Podman { bin })
         }
 
         // ── lima ─────────────────────────────────────────────────────────
@@ -1171,7 +1178,7 @@ pub async fn probe_candidate(
                 })
                 .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(String::from))
                 .ok_or_else(|| "limactl: no running Lima instance found".to_string())?;
-            Ok(Box::new(OciBackend::new(BackendDriver::Lima { bin, instance })))
+            Ok(BackendDriver::Lima { bin, instance })
         }
 
         // ── nerdctl (standalone) ─────────────────────────────────────────
@@ -1181,7 +1188,7 @@ pub async fn probe_candidate(
             probe_run(bin.to_str().unwrap_or("nerdctl"), &["--version"])
                 .await
                 .map_err(|e| format!("nerdctl --version failed: {}", e))?;
-            Ok(Box::new(OciBackend::new(BackendDriver::Nerdctl { bin })))
+            Ok(BackendDriver::Nerdctl { bin })
         }
 
         // ── docker ───────────────────────────────────────────────────────
@@ -1191,11 +1198,17 @@ pub async fn probe_candidate(
             probe_run(bin.to_str().unwrap_or("docker"), &["--version"])
                 .await
                 .map_err(|e| format!("docker --version failed: {}", e))?;
-            Ok(Box::new(OciBackend::new(BackendDriver::Docker { bin })))
+            Ok(BackendDriver::Docker { bin })
         }
 
         other => Err(format!("unknown runtime '{}'", other)),
     }
+}
+
+pub async fn probe_candidate(
+    name: &str,
+) -> std::result::Result<Box<dyn ContainerBackend>, String> {
+    probe_driver(name).await.map(|d| d.instantiate())
 }
 
 /// Detect the best available container backend for the current platform.
@@ -1203,14 +1216,14 @@ pub async fn probe_candidate(
 /// 1. If `PERRY_CONTAINER_BACKEND` is set, use that backend directly.
 /// 2. Otherwise, probe `platform_candidates()` in order with a 2s timeout each.
 /// 3. If no candidate is available, returns `Err(NoBackendFound { probed })`.
-pub async fn detect_backend() -> std::result::Result<Box<dyn ContainerBackend>, ComposeError> {
+pub async fn detect_backend() -> std::result::Result<BackendDriver, ComposeError> {
     use std::time::Duration;
 
     // ── Override via env var ──────────────────────────────────────────────
     if let Ok(override_name) = std::env::var("PERRY_CONTAINER_BACKEND") {
         let name = override_name.trim().to_string();
         debug!("PERRY_CONTAINER_BACKEND={}, probing directly", name);
-        return probe_candidate(&name).await.map_err(|reason| {
+        return probe_driver(&name).await.map_err(|reason| {
             ComposeError::BackendNotAvailable {
                 name: name.clone(),
                 reason,
@@ -1225,13 +1238,13 @@ pub async fn detect_backend() -> std::result::Result<Box<dyn ContainerBackend>, 
         debug!("probing container backend: {}", candidate);
         match tokio::time::timeout(
             Duration::from_secs(PROBE_TIMEOUT_SECS),
-            probe_candidate(candidate),
+            probe_driver(candidate),
         )
         .await
         {
-            Ok(Ok(backend)) => {
+            Ok(Ok(driver)) => {
                 debug!("selected container backend: {}", candidate);
-                return Ok(backend);
+                return Ok(driver);
             }
             Ok(Err(reason)) => {
                 debug!("backend '{}' not available: {}", candidate, reason);
@@ -1253,6 +1266,10 @@ pub async fn detect_backend() -> std::result::Result<Box<dyn ContainerBackend>, 
     }
 
     Err(ComposeError::NoBackendFound { probed })
+}
+
+pub async fn detect_backend_instance() -> std::result::Result<Box<dyn ContainerBackend>, ComposeError> {
+    detect_backend().await.map(|d| d.instantiate())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1279,6 +1296,8 @@ mod tests {
             entrypoint: None,
             network: Some("mynet".into()),
             rm: Some(true),
+            isolation_level: None,
+            read_only: None,
         }
     }
 

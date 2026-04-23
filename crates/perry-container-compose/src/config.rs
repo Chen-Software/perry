@@ -21,7 +21,7 @@ pub const DEFAULT_COMPOSE_FILES: &[&str] = &[
 ///
 /// Use [`ProjectConfig::new`] to construct from CLI args, then pass to
 /// [`crate::project::ComposeProject::load`] which runs the full resolution chain.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ProjectConfig {
     /// Compose file paths from `-f` flags (empty = use env var / default discovery).
     pub compose_files: Vec<PathBuf>,

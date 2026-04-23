@@ -564,6 +564,36 @@ impl ComposeService {
         self.container_name.as_deref()
     }
 
+    /// Check if container exists
+    pub async fn exists(&self, service_name: &str, backend: &dyn crate::backend::ContainerBackend) -> bool {
+        let name = self.explicit_name().map(|s| s.to_string()).unwrap_or_else(|| {
+            crate::service::service_container_name(self, service_name)
+        });
+        backend.inspect(&name).await.is_ok()
+    }
+
+    /// Check if container is running
+    pub async fn is_running(&self, service_name: &str, backend: &dyn crate::backend::ContainerBackend) -> bool {
+        let name = self.explicit_name().map(|s| s.to_string()).unwrap_or_else(|| {
+            crate::service::service_container_name(self, service_name)
+        });
+        match backend.inspect(&name).await {
+            Ok(info) => info.status == "running",
+            Err(_) => false,
+        }
+    }
+
+    /// Build image from ServiceBuild config
+    pub async fn build_command(&self, service_name: &str, backend: &dyn crate::backend::ContainerBackend) -> Result<(), crate::error::ComposeError> {
+        if let Some(build_spec) = &self.build {
+            let build_config = build_spec.as_build();
+            let tag = self.image_ref(service_name);
+            backend.build(&build_config, &tag).await
+        } else {
+            Ok(())
+        }
+    }
+
     /// Get command as a list of strings.
     pub fn command_list(&self) -> Option<Vec<String>> {
         self.command.as_ref().map(|c| match c {
@@ -672,10 +702,55 @@ pub struct ComposeHandle {
     pub services: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceGraph {
+    pub nodes: Vec<String>,
+    pub edges: Vec<GraphEdge>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphEdge {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StackStatus {
+    pub services: std::collections::HashMap<String, ServiceStatus>,
+    pub healthy: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceStatus {
+    pub state: String,
+    pub container_id: Option<String>,
+    pub error: Option<String>,
+}
+
+// ============ Execution & Isolation ============
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionStrategy {
+    CliExec,
+    ApiSocket,
+    VmSpawn,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IsolationLevel {
+    None,
+    Process,
+    Container,
+    MicroVm,
+    Wasm,
+}
+
 // ============ Container types (for single-container API) ============
 
 /// Specification for running a single container.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct ContainerSpec {
     pub image: String,
     pub name: Option<String>,
@@ -688,6 +763,17 @@ pub struct ContainerSpec {
     pub network: Option<String>,
     pub rm: Option<bool>,
     pub read_only: Option<bool>,
+    pub isolation_level: Option<IsolationLevel>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackendInfo {
+    pub name: String,
+    pub available: bool,
+    pub reason: String,
+    pub version: Option<String>,
+    pub mode: Option<String>,
+    pub isolation_level: Option<IsolationLevel>,
 }
 
 /// Handle returned after creating/running a container.
