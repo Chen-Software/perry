@@ -3,7 +3,7 @@ use dashmap::DashMap;
 use crate::backend::{ContainerBackend, detect_backend};
 use crate::types::ComposeError;
 use super::compose::ComposeEngine;
-use tokio::sync::Mutex;
+use tokio::sync::OnceCell;
 
 pub enum HandleEntry {
     Container(crate::types::ContainerHandle),
@@ -11,7 +11,7 @@ pub enum HandleEntry {
 }
 
 pub struct ContainerContext {
-    backend: Mutex<Option<Arc<dyn ContainerBackend + Send + Sync>>>,
+    backend: OnceCell<Arc<dyn ContainerBackend + Send + Sync>>,
     pub handles: DashMap<u64, HandleEntry>,
 }
 
@@ -24,37 +24,25 @@ impl ContainerContext {
 
     pub fn new() -> Self {
         Self {
-            backend: Mutex::new(None),
+            backend: OnceCell::new(),
             handles: DashMap::new(),
         }
     }
 
     pub fn get_backend_sync(&self) -> Option<Arc<dyn ContainerBackend + Send + Sync>> {
-        self.backend.try_lock().ok().and_then(|l| l.as_ref().map(Arc::clone))
+        self.backend.get().cloned()
     }
 
     pub async fn get_backend(&self) -> Result<Arc<dyn ContainerBackend + Send + Sync>, String> {
-        let mut backend_lock = self.backend.lock().await;
-        if let Some(b) = backend_lock.as_ref() {
-            return Ok(Arc::clone(b));
-        }
-
-        match detect_backend().await {
-            Ok(b) => {
-                *backend_lock = Some(Arc::clone(&b));
-                Ok(b)
-            }
-            Err(probed) => {
-                let installer = perry_container_compose::installer::BackendInstaller { probed };
-                match installer.run().await {
-                    Ok(b) => {
-                        *backend_lock = Some(Arc::clone(&b));
-                        Ok(b)
-                    }
-                    Err(e) => Err(e.to_string()),
+        self.backend.get_or_try_init(|| async {
+            match detect_backend().await {
+                Ok(b) => Ok(b),
+                Err(probed) => {
+                    let installer = perry_container_compose::installer::BackendInstaller { probed };
+                    installer.run().await.map_err(|e| e.to_string())
                 }
             }
-        }
+        }).await.cloned()
     }
 }
 

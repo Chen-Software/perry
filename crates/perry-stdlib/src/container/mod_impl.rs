@@ -376,7 +376,14 @@ pub unsafe extern "C" fn js_container_getBackend() -> *const StringHeader {
     // ideally be a cache hit.
     let name = match ContainerContext::global().get_backend_sync() {
         Some(b) => b.backend_name().to_string(),
-        None => "none".to_string(),
+        None => {
+            // Fallback: block_on detection if not already initialized.
+            // Safe here as we're likely in a startup or FFI boundary.
+            match crate::common::async_bridge::RUNTIME.block_on(get_global_backend_instance()) {
+                Ok(b) => b.backend_name().to_string(),
+                Err(_) => "none".to_string(),
+            }
+        }
     };
     string_to_js(&name)
 }

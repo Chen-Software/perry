@@ -27,17 +27,23 @@ pub enum RecordedCall {
 
 pub struct MockBackend {
     pub calls: Mutex<Vec<RecordedCall>>,
+    pub inspect_results: Mutex<std::collections::VecDeque<Result<ContainerInfo>>>,
 }
 
 impl MockBackend {
     pub fn new() -> Self {
         Self {
             calls: Mutex::new(Vec::new()),
+            inspect_results: Mutex::new(std::collections::VecDeque::new()),
         }
     }
 
     pub fn calls(&self) -> Vec<RecordedCall> {
         self.calls.lock().unwrap().clone()
+    }
+
+    pub fn push_inspect_result(&self, res: Result<ContainerInfo>) {
+        self.inspect_results.lock().unwrap().push_back(res);
     }
 }
 
@@ -49,12 +55,12 @@ impl ContainerBackend for MockBackend {
 
     async fn run(&self, spec: &ContainerSpec) -> Result<ContainerHandle> {
         self.calls.lock().unwrap().push(RecordedCall::Run(spec.clone()));
-        Ok(ContainerHandle { id: "mock-id".into(), name: spec.name.clone() })
+        Ok(ContainerHandle { id: format!("id-{}", spec.name.as_deref().unwrap_or("unknown")), name: spec.name.clone() })
     }
 
     async fn create(&self, spec: &ContainerSpec) -> Result<ContainerHandle> {
         self.calls.lock().unwrap().push(RecordedCall::Create(spec.clone()));
-        Ok(ContainerHandle { id: "mock-id".into(), name: spec.name.clone() })
+        Ok(ContainerHandle { id: format!("id-{}", spec.name.as_deref().unwrap_or("unknown")), name: spec.name.clone() })
     }
 
     async fn start(&self, id: &str) -> Result<()> {
@@ -79,14 +85,10 @@ impl ContainerBackend for MockBackend {
 
     async fn inspect(&self, id: &str) -> Result<ContainerInfo> {
         self.calls.lock().unwrap().push(RecordedCall::Inspect(id.into()));
-        Ok(ContainerInfo {
-            id: id.into(),
-            name: id.into(),
-            image: "alpine".into(),
-            status: "running".into(),
-            ports: vec![],
-            created: "".into(),
-        })
+        if let Some(res) = self.inspect_results.lock().unwrap().pop_front() {
+            return res;
+        }
+        Err(crate::error::ComposeError::NotFound(id.into()))
     }
 
     async fn logs(&self, id: &str, tail: Option<u32>) -> Result<ContainerLogs> {

@@ -77,6 +77,68 @@ impl ComposeEngine {
         Self::resolve_startup_order(&self.spec)
     }
 
+    pub fn resolve_startup_levels(spec: &ComposeSpec) -> Result<Vec<Vec<String>>> {
+        let mut in_degree: IndexMap<String, usize> = IndexMap::new();
+        let mut dependents: IndexMap<String, Vec<String>> = IndexMap::new();
+
+        for name in spec.services.keys() {
+            in_degree.insert(name.clone(), 0);
+            dependents.insert(name.clone(), Vec::new());
+        }
+
+        for (name, service) in &spec.services {
+            if let Some(deps) = &service.depends_on {
+                for dep in deps.service_names() {
+                    if !spec.services.contains_key(&dep) {
+                        return Err(ComposeError::ValidationError {
+                            message: format!("Service '{}' depends on '{}' which is not defined", name, dep)
+                        });
+                    }
+                    *in_degree.get_mut(name).unwrap() += 1;
+                    dependents.get_mut(&dep).unwrap().push(name.clone());
+                }
+            }
+        }
+
+        let mut levels = Vec::new();
+        let mut current_level: BTreeSet<String> = in_degree
+            .iter()
+            .filter(|(_, &deg)| deg == 0)
+            .map(|(name, _)| name.clone())
+            .collect();
+
+        while !current_level.is_empty() {
+            let mut next_level = BTreeSet::new();
+            let level_vec: Vec<String> = current_level.iter().cloned().collect();
+            levels.push(level_vec);
+
+            for service in current_level {
+                if let Some(deps) = dependents.get(&service) {
+                    for dependent in deps {
+                        let deg = in_degree.get_mut(dependent).unwrap();
+                        *deg -= 1;
+                        if *deg == 0 {
+                            next_level.insert(dependent.clone());
+                        }
+                    }
+                }
+            }
+            current_level = next_level;
+        }
+
+        let total_services: usize = levels.iter().map(|l| l.len()).sum();
+        if total_services != spec.services.len() {
+            let cycle_services: Vec<String> = in_degree
+                .iter()
+                .filter(|(_, &deg)| deg > 0)
+                .map(|(name, _)| name.clone())
+                .collect();
+            return Err(ComposeError::DependencyCycle { services: cycle_services });
+        }
+
+        Ok(levels)
+    }
+
     pub async fn up(&self) -> Result<ComposeHandle> {
         let order = Self::resolve_startup_order(&self.spec)?;
         let mut created_networks = Vec::new();

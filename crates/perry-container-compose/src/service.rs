@@ -46,10 +46,47 @@ impl ComposeService {
         backend.start(&name).await
     }
 
+    pub async fn needs_build(&self, backend: &dyn ContainerBackend) -> bool {
+        if let Some(build) = &self.build {
+            if self.image.is_none() {
+                return true;
+            }
+            if let Some(image_name) = &self.image {
+                let images = backend.list_images().await.unwrap_or_default();
+                return !images.iter().any(|img| img.repository == *image_name || img.id == *image_name);
+            }
+        }
+        false
+    }
+
+    pub async fn build_command(&self, backend: &dyn ContainerBackend) -> Result<()> {
+        if let Some(build_spec) = &self.build {
+            let spec = match build_spec {
+                crate::types::BuildSpec::Context(ctx) => crate::types::ComposeServiceBuild {
+                    context: Some(ctx.clone()),
+                    ..Default::default()
+                },
+                crate::types::BuildSpec::Config(cfg) => cfg.clone(),
+            };
+            let image_name = self.image.clone().unwrap_or_else(|| format!("{}-image", self.container_name.as_deref().unwrap_or("service")));
+            backend.build(&spec, &image_name).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn inspect_command(&self, service_key: &str, backend: &dyn ContainerBackend) -> Result<crate::types::ContainerInfo> {
+        let name = self.name(service_key);
+        backend.inspect(&name).await
+    }
+
     pub async fn run_command(&self, service_key: &str, backend: &dyn ContainerBackend) -> Result<()> {
+        if self.needs_build(backend).await {
+            self.build_command(backend).await?;
+        }
+
         let name = self.name(service_key);
         let mut spec = ContainerSpec {
-            image: self.image.clone().unwrap_or_default(),
+            image: self.image.clone().unwrap_or_else(|| format!("{}-image", self.container_name.as_deref().unwrap_or("service"))),
             name: Some(name),
             rm: Some(false),
             ..Default::default()

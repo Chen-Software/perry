@@ -52,11 +52,13 @@ interface perry-container {
         image: option<string>,
         ports: list<string>,
         depends-on: list<string>,
+        env: list<tuple<string, string>>,
     }
 
     record workload-graph {
         name: string,
         nodes: list<tuple<string, workload-node>>,
+        edges: list<tuple<string, string>>,
     }
 
     record graph-status {
