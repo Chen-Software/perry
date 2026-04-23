@@ -67,7 +67,7 @@ validation = ["dep:validator", "dep:regex"]
 ids = ["dep:uuid", "dep:nanoid"]
 
 # Container module (OCI container management)
-container = ["dep:async-trait", "dep:tokio", "async-runtime", "perry-container-compose", "dep:indexmap", "dep:serde_yaml"]
+container = ["dep:async-trait", "dep:tokio", "async-runtime", "perry-container-compose/installer", "dep:indexmap", "dep:serde_yaml"]
 
 # Async runtime (tokio) - internal feature
 async-runtime = ["dep:tokio"]
