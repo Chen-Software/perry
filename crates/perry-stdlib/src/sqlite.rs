@@ -433,6 +433,7 @@ unsafe extern "C" fn sqlite_tx_wrapper(
 ///
 /// Returns a closure that wraps fn in BEGIN/COMMIT.
 #[no_mangle]
+#[cfg(all(not(test), feature = "sqlite_tx"))]
 pub unsafe extern "C" fn js_sqlite_transaction(
     db_handle: Handle,
     closure_ptr: i64,
