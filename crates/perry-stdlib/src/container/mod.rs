@@ -40,24 +40,15 @@ pub unsafe fn string_to_js(s: &str) -> *const StringHeader {
     perry_runtime::js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
 }
 
-pub unsafe fn parse_workload_graph_json(ptr: *const StringHeader) -> Result<perry_container_compose::types::WorkloadGraph, String> {
+pub unsafe fn parse_workload_graph_json(
+    ptr: *const StringHeader,
+) -> Result<perry_container_compose::types::WorkloadGraph, String> {
     let s = string_from_header(ptr).ok_or("Invalid graph pointer")?;
     serde_json::from_str(&s).map_err(|e| e.to_string())
 }
 
 pub fn compose_error_to_js(e: &ComposeError) -> String {
-    let code = match &e {
-        ComposeError::NotFound(_) => 404,
-        ComposeError::BackendError { code, .. } => *code,
-        ComposeError::DependencyCycle { .. } => 422,
-        ComposeError::ValidationError { .. } => 400,
-        ComposeError::VerificationFailed { .. } => 403,
-        _ => 500,
-    };
-    serde_json::json!({
-        "message": e.to_string(),
-        "code": code
-    }).to_string()
+    perry_container_compose::error::compose_error_to_js(e)
 }
 
 // ============ Container Lifecycle ============
@@ -121,10 +112,15 @@ pub unsafe extern "C" fn js_container_start(id_ptr: *const StringHeader) -> *mut
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_stop(id_ptr: *const StringHeader, timeout: f64) -> *mut Promise {
+pub unsafe extern "C" fn js_container_stop(
+    id_ptr: *const StringHeader,
+    opts_json: *const StringHeader,
+) -> *mut Promise {
     let promise = js_promise_new();
     let id = string_from_header(id_ptr).unwrap_or_default();
-    let t = if timeout < 0.0 { None } else { Some(timeout as u32) };
+    let opts_str = string_from_header(opts_json).unwrap_or_default();
+    let opts: serde_json::Value = serde_json::from_str(&opts_str).unwrap_or_default();
+    let t = opts["timeout"].as_u64().map(|v| v as u32);
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         get_global_backend_instance()
@@ -138,14 +134,20 @@ pub unsafe extern "C" fn js_container_stop(id_ptr: *const StringHeader, timeout:
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_remove(id_ptr: *const StringHeader, force: f64) -> *mut Promise {
+pub unsafe extern "C" fn js_container_remove(
+    id_ptr: *const StringHeader,
+    opts_json: *const StringHeader,
+) -> *mut Promise {
     let promise = js_promise_new();
     let id = string_from_header(id_ptr).unwrap_or_default();
+    let opts_str = string_from_header(opts_json).unwrap_or_default();
+    let opts: serde_json::Value = serde_json::from_str(&opts_str).unwrap_or_default();
+    let force = opts["force"].as_bool().unwrap_or(false);
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         get_global_backend_instance()
             .await
-            .remove(&id, force != 0.0)
+            .remove(&id, force)
             .await
             .map(|_| 0u64)
             .map_err(|e| compose_error_to_js(&e))
@@ -154,10 +156,14 @@ pub unsafe extern "C" fn js_container_remove(id_ptr: *const StringHeader, force:
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_list(all: f64) -> *mut Promise {
+pub unsafe extern "C" fn js_container_list(opts_json: *const StringHeader) -> *mut Promise {
     let promise = js_promise_new();
+    let opts_str = string_from_header(opts_json).unwrap_or_default();
+    let opts: serde_json::Value = serde_json::from_str(&opts_str).unwrap_or_default();
+    let all = opts["all"].as_bool().unwrap_or(false);
+
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        match get_global_backend_instance().await.list(all != 0.0).await {
+        match get_global_backend_instance().await.list(all).await {
             Ok(list) => Ok(types::register_container_info_list(
                 list.into_iter().map(|i| i.into()).collect(),
             )),
@@ -181,12 +187,18 @@ pub unsafe extern "C" fn js_container_inspect(id_ptr: *const StringHeader) -> *m
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_logs(id_ptr: *const StringHeader, tail: f64) -> *mut Promise {
+pub unsafe extern "C" fn js_container_logs(
+    id_ptr: *const StringHeader,
+    opts_json: *const StringHeader,
+) -> *mut Promise {
     let promise = js_promise_new();
     let id = string_from_header(id_ptr).unwrap_or_default();
-    let t = if tail < 0.0 { None } else { Some(tail as u32) };
+    let opts_str = string_from_header(opts_json).unwrap_or_default();
+    let opts: serde_json::Value = serde_json::from_str(&opts_str).unwrap_or_default();
+    let tail = opts["tail"].as_u64().map(|v| v as u32);
+
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        match get_global_backend_instance().await.logs(&id, t).await {
+        match get_global_backend_instance().await.logs(&id, tail).await {
             Ok(logs) => Ok(types::register_container_logs(logs.into())),
             Err(e) => Err(compose_error_to_js(&e)),
         }
@@ -198,18 +210,21 @@ pub unsafe extern "C" fn js_container_logs(id_ptr: *const StringHeader, tail: f6
 pub unsafe extern "C" fn js_container_exec(
     id_ptr: *const StringHeader,
     cmd_json: *const StringHeader,
+    env_json: *const StringHeader,
+    workdir_ptr: *const StringHeader,
 ) -> *mut Promise {
     let promise = js_promise_new();
     let id = string_from_header(id_ptr).unwrap_or_default();
     let cmd_str = string_from_header(cmd_json).unwrap_or_default();
-    let cmd: Vec<String> = serde_json::from_str(&cmd_str).unwrap_or_else(|_| {
-        cmd_str.split_whitespace().map(String::from).collect()
-    });
+    let cmd: Vec<String> = serde_json::from_str(&cmd_str).unwrap_or_default();
+    let env_str = string_from_header(env_json).unwrap_or_default();
+    let env: Option<HashMap<String, String>> = serde_json::from_str(&env_str).ok();
+    let workdir = string_from_header(workdir_ptr);
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         match get_global_backend_instance()
             .await
-            .exec(&id, &cmd, None, None)
+            .exec(&id, &cmd, env.as_ref(), workdir.as_deref())
             .await
         {
             Ok(logs) => Ok(types::register_container_logs(logs.into())),
@@ -272,14 +287,14 @@ pub unsafe extern "C" fn js_container_listImages() -> *mut Promise {
 #[no_mangle]
 pub unsafe extern "C" fn js_container_removeImage(
     image_ptr: *const StringHeader,
-    force: f64,
+    force: i32,
 ) -> *mut Promise {
     let promise = js_promise_new();
     let image = string_from_header(image_ptr).unwrap_or_default();
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         get_global_backend_instance()
             .await
-            .remove_image(&image, force != 0.0)
+            .remove_image(&image, force != 0)
             .await
             .map(|_| 0u64)
             .map_err(|e| compose_error_to_js(&e))
@@ -317,54 +332,72 @@ pub unsafe extern "C" fn js_container_detectBackend() -> *mut Promise {
 
 // ============ Compose Functions ============
 
+async fn compose_up_internal(input: String) -> Result<u64, String> {
+    let backend = get_global_backend_instance().await;
+    let (spec, project_name) = if input.trim_start().starts_with('{') {
+        let spec: perry_container_compose::types::ComposeSpec =
+            serde_json::from_str(&input).map_err(|e| e.to_string())?;
+        let name = spec.name.clone().unwrap_or_else(|| "perry-stack".to_string());
+        (spec, name)
+    } else {
+        let config = perry_container_compose::config::ProjectConfig {
+            files: vec![input.into()],
+            project_name: None,
+            env_files: vec![],
+        };
+        let project = perry_container_compose::ComposeProject::load(&config)
+            .map_err(|e| compose_error_to_js(&e))?;
+        (project.spec, project.project_name)
+    };
+    let engine = Arc::new(perry_container_compose::ComposeEngine::new(
+        spec,
+        project_name,
+        backend,
+    ));
+    engine.up(&[], true, true, false).await
+        .map(|h| types::register_compose_engine(engine, h.stack_id))
+        .map_err(|e| compose_error_to_js(&e))
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn js_container_composeUp(spec_json: *const StringHeader) -> *mut Promise {
     let promise = js_promise_new();
-    let spec = match types::parse_compose_spec_json(spec_json) {
-        Ok(s) => s,
-        Err(e) => {
-            crate::common::spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>(e) });
-            return promise;
-        }
-    };
-
-    crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = get_global_backend_instance().await;
-        let project_name = spec
-            .name
-            .clone()
-            .unwrap_or_else(|| "perry-stack".to_string());
-        let engine = Arc::new(perry_container_compose::ComposeEngine::new(
-            spec,
-            project_name,
-            backend,
-        ));
-        match engine.up(&[], true, true, false).await {
-            Ok(handle) => Ok(types::register_compose_engine(engine, handle.stack_id)),
-            Err(e) => Err(compose_error_to_js(&e)),
-        }
-    });
+    if let Some(input) = string_from_header(spec_json) {
+        crate::common::spawn_for_promise(promise as *mut u8, async move {
+            compose_up_internal(input).await
+        });
+    } else {
+        crate::common::spawn_for_promise(promise as *mut u8, async move {
+            Err::<u64, String>("Invalid spec pointer".to_string())
+        });
+    }
     promise
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_down(handle_id: u64, volumes: f64) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_down(handle_id: i64, volumes: i32) -> *mut Promise {
     let promise = js_promise_new();
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        if let Some(engine) = types::get_compose_engine(handle_id) {
-            engine.down(volumes != 0.0).await.map(|_| 0u64).map_err(|e| compose_error_to_js(&e))
+        if let Some(engine) = types::get_compose_engine(handle_id as u64) {
+            engine
+                .down(volumes != 0)
+                .await
+                .map(|_| 0u64)
+                .map_err(|e| compose_error_to_js(&e))
         } else {
-            Err("Invalid compose handle".to_string())
+            Err(compose_error_to_js(&ComposeError::NotFound(
+                "Invalid compose handle".to_string(),
+            )))
         }
     });
     promise
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_ps(handle_id: u64) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_ps(handle_id: i64) -> *mut Promise {
     let promise = js_promise_new();
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        if let Some(engine) = types::get_compose_engine(handle_id) {
+        if let Some(engine) = types::get_compose_engine(handle_id as u64) {
             match engine.ps().await {
                 Ok(list) => Ok(types::register_container_info_list(
                     list.into_iter().map(|i| i.into()).collect(),
@@ -372,7 +405,9 @@ pub unsafe extern "C" fn js_container_compose_ps(handle_id: u64) -> *mut Promise
                 Err(e) => Err(compose_error_to_js(&e)),
             }
         } else {
-            Err("Invalid compose handle".to_string())
+            Err(compose_error_to_js(&ComposeError::NotFound(
+                "Invalid compose handle".to_string(),
+            )))
         }
     });
     promise
@@ -380,23 +415,25 @@ pub unsafe extern "C" fn js_container_compose_ps(handle_id: u64) -> *mut Promise
 
 #[no_mangle]
 pub unsafe extern "C" fn js_container_compose_logs(
-    handle_id: u64,
-    service_ptr: *const StringHeader,
-    tail: f64,
+    handle_id: i64,
+    opts_json: *const StringHeader,
 ) -> *mut Promise {
     let promise = js_promise_new();
-    let service = string_from_header(service_ptr);
-    let t = if tail < 0.0 { None } else { Some(tail as u32) };
+    let opts_str = string_from_header(opts_json).unwrap_or_default();
+    let opts: serde_json::Value = serde_json::from_str(&opts_str).unwrap_or_default();
+    let service = opts["service"].as_str().map(|s| s.to_string());
+    let tail = opts["tail"].as_u64().map(|v| v as u32);
+
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        if let Some(engine) = types::get_compose_engine(handle_id) {
-            match engine.logs(service.as_deref(), t).await {
-                Ok(logs) => {
-                    Ok(types::register_container_logs(logs.into()))
-                }
+        if let Some(engine) = types::get_compose_engine(handle_id as u64) {
+            match engine.logs(service.as_deref(), tail).await {
+                Ok(logs) => Ok(types::register_container_logs(logs.into())),
                 Err(e) => Err(compose_error_to_js(&e)),
             }
         } else {
-            Err("Invalid compose handle".to_string())
+            Err(compose_error_to_js(&ComposeError::NotFound(
+                "Invalid compose handle".to_string(),
+            )))
         }
     });
     promise
@@ -404,93 +441,125 @@ pub unsafe extern "C" fn js_container_compose_logs(
 
 #[no_mangle]
 pub unsafe extern "C" fn js_container_compose_exec(
-    handle_id: u64,
+    handle_id: i64,
     service_ptr: *const StringHeader,
     cmd_json: *const StringHeader,
+    opts_json: *const StringHeader,
 ) -> *mut Promise {
     let promise = js_promise_new();
     let service = string_from_header(service_ptr).unwrap_or_default();
     let cmd_str = string_from_header(cmd_json).unwrap_or_default();
-    let cmd: Vec<String> = serde_json::from_str(&cmd_str).unwrap_or_else(|_| {
-        cmd_str.split_whitespace().map(String::from).collect()
-    });
+    let cmd: Vec<String> = serde_json::from_str(&cmd_str).unwrap_or_default();
+    let _opts_str = string_from_header(opts_json).unwrap_or_default();
+
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        if let Some(engine) = types::get_compose_engine(handle_id) {
+        if let Some(engine) = types::get_compose_engine(handle_id as u64) {
             match engine.exec(&service, &cmd).await {
                 Ok(res) => Ok(types::register_container_logs(res.into())),
                 Err(e) => Err(compose_error_to_js(&e)),
             }
         } else {
-            Err("Invalid compose handle".to_string())
+            Err(compose_error_to_js(&ComposeError::NotFound(
+                "Invalid compose handle".to_string(),
+            )))
         }
     });
     promise
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_config(handle_id: u64) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_config(handle_id: i64) -> *mut Promise {
     let promise = js_promise_new();
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        if let Some(engine) = types::get_compose_engine(handle_id) {
+        if let Some(engine) = types::get_compose_engine(handle_id as u64) {
             match engine.config() {
                 Ok(yaml) => Ok(types::register_string(yaml)),
                 Err(e) => Err(compose_error_to_js(&e)),
             }
         } else {
-            Err("Invalid compose handle".to_string())
+            Err(compose_error_to_js(&ComposeError::NotFound(
+                "Invalid compose handle".to_string(),
+            )))
         }
     });
     promise
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_start(handle_id: u64, services_json: *const StringHeader) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_start(
+    handle_id: i64,
+    services_json: *const StringHeader,
+) -> *mut Promise {
     let promise = js_promise_new();
     let services_str = string_from_header(services_json).unwrap_or_default();
     let services: Vec<String> = serde_json::from_str(&services_str).unwrap_or_default();
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        if let Some(engine) = types::get_compose_engine(handle_id) {
-            engine.start(&services).await.map(|_| 0u64).map_err(|e| compose_error_to_js(&e))
+        if let Some(engine) = types::get_compose_engine(handle_id as u64) {
+            engine
+                .start(&services)
+                .await
+                .map(|_| 0u64)
+                .map_err(|e| compose_error_to_js(&e))
         } else {
-            Err("Invalid compose handle".to_string())
+            Err(compose_error_to_js(&ComposeError::NotFound(
+                "Invalid compose handle".to_string(),
+            )))
         }
     });
     promise
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_stop(handle_id: u64, services_json: *const StringHeader) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_stop(
+    handle_id: i64,
+    services_json: *const StringHeader,
+) -> *mut Promise {
     let promise = js_promise_new();
     let services_str = string_from_header(services_json).unwrap_or_default();
     let services: Vec<String> = serde_json::from_str(&services_str).unwrap_or_default();
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        if let Some(engine) = types::get_compose_engine(handle_id) {
-            engine.stop(&services).await.map(|_| 0u64).map_err(|e| compose_error_to_js(&e))
+        if let Some(engine) = types::get_compose_engine(handle_id as u64) {
+            engine
+                .stop(&services)
+                .await
+                .map(|_| 0u64)
+                .map_err(|e| compose_error_to_js(&e))
         } else {
-            Err("Invalid compose handle".to_string())
+            Err(compose_error_to_js(&ComposeError::NotFound(
+                "Invalid compose handle".to_string(),
+            )))
         }
     });
     promise
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_restart(handle_id: u64, services_json: *const StringHeader) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_restart(
+    handle_id: i64,
+    services_json: *const StringHeader,
+) -> *mut Promise {
     let promise = js_promise_new();
     let services_str = string_from_header(services_json).unwrap_or_default();
     let services: Vec<String> = serde_json::from_str(&services_str).unwrap_or_default();
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        if let Some(engine) = types::get_compose_engine(handle_id) {
-            engine.restart(&services).await.map(|_| 0u64).map_err(|e| compose_error_to_js(&e))
+        if let Some(engine) = types::get_compose_engine(handle_id as u64) {
+            engine
+                .restart(&services)
+                .await
+                .map(|_| 0u64)
+                .map_err(|e| compose_error_to_js(&e))
         } else {
-            Err("Invalid compose handle".to_string())
+            Err(compose_error_to_js(&ComposeError::NotFound(
+                "Invalid compose handle".to_string(),
+            )))
         }
     });
     promise
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_graph(handle_id: u64) -> *const StringHeader {
-    if let Some(engine) = types::get_compose_engine(handle_id) {
+pub unsafe extern "C" fn js_container_compose_graph(handle_id: i64) -> *const StringHeader {
+    if let Some(engine) = types::get_compose_engine(handle_id as u64) {
         let nodes: Vec<String> = engine.spec.services.keys().cloned().collect();
         let edges: Vec<serde_json::Value> = vec![]; // Simplified
         let graph = serde_json::json!({
@@ -503,10 +572,10 @@ pub unsafe extern "C" fn js_container_compose_graph(handle_id: u64) -> *const St
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_status(handle_id: u64) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_status(handle_id: i64) -> *mut Promise {
     let promise = js_promise_new();
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        if let Some(engine) = types::get_compose_engine(handle_id) {
+        if let Some(engine) = types::get_compose_engine(handle_id as u64) {
             let mut services = vec![];
             let mut healthy = true;
             for (id, svc) in &engine.spec.services {
@@ -535,7 +604,9 @@ pub unsafe extern "C" fn js_container_compose_status(handle_id: u64) -> *mut Pro
             });
             Ok(types::register_string(status.to_string()))
         } else {
-            Err("Invalid compose handle".to_string())
+            Err(compose_error_to_js(&ComposeError::NotFound(
+                "Invalid compose handle".to_string(),
+            )))
         }
     });
     promise
@@ -634,16 +705,21 @@ pub unsafe extern "C" fn js_workload_inspectGraph(graph_json: *const StringHeade
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_workload_handle_down(handle_id: u64, opts_json: *const StringHeader) -> *mut Promise {
-    // Shared with compose_down
-    js_container_compose_down(handle_id, 0.0) // simplified
+pub unsafe extern "C" fn js_workload_handle_down(
+    handle_id: i64,
+    opts_json: *const StringHeader,
+) -> *mut Promise {
+    let opts_str = string_from_header(opts_json).unwrap_or_default();
+    let opts: serde_json::Value = serde_json::from_str(&opts_str).unwrap_or_default();
+    let volumes = opts["volumes"].as_bool().unwrap_or(false);
+    js_container_compose_down(handle_id, if volumes { 1 } else { 0 })
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_workload_handle_status(handle_id: u64) -> *mut Promise {
+pub unsafe extern "C" fn js_workload_handle_status(handle_id: i64) -> *mut Promise {
     let promise = js_promise_new();
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        if let Some(engine) = types::get_compose_engine(handle_id) {
+        if let Some(engine) = types::get_compose_engine(handle_id as u64) {
             let mut nodes = HashMap::new();
             let mut healthy = true;
             for (id, svc) in &engine.spec.services {
@@ -669,7 +745,9 @@ pub unsafe extern "C" fn js_workload_handle_status(handle_id: u64) -> *mut Promi
             });
             Ok(types::register_string(status.to_string()))
         } else {
-            Err("Invalid workload handle".to_string())
+            Err(compose_error_to_js(&ComposeError::NotFound(
+                "Invalid workload handle".to_string(),
+            )))
         }
     });
     promise
@@ -677,7 +755,7 @@ pub unsafe extern "C" fn js_workload_handle_status(handle_id: u64) -> *mut Promi
 
 #[no_mangle]
 pub unsafe extern "C" fn js_workload_handle_logs(
-    handle_id: u64,
+    handle_id: i64,
     node_ptr: *const StringHeader,
     opts_json: *const StringHeader,
 ) -> *mut Promise {
@@ -685,18 +763,18 @@ pub unsafe extern "C" fn js_workload_handle_logs(
     let node = string_from_header(node_ptr).unwrap_or_default();
     let opts_str = string_from_header(opts_json).unwrap_or_default();
     let opts: serde_json::Value = serde_json::from_str(&opts_str).unwrap_or_default();
-    let tail = opts["tail"].as_u64().map(|t| t as u32);
+    let tail = opts["tail"].as_u64().map(|v| v as u32);
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        if let Some(engine) = types::get_compose_engine(handle_id) {
+        if let Some(engine) = types::get_compose_engine(handle_id as u64) {
             match engine.logs(Some(&node), tail).await {
-                Ok(logs) => {
-                    Ok(types::register_container_logs(logs.into()))
-                }
+                Ok(logs) => Ok(types::register_container_logs(logs.into())),
                 Err(e) => Err(compose_error_to_js(&e)),
             }
         } else {
-            Err("Invalid workload handle".to_string())
+            Err(compose_error_to_js(&ComposeError::NotFound(
+                "Invalid workload handle".to_string(),
+            )))
         }
     });
     promise
@@ -704,18 +782,19 @@ pub unsafe extern "C" fn js_workload_handle_logs(
 
 #[no_mangle]
 pub unsafe extern "C" fn js_workload_handle_exec(
-    handle_id: u64,
+    handle_id: i64,
     node_ptr: *const StringHeader,
     cmd_json: *const StringHeader,
+    opts_json: *const StringHeader,
 ) -> *mut Promise {
-    js_container_compose_exec(handle_id, node_ptr, cmd_json)
+    js_container_compose_exec(handle_id, node_ptr, cmd_json, opts_json)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_workload_handle_ps(handle_id: u64) -> *mut Promise {
+pub unsafe extern "C" fn js_workload_handle_ps(handle_id: i64) -> *mut Promise {
     let promise = js_promise_new();
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        if let Some(engine) = types::get_compose_engine(handle_id) {
+        if let Some(engine) = types::get_compose_engine(handle_id as u64) {
             match engine.ps().await {
                 Ok(list) => {
                     let infos: Vec<serde_json::Value> = list.into_iter().map(|i| {
@@ -732,15 +811,17 @@ pub unsafe extern "C" fn js_workload_handle_ps(handle_id: u64) -> *mut Promise {
                 Err(e) => Err(compose_error_to_js(&e)),
             }
         } else {
-            Err("Invalid workload handle".to_string())
+            Err(compose_error_to_js(&ComposeError::NotFound(
+                "Invalid workload handle".to_string(),
+            )))
         }
     });
     promise
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_workload_handle_graph(handle_id: u64) -> *const StringHeader {
-    if let Some(engine) = types::get_compose_engine(handle_id) {
+pub unsafe extern "C" fn js_workload_handle_graph(handle_id: i64) -> *const StringHeader {
+    if let Some(engine) = types::get_compose_engine(handle_id as u64) {
         let json = serde_json::to_string(&engine.spec).unwrap_or_default();
         return string_to_js(&json);
     }

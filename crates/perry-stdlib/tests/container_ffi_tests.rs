@@ -71,7 +71,7 @@ async fn test_js_container_run_null() {
 #[tokio::test]
 async fn test_js_container_list_contract() {
     unsafe {
-        let p = perry_stdlib::container::js_container_list(1);
+        let p = perry_stdlib::container::js_container_list(null());
         let _ = await_promise_sync(p);
     }
 }
@@ -127,7 +127,7 @@ async fn test_js_container_compose_ps_contract() {
 #[tokio::test]
 async fn test_js_container_compose_logs_null() {
     unsafe {
-        let p = perry_stdlib::container::js_container_compose_logs(0, null(), 10);
+        let p = perry_stdlib::container::js_container_compose_logs(0, null());
         let res = await_promise_sync(p);
         assert!(res.is_err());
     }
@@ -139,7 +139,7 @@ async fn test_js_container_compose_logs_null() {
 #[tokio::test]
 async fn test_js_container_compose_exec_null() {
     unsafe {
-        let p = perry_stdlib::container::js_container_compose_exec(0, null(), null());
+        let p = perry_stdlib::container::js_container_compose_exec(0, null(), null(), null());
         let res = await_promise_sync(p);
         assert!(res.is_err());
     }
@@ -186,7 +186,7 @@ async fn test_js_container_start_null() {
 #[tokio::test]
 async fn test_js_container_stop_null() {
     unsafe {
-        let p = perry_stdlib::container::js_container_stop(null(), 10);
+        let p = perry_stdlib::container::js_container_stop(null(), null());
         let res = await_promise_sync(p);
         assert!(res.is_err());
     }
@@ -198,7 +198,7 @@ async fn test_js_container_stop_null() {
 #[tokio::test]
 async fn test_js_container_remove_null() {
     unsafe {
-        let p = perry_stdlib::container::js_container_remove(null(), 1);
+        let p = perry_stdlib::container::js_container_remove(null(), null());
         let res = await_promise_sync(p);
         assert!(res.is_err());
     }
@@ -222,7 +222,7 @@ async fn test_js_container_inspect_null() {
 #[tokio::test]
 async fn test_js_container_logs_null() {
     unsafe {
-        let p = perry_stdlib::container::js_container_logs(null(), 10);
+        let p = perry_stdlib::container::js_container_logs(null(), null());
         let res = await_promise_sync(p);
         assert!(res.is_err());
     }

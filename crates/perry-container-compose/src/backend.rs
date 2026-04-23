@@ -519,7 +519,16 @@ pub async fn probe_all_candidates() -> Vec<BackendProbeResult> {
 
 fn platform_candidates() -> &'static [&'static str] {
     if cfg!(target_os = "macos") || cfg!(target_os = "ios") {
-        &["apple/container", "orbstack", "colima", "rancher-desktop", "podman", "lima", "docker"]
+        &[
+            "apple/container",
+            "orbstack",
+            "colima",
+            "rancher-desktop",
+            "lima",
+            "podman",
+            "nerdctl",
+            "docker",
+        ]
     } else {
         &["podman", "nerdctl", "docker"]
     }

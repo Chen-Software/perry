@@ -156,15 +156,21 @@ impl ComposeEngine {
         }
 
         if let Some(networks) = &self.spec.networks {
-            for name in networks.keys() {
-                let _ = self.backend.remove_network(name).await;
+            for (name, config) in networks {
+                let external = config.as_ref().and_then(|c| c.external).unwrap_or(false);
+                if !external {
+                    let _ = self.backend.remove_network(name).await;
+                }
             }
         }
 
         if remove_volumes {
             if let Some(volumes) = &self.spec.volumes {
-                for name in volumes.keys() {
-                    let _ = self.backend.remove_volume(name).await;
+                for (name, config) in volumes {
+                    let external = config.as_ref().and_then(|c| c.external).unwrap_or(false);
+                    if !external {
+                        let _ = self.backend.remove_volume(name).await;
+                    }
                 }
             }
         }

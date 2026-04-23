@@ -44,7 +44,7 @@ pub struct ServiceBuild {
 
 impl Service {
     /// Ported from internal/entities/service.go (Requirement 19.2, 19.4)
-    pub fn generate_name(image: &str, service_name: &str) -> String {
+    pub fn generate_name(image: &str, _service_name: &str) -> String {
         let mut hasher = Md5::new();
         hasher.update(image.as_bytes());
         let hash = hex::encode(hasher.finalize());
@@ -52,7 +52,7 @@ impl Service {
 
         let random_suffix: u32 = rand::random();
 
-        format!("{}_{}_{}", service_name, short_hash, random_suffix)
+        format!("{}{:x}", short_hash, random_suffix)
     }
 
     pub fn container_name(&self, service_name: &str) -> String {
