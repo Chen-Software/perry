@@ -5,4 +5,4 @@ pub use perry_container_compose::backend::{
     DockerProtocol, LimaProtocol, detect_backend,
     AppleBackend, DockerBackend, LimaBackend, NetworkConfig, VolumeConfig,
 };
-pub use perry_container_compose::error::BackendProbeResult;
+pub use perry_container_compose::backend::BackendProbeResult;

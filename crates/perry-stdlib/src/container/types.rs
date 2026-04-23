@@ -11,9 +11,36 @@ use perry_container_compose::ComposeEngine;
 
 // ============ Handle Registry ============
 
-pub struct ContainerHandle {
-    pub id: String,
-    pub name: Option<String>,
+pub use perry_container_compose::types::{
+    ContainerHandle, ContainerInfo, ContainerLogs, ImageInfo, ComposeHandle, ContainerSpec, ComposeSpec, ListOrDict
+};
+use perry_container_compose::ComposeError;
+
+#[derive(Debug, thiserror::Error)]
+pub enum ContainerError {
+    #[error("{message}")]
+    BackendError { code: i32, message: String },
+    #[error("No container backend found. Probed: {probed:?}")]
+    NoBackendFound { probed: Vec<perry_container_compose::backend::BackendProbeResult> },
+    #[error("Not found: {0}")]
+    NotFound(String),
+}
+
+impl From<ComposeError> for ContainerError {
+    fn from(e: ComposeError) -> Self {
+        match e {
+            ComposeError::BackendError { code, message } => ContainerError::BackendError { code, message },
+            ComposeError::NoBackendFound { probed } => ContainerError::NoBackendFound { probed },
+            ComposeError::NotFound(s) => ContainerError::NotFound(s),
+            _ => ContainerError::BackendError { code: -1, message: e.to_string() },
+        }
+    }
+}
+
+impl From<String> for ContainerError {
+    fn from(s: String) -> Self {
+        ContainerError::BackendError { code: -1, message: s }
+    }
 }
 
 pub static CONTAINER_HANDLES: OnceLock<DashMap<u64, ContainerHandle>> = OnceLock::new();
@@ -34,55 +61,24 @@ pub fn register_compose_handle(engine: ComposeEngine) -> u64 {
     id
 }
 
-// ============ Core Container Types ============
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ContainerSpec {
-    pub image: String,
-    pub name: Option<String>,
-    pub ports: Option<Vec<String>>,
-    pub volumes: Option<Vec<String>>,
-    pub env: Option<HashMap<String, String>>,
-    pub cmd: Option<Vec<String>>,
-    pub entrypoint: Option<Vec<String>>,
-    pub network: Option<String>,
-    pub rm: Option<bool>,
-    pub read_only: Option<bool>,
-    pub seccomp: Option<String>,
-    pub labels: Option<HashMap<String, String>>,
+pub fn get_compose_handle(id: u64) -> Option<ArcComposeEngine> {
+    COMPOSE_HANDLES.get()?.get(&id).map(|e| ArcComposeEngine(std::sync::Arc::clone(&e.0)))
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContainerInfo {
-    pub id: String,
-    pub name: String,
-    pub image: String,
-    pub status: String,
-    pub ports: Vec<String>,
-    pub created: String,
+pub fn take_compose_handle(id: u64) -> Option<ArcComposeEngine> {
+    COMPOSE_HANDLES.get()?.remove(&id).map(|(_, e)| e)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ContainerLogs {
-    pub stdout: String,
-    pub stderr: String,
+pub fn parse_container_spec(ptr: *const StringHeader) -> Result<ContainerSpec, String> {
+    let json = unsafe { string_from_header(ptr) }.ok_or("Invalid JSON pointer")?;
+    serde_json::from_str(&json).map_err(|e| e.to_string())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ImageInfo {
-    pub id: String,
-    pub repository: String,
-    pub tag: String,
-    pub size: u64,
-    pub created: String,
+pub fn parse_compose_spec(ptr: *const StringHeader) -> Result<perry_container_compose::types::ComposeSpec, String> {
+    let json = unsafe { string_from_header(ptr) }.ok_or("Invalid JSON pointer")?;
+    serde_json::from_str(&json).map_err(|e| e.to_string())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComposeHandle {
-    pub stack_id: u64,
-    pub project_name: String,
-    pub services: Vec<String>,
-}
 
 // ============ Helper for StringHeader ============
 

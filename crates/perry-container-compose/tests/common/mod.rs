@@ -48,7 +48,6 @@ impl ContainerBackend for MockBackend {
             image: spec.image.clone(),
             status: "running".to_string(),
             ports: spec.ports.clone().unwrap_or_default(),
-            labels: spec.labels.clone().unwrap_or_default(),
             created: "2025-01-01T00:00:00Z".to_string(),
         };
         state.containers.insert(name.clone(), info);
@@ -64,7 +63,6 @@ impl ContainerBackend for MockBackend {
             image: spec.image.clone(),
             status: "created".to_string(),
             ports: spec.ports.clone().unwrap_or_default(),
-            labels: spec.labels.clone().unwrap_or_default(),
             created: "2025-01-01T00:00:00Z".to_string(),
         };
         state.containers.insert(name.clone(), info);
@@ -150,15 +148,9 @@ impl ContainerBackend for MockBackend {
         Ok(())
     }
 
-    async fn wait(&self, _id: &str) -> Result<i32> { Ok(0) }
-    async fn inspect_image(&self, _reference: &str) -> Result<ImageInfo> {
-        Ok(ImageInfo {
-            id: "id".into(),
-            repository: "repo".into(),
-            tag: "tag".into(),
-            size: 0,
-            created: "".into(),
-        })
+    async fn inspect_volume(&self, _name: &str) -> Result<()> { Ok(()) }
+    async fn run_with_security(&self, spec: &ContainerSpec, _profile: &perry_container_compose::backend::SecurityProfile) -> Result<ContainerHandle> {
+        self.run(spec).await
     }
 
     async fn inspect_network(&self, _name: &str) -> Result<()> {

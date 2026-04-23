@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
-use crate::container::mod_private::get_global_backend_instance;
+use crate::container::get_global_backend;
 
 pub const CHAINGUARD_IDENTITY: &str =
     "https://github.com/chainguard-images/images/.github/workflows/sign.yaml@refs/heads/main";
@@ -18,8 +18,8 @@ pub enum VerificationResult {
 static VERIFICATION_CACHE: OnceLock<RwLock<HashMap<String, VerificationResult>>> = OnceLock::new();
 
 pub async fn fetch_image_digest(reference: &str) -> Result<String, String> {
-    let backend = get_global_backend_instance().await?;
-    let info = backend.inspect_image(reference).await.map_err(|e| e.to_string())?;
+    let backend = get_global_backend().await.map_err(|e| e.to_string())?;
+    let info = backend.inspect(reference).await.map_err(|e| e.to_string())?;
     Ok(info.id)
 }
 
