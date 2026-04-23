@@ -18,7 +18,7 @@ async fn test_compose_up_success() {
     });
 
     let backend = Arc::new(MockBackend::default());
-    let engine = ComposeEngine::new(spec, "test-project".into(), backend.clone());
+    let engine = Arc::new(ComposeEngine::new(spec, "test-project".into(), backend.clone()));
 
     let handle = engine.up(&[], true, false, false).await.expect("up failed");
 
@@ -50,7 +50,7 @@ async fn test_compose_up_rollback_on_failure() {
         state.fail_on_run = Some("web".into());
     }
 
-    let engine = ComposeEngine::new(spec, "fail-project".into(), backend.clone());
+    let engine = Arc::new(ComposeEngine::new(spec, "fail-project".into(), backend.clone()));
     let result = engine.up(&[], true, false, false).await;
 
     assert!(result.is_err());
@@ -74,9 +74,9 @@ async fn test_compose_down_cleans_resources() {
     });
 
     let backend = Arc::new(MockBackend::default());
-    let engine = ComposeEngine::new(spec, "down-project".into(), backend.clone());
+    let engine = Arc::new(ComposeEngine::new(spec, "down-project".into(), backend.clone()));
 
-    let handle = engine.up(&[], true, false, false).await.unwrap();
+    let handle = Arc::clone(&engine).up(&[], true, false, false).await.unwrap();
     engine.down(&handle.services, false, true).await.expect("down failed");
 
     let state = backend.state.lock().unwrap();

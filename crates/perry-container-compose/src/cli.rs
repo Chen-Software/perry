@@ -7,6 +7,7 @@ use crate::error::Result;
 use crate::project::ComposeProject;
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// perry-compose: Docker Compose-like experience for Apple Container / Podman
 #[derive(Parser, Debug)]
@@ -138,7 +139,7 @@ pub async fn run(cli: Cli) -> Result<()> {
 
     match cli.command {
         Commands::Up(args) => {
-            engine
+            Arc::new(engine)
                 .up(&args.services, args.detach, args.build, args.remove_orphans)
                 .await?;
         }

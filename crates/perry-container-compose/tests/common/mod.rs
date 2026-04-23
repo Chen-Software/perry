@@ -108,8 +108,21 @@ impl ContainerBackend for MockBackend {
         Ok(ContainerLogs { stdout: "exec".into(), stderr: "".into() })
     }
 
-    async fn pull_image(&self, _reference: &str) -> Result<()> { Ok(()) }
-    async fn list_images(&self) -> Result<Vec<ImageInfo>> { Ok(vec![]) }
+    async fn pull_image(&self, _reference: &str) -> Result<()> {
+        Ok(())
+    }
+    async fn inspect_image(&self, reference: &str) -> Result<ImageInfo> {
+        Ok(ImageInfo {
+            id: reference.to_string(),
+            repository: reference.to_string(),
+            tag: "latest".into(),
+            size: 0,
+            created: "".into(),
+        })
+    }
+    async fn list_images(&self) -> Result<Vec<ImageInfo>> {
+        Ok(vec![])
+    }
     async fn remove_image(&self, _reference: &str, _force: bool) -> Result<()> { Ok(()) }
 
     async fn create_network(&self, name: &str, _config: &NetworkConfig) -> Result<()> {

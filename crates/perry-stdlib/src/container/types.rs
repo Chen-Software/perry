@@ -146,6 +146,26 @@ impl std::fmt::Display for ContainerError {
 
 impl std::error::Error for ContainerError {}
 
+impl ContainerError {
+    pub fn to_json(&self) -> String {
+        let code = match self {
+            ContainerError::NotFound(_) => 404,
+            ContainerError::BackendError { code, .. } => *code,
+            ContainerError::VerificationFailed { .. } => 403,
+            ContainerError::DependencyCycle { .. } => 422,
+            ContainerError::ServiceStartupFailed { .. } => 500,
+            ContainerError::InvalidConfig(_) => 400,
+            ContainerError::NoBackendFound { .. } => 503,
+            ContainerError::BackendNotAvailable { .. } => 503,
+        };
+        serde_json::json!({
+            "message": self.to_string(),
+            "code": code
+        })
+        .to_string()
+    }
+}
+
 impl From<perry_container_compose::error::ComposeError> for ContainerError {
     fn from(e: perry_container_compose::error::ComposeError) -> Self {
         match e {

@@ -631,7 +631,10 @@ pub async fn probe_all_backends() -> (Option<Box<dyn ContainerBackend>>, Vec<Bac
         return (None, vec![BackendProbeResult {
             name: "config".into(),
             available: false,
-            reason: format!("Invalid PERRY_CONTAINER_MODE: {}. Expected 'local-first' or 'server-first'", mode),
+            reason: format!(
+                "Invalid PERRY_CONTAINER_MODE: {}. Expected 'local-first' or 'server-first'",
+                mode
+            ),
             version: None,
             mode,
             isolation_level: IsolationLevel::None,
@@ -640,22 +643,28 @@ pub async fn probe_all_backends() -> (Option<Box<dyn ContainerBackend>>, Vec<Bac
 
     if let Ok(name) = std::env::var("PERRY_CONTAINER_BACKEND") {
         return match probe_candidate(&name).await {
-            Ok((backend, version)) => (Some(backend), vec![BackendProbeResult {
-                name: name.clone(),
-                available: true,
-                reason: String::new(),
-                version,
-                mode,
-                isolation_level: IsolationLevel::Container,
-            }]),
-            Err(reason) => (None, vec![BackendProbeResult {
-                name: name.clone(),
-                available: false,
-                reason,
-                version: None,
-                mode,
-                isolation_level: IsolationLevel::Container,
-            }]),
+            Ok((backend, version)) => (
+                Some(backend),
+                vec![BackendProbeResult {
+                    name: name.clone(),
+                    available: true,
+                    reason: String::new(),
+                    version,
+                    mode,
+                    isolation_level: IsolationLevel::Container,
+                }],
+            ),
+            Err(reason) => (
+                None,
+                vec![BackendProbeResult {
+                    name: name.clone(),
+                    available: false,
+                    reason,
+                    version: None,
+                    mode,
+                    isolation_level: IsolationLevel::Container,
+                }],
+            ),
         };
     }
 
@@ -684,7 +693,11 @@ pub async fn probe_all_backends() -> (Option<Box<dyn ContainerBackend>>, Vec<Bac
                     isolation_level: IsolationLevel::Container,
                 });
                 if winner.is_none() {
-                    tracing::debug!(backend = candidate, version = ?version, "container backend detected");
+                    tracing::debug!(
+                        backend = candidate,
+                        version = ?version,
+                        "container backend detected"
+                    );
                     winner = Some(backend);
                 }
             }
@@ -712,9 +725,19 @@ pub async fn probe_all_backends() -> (Option<Box<dyn ContainerBackend>>, Vec<Bac
 
 fn platform_candidates() -> &'static [&'static str] {
     match std::env::consts::OS {
-        "macos" | "ios" => &["apple/container", "orbstack", "colima", "rancher-desktop", "podman", "lima", "docker"],
+        "macos" | "ios" => &[
+            "apple/container",
+            "orbstack",
+            "colima",
+            "rancher-desktop",
+            "lima",
+            "podman",
+            "nerdctl",
+            "docker",
+        ],
         "linux" => &["podman", "nerdctl", "docker"],
-        _ => &["podman", "nerdctl", "docker"], // Windows + other
+        "windows" => &["podman", "nerdctl", "docker"],
+        _ => &["podman", "nerdctl", "docker"],
     }
 }
 
@@ -757,19 +780,39 @@ async fn probe_candidate(name: &str) -> std::result::Result<(Box<dyn ContainerBa
             Ok((Box::new(DockerBackend::new(bin, DockerProtocol, version.clone())), version))
         }
         "orbstack" => {
-            let bin = which_bin("orb").or_else(|_| which_bin("docker")).map_err(|_| "orbstack not found")?;
+            let bin = which_bin("orb")
+                .or_else(|_| which_bin("docker"))
+                .map_err(|_| "orbstack not found")?;
             let version = get_version(bin.clone()).await;
-            Ok((Box::new(DockerBackend::new(bin, DockerProtocol, version.clone())), version))
+            Ok((
+                Box::new(DockerBackend::new(bin, DockerProtocol, version.clone())),
+                version,
+            ))
         }
         "colima" => {
             let bin = which_bin("colima")?;
             let version = get_version(bin.clone()).await;
-            let out = Command::new(&bin).arg("status").output().await.map_err(|_| "colima status failed")?;
+            let out = Command::new(&bin)
+                .arg("status")
+                .output()
+                .await
+                .map_err(|_| "colima status failed")?;
             if !String::from_utf8_lossy(&out.stdout).contains("running") {
                 return Err("colima not running".into());
             }
             let dbin = which_bin("docker").map_err(|_| "docker cli not found for colima")?;
-            Ok((Box::new(DockerBackend::new(dbin, DockerProtocol, version.clone())), version))
+            Ok((
+                Box::new(DockerBackend::new(dbin, DockerProtocol, version.clone())),
+                version,
+            ))
+        }
+        "rancher-desktop" => {
+            let bin = which_bin("nerdctl").map_err(|_| "rancher-desktop (nerdctl) not found")?;
+            let version = get_version(bin.clone()).await;
+            Ok((
+                Box::new(DockerBackend::new(bin, DockerProtocol, version.clone())),
+                version,
+            ))
         }
         "lima" => {
             let bin = which_bin("limactl")?;

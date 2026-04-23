@@ -33,15 +33,13 @@ pub struct ComposeEngine {
     created_networks: std::sync::Mutex<Vec<String>>,
     /// Volumes that were created in this session
     created_volumes: std::sync::Mutex<Vec<String>>,
+    /// Cached container names for services
+    container_names: std::sync::Mutex<HashMap<String, String>>,
 }
 
 impl ComposeEngine {
     /// Create a new ComposeEngine.
-    pub fn new(
-        spec: ComposeSpec,
-        project_name: String,
-        backend: Arc<dyn ContainerBackend>,
-    ) -> Self {
+    pub fn new(spec: ComposeSpec, project_name: String, backend: Arc<dyn ContainerBackend>) -> Self {
         ComposeEngine {
             spec,
             project_name,
@@ -49,11 +47,30 @@ impl ComposeEngine {
             started_containers: std::sync::Mutex::new(Vec::new()),
             created_networks: std::sync::Mutex::new(Vec::new()),
             created_volumes: std::sync::Mutex::new(Vec::new()),
+            container_names: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
+    /// Get or generate the container name for a service.
+    pub fn get_container_name(&self, svc_name: &str) -> Result<String> {
+        let mut names = self.container_names.lock().unwrap();
+        if let Some(name) = names.get(svc_name) {
+            return Ok(name.to_string());
+        }
+
+        let svc = self
+            .spec
+            .services
+            .get(svc_name)
+            .ok_or_else(|| ComposeError::NotFound(svc_name.to_string()))?;
+
+        let name = service::service_container_name(svc, svc_name);
+        names.insert(svc_name.to_string(), name.clone());
+        Ok(name)
+    }
+
     /// Register this engine in the global registry and return a handle.
-    fn register(&self) -> ComposeHandle {
+    fn register(self: Arc<Self>) -> ComposeHandle {
         let stack_id = NEXT_STACK_ID.fetch_add(1, Ordering::SeqCst);
         let services: Vec<String> = self.spec.services.keys().cloned().collect();
         let handle = ComposeHandle {
@@ -61,14 +78,7 @@ impl ComposeEngine {
             project_name: self.project_name.clone(),
             services,
         };
-        let _ = COMPOSE_ENGINES
-            .lock()
-            .unwrap()
-            .insert(stack_id, Arc::new(ComposeEngine::new(
-                self.spec.clone(),
-                self.project_name.clone(),
-                Arc::clone(&self.backend),
-            )));
+        let _ = COMPOSE_ENGINES.lock().unwrap().insert(stack_id, self);
         handle
     }
 
@@ -89,7 +99,7 @@ impl ComposeEngine {
     /// Creates networks and volumes first, then starts containers.
     /// On failure, rolls back all previously started containers, networks, and volumes.
     pub async fn up(
-        &self,
+        self: Arc<Self>,
         services: &[String],
         detach: bool,
         _build: bool,
@@ -174,7 +184,7 @@ impl ComposeEngine {
                 .get(svc_name)
                 .ok_or_else(|| ComposeError::NotFound(svc_name.clone()))?;
 
-            let container_name = service::service_container_name(svc, svc_name);
+            let container_name = self.get_container_name(svc_name)?;
 
             // Check if already exists and running
             let info_res = self.backend.inspect(&container_name).await;
@@ -267,13 +277,7 @@ impl ComposeEngine {
 
         // 1. Stop and remove containers
         for svc_name in target {
-            let svc = self
-                .spec
-                .services
-                .get(svc_name)
-                .ok_or_else(|| ComposeError::NotFound(svc_name.clone()))?;
-
-            let container_name = service::service_container_name(svc, svc_name);
+            let container_name = self.get_container_name(svc_name)?;
             let info_res = self.backend.inspect(&container_name).await;
 
             if let Ok(info) = info_res {
@@ -324,7 +328,7 @@ impl ComposeEngine {
         let mut results = Vec::new();
 
         for (svc_name, svc) in &self.spec.services {
-            let container_name = service::service_container_name(svc, svc_name);
+            let container_name = self.get_container_name(svc_name)?;
             let info_res = self.backend.inspect(&container_name).await;
 
             match info_res {
@@ -364,13 +368,7 @@ impl ComposeEngine {
         };
 
         for svc_name in service_names {
-            let svc = self
-                .spec
-                .services
-                .get(&svc_name)
-                .ok_or_else(|| ComposeError::NotFound(svc_name.clone()))?;
-
-            let container_name = service::service_container_name(svc, &svc_name);
+            let container_name = self.get_container_name(&svc_name)?;
             let logs = self.backend.logs(&container_name, tail).await?;
             stdout.push_str(&format!("--- {} ---\n{}", svc_name, logs.stdout));
             stderr.push_str(&format!("--- {} ---\n{}", svc_name, logs.stderr));
@@ -382,18 +380,8 @@ impl ComposeEngine {
     // ============ exec ============
 
     /// Execute a command in a running service container.
-    pub async fn exec(
-        &self,
-        service: &str,
-        cmd: &[String],
-    ) -> Result<ContainerLogs> {
-        let svc = self
-            .spec
-            .services
-            .get(service)
-            .ok_or_else(|| ComposeError::NotFound(service.to_owned()))?;
-
-        let container_name = service::service_container_name(svc, service);
+    pub async fn exec(&self, service: &str, cmd: &[String]) -> Result<ContainerLogs> {
+        let container_name = self.get_container_name(service)?;
         let info = self.backend.inspect(&container_name).await?;
 
         if info.status != "running" {
@@ -431,12 +419,7 @@ impl ComposeEngine {
         };
 
         for svc_name in target {
-            let svc = self
-                .spec
-                .services
-                .get(&svc_name)
-                .ok_or_else(|| ComposeError::NotFound(svc_name.clone()))?;
-            let container_name = service::service_container_name(svc, &svc_name);
+            let container_name = self.get_container_name(&svc_name)?;
             self.backend.start(&container_name).await?;
         }
 
@@ -452,12 +435,7 @@ impl ComposeEngine {
         };
 
         for svc_name in target {
-            let svc = self
-                .spec
-                .services
-                .get(&svc_name)
-                .ok_or_else(|| ComposeError::NotFound(svc_name.clone()))?;
-            let container_name = service::service_container_name(svc, &svc_name);
+            let container_name = self.get_container_name(&svc_name)?;
             self.backend.stop(&container_name, None).await?;
         }
 

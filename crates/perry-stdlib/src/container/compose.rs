@@ -22,11 +22,17 @@ impl ComposeWrapper {
     }
 
     pub async fn up(&self) -> Result<ComposeHandle, ContainerError> {
-        self.engine.up(&[], true, false, false).await.map_err(ContainerError::from)
+        Arc::clone(&self.engine)
+            .up(&[], true, false, false)
+            .await
+            .map_err(ContainerError::from)
     }
 
     pub async fn down(&self, _handle: &ComposeHandle, volumes: bool) -> Result<(), ContainerError> {
-        self.engine.down(&[], false, volumes).await.map_err(ContainerError::from)
+        self.engine
+            .down(&[], false, volumes)
+            .await
+            .map_err(ContainerError::from)
     }
 
     pub async fn ps(&self, _handle: &ComposeHandle) -> Result<Vec<ContainerInfo>, ContainerError> {

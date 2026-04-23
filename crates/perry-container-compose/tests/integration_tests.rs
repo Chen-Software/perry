@@ -1,7 +1,3 @@
-use perry_container_compose::backend::detect_backend;
-use perry_container_compose::compose::ComposeEngine;
-use perry_container_compose::types::ComposeSpec;
-use std::sync::Arc;
 
 // Feature: perry-container | Layer: integration | Req: 6.1 | Property: -
 #[cfg(feature = "integration-tests")]

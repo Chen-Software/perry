@@ -1032,6 +1032,10 @@ pub enum Expr {
     ProcessChdir(Box<Expr>),
     // process.kill(pid, signal?) -> void
     ProcessKill { pid: Box<Expr>, signal: Option<Box<Expr>> },
+    // process.exit(code?) -> never
+    ProcessExit(Option<Box<Expr>>),
+    // process.env -> object { KEY: VAL }
+    ProcessEnv,
     // process.stdin -> stub object { write: fn }
     ProcessStdin,
     // process.stdout -> stub object { write: fn }
@@ -1145,6 +1149,7 @@ pub enum Expr {
     MathHypot(Vec<Expr>),                // Math.hypot(...values) -> number
     MathFround(Box<Expr>),               // Math.fround(x) -> number
     MathClz32(Box<Expr>),                // Math.clz32(x) -> number
+    MathExp(Box<Expr>),                  // Math.exp(x) -> number
     MathExpm1(Box<Expr>),                // Math.expm1(x) -> number
     MathLog1p(Box<Expr>),                // Math.log1p(x) -> number
     MathSinh(Box<Expr>),                 // Math.sinh(x) -> number
