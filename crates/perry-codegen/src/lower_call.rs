@@ -223,7 +223,7 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
         // These arrive as ExternFuncRef because perry/system imports aren't
         // lowered to NativeMethodCall in the HIR.
         if let Some(sig) = perry_system_table_lookup(name) {
-            return lower_table_dispatch_call(ctx, sig, args);
+            return lower_native_table_call(ctx, sig, args);
         }
         // Built-in runtime extern functions (`js_weakmap_set`,
         // `js_regexp_exec`, etc.) that start with `js_` are resolved
@@ -2362,13 +2362,13 @@ pub(crate) fn lower_native_method_call(
     // perry/system dispatch: audioStart, audioGetLevel, getDeviceModel, etc.
     if module == "perry/system" && object.is_none() {
         if let Some(sig) = perry_system_table_lookup(method) {
-            return lower_table_dispatch_call(ctx, sig, args);
+            return lower_native_table_call(ctx, sig, args);
         }
     }
 
     if module == "perry/workloads" && object.is_none() {
         if let Some(sig) = perry_workloads_table_lookup(method) {
-            return lower_table_dispatch_call(ctx, sig, args);
+            return lower_native_table_call(ctx, sig, args);
         }
     }
 
@@ -2379,7 +2379,7 @@ pub(crate) fn lower_native_method_call(
         && method != "HStack"
     {
         if let Some(sig) = perry_ui_table_lookup(method) {
-            return lower_table_dispatch_call(ctx, sig, args);
+            return lower_native_table_call(ctx, sig, args);
         }
         // Warn at compile time so missing methods are visible instead
         // of silently returning 0.0 (which causes null-pointer crashes
@@ -2389,13 +2389,13 @@ pub(crate) fn lower_native_method_call(
 
     if module == "perry/container" && object.is_none() {
         if let Some(sig) = perry_container_table_lookup(method) {
-            return lower_table_dispatch_call(ctx, sig, args);
+            return lower_native_table_call(ctx, sig, args);
         }
     }
 
-    if module == "perry/compose" && object.is_none() {
-        if let Some(sig) = perry_compose_table_lookup(method) {
-            return lower_table_dispatch_call(ctx, sig, args);
+    if module == "perry/container-compose" && object.is_none() {
+        if let Some(sig) = perry_container_compose_table_lookup(method) {
+            return lower_native_table_call(ctx, sig, args);
         }
     }
 
@@ -2594,13 +2594,22 @@ pub(crate) fn lower_native_method_call(
                         llvm_args.push((I64, i));
                         runtime_param_types.push(I64);
                     }
+                    UiArgKind::Json => {
+                        let v = lower_expr(ctx, arg)?;
+                        let blk = ctx.block();
+                        let zero = "0".to_string();
+                        let json_ptr = blk.call(I64, "js_json_stringify", &[(DOUBLE, &v), (I32, &zero)]);
+                        llvm_args.push((I64, json_ptr));
+                        runtime_param_types.push(I64);
+                    }
                 }
             }
             let return_type = match sig.ret {
                 UiReturnKind::Widget => I64,
-                UiReturnKind::Str => I64,
                 UiReturnKind::F64 => DOUBLE,
                 UiReturnKind::Void => crate::types::VOID,
+                UiReturnKind::Promise => I64,
+                UiReturnKind::Str => I64,
             };
             ctx.pending_declares.push((sig.runtime.to_string(), return_type, runtime_param_types));
             let ref_args: Vec<(crate::types::LlvmType, &str)> =
@@ -2615,12 +2624,16 @@ pub(crate) fn lower_native_method_call(
                     let raw = blk.call(I64, sig.runtime, &ref_args);
                     Ok(crate::expr::nanbox_pointer_inline(blk, &raw))
                 }
-                UiReturnKind::Str => {
-                    let raw = blk.call(I64, sig.runtime, &ref_args);
-                    Ok(crate::expr::nanbox_string_inline(blk, &raw))
-                }
                 UiReturnKind::F64 => {
                     Ok(blk.call(DOUBLE, sig.runtime, &ref_args))
+                }
+                UiReturnKind::Promise => {
+                    let promise = blk.call(I64, sig.runtime, &ref_args);
+                    Ok(crate::expr::nanbox_pointer_inline(blk, &promise))
+                }
+                UiReturnKind::Str => {
+                    let ptr = blk.call(I64, sig.runtime, &ref_args);
+                    Ok(crate::expr::nanbox_string_inline(blk, &ptr))
                 }
             };
         }
@@ -3430,6 +3443,9 @@ enum UiArgKind {
     Closure,
     /// Raw i64 (rare; some setters take an enum tag as i64).
     I64Raw,
+    /// JSON string: lower the JSValue, call JSON.stringify, then pass
+    /// the StringHeader pointer as i64.
+    Json,
 }
 
 /// What the perry/ui FFI function returns and how to box it.
@@ -3437,12 +3453,14 @@ enum UiArgKind {
 enum UiReturnKind {
     /// Widget handle: NaN-box the i64 result with POINTER_TAG.
     Widget,
-    /// String pointer: NaN-box the i64 result with STRING_TAG.
-    Str,
     /// Raw f64: pass through unchanged. Used by `scrollviewGetOffset` etc.
     F64,
     /// Void return: emit `call void` and return the `0.0` sentinel f64.
     Void,
+    /// Promise return: returns a `*mut Promise` (i64). NaN-box as POINTER.
+    Promise,
+    /// String return: returns a `*const StringHeader` (i64). NaN-box as STRING.
+    Str,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -3876,58 +3894,6 @@ fn perry_ui_table_lookup(method: &str) -> Option<&'static UiSig> {
     PERRY_UI_TABLE.iter().find(|s| s.method == method)
 }
 
-/// Dispatch table for perry/container module.
-static PERRY_CONTAINER_TABLE: &[UiSig] = &[
-    UiSig { method: "run", runtime: "js_container_run", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
-    UiSig { method: "create", runtime: "js_container_create", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
-    UiSig { method: "start", runtime: "js_container_start", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
-    UiSig { method: "stop", runtime: "js_container_stop", args: &[UiArgKind::Str, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
-    UiSig { method: "remove", runtime: "js_container_remove", args: &[UiArgKind::Str, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
-    UiSig { method: "list", runtime: "js_container_list", args: &[UiArgKind::I64Raw], ret: UiReturnKind::Widget },
-    UiSig { method: "inspect", runtime: "js_container_inspect", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
-    UiSig { method: "logs", runtime: "js_container_logs", args: &[UiArgKind::Str, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
-    UiSig { method: "exec", runtime: "js_container_exec", args: &[UiArgKind::Str, UiArgKind::Str, UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Widget },
-    UiSig { method: "pullImage", runtime: "js_container_pullImage", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
-    UiSig { method: "listImages", runtime: "js_container_listImages", args: &[], ret: UiReturnKind::Widget },
-    UiSig { method: "removeImage", runtime: "js_container_removeImage", args: &[UiArgKind::Str, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
-    UiSig { method: "getBackend", runtime: "js_container_getBackend", args: &[], ret: UiReturnKind::Str },
-    UiSig { method: "detectBackend", runtime: "js_container_detectBackend", args: &[], ret: UiReturnKind::Widget },
-    UiSig { method: "composeUp", runtime: "js_container_composeUp", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
-];
-
-/// Dispatch table for perry/compose module.
-static PERRY_COMPOSE_TABLE: &[UiSig] = &[
-    UiSig { method: "up", runtime: "js_compose_up", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
-    UiSig { method: "down", runtime: "js_compose_down", args: &[UiArgKind::I64Raw, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
-    UiSig { method: "ps", runtime: "js_compose_ps", args: &[UiArgKind::I64Raw], ret: UiReturnKind::Widget },
-    UiSig { method: "logs", runtime: "js_compose_logs", args: &[UiArgKind::I64Raw, UiArgKind::Str, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
-    UiSig { method: "exec", runtime: "js_compose_exec", args: &[UiArgKind::I64Raw, UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Widget },
-    UiSig { method: "config", runtime: "js_compose_config", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
-    UiSig { method: "start", runtime: "js_compose_start", args: &[UiArgKind::I64Raw, UiArgKind::Str], ret: UiReturnKind::Widget },
-    UiSig { method: "stop", runtime: "js_compose_stop", args: &[UiArgKind::I64Raw, UiArgKind::Str], ret: UiReturnKind::Widget },
-    UiSig { method: "restart", runtime: "js_compose_restart", args: &[UiArgKind::I64Raw, UiArgKind::Str], ret: UiReturnKind::Widget },
-];
-
-/// Dispatch table for perry/workloads module.
-static PERRY_WORKLOADS_TABLE: &[UiSig] = &[
-    UiSig { method: "graph", runtime: "js_workload_graph", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Str },
-    UiSig { method: "node", runtime: "js_workload_node", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Str },
-    UiSig { method: "runGraph", runtime: "js_workload_runGraph", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Widget },
-    UiSig { method: "inspectGraph", runtime: "js_workload_inspectGraph", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
-];
-
-fn perry_container_table_lookup(method: &str) -> Option<&'static UiSig> {
-    PERRY_CONTAINER_TABLE.iter().find(|s| s.method == method)
-}
-
-fn perry_compose_table_lookup(method: &str) -> Option<&'static UiSig> {
-    PERRY_COMPOSE_TABLE.iter().find(|s| s.method == method)
-}
-
-fn perry_workloads_table_lookup(method: &str) -> Option<&'static UiSig> {
-    PERRY_WORKLOADS_TABLE.iter().find(|s| s.method == method)
-}
-
 fn perry_ui_instance_method_lookup(method: &str) -> Option<&'static UiSig> {
     PERRY_UI_INSTANCE_TABLE.iter().find(|s| s.method == method)
 }
@@ -3937,7 +3903,7 @@ fn perry_ui_instance_method_lookup(method: &str) -> Option<&'static UiSig> {
 // =============================================================================
 
 /// Maps JS import names from `perry/system` to their `perry_system_*` / `perry_*`
-/// runtime C symbols. Uses the same UiSig + lower_table_dispatch_call machinery
+/// runtime C symbols. Uses the same UiSig + lower_perry_ui_table_call machinery
 /// since the calling convention is identical.
 static PERRY_SYSTEM_TABLE: &[UiSig] = &[
     UiSig { method: "isDarkMode", runtime: "perry_system_is_dark_mode",
@@ -3976,17 +3942,114 @@ fn perry_system_table_lookup(method: &str) -> Option<&'static UiSig> {
     PERRY_SYSTEM_TABLE.iter().find(|s| s.method == method)
 }
 
-/// Lower a perry/ui call described by `sig`. Walks each arg, applies
+// =============================================================================
+// perry/container dispatch table
+// =============================================================================
+
+static PERRY_CONTAINER_TABLE: &[UiSig] = &[
+    UiSig { method: "run", runtime: "js_container_run",
+            args: &[UiArgKind::Json], ret: UiReturnKind::Promise },
+    UiSig { method: "create", runtime: "js_container_create",
+            args: &[UiArgKind::Json], ret: UiReturnKind::Promise },
+    UiSig { method: "start", runtime: "js_container_start",
+            args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
+    UiSig { method: "stop", runtime: "js_container_stop",
+            args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
+    UiSig { method: "remove", runtime: "js_container_remove",
+            args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
+    UiSig { method: "list", runtime: "js_container_list",
+            args: &[UiArgKind::F64], ret: UiReturnKind::Promise },
+    UiSig { method: "inspect", runtime: "js_container_inspect",
+            args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
+    UiSig { method: "logs", runtime: "js_container_logs",
+            args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
+    UiSig { method: "exec", runtime: "js_container_exec",
+            args: &[UiArgKind::Str, UiArgKind::Json], ret: UiReturnKind::Promise },
+    UiSig { method: "pullImage", runtime: "js_container_pullImage",
+            args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
+    UiSig { method: "listImages", runtime: "js_container_listImages",
+            args: &[], ret: UiReturnKind::Promise },
+    UiSig { method: "removeImage", runtime: "js_container_removeImage",
+            args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
+    UiSig { method: "getBackend", runtime: "js_container_getBackend",
+            args: &[], ret: UiReturnKind::Str },
+    UiSig { method: "composeUp", runtime: "js_container_composeUp",
+            args: &[UiArgKind::Json], ret: UiReturnKind::Promise },
+    UiSig { method: "build", runtime: "js_container_build",
+            args: &[UiArgKind::Json, UiArgKind::Str], ret: UiReturnKind::Promise },
+];
+
+fn perry_container_table_lookup(method: &str) -> Option<&'static UiSig> {
+    PERRY_CONTAINER_TABLE.iter().find(|s| s.method == method)
+}
+
+// =============================================================================
+// perry/container-compose dispatch table
+// =============================================================================
+
+static PERRY_CONTAINER_COMPOSE_TABLE: &[UiSig] = &[
+    UiSig { method: "up", runtime: "js_container_composeUp",
+            args: &[UiArgKind::Json], ret: UiReturnKind::Promise },
+    UiSig { method: "down", runtime: "js_container_compose_down",
+            args: &[UiArgKind::I64Raw, UiArgKind::F64], ret: UiReturnKind::Promise },
+    UiSig { method: "ps", runtime: "js_container_compose_ps",
+            args: &[UiArgKind::I64Raw], ret: UiReturnKind::Promise },
+    UiSig { method: "logs", runtime: "js_container_compose_logs",
+            args: &[UiArgKind::I64Raw, UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
+    UiSig { method: "exec", runtime: "js_container_compose_exec",
+            args: &[UiArgKind::I64Raw, UiArgKind::Str, UiArgKind::Json], ret: UiReturnKind::Promise },
+    UiSig { method: "config", runtime: "js_container_compose_config",
+            args: &[UiArgKind::I64Raw], ret: UiReturnKind::Promise },
+    UiSig { method: "start", runtime: "js_container_compose_start",
+            args: &[UiArgKind::I64Raw, UiArgKind::Json], ret: UiReturnKind::Promise },
+    UiSig { method: "stop", runtime: "js_container_compose_stop",
+            args: &[UiArgKind::I64Raw, UiArgKind::Json], ret: UiReturnKind::Promise },
+    UiSig { method: "restart", runtime: "js_container_compose_restart",
+            args: &[UiArgKind::I64Raw, UiArgKind::Json], ret: UiReturnKind::Promise },
+];
+
+fn perry_container_compose_table_lookup(method: &str) -> Option<&'static UiSig> {
+    PERRY_CONTAINER_COMPOSE_TABLE.iter().find(|s| s.method == method)
+}
+
+// =============================================================================
+// perry/workloads dispatch table
+// =============================================================================
+
+static PERRY_WORKLOADS_TABLE: &[UiSig] = &[
+    UiSig { method: "graph", runtime: "js_workload_graph",
+            args: &[UiArgKind::Str, UiArgKind::Json], ret: UiReturnKind::Str },
+    UiSig { method: "node", runtime: "js_workload_node",
+            args: &[UiArgKind::Str, UiArgKind::Json], ret: UiReturnKind::Str },
+    UiSig { method: "runGraph", runtime: "js_workload_runGraph",
+            args: &[UiArgKind::Json], ret: UiReturnKind::Promise },
+    UiSig { method: "inspectGraph", runtime: "js_workload_inspectGraph",
+            args: &[UiArgKind::Json], ret: UiReturnKind::Promise },
+    UiSig { method: "down", runtime: "js_workload_handle_down",
+            args: &[UiArgKind::I64Raw, UiArgKind::Json], ret: UiReturnKind::Promise },
+    UiSig { method: "status", runtime: "js_workload_handle_status",
+            args: &[UiArgKind::I64Raw], ret: UiReturnKind::Promise },
+    UiSig { method: "logs", runtime: "js_workload_handle_logs",
+            args: &[UiArgKind::I64Raw, UiArgKind::Str, UiArgKind::Json], ret: UiReturnKind::Promise },
+    UiSig { method: "exec", runtime: "js_workload_handle_exec",
+            args: &[UiArgKind::I64Raw, UiArgKind::Str, UiArgKind::Json], ret: UiReturnKind::Promise },
+    UiSig { method: "ps", runtime: "js_workload_handle_ps",
+            args: &[UiArgKind::I64Raw], ret: UiReturnKind::Promise },
+];
+
+fn perry_workloads_table_lookup(method: &str) -> Option<&'static UiSig> {
+    PERRY_WORKLOADS_TABLE.iter().find(|s| s.method == method)
+}
+
+/// Lower a native stdlib call described by `sig`. Walks each arg, applies
 /// the per-kind coercion to produce an LLVM SSA value of the right type,
 /// lazy-declares the runtime function, emits the call, and boxes the
 /// return value per `sig.ret`.
 ///
 /// Args length mismatch (caller passed wrong number of args) → falls
 /// back to lowering all args for side effects + returning the
-/// zero-sentinel. The catch-all is intentional: TS users may write
-/// `Text()` (no arg) or `Text(s, extra)` and we don't want to bail
-/// the entire compilation.
-fn lower_table_dispatch_call(
+/// zero-sentinel.
+fn lower_native_table_call(
     ctx: &mut FnCtx<'_>,
     sig: &UiSig,
     args: &[Expr],
@@ -4046,6 +4109,14 @@ fn lower_table_dispatch_call(
                 llvm_args.push((I64, i));
                 runtime_param_types.push(I64);
             }
+            UiArgKind::Json => {
+                let v = lower_expr(ctx, arg)?;
+                let blk = ctx.block();
+                let zero = "0".to_string();
+                let json_ptr = blk.call(I64, "js_json_stringify", &[(DOUBLE, &v), (I32, &zero)]);
+                llvm_args.push((I64, json_ptr));
+                runtime_param_types.push(I64);
+            }
         }
     }
 
@@ -4054,9 +4125,10 @@ fn lower_table_dispatch_call(
     // cross-module call site uses for `perry_fn_*`.
     let return_type = match sig.ret {
         UiReturnKind::Widget => I64,
-        UiReturnKind::Str => I64,
         UiReturnKind::F64 => DOUBLE,
         UiReturnKind::Void => crate::types::VOID,
+        UiReturnKind::Promise => I64,
+        UiReturnKind::Str => I64,
     };
     ctx.pending_declares.push((
         sig.runtime.to_string(),
@@ -4074,17 +4146,22 @@ fn lower_table_dispatch_call(
             let handle = blk.call(I64, sig.runtime, &arg_slices);
             Ok(nanbox_pointer_inline(blk, &handle))
         }
-        UiReturnKind::Str => {
-            let blk = ctx.block();
-            let handle = blk.call(I64, sig.runtime, &arg_slices);
-            Ok(nanbox_string_inline(blk, &handle))
-        }
         UiReturnKind::F64 => {
             Ok(ctx.block().call(DOUBLE, sig.runtime, &arg_slices))
         }
         UiReturnKind::Void => {
             ctx.block().call_void(sig.runtime, &arg_slices);
             Ok(double_literal(0.0))
+        }
+        UiReturnKind::Promise => {
+            let blk = ctx.block();
+            let promise = blk.call(I64, sig.runtime, &arg_slices);
+            Ok(nanbox_pointer_inline(blk, &promise))
+        }
+        UiReturnKind::Str => {
+            let blk = ctx.block();
+            let ptr = blk.call(I64, sig.runtime, &arg_slices);
+            Ok(nanbox_string_inline(blk, &ptr))
         }
     }
 }
@@ -4652,80 +4729,6 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
     NativeModSig { module: "bcrypt", has_receiver: false, method: "compare",
         class_filter: None,
         runtime: "js_bcrypt_compare", args: &[NA_F64, NA_F64], ret: NR_PTR },
-
-    // ========== perry/container ==========
-    NativeModSig { module: "perry/container", has_receiver: false, method: "run",
-        class_filter: None,
-        runtime: "js_container_run", args: &[NA_STR], ret: NR_PTR },
-    NativeModSig { module: "perry/container", has_receiver: false, method: "create",
-        class_filter: None,
-        runtime: "js_container_create", args: &[NA_STR], ret: NR_PTR },
-    NativeModSig { module: "perry/container", has_receiver: false, method: "start",
-        class_filter: None,
-        runtime: "js_container_start", args: &[NA_STR], ret: NR_PTR },
-    NativeModSig { module: "perry/container", has_receiver: false, method: "stop",
-        class_filter: None,
-        runtime: "js_container_stop", args: &[NA_STR, NA_F64], ret: NR_PTR },
-    NativeModSig { module: "perry/container", has_receiver: false, method: "remove",
-        class_filter: None,
-        runtime: "js_container_remove", args: &[NA_STR, NA_F64], ret: NR_PTR },
-    NativeModSig { module: "perry/container", has_receiver: false, method: "list",
-        class_filter: None,
-        runtime: "js_container_list", args: &[NA_F64], ret: NR_PTR },
-    NativeModSig { module: "perry/container", has_receiver: false, method: "inspect",
-        class_filter: None,
-        runtime: "js_container_inspect", args: &[NA_STR], ret: NR_PTR },
-    NativeModSig { module: "perry/container", has_receiver: false, method: "getBackend",
-        class_filter: None,
-        runtime: "js_container_getBackend", args: &[], ret: NR_STR },
-    NativeModSig { module: "perry/container", has_receiver: false, method: "detectBackend",
-        class_filter: None,
-        runtime: "js_container_detectBackend", args: &[], ret: NR_PTR },
-    NativeModSig { module: "perry/container", has_receiver: false, method: "logs",
-        class_filter: None,
-        runtime: "js_container_logs", args: &[NA_STR, NA_F64], ret: NR_PTR },
-    NativeModSig { module: "perry/container", has_receiver: false, method: "exec",
-        class_filter: None,
-        runtime: "js_container_exec", args: &[NA_STR, NA_STR, NA_STR, NA_STR], ret: NR_PTR },
-    NativeModSig { module: "perry/container", has_receiver: false, method: "pullImage",
-        class_filter: None,
-        runtime: "js_container_pullImage", args: &[NA_STR], ret: NR_PTR },
-    NativeModSig { module: "perry/container", has_receiver: false, method: "listImages",
-        class_filter: None,
-        runtime: "js_container_listImages", args: &[], ret: NR_PTR },
-    NativeModSig { module: "perry/container", has_receiver: false, method: "removeImage",
-        class_filter: None,
-        runtime: "js_container_removeImage", args: &[NA_STR, NA_F64], ret: NR_PTR },
-
-    // ========== perry/container-compose ==========
-    NativeModSig { module: "perry/container-compose", has_receiver: false, method: "composeUp",
-        class_filter: None,
-        runtime: "js_container_composeUp", args: &[NA_STR], ret: NR_PTR },
-    NativeModSig { module: "perry/container-compose", has_receiver: false, method: "composeDown",
-        class_filter: None,
-        runtime: "js_container_compose_down", args: &[NA_JSV, NA_F64], ret: NR_PTR },
-    NativeModSig { module: "perry/container-compose", has_receiver: false, method: "composePs",
-        class_filter: None,
-        runtime: "js_container_compose_ps", args: &[NA_JSV], ret: NR_PTR },
-    NativeModSig { module: "perry/container-compose", has_receiver: false, method: "composeLogs",
-        class_filter: None,
-        runtime: "js_container_compose_logs", args: &[NA_JSV, NA_STR, NA_F64], ret: NR_PTR },
-    NativeModSig { module: "perry/container-compose", has_receiver: false, method: "composeExec",
-        class_filter: None,
-        runtime: "js_container_compose_exec", args: &[NA_JSV, NA_STR, NA_STR], ret: NR_PTR },
-    // ComposeHandle instance methods
-    NativeModSig { module: "perry/container-compose", has_receiver: true, method: "down",
-        class_filter: Some("ComposeHandle"),
-        runtime: "js_container_compose_down", args: &[NA_F64], ret: NR_PTR },
-    NativeModSig { module: "perry/container-compose", has_receiver: true, method: "ps",
-        class_filter: Some("ComposeHandle"),
-        runtime: "js_container_compose_ps", args: &[], ret: NR_PTR },
-    NativeModSig { module: "perry/container-compose", has_receiver: true, method: "logs",
-        class_filter: Some("ComposeHandle"),
-        runtime: "js_container_compose_logs", args: &[NA_STR, NA_F64], ret: NR_PTR },
-    NativeModSig { module: "perry/container-compose", has_receiver: true, method: "exec",
-        class_filter: Some("ComposeHandle"),
-        runtime: "js_container_compose_exec", args: &[NA_STR, NA_STR], ret: NR_PTR },
 ];
 
 /// Look up a native module method in the static dispatch table.

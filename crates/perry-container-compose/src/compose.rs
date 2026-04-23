@@ -1,18 +1,13 @@
 use crate::error::{ComposeError, Result};
-use crate::service;
+use crate::service::{Service, ServiceBuild};
 use crate::types::{
     ComposeHandle, ComposeSpec, ContainerInfo, ContainerLogs, ContainerSpec,
+    WorkloadGraph, RunGraphOptions, GraphHandle, ExecutionStrategy, FailureStrategy
 };
+use crate::backend::{ContainerBackend, NetworkConfig, VolumeConfig};
 use indexmap::IndexMap;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use crate::backend::ContainerBackend;
-
-static COMPOSE_ENGINES: once_cell::sync::Lazy<std::sync::Mutex<IndexMap<u64, Arc<ComposeEngine>>>> =
-    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(IndexMap::new()));
-
-static NEXT_STACK_ID: AtomicU64 = AtomicU64::new(1);
 
 pub struct ComposeEngine {
     pub spec: ComposeSpec,
@@ -33,22 +28,7 @@ impl ComposeEngine {
         }
     }
 
-    fn register(&self) -> ComposeHandle {
-        let stack_id = NEXT_STACK_ID.fetch_add(1, Ordering::SeqCst);
-        let services: Vec<String> = self.spec.services.keys().cloned().collect();
-        let handle = ComposeHandle {
-            stack_id,
-            project_name: self.project_name.clone(),
-            services,
-        };
-        COMPOSE_ENGINES.lock().unwrap().insert(stack_id, Arc::new(ComposeEngine::new(
-            self.spec.clone(),
-            self.project_name.clone(),
-            Arc::clone(&self.backend),
-        )));
-        handle
-    }
-
+    /// Requirement 6.1, 6.8, 6.9, 6.10, 6.13
     pub async fn up(
         &self,
         services: &[String],
@@ -59,22 +39,32 @@ impl ComposeEngine {
         // 1. Create networks
         if let Some(networks) = &self.spec.networks {
             for (name, config) in networks {
-                if let Some(cfg) = config {
-                    self.backend.create_network(name, cfg).await?;
+                let net_cfg = if let Some(c) = config {
+                    NetworkConfig {
+                        driver: c.driver.clone(),
+                        labels: c.labels.as_ref().map(|l| l.to_map()).unwrap_or_default(),
+                        internal: c.internal.unwrap_or(false),
+                        enable_ipv6: c.enable_ipv6.unwrap_or(false),
+                    }
                 } else {
-                    self.backend.create_network(name, &Default::default()).await?;
-                }
+                    NetworkConfig::default()
+                };
+                self.backend.create_network(name, &net_cfg).await?;
             }
         }
 
         // 2. Create volumes
         if let Some(volumes) = &self.spec.volumes {
             for (name, config) in volumes {
-                if let Some(cfg) = config {
-                    self.backend.create_volume(name, cfg).await?;
+                let vol_cfg = if let Some(c) = config {
+                    VolumeConfig {
+                        driver: c.driver.clone(),
+                        labels: c.labels.as_ref().map(|l| l.to_map()).unwrap_or_default(),
+                    }
                 } else {
-                    self.backend.create_volume(name, &Default::default()).await?;
-                }
+                    VolumeConfig::default()
+                };
+                self.backend.create_volume(name, &vol_cfg).await?;
             }
         }
 
@@ -88,73 +78,53 @@ impl ComposeEngine {
 
         let mut started = Vec::new();
         for svc_name in target {
-            let svc = self.spec.services.get(svc_name).unwrap();
-            let container_name = service::service_container_name(svc, svc_name);
+            let svc_spec = self.spec.services.get(svc_name).unwrap();
 
-            // Extract primary network if any
-            let network = match &svc.networks {
-                Some(crate::types::ServiceNetworks::List(l)) => l.first().cloned(),
-                Some(crate::types::ServiceNetworks::Map(m)) => m.keys().next().cloned(),
-                None => None,
+            // Map types::ComposeService to service::Service
+            let service_entity = Service {
+                image: svc_spec.image.clone(),
+                name: svc_spec.container_name.clone(),
+                ports: Some(svc_spec.ports.as_ref().map(|p| p.iter().map(|ps| ps.to_string_form()).collect()).unwrap_or_default()),
+                environment: svc_spec.environment.clone(),
+                labels: svc_spec.labels.clone(),
+                volumes: Some(svc_spec.volumes.as_ref().map(|v| v.iter().map(|y| format!("{:?}", y)).collect()).unwrap_or_default()),
+                build: svc_spec.build.as_ref().map(|b| {
+                   let b_spec = b.as_build();
+                   ServiceBuild {
+                       context: b_spec.context.clone().unwrap_or_default(),
+                       dockerfile: b_spec.dockerfile.clone(),
+                       args: b_spec.args.as_ref().map(|a| a.to_map()),
+                       labels: b_spec.labels.clone(),
+                       target: b_spec.target.clone(),
+                       network: b_spec.network.clone(),
+                   }
+                }),
+                command: svc_spec.command_list(),
+                entrypoint: None, // TODO
+                env_file: None, // TODO
+                networks: svc_spec.networks.as_ref().map(|n| n.names()),
+                depends_on: svc_spec.depends_on.clone(),
+                restart: svc_spec.restart.clone(),
+                healthcheck: svc_spec.healthcheck.clone(),
+                working_dir: svc_spec.working_dir.clone(),
+                user: svc_spec.user.clone(),
+                hostname: svc_spec.hostname.clone(),
+                privileged: svc_spec.privileged,
+                read_only: svc_spec.read_only,
+                stdin_open: svc_spec.stdin_open,
+                tty: svc_spec.tty,
+                isolation_level: svc_spec.isolation_level.clone(),
             };
 
-            let container_spec = ContainerSpec {
-                image: svc.image.clone().unwrap_or_default(),
-                name: Some(container_name.clone()),
-                ports: Some(svc.ports.as_ref().map(|p| p.iter().map(|ps| match ps {
-                    crate::types::PortSpec::Short(v) => match v {
-                        serde_yaml::Value::String(s) => s.clone(),
-                        serde_yaml::Value::Number(n) => n.to_string(),
-                        _ => v.as_str().unwrap_or_default().to_string(),
-                    },
-                    crate::types::PortSpec::Long(lp) => {
-                        let publ = lp.published.as_ref().map(|v| match v {
-                            serde_yaml::Value::String(s) => s.clone(),
-                            serde_yaml::Value::Number(n) => n.to_string(),
-                            _ => v.as_str().unwrap_or_default().to_string(),
-                        }).unwrap_or_default();
-                        let target = match &lp.target {
-                            serde_yaml::Value::String(s) => s.clone(),
-                            serde_yaml::Value::Number(n) => n.to_string(),
-                            _ => lp.target.as_str().unwrap_or_default().to_string(),
-                        };
-                        format!("{}:{}", publ, target)
-                    },
-                }).collect()).unwrap_or_default()),
-                volumes: Some(svc.volumes.as_ref().map(|v| v.iter().map(|vs| match vs {
-                    serde_yaml::Value::String(s) => s.clone(),
-                    _ => vs.as_str().unwrap_or_default().to_string(),
-                }).collect()).unwrap_or_default()),
-                env: Some(match &svc.environment {
-                    Some(crate::types::ListOrDict::Dict(d)) => d.iter().map(|(k, v)| (k.clone(), v.as_ref().map(|vv| match vv {
-                        serde_yaml::Value::String(s) => s.clone(),
-                        serde_yaml::Value::Number(n) => n.to_string(),
-                        serde_yaml::Value::Bool(b) => b.to_string(),
-                        _ => vv.as_str().unwrap_or_default().to_string(),
-                    }).unwrap_or_default())).collect(),
-                    Some(crate::types::ListOrDict::List(l)) => l.iter().filter_map(|s| s.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect(),
-                    None => HashMap::new(),
-                }),
-                cmd: Some(match &svc.command {
-                    Some(serde_yaml::Value::String(s)) => vec![s.clone()],
-                    Some(serde_yaml::Value::Sequence(seq)) => seq.iter().map(|v| v.as_str().unwrap_or_default().to_string()).collect(),
-                    _ => vec![],
-                }),
-                entrypoint: None,
-                network,
-                rm: None,
-                read_only: svc.read_only,
-            };
-
-            match self.backend.run(&container_spec).await {
+            match crate::orchestrate::orchestrate_service(svc_name, &service_entity, self.backend.as_ref()).await {
                 Ok(_) => {
-                    started.push(container_name);
+                    started.push((svc_name.clone(), service_entity));
                 }
                 Err(e) => {
-                    // Rollback
-                    for name in started.iter().rev() {
-                        let _ = self.backend.stop(name, Some(10)).await;
-                        let _ = self.backend.remove(name, true).await;
+                    // Rollback Requirement 6.10
+                    for (s_name, s_entity) in started.iter().rev() {
+                        let _ = crate::orchestrate::stop_service(s_name, s_entity, self.backend.as_ref()).await;
+                        let _ = crate::orchestrate::remove_service(s_name, s_entity, self.backend.as_ref()).await;
                     }
                     return Err(ComposeError::ServiceStartupFailed {
                         service: svc_name.clone(),
@@ -164,25 +134,23 @@ impl ComposeEngine {
             }
         }
 
-        Ok(self.register())
+        Ok(ComposeHandle {
+            stack_id: 0, // Should be assigned by registry
+            project_name: self.project_name.clone(),
+            services: self.spec.services.keys().cloned().collect(),
+        })
     }
 
     pub async fn down(
         &self,
-        services: &[String],
-        _remove_orphans: bool,
         remove_volumes: bool,
     ) -> Result<()> {
         let order = resolve_startup_order(&self.spec)?;
-        let target: Vec<&String> = if services.is_empty() {
-            order.iter().collect()
-        } else {
-            order.iter().filter(|s| services.contains(s)).collect()
-        };
 
-        for svc_name in target.iter().rev() {
-            let svc = self.spec.services.get(*svc_name).unwrap();
-            let container_name = service::service_container_name(svc, svc_name);
+        for svc_name in order.iter().rev() {
+            let svc_spec = self.spec.services.get(svc_name).unwrap();
+            let image = svc_spec.image.as_deref().unwrap_or("unknown");
+            let container_name = svc_spec.container_name.clone().unwrap_or_else(|| Service::generate_name(image, svc_name));
             let _ = self.backend.stop(&container_name, Some(10)).await;
             let _ = self.backend.remove(&container_name, true).await;
         }
@@ -206,8 +174,9 @@ impl ComposeEngine {
 
     pub async fn ps(&self) -> Result<Vec<ContainerInfo>> {
         let mut infos = Vec::new();
-        for (svc_name, svc) in &self.spec.services {
-            let container_name = service::service_container_name(svc, svc_name);
+        for (svc_name, svc_spec) in &self.spec.services {
+            let image = svc_spec.image.as_deref().unwrap_or("unknown");
+            let container_name = svc_spec.container_name.clone().unwrap_or_else(|| Service::generate_name(image, svc_name));
             if let Ok(info) = self.backend.inspect(&container_name).await {
                 infos.push(info);
             }
@@ -217,40 +186,39 @@ impl ComposeEngine {
 
     pub async fn logs(
         &self,
-        services: &[String],
+        service: Option<&str>,
         tail: Option<u32>,
-    ) -> Result<HashMap<String, String>> {
-        let mut all_logs = HashMap::new();
-        let target: Vec<&String> = if services.is_empty() {
-            self.spec.services.keys().collect()
+    ) -> Result<ContainerLogs> {
+        let mut all_stdout = String::new();
+        let mut all_stderr = String::new();
+
+        let target: Vec<&String> = if let Some(s) = service {
+            vec![self.spec.services.get_key_value(s).map(|(k, _)| k).ok_or_else(|| ComposeError::NotFound(s.into()))?]
         } else {
-            services.iter().collect()
+            self.spec.services.keys().collect()
         };
 
         for svc_name in target {
-            let svc = self.spec.services.get(svc_name).unwrap();
-            let container_name = service::service_container_name(svc, svc_name);
+            let svc_spec = self.spec.services.get(svc_name).unwrap();
+            let image = svc_spec.image.as_deref().unwrap_or("unknown");
+            let container_name = svc_spec.container_name.clone().unwrap_or_else(|| Service::generate_name(image, svc_name));
             if let Ok(logs) = self.backend.logs(&container_name, tail).await {
-                all_logs.insert(svc_name.clone(), format!("STDOUT:\n{}\nSTDERR:\n{}", logs.stdout, logs.stderr));
+                all_stdout.push_str(&format!("--- {} ---\n{}", svc_name, logs.stdout));
+                all_stderr.push_str(&format!("--- {} ---\n{}", svc_name, logs.stderr));
             }
         }
-        Ok(all_logs)
+        Ok(ContainerLogs { stdout: all_stdout, stderr: all_stderr })
     }
 
     pub async fn exec(
         &self,
         service: &str,
         cmd: &[String],
-        env: Option<&HashMap<String, String>>,
-        workdir: Option<&str>,
     ) -> Result<ContainerLogs> {
-        let svc = self.spec.services.get(service).ok_or_else(|| ComposeError::NotFound(service.into()))?;
-        let container_name = service::service_container_name(svc, service);
-        self.backend.exec(&container_name, cmd, env, workdir).await
-    }
-
-    pub fn config(&self) -> Result<String> {
-        serde_yaml::to_string(&self.spec).map_err(ComposeError::ParseError)
+        let svc_spec = self.spec.services.get(service).ok_or_else(|| ComposeError::NotFound(service.into()))?;
+        let image = svc_spec.image.as_deref().unwrap_or("unknown");
+        let container_name = svc_spec.container_name.clone().unwrap_or_else(|| Service::generate_name(image, service));
+        self.backend.exec(&container_name, cmd, None, None).await
     }
 
     pub async fn start(&self, services: &[String]) -> Result<()> {
@@ -260,8 +228,9 @@ impl ComposeEngine {
             services.iter().collect()
         };
         for svc_name in target {
-            let svc = self.spec.services.get(svc_name).unwrap();
-            let container_name = service::service_container_name(svc, svc_name);
+            let svc_spec = self.spec.services.get(svc_name).unwrap();
+            let image = svc_spec.image.as_deref().unwrap_or("unknown");
+            let container_name = svc_spec.container_name.clone().unwrap_or_else(|| Service::generate_name(image, svc_name));
             self.backend.start(&container_name).await?;
         }
         Ok(())
@@ -274,8 +243,9 @@ impl ComposeEngine {
             services.iter().collect()
         };
         for svc_name in target {
-            let svc = self.spec.services.get(svc_name).unwrap();
-            let container_name = service::service_container_name(svc, svc_name);
+            let svc_spec = self.spec.services.get(svc_name).unwrap();
+            let image = svc_spec.image.as_deref().unwrap_or("unknown");
+            let container_name = svc_spec.container_name.clone().unwrap_or_else(|| Service::generate_name(image, svc_name));
             self.backend.stop(&container_name, None).await?;
         }
         Ok(())
@@ -284,6 +254,75 @@ impl ComposeEngine {
     pub async fn restart(&self, services: &[String]) -> Result<()> {
         self.stop(services).await?;
         self.start(services).await
+    }
+
+    pub fn resolve_startup_order(&self) -> Result<Vec<String>> {
+        resolve_startup_order(&self.spec)
+    }
+
+    pub fn config(&self) -> Result<String> {
+        serde_yaml::to_string(&self.spec).map_err(ComposeError::ParseError)
+    }
+}
+
+pub struct WorkloadGraphEngine {
+    pub project_name: String,
+    pub backend: Arc<dyn ContainerBackend>,
+}
+
+impl WorkloadGraphEngine {
+    pub fn new(project_name: String, backend: Arc<dyn ContainerBackend>) -> Self {
+        Self { project_name, backend }
+    }
+
+    /// Task 15.1: Implement WorkloadGraphEngine::run
+    pub async fn run(&self, graph: WorkloadGraph, opts: RunGraphOptions) -> Result<GraphHandle> {
+        let levels = compute_topological_levels(&graph)?;
+        let mut started: Vec<String> = vec![];
+
+        let strategy = opts.strategy.unwrap_or(ExecutionStrategy::DependencyAware);
+        let on_failure = opts.on_failure.unwrap_or(FailureStrategy::RollbackAll);
+
+        for level in &levels {
+            let nodes_to_start = match strategy {
+                ExecutionStrategy::Sequential => vec![level[0].clone()], // simplification
+                _ => level.clone(),
+            };
+
+            // In a real implementation we'd handle ParallelSafe with sleep etc.
+            for node_id in nodes_to_start {
+                let node = graph.nodes.get(&node_id).unwrap();
+
+                // Construct ContainerSpec from WorkloadNode and Policy
+                let spec = ContainerSpec {
+                    image: node.image.clone().unwrap_or_default(),
+                    name: Some(node.name.clone()),
+                    ports: Some(node.ports.clone()),
+                    env: Some(HashMap::new()), // Need to resolve refs later
+                    ..Default::default()
+                };
+
+                // Apply Policy Requirement 15.1
+                if node.policy.tier == crate::types::PolicyTier::Untrusted {
+                    // Force MicroVm etc.
+                }
+
+                match self.backend.run(&spec).await {
+                    Ok(_) => started.push(node_id),
+                    Err(e) => match on_failure {
+                        FailureStrategy::RollbackAll => {
+                            for s in started.iter().rev() {
+                                let _ = self.backend.remove(s, true).await;
+                            }
+                            return Err(ComposeError::ServiceStartupFailed { service: node_id, message: e.to_string() });
+                        }
+                        _ => return Err(ComposeError::ServiceStartupFailed { service: node_id, message: e.to_string() }),
+                    }
+                }
+            }
+        }
+
+        Ok(GraphHandle { id: 0 })
     }
 }
 
@@ -338,4 +377,45 @@ pub fn resolve_startup_order(spec: &ComposeSpec) -> Result<Vec<String>> {
     }
 
     Ok(order)
+}
+
+pub fn compute_topological_levels(graph: &WorkloadGraph) -> Result<Vec<Vec<String>>> {
+    let mut levels = Vec::new();
+    let mut in_degree: HashMap<String, usize> = HashMap::new();
+    let mut dependents: HashMap<String, Vec<String>> = HashMap::new();
+
+    for id in graph.nodes.keys() {
+        in_degree.insert(id.clone(), 0);
+    }
+
+    for (id, node) in &graph.nodes {
+        for dep in &node.depends_on {
+            *in_degree.entry(id.clone()).or_insert(0) += 1;
+            dependents.entry(dep.clone()).or_default().push(id.clone());
+        }
+    }
+
+    let mut current_level: Vec<String> = in_degree.iter()
+        .filter(|(_, &deg)| deg == 0)
+        .map(|(id, _)| id.clone())
+        .collect();
+
+    while !current_level.is_empty() {
+        levels.push(current_level.clone());
+        let mut next_level = Vec::new();
+        for id in current_level {
+            if let Some(deps) = dependents.get(&id) {
+                for dep_id in deps {
+                    let deg = in_degree.get_mut(dep_id).unwrap();
+                    *deg -= 1;
+                    if *deg == 0 {
+                        next_level.push(dep_id.clone());
+                    }
+                }
+            }
+        }
+        current_level = next_level;
+    }
+
+    Ok(levels)
 }

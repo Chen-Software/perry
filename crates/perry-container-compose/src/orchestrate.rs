@@ -1,36 +1,54 @@
-//! Service orchestration logic.
-
+use crate::error::{ComposeError, Result};
 use crate::backend::ContainerBackend;
-use crate::error::Result;
-use crate::types::ComposeService;
+use crate::service::Service;
+// Note: commands are assumed to be implemented in crates/perry-container-compose/src/commands/
+// For this plan step, we focus on the orchestrate_service logic.
 
-/// Orchestrate a single service startup.
-///
-/// Logic:
-/// 1. If running -> skip
-/// 2. If exists but stopped -> start_command
-/// 3. If not exists -> (build if needed) -> run_command
+/// Requirement 19.1, 19.2: Core per-service startup function ported from cmd/start/cmd.go
 pub async fn orchestrate_service(
-    service: &ComposeService,
     service_name: &str,
-    backend: &dyn ContainerBackend,
+    service: &Service,
+    backend: &dyn ContainerBackend
 ) -> Result<()> {
-    if service.is_running(backend, service_name).await? {
+    if service.is_running(service_name, backend).await? {
         tracing::info!(service = %service_name, "already running, skipping");
         return Ok(());
     }
 
-    if service.exists(backend, service_name).await? {
+    if service.exists(service_name, backend).await? {
         tracing::info!(service = %service_name, "exists but stopped, starting");
-        service.start_command(backend, service_name).await?;
+        service.start_command(service_name, backend).await?;
     } else {
         if service.needs_build() {
             tracing::info!(service = %service_name, "building image");
-            service.build_command(backend, service_name).await?;
+            service.build_command(service_name, backend).await?;
         }
         tracing::info!(service = %service_name, "creating and running");
-        service.run_command(backend, service_name).await?;
+        service.run_command(service_name, backend).await?;
     }
+    Ok(())
+}
 
+pub async fn stop_service(
+    service_name: &str,
+    service: &Service,
+    backend: &dyn ContainerBackend
+) -> Result<()> {
+    if service.is_running(service_name, backend).await? {
+        tracing::info!(service = %service_name, "stopping service");
+        backend.stop(&service.container_name(service_name), None).await?;
+    }
+    Ok(())
+}
+
+pub async fn remove_service(
+    service_name: &str,
+    service: &Service,
+    backend: &dyn ContainerBackend
+) -> Result<()> {
+    if service.exists(service_name, backend).await? {
+        tracing::info!(service = %service_name, "removing service");
+        backend.remove(&service.container_name(service_name), true).await?;
+    }
     Ok(())
 }
