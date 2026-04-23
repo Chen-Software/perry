@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::process::Stdio;
 use tokio::process::Command;
 use crate::types::*;
 use crate::error::ComposeError;
@@ -39,14 +38,14 @@ pub trait CliProtocol: Send + Sync {
     fn get_args(&self, cmd: &str) -> Vec<String>;
 }
 
-pub struct DockerProtocol;
+pub struct DockerProtocol { pub binary: String }
 #[async_trait]
 impl CliProtocol for DockerProtocol {
     fn name(&self) -> &str { "docker" }
-    fn binary(&self) -> &str { "docker" }
+    fn binary(&self) -> &str { &self.binary }
     async fn check_available(&self) -> Result<()> {
-        let output = Command::new("docker").arg("info").output().await?;
-        if output.status.success() { Ok(()) } else { Err(anyhow!("Docker not running")) }
+        let output = Command::new(&self.binary).arg("info").output().await?;
+        if output.status.success() { Ok(()) } else { Err(anyhow!("Docker-compatible runtime not running")) }
     }
     fn get_args(&self, _cmd: &str) -> Vec<String> { vec![] }
 }
@@ -229,14 +228,14 @@ impl<P: CliProtocol> ContainerBackend for CliBackend<P> {
         let output = Command::new(self.protocol.binary()).args(&args).output().await?;
         if output.status.success() {
             let v: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-            let v = &v[0];
+            let v = if v.is_array() { &v[0] } else { &v };
             Ok(ContainerInfo {
                 id: v["Id"].as_str().unwrap_or_default().to_string(),
                 name: v["Name"].as_str().unwrap_or_default().strip_prefix("/").unwrap_or_default().to_string(),
                 image: v["Config"]["Image"].as_str().unwrap_or_default().to_string(),
                 status: v["State"]["Status"].as_str().unwrap_or_default().to_string(),
                 state: v["State"]["Status"].as_str().unwrap_or_default().to_string(),
-                ports: vec![], // complex to parse from inspect, keeping simple
+                ports: vec![],
             })
         } else {
             Err(anyhow!("Failed to inspect container"))
@@ -318,7 +317,7 @@ impl<P: CliProtocol> ContainerBackend for CliBackend<P> {
                         id: v["ID"].as_str().unwrap_or_default().to_string(),
                         repository: v["Repository"].as_str().unwrap_or_default().to_string(),
                         tag: v["Tag"].as_str().unwrap_or_default().to_string(),
-                        size: 0, // difficult to parse size as u64 from string
+                        size: 0,
                     });
                 }
             }
@@ -396,7 +395,7 @@ pub async fn probe_all_backends() -> Vec<BackendProbeResult> {
     for name in candidates {
         let (available, error) = match name {
             "apple/container" => {
-                if let Ok(_) = which::which("container") {
+                if which::which("container").is_ok() {
                     let p = AppleContainerProtocol;
                     match p.check_available().await {
                         Ok(_) => (true, None),
@@ -405,7 +404,7 @@ pub async fn probe_all_backends() -> Vec<BackendProbeResult> {
                 } else { (false, Some("binary 'container' not found".to_string())) }
             }
             "podman" => {
-                if let Ok(_) = which::which("podman") {
+                if which::which("podman").is_ok() {
                     let p = PodmanProtocol;
                     match p.check_available().await {
                         Ok(_) => (true, None),
@@ -413,17 +412,18 @@ pub async fn probe_all_backends() -> Vec<BackendProbeResult> {
                     }
                 } else { (false, Some("binary 'podman' not found".to_string())) }
             }
-            "docker" => {
-                if let Ok(_) = which::which("docker") {
-                    let p = DockerProtocol;
+            "docker" | "orbstack" | "colima" => {
+                let bin = if name == "orbstack" { "orb" } else { "docker" };
+                if which::which(bin).is_ok() {
+                    let p = DockerProtocol { binary: bin.to_string() };
                     match p.check_available().await {
                         Ok(_) => (true, None),
                         Err(e) => (false, Some(e.to_string())),
                     }
-                } else { (false, Some("binary 'docker' not found".to_string())) }
+                } else { (false, Some(format!("binary '{}' not found", bin))) }
             }
             "lima" => {
-                if let Ok(_) = which::which("limactl") {
+                if which::which("limactl").is_ok() {
                     let p = LimaProtocol { instance: None };
                     match p.check_available().await {
                         Ok(_) => (true, None),
@@ -431,7 +431,6 @@ pub async fn probe_all_backends() -> Vec<BackendProbeResult> {
                     }
                 } else { (false, Some("binary 'limactl' not found".to_string())) }
             }
-            // placeholders for others
             _ => (false, Some("Not implemented".to_string())),
         };
         results.push(BackendProbeResult { name: name.to_string(), available, error });
@@ -446,7 +445,10 @@ pub async fn detect_backend() -> Result<std::sync::Arc<dyn ContainerBackend>, Co
             match res.name.as_str() {
                 "apple/container" => return Ok(std::sync::Arc::new(CliBackend { protocol: AppleContainerProtocol })),
                 "podman" => return Ok(std::sync::Arc::new(CliBackend { protocol: PodmanProtocol })),
-                "docker" => return Ok(std::sync::Arc::new(CliBackend { protocol: DockerProtocol })),
+                "docker" | "orbstack" | "colima" => {
+                    let bin = if res.name == "orbstack" { "orb" } else { "docker" };
+                    return Ok(std::sync::Arc::new(CliBackend { protocol: DockerProtocol { binary: bin.to_string() } }));
+                },
                 "lima" => return Ok(std::sync::Arc::new(CliBackend { protocol: LimaProtocol { instance: None } })),
                 _ => continue,
             }

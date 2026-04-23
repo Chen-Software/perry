@@ -27,7 +27,7 @@ async fn test_startup_order_alphabetical_tie_break() {
     };
 
     let engine = compose::ComposeEngine::new(
-        Arc::new(compose::CliBackend { protocol: compose::DockerProtocol }),
+        Arc::new(compose::CliBackend { protocol: compose::DockerProtocol { binary: "docker".to_string() } }),
         spec,
         None,
     );
