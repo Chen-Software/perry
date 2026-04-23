@@ -31,5 +31,7 @@ pub async fn alloy_container_run_capability(
     };
 
     let handle = backend.run(&spec).await?;
-    backend.logs(&handle.id, None).await
+    let logs = backend.logs(&handle.id, None).await?;
+    let _ = backend.remove(&handle.id, true).await;
+    Ok(logs)
 }

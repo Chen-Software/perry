@@ -1,7 +1,6 @@
 //! CLI entry point for `perry-compose` binary.
 
-use clap::Parser;
-use perry_container_compose::cli::{run, Cli};
+use perry_container_compose::cli::run;
 use tracing_subscriber::{fmt, EnvFilter};
 
 #[tokio::main]

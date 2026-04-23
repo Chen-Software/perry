@@ -5,7 +5,6 @@ use crate::project::ComposeProject;
 use crate::config::ProjectConfig;
 use crate::compose::ComposeEngine;
 use crate::backend::detect_backend;
-use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(name = "perry-compose")]

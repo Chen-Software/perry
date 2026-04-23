@@ -652,6 +652,9 @@ fn native_instance_from_return_type(ty: &Type) -> Option<(&'static str, &'static
             "PoolConnection" => Some(("mysql2/promise", "PoolConnection")),
             "WebSocket" => Some(("ws", "WebSocket")),
             "WebSocketServer" => Some(("ws", "WebSocketServer")),
+        "WorkloadGraphHandle" => Some(("perry/workloads", "WorkloadGraphHandle")),
+        "ComposeHandle" => Some(("perry/container-compose", "ComposeHandle")),
+        "ContainerHandle" => Some(("perry/container", "ContainerHandle")),
             _ => None,
         };
     }
@@ -2439,7 +2442,7 @@ fn lower_module_decl(
             let source = raw_source.strip_prefix("node:").unwrap_or(&raw_source).to_string();
 
             // Check if this is a native module import
-            let is_native = is_native_module(&source);
+            let is_native = is_native_module(&source) || source == "perry/workloads";
 
             // Parse import specifiers
             let mut specifiers = Vec::new();
@@ -2459,7 +2462,8 @@ fn lower_module_decl(
                         if is_native {
                             // Register as native module function with the original method name
                             // e.g., import { v4 as uuid } from 'uuid' -> uuid maps to uuid.v4
-                            ctx.register_native_module(local.clone(), source.clone(), Some(imported.clone()));
+                            let effective_source = if source == "perry/compose" { "perry/container-compose".to_string() } else { source.clone() };
+                            ctx.register_native_module(local.clone(), effective_source, Some(imported.clone()));
                             // Auto-register parentPort from worker_threads as a native instance
                             // (it's a singleton, not created via `new`)
                             if source == "worker_threads" && imported == "parentPort" {
@@ -2476,7 +2480,8 @@ fn lower_module_decl(
                         if is_native {
                             // Default import of native module (e.g., import mysql from 'mysql2/promise')
                             // Default exports don't have a method name
-                            ctx.register_native_module(local.clone(), source.clone(), None);
+                            let effective_source = if source == "perry/compose" { "perry/container-compose".to_string() } else { source.clone() };
+                            ctx.register_native_module(local.clone(), effective_source, None);
                         } else {
                             // Default import from JS module - register so calls resolve to ExternFuncRef
                             // Use "default" as the original name since default imports map to the "default" export
@@ -2489,10 +2494,11 @@ fn lower_module_decl(
                         if is_native {
                             // Namespace import of native module (e.g., import * as mysql from 'mysql2')
                             // Methods are called via the namespace, so no specific method name
-                            ctx.register_native_module(local.clone(), source.clone(), None);
+                            let effective_source = if source == "perry/compose" { "perry/container-compose".to_string() } else { source.clone() };
+                            ctx.register_native_module(local.clone(), effective_source.clone(), None);
                             // Also register as builtin module alias so method-level
                             // recognition works (child_process, fs, os, etc.)
-                            ctx.register_builtin_module_alias(local.clone(), source.clone());
+                            ctx.register_builtin_module_alias(local.clone(), effective_source);
                         } else {
                             // Namespace import from JS module - register so calls resolve to ExternFuncRef
                             ctx.register_imported_func(local.clone(), local.clone());
@@ -2686,6 +2692,12 @@ fn lower_module_decl(
                                                     }
                                                     _ => {}
                                                 }
+                                            } else if module_name == "perry/workloads" && method_name == "runGraph" {
+                                                ctx.register_native_instance(name.clone(), module_name.to_string(), "WorkloadGraphHandle".to_string());
+                                            } else if (module_name == "perry/container" || module_name == "perry/compose" || module_name == "perry/container-compose") && (method_name == "up" || method_name == "composeUp") {
+                                                ctx.register_native_instance(name.clone(), module_name.to_string(), "ComposeHandle".to_string());
+                                            } else if module_name == "perry/container" && method_name == "run" {
+                                                ctx.register_native_instance(name.clone(), module_name.to_string(), "ContainerHandle".to_string());
                                             }
                                         }
                                     }

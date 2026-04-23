@@ -5,7 +5,7 @@ use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 use serde_json::Value;
 pub use crate::error::{ComposeError, Result, BackendProbeResult};
-use crate::types::{ContainerSpec, ContainerHandle, ContainerInfo, ContainerLogs, ImageInfo, ComposeNetwork, ComposeVolume, ComposeServiceBuild};
+use crate::types::{ContainerSpec, ContainerHandle, ContainerInfo, ContainerLogs, ImageInfo, ComposeServiceBuild};
 
 // Layer 1: Abstract Operations
 

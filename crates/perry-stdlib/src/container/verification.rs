@@ -16,9 +16,46 @@ static VERIFICATION_CACHE: OnceLock<RwLock<HashMap<String, VerificationResult>>>
 pub async fn verify_image(reference: &str) -> Result<String, ComposeError> {
     let cache = VERIFICATION_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
 
+    // Try to find cosign binary
+    let cosign_bin = match which::which("cosign") {
+        Ok(p) => p,
+        Err(_) => {
+            return Err(ComposeError::VerificationFailed {
+                image: reference.into(),
+                reason: "cosign binary not found".into(),
+            });
+        }
+    };
+
+    // Requirement 15.4: result MUST be cached by digest.
+    // Fetch digest first (tag -> digest resolution) using JSON output for robustness.
+    let output = tokio::process::Command::new(&cosign_bin)
+        .args(["verify", "--output", "json", reference])
+        .output()
+        .await
+        .map_err(|e| ComposeError::VerificationFailed {
+            image: reference.into(),
+            reason: format!("failed to resolve digest: {}", e),
+        })?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout)
+        .map_err(|e| ComposeError::VerificationFailed {
+            image: reference.into(),
+            reason: format!("failed to parse cosign output: {}", e),
+        })?;
+
+    let digest = json[0]["critical"]["image"]["docker-manifest-digest"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| ComposeError::VerificationFailed {
+            image: reference.into(),
+            reason: "digest not found in cosign JSON output".into(),
+        })?;
+
     {
         let r = cache.read().unwrap();
-        if let Some(res) = r.get(reference) {
+        if let Some(res) = r.get(&digest) {
             match res {
                 VerificationResult::Verified(d) => return Ok(d.clone()),
                 VerificationResult::Failed(reason) => {
@@ -31,22 +68,9 @@ pub async fn verify_image(reference: &str) -> Result<String, ComposeError> {
         }
     }
 
-    // Try to find cosign binary
-    let cosign_bin = match which::which("cosign") {
-        Ok(p) => p,
-        Err(_) => {
-            // If cosign is not installed, we cannot verify signatures.
-            // For now, we allow it but log a warning, OR we can strictly enforce it.
-            // Requirement 15.5: "The runtime SHALL NOT fall back to running an unverified image under any circumstances."
-            // So we must error if we can't verify.
-            return Err(ComposeError::VerificationFailed {
-                image: reference.into(),
-                reason: "cosign binary not found".into(),
-            });
-        }
-    };
+    tracing::debug!(image = reference, digest = %digest, "verifying image signature");
 
-    let output = tokio::process::Command::new(cosign_bin)
+    let output = tokio::process::Command::new(&cosign_bin)
         .args([
             "verify",
             "--certificate-identity",
@@ -66,35 +90,17 @@ pub async fn verify_image(reference: &str) -> Result<String, ComposeError> {
         let reason = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let result = VerificationResult::Failed(reason.clone());
         let mut w = cache.write().unwrap();
-        w.insert(reference.to_string(), result);
+        w.insert(digest.clone(), result);
         return Err(ComposeError::VerificationFailed {
             image: reference.into(),
             reason,
         });
     }
 
-    // Extract digest from output. Cosign verify output contains the digest in the form:
-    // [index] sha256:<digest>
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let digest = stdout
-        .lines()
-        .find_map(|line| {
-            if line.contains("sha256:") {
-                line.split("sha256:").nth(1)?.split_whitespace().next()
-            } else {
-                None
-            }
-        })
-        .map(|d| format!("sha256:{}", d))
-        .ok_or_else(|| ComposeError::VerificationFailed {
-            image: reference.into(),
-            reason: "digest not found in cosign output".into(),
-        })?;
-
     let result = VerificationResult::Verified(digest.clone());
 
     let mut w = cache.write().unwrap();
-    w.insert(reference.to_string(), result);
+    w.insert(digest.clone(), result);
 
     Ok(digest)
 }
