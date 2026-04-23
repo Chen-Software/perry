@@ -482,6 +482,11 @@ pub struct ContainerSpec {
     pub entrypoint: Option<Vec<String>>,
     pub network: Option<String>,
     pub rm: Option<bool>,
+    pub read_only: Option<bool>,
+    pub privileged: Option<bool>,
+    pub cap_add: Option<Vec<String>>,
+    pub cap_drop: Option<Vec<String>>,
+    pub security_opt: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

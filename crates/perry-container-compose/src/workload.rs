@@ -1,6 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use crate::types::{ContainerLogs, ContainerInfo, IsolationLevel};
+use std::sync::Arc;
+use crate::types::{ContainerLogs, ContainerInfo, IsolationLevel, ComposeSpec, ComposeService, ListOrDict, PortSpec};
+use crate::backend::ContainerBackend;
+use crate::error::Result;
+use crate::compose::ComposeEngine;
+use indexmap::IndexMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -42,7 +47,7 @@ pub enum RefProjection {
 }
 
 impl WorkloadRef {
-    pub fn resolve(&self, running_nodes: &HashMap<String, ContainerInfo>) -> Result<String, String> {
+    pub fn resolve(&self, running_nodes: &HashMap<String, ContainerInfo>) -> std::result::Result<String, String> {
         let _info = running_nodes.get(&self.node_id)
             .ok_or_else(|| format!("Node '{}' not found in running set", self.node_id))?;
 
@@ -121,4 +126,70 @@ pub struct NodeInfo {
     pub container_id: Option<String>,
     pub state: String,
     pub image: Option<String>,
+}
+
+pub struct WorkloadGraphEngine {
+    pub engine: ComposeEngine,
+}
+
+impl WorkloadGraphEngine {
+    pub fn new(spec: ComposeSpec, backend: Arc<dyn ContainerBackend + Send + Sync>) -> Self {
+        Self {
+            engine: ComposeEngine::new(spec, backend),
+        }
+    }
+
+    pub async fn run(&self, graph: WorkloadGraph, _opts: RunGraphOptions) -> Result<u64> {
+        let mut spec = ComposeSpec::default();
+        spec.name = Some(graph.name.clone());
+
+        for (id, node) in &graph.nodes {
+            let mut svc = ComposeService::default();
+            svc.image = node.image.clone();
+            svc.ports = Some(node.ports.iter().map(|p| PortSpec::Short(serde_yaml::Value::String(p.clone()))).collect());
+            svc.depends_on = Some(crate::types::DependsOnSpec::List(node.depends_on.clone()));
+
+            // Map policy to OCI settings
+            match node.policy.tier.as_str() {
+                "hardened" => {
+                    svc.read_only = Some(true);
+                    svc.security_opt = Some(vec!["no-new-privileges".to_string()]);
+                    svc.cap_drop = Some(vec!["ALL".to_string()]);
+                }
+                "isolated" => {
+                    svc.network_mode = Some("none".to_string());
+                }
+                "untrusted" => {
+                    // Would use a different runtime if configured
+                }
+                _ => {}
+            }
+
+            if let Some(ro) = node.policy.read_only_root {
+                svc.read_only = Some(ro);
+            }
+
+            let mut env = IndexMap::new();
+            for (k, v) in &node.env {
+                let val = match v {
+                    WorkloadEnvValue::Literal(s) => Some(serde_yaml::Value::String(s.clone())),
+                    WorkloadEnvValue::Ref(r) => {
+                        let proj_str = match r.projection {
+                            RefProjection::Endpoint => "endpoint",
+                            RefProjection::Ip => "ip",
+                            RefProjection::InternalUrl => "url",
+                        };
+                        Some(serde_yaml::Value::String(format!("REF:{}:{}:{}", r.node_id, proj_str, r.port.as_deref().unwrap_or(""))))
+                    }
+                };
+                env.insert(k.clone(), val);
+            }
+            svc.environment = Some(ListOrDict::Dict(env));
+            spec.services.insert(id.clone(), svc);
+        }
+
+        let engine = ComposeEngine::new(spec, Arc::clone(&self.engine.backend));
+        let _handle = engine.up().await?;
+        Ok(rand::random())
+    }
 }

@@ -239,6 +239,27 @@ pub fn docker_run_flags(spec: &ContainerSpec, include_detach: bool) -> Vec<Strin
     if spec.rm.unwrap_or(false) {
         args.push("--rm".into());
     }
+    if spec.read_only.unwrap_or(false) {
+        args.push("--read-only".into());
+    }
+    if spec.privileged.unwrap_or(false) {
+        args.push("--privileged".into());
+    }
+    if let Some(cap_add) = &spec.cap_add {
+        for c in cap_add {
+            args.extend(["--cap-add".into(), c.clone()]);
+        }
+    }
+    if let Some(cap_drop) = &spec.cap_drop {
+        for c in cap_drop {
+            args.extend(["--cap-drop".into(), c.clone()]);
+        }
+    }
+    if let Some(security_opt) = &spec.security_opt {
+        for s in security_opt {
+            args.extend(["--security-opt".into(), s.clone()]);
+        }
+    }
     if let Some(entrypoint) = &spec.entrypoint {
         args.extend(["--entrypoint".into(), entrypoint.join(" ")]);
     }
@@ -629,7 +650,7 @@ pub async fn detect_backend() -> std::result::Result<std::sync::Arc<dyn Containe
         &["docker", "podman", "nerdctl"] // Remote candidates typically use standard names
     } else {
         match std::env::consts::OS {
-            "macos" | "ios" => &["apple/container", "orbstack", "colima", "rancher-desktop", "podman", "lima", "docker"],
+            "macos" | "ios" => &["apple/container", "orbstack", "colima", "rancher-desktop", "lima", "podman", "nerdctl", "docker"],
             _ => &["podman", "nerdctl", "docker"],
         }
     };

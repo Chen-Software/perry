@@ -21,10 +21,15 @@ pub async fn alloy_container_run_capability(
         volumes: None,
         network: if grants.network { None } else { Some("none".to_string()) },
         rm: Some(true),
+        read_only: Some(true),
+        privileged: Some(false),
+        cap_drop: Some(vec!["ALL".to_string()]),
+        security_opt: Some(vec!["no-new-privileges".to_string()]),
         env: grants.env.clone(),
         cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
         entrypoint: None,
         ports: None,
+        cap_add: None,
     };
 
     let backend = crate::mod_impl::get_global_backend_instance_internal().await
