@@ -1,18 +1,20 @@
 //! Container backend abstraction.
 //!
 //! Defines the `ContainerBackend` async trait, platform-specific
-//! implementations (Apple Container on macOS, Podman elsewhere), and
-//! the `get_backend()` platform selector.
+//! implementations (Apple Container on macOS, Podman/Docker elsewhere), and
+//! the `get_best_backend()` selector with robust detection.
 
 pub mod apple;
+pub mod docker;
 #[cfg(not(target_os = "macos"))]
 pub mod podman;
 
 pub use apple::AppleContainerBackend;
+pub use docker::DockerBackend;
 #[cfg(not(target_os = "macos"))]
 pub use podman::PodmanBackend;
 
-use crate::error::Result;
+use crate::error::{ComposeError, Result};
 use crate::types::{
     ComposeNetwork, ComposeVolume, ContainerHandle, ContainerInfo,
     ContainerLogs, ContainerSpec, ImageInfo,
@@ -28,7 +30,7 @@ pub trait ContainerBackend: Send + Sync {
     /// Backend name for display (e.g. "apple-container", "podman")
     fn name(&self) -> &'static str;
 
-    /// Check whether the backend binary is available on PATH.
+    /// Check whether the backend binary is available and functional.
     async fn check_available(&self) -> Result<()>;
 
     /// Run a container (create + start). Returns a handle.
@@ -176,10 +178,36 @@ pub trait Backend: Send + Sync {
     async fn remove_volume(&self, name: &str) -> Result<()>;
 }
 
-/// Select the best available backend for the current platform.
-///
-/// macOS/iOS → AppleContainerBackend
-/// Other     → PodmanBackend (if available)
+/// Select the best available backend for the current platform with robust detection.
+pub async fn get_best_backend() -> Result<Box<dyn Backend>> {
+    #[cfg(target_os = "macos")]
+    {
+        let apple = AppleContainerBackend::new();
+        if apple.check_available().await.is_ok() {
+            return Ok(Box::new(apple));
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let podman = PodmanBackend::new();
+        if podman.check_available().await.is_ok() {
+            return Ok(Box::new(podman));
+        }
+    }
+
+    let docker = DockerBackend::new();
+    if docker.check_available().await.is_ok() {
+        return Ok(Box::new(docker));
+    }
+
+    Err(ComposeError::BackendError {
+        code: -1,
+        message: "No functional container backend (Apple Container, Podman, or Docker) detected on this system.".to_string(),
+    })
+}
+
+/// Legacy synchronous selector (for old entrypoints).
 pub fn get_backend() -> Result<Box<dyn Backend>> {
     #[cfg(target_os = "macos")]
     {
@@ -193,6 +221,34 @@ pub fn get_backend() -> Result<Box<dyn Backend>> {
 }
 
 /// Get a `ContainerBackend` (new API) for the current platform.
+pub async fn get_best_container_backend() -> Result<Box<dyn ContainerBackend>> {
+    #[cfg(target_os = "macos")]
+    {
+        let apple = AppleContainerBackend::new();
+        if apple.check_available().await.is_ok() {
+            return Ok(Box::new(apple));
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let podman = PodmanBackend::new();
+        if podman.check_available().await.is_ok() {
+            return Ok(Box::new(podman));
+        }
+    }
+
+    let docker = DockerBackend::new();
+    if docker.check_available().await.is_ok() {
+        return Ok(Box::new(docker));
+    }
+
+    Err(ComposeError::BackendError {
+        code: -1,
+        message: "No functional container backend (Apple Container, Podman, or Docker) detected on this system.".to_string(),
+    })
+}
+
 pub fn get_container_backend() -> Result<Box<dyn ContainerBackend>> {
     #[cfg(target_os = "macos")]
     {

@@ -24,6 +24,7 @@ pub(crate) mod mod_priv {
 }
 
 use perry_runtime::{js_promise_new, Promise, StringHeader};
+use std::collections::HashMap;
 use std::sync::Arc;
 use self::mod_priv::get_global_backend_instance;
 
@@ -166,16 +167,24 @@ pub unsafe extern "C" fn js_container_logs(id_ptr: *const StringHeader, tail: f6
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_container_exec(id_ptr: *const StringHeader, cmd_val: f64) -> *mut Promise {
+pub unsafe extern "C" fn js_container_exec(
+    id_ptr: *const StringHeader,
+    cmd_ptr: *const StringHeader,
+    env_ptr: *const StringHeader,
+    workdir_ptr: *const StringHeader,
+) -> *mut Promise {
     let promise = js_promise_new();
     let id = string_from_header(id_ptr).unwrap_or_default();
-    let cmd_json = js_json_stringify(cmd_val, 0);
-    let cmd_str = string_from_header(cmd_json).unwrap_or_default();
+    let cmd_str = string_from_header(cmd_ptr).unwrap_or_default();
     let cmd: Vec<String> = serde_json::from_str(&cmd_str).unwrap_or_else(|_| {
         cmd_str.split_whitespace().map(String::from).collect()
     });
+    let env_str = string_from_header(env_ptr);
+    let env: Option<HashMap<String, String>> = env_str.and_then(|s| serde_json::from_str(&s).ok());
+    let workdir = string_from_header(workdir_ptr);
+
     crate::common::spawn_for_promise(promise as *mut u8, async move {
-        match get_global_backend_instance().exec(&id, &cmd, None, None).await {
+        match get_global_backend_instance().exec(&id, &cmd, env.as_ref(), workdir.as_deref()).await {
             Ok(logs) => Ok(types::register_container_logs(logs)),
             Err(e) => Err(e.to_string()),
         }
