@@ -4,7 +4,7 @@
 //! enum declarations, interface declarations, type alias declarations,
 //! constructors, class methods, getters, setters, and class properties.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use perry_types::{LocalId, Type};
 use swc_ecma_ast as ast;
 
@@ -276,8 +276,11 @@ pub(crate) fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) ->
         }
     }
 
-    // Extract return type from function's type annotation (with context)
-    let return_type = fn_decl.function.return_type.as_ref()
+    // Extract return type from function's type annotation (with context).
+    // Body-based inference for unannotated functions is filled in after body
+    // lowering below, once parameters and body locals are visible to
+    // `infer_type_from_expr`.
+    let mut return_type = fn_decl.function.return_type.as_ref()
         .map(|rt| extract_ts_type_with_ctx(&rt.type_ann, Some(ctx)))
         .unwrap_or(Type::Any);
 
@@ -360,6 +363,23 @@ pub(crate) fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) ->
         }
     }
 
+    // Body-based return-type inference: when the function has no explicit
+    // annotation, walk its return statements and unify. Enables call-site
+    // type inference for unannotated user functions and — combined with Phase 1
+    // literal-shape inference — makes `function make() { return {x:0, y:0} }`
+    // flow Point-shaped values to callers.
+    if matches!(return_type, Type::Any) && !fn_decl.function.is_generator {
+        if let Some(ref block) = fn_decl.function.body {
+            if let Some(inferred) = infer_body_return_type(&block.stmts, ctx) {
+                return_type = if fn_decl.function.is_async {
+                    Type::Promise(Box::new(inferred))
+                } else {
+                    inferred
+                };
+            }
+        }
+    }
+
     ctx.exit_scope(scope_mark);
 
     // Exit type parameter scope
@@ -391,8 +411,117 @@ pub(crate) fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) ->
     })
 }
 
+/// Refuse to lower classes that use `@decorator` syntax. Perry parses decorators
+/// into the HIR but has no codegen path — before this check they were silently
+/// dropped, producing executables where the decorator body never ran (issue #144).
+/// Walks every decoration point: the class itself, methods/accessors/private-methods,
+/// class properties, and constructor parameters (TS parameter decorators).
+fn reject_decorators(class: &ast::Class, class_name: &str) -> Result<()> {
+    if let Some(dec) = class.decorators.first() {
+        let name = decorator_name_hint(dec);
+        bail!(
+            "TypeScript decorators are not supported (found `@{name}` on class `{class_name}`). \
+             See docs/src/language/limitations.md#no-decorators. Rewrite as an explicit wrapper \
+             function or remove the annotation.",
+        );
+    }
+    for member in &class.body {
+        match member {
+            ast::ClassMember::Method(m) => {
+                if let Some(dec) = m.function.decorators.first() {
+                    let name = decorator_name_hint(dec);
+                    let key = method_key_hint(&m.key);
+                    bail!(
+                        "TypeScript decorators are not supported (found `@{name}` on method `{class_name}.{key}`). \
+                         See docs/src/language/limitations.md#no-decorators.",
+                    );
+                }
+                for param in &m.function.params {
+                    if let Some(dec) = param.decorators.first() {
+                        let name = decorator_name_hint(dec);
+                        let key = method_key_hint(&m.key);
+                        bail!(
+                            "TypeScript parameter decorators are not supported (found `@{name}` on a parameter of `{class_name}.{key}`). \
+                             See docs/src/language/limitations.md#no-decorators.",
+                        );
+                    }
+                }
+            }
+            ast::ClassMember::PrivateMethod(m) => {
+                if let Some(dec) = m.function.decorators.first() {
+                    let name = decorator_name_hint(dec);
+                    bail!(
+                        "TypeScript decorators are not supported (found `@{name}` on private method of `{class_name}`). \
+                         See docs/src/language/limitations.md#no-decorators.",
+                    );
+                }
+            }
+            ast::ClassMember::ClassProp(p) => {
+                if let Some(dec) = p.decorators.first() {
+                    let name = decorator_name_hint(dec);
+                    bail!(
+                        "TypeScript decorators are not supported (found `@{name}` on a property of `{class_name}`). \
+                         See docs/src/language/limitations.md#no-decorators.",
+                    );
+                }
+            }
+            ast::ClassMember::PrivateProp(p) => {
+                if let Some(dec) = p.decorators.first() {
+                    let name = decorator_name_hint(dec);
+                    bail!(
+                        "TypeScript decorators are not supported (found `@{name}` on a private property of `{class_name}`). \
+                         See docs/src/language/limitations.md#no-decorators.",
+                    );
+                }
+            }
+            ast::ClassMember::Constructor(c) => {
+                for param in &c.params {
+                    let decs = match param {
+                        ast::ParamOrTsParamProp::Param(p) => &p.decorators,
+                        ast::ParamOrTsParamProp::TsParamProp(tp) => &tp.decorators,
+                    };
+                    if let Some(dec) = decs.first() {
+                        let name = decorator_name_hint(dec);
+                        bail!(
+                            "TypeScript parameter decorators are not supported (found `@{name}` on a constructor parameter of `{class_name}`). \
+                             See docs/src/language/limitations.md#no-decorators.",
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn decorator_name_hint(dec: &ast::Decorator) -> String {
+    match dec.expr.as_ref() {
+        ast::Expr::Ident(i) => i.sym.to_string(),
+        ast::Expr::Call(c) => {
+            if let ast::Callee::Expr(e) = &c.callee {
+                if let ast::Expr::Ident(i) = e.as_ref() {
+                    return i.sym.to_string();
+                }
+            }
+            "<decorator>".to_string()
+        }
+        _ => "<decorator>".to_string(),
+    }
+}
+
+fn method_key_hint(key: &ast::PropName) -> String {
+    match key {
+        ast::PropName::Ident(i) => i.sym.to_string(),
+        ast::PropName::Str(s) => format!("{:?}", s.value),
+        ast::PropName::Num(n) => n.value.to_string(),
+        _ => "<method>".to_string(),
+    }
+}
+
 pub(crate) fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::ClassDecl, is_exported: bool) -> Result<Class> {
     let name = class_decl.ident.sym.to_string();
+    reject_decorators(&class_decl.class, &name)?;
     let class_id = match ctx.lookup_class(&name) {
         Some(id) => id,
         None => {
@@ -851,6 +980,7 @@ pub(crate) fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::Clas
 /// Lower a class expression (ast::Class) to HIR.
 /// Used for anonymous class expressions like `new (class extends Command { ... })()`.
 pub(crate) fn lower_class_from_ast(ctx: &mut LoweringContext, class: &ast::Class, name: &str, is_exported: bool) -> Result<Class> {
+    reject_decorators(class, name)?;
     let class_id = match ctx.lookup_class(name) {
         Some(id) => id,
         None => {

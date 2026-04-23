@@ -485,7 +485,7 @@ perry publish macos   # or: ios / android / linux
 | Spread operator in calls and literals | ✅ |
 | RegExp (test, match, replace) | ✅ |
 | BigInt (256-bit) | ✅ |
-| Decorators | ✅ |
+| Decorators | ❌ ([not supported](docs/src/language/limitations.md#no-decorators)) |
 
 ### Standard Library
 
