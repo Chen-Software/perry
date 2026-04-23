@@ -511,6 +511,7 @@ pub struct ComposeService {
     pub memswap_limit: Option<serde_yaml::Value>,
     pub cpus: Option<serde_yaml::Value>,
     pub cpu_shares: Option<i64>,
+    pub isolation: Option<String>,
     pub platform: Option<String>,
     pub pull_policy: Option<String>,
     pub profiles: Option<Vec<String>>,
@@ -712,25 +713,27 @@ pub struct ServiceStatus {
 
 // ============ Workload Graph Types ============
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum RuntimeSpec {
     Oci,
     Microvm { config: Option<serde_json::Value> },
     Wasm { module: Option<String> },
+    #[default]
     Auto,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum PolicyTier {
+    #[default]
     Default,
     Isolated,
     Hardened,
     Untrusted,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct PolicySpec {
     pub tier: PolicyTier,
@@ -765,7 +768,7 @@ pub enum WorkloadEnvValue {
     Ref(WorkloadRef),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkloadNode {
     pub id: String,
@@ -779,14 +782,14 @@ pub struct WorkloadNode {
     pub policy: PolicySpec,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkloadEdge {
     pub from: String,
     pub to: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkloadGraph {
     pub name: String,

@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 use dashmap::DashMap;
 
 use perry_container_compose::ComposeEngine;
+use perry_container_compose::types::{WorkloadGraph, WorkloadNode};
 
 // ============ Handle Registry ============
 
@@ -18,6 +19,8 @@ pub struct ContainerHandle {
 
 pub static CONTAINER_HANDLES: OnceLock<DashMap<u64, ContainerHandle>> = OnceLock::new();
 pub static COMPOSE_HANDLES: OnceLock<DashMap<u64, ArcComposeEngine>> = OnceLock::new();
+pub static WORKLOAD_GRAPH_HANDLES: OnceLock<DashMap<u64, WorkloadGraph>> = OnceLock::new();
+pub static WORKLOAD_NODE_HANDLES: OnceLock<DashMap<u64, WorkloadNode>> = OnceLock::new();
 pub static NEXT_HANDLE_ID: AtomicU64 = AtomicU64::new(1);
 
 pub struct ArcComposeEngine(pub std::sync::Arc<ComposeEngine>);
