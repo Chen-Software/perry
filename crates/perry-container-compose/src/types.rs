@@ -704,6 +704,9 @@ pub struct ContainerSpec {
     pub entrypoint: Option<Vec<String>>,
     pub network: Option<String>,
     pub rm: Option<bool>,
+    pub read_only: Option<bool>,
+    pub seccomp: Option<String>,
+    pub labels: Option<std::collections::HashMap<String, String>>,
 }
 
 /// Handle returned after creating/running a container.

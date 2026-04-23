@@ -11,7 +11,6 @@ use crate::types::{
     ComposeHandle, ComposeSpec, ContainerInfo, ContainerSpec,
 };
 use indexmap::IndexMap;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -247,6 +246,10 @@ impl ComposeEngine {
         }
     }
 
+    pub async fn resolve_startup_order(&self) -> Result<Vec<String>> {
+        resolve_startup_order(&self.spec)
+    }
+
     // ============ down / stop ============
 
     /// Stop and remove services in reverse dependency order.
@@ -256,6 +259,9 @@ impl ComposeEngine {
         _remove_orphans: bool,
         remove_volumes: bool,
     ) -> Result<()> {
+        // Always include containers that were started in THIS session,
+        // even if not explicitly defined in the spec anymore (orphans).
+        let mut started = self.started_containers.lock().unwrap().clone();
         let mut order = resolve_startup_order(&self.spec)?;
         order.reverse();
 
@@ -282,6 +288,13 @@ impl ComposeEngine {
                 }
                 self.backend.remove(&container_name, true).await?;
             }
+            started.retain(|c| c != &container_name);
+        }
+
+        // Cleanup any remaining containers from this session
+        for container_name in started.iter().rev() {
+            let _ = self.backend.stop(container_name, None).await;
+            let _ = self.backend.remove(container_name, true).await;
         }
 
         // 2. Remove networks (non-external, idempotent)

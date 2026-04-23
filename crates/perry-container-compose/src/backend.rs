@@ -73,6 +73,7 @@ pub trait ContainerBackend: Send + Sync {
         env: Option<&HashMap<String, String>>,
         workdir: Option<&str>,
     ) -> Result<ContainerLogs>;
+    async fn build(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Result<()>;
     async fn pull_image(&self, reference: &str) -> Result<()>;
     async fn list_images(&self) -> Result<Vec<ImageInfo>>;
     async fn remove_image(&self, reference: &str, force: bool) -> Result<()>;
@@ -103,6 +104,7 @@ pub trait CliProtocol: Send + Sync {
     fn logs_args(&self, id: &str, tail: Option<u32>) -> Vec<String>;
     fn exec_args(&self, id: &str, cmd: &[String], env: Option<&HashMap<String, String>>, workdir: Option<&str>) -> Vec<String>;
     fn pull_image_args(&self, reference: &str) -> Vec<String> { vec!["pull".into(), reference.into()] }
+    fn build_args(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Vec<String>;
     fn list_images_args(&self) -> Vec<String> { vec!["images".into(), "--format".into(), "json".into()] }
     fn remove_image_args(&self, reference: &str, force: bool) -> Vec<String>;
     fn create_network_args(&self, name: &str, config: &NetworkConfig) -> Vec<String>;
@@ -186,6 +188,11 @@ impl CliProtocol for DockerProtocol {
         for (k, v) in spec.env.as_ref().iter().flat_map(|m| m.iter()) { args.extend(["-e".into(), format!("{k}={v}")]); }
         if let Some(net) = &spec.network { args.extend(["--network".into(), net.clone()]); }
         if spec.rm.unwrap_or(false) { args.push("--rm".into()); }
+        if spec.read_only.unwrap_or(false) { args.push("--read-only".into()); }
+        if let Some(s) = &spec.seccomp { args.extend(["--security-opt".into(), format!("seccomp={s}")]); }
+        if let Some(labels) = &spec.labels {
+            for (k, v) in labels { args.extend(["--label".into(), format!("{k}={v}")]); }
+        }
         if let Some(ep) = &spec.entrypoint {
             args.push("--entrypoint".into());
             args.push(ep.join(" "));
@@ -202,6 +209,11 @@ impl CliProtocol for DockerProtocol {
         for vol in spec.volumes.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["-v".into(), vol.clone()]); }
         for (k, v) in spec.env.as_ref().iter().flat_map(|m| m.iter()) { args.extend(["-e".into(), format!("{k}={v}")]); }
         if let Some(net) = &spec.network { args.extend(["--network".into(), net.clone()]); }
+        if spec.read_only.unwrap_or(false) { args.push("--read-only".into()); }
+        if let Some(s) = &spec.seccomp { args.extend(["--security-opt".into(), format!("seccomp={s}")]); }
+        if let Some(labels) = &spec.labels {
+            for (k, v) in labels { args.extend(["--label".into(), format!("{k}={v}")]); }
+        }
         if let Some(ep) = &spec.entrypoint {
             args.push("--entrypoint".into());
             args.push(ep.join(" "));
@@ -259,6 +271,16 @@ impl CliProtocol for DockerProtocol {
             args.extend(["--label".into(), format!("{k}={v}")]);
         }
         args.push(name.into());
+        args
+    }
+
+    fn build_args(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Vec<String> {
+        let mut args = vec!["build".into(), "-t".into(), image_name.into()];
+        if let Some(ctx) = &spec.context { args.push(ctx.clone()); }
+        if let Some(df) = &spec.containerfile { args.extend(["-f".into(), df.clone()]); }
+        if let Some(args_map) = &spec.args {
+            for (k, v) in args_map.to_map() { args.extend(["--build-arg".into(), format!("{k}={v}")]); }
+        }
         args
     }
 
@@ -329,6 +351,7 @@ impl CliProtocol for AppleContainerProtocol {
         if spec.rm.unwrap_or(false) { args.push("--rm".into()); }
         if let Some(name) = &spec.name { args.extend(["--name".into(), name.clone()]); }
         if let Some(network) = &spec.network { args.extend(["--network".into(), network.clone()]); }
+        if spec.read_only.unwrap_or(false) { args.push("--read-only".into()); }
         for port in spec.ports.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["-p".into(), port.clone()]); }
         for vol in spec.volumes.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["-v".into(), vol.clone()]); }
         for (k, v) in spec.env.as_ref().iter().flat_map(|m| m.iter()) { args.extend(["-e".into(), format!("{k}={v}")]); }
@@ -343,6 +366,7 @@ impl CliProtocol for AppleContainerProtocol {
     fn logs_args(&self, id: &str, tail: Option<u32>) -> Vec<String> { DockerProtocol.logs_args(id, tail) }
     fn exec_args(&self, id: &str, cmd: &[String], env: Option<&HashMap<String, String>>, workdir: Option<&str>) -> Vec<String> { DockerProtocol.exec_args(id, cmd, env, workdir) }
     fn remove_image_args(&self, reference: &str, force: bool) -> Vec<String> { DockerProtocol.remove_image_args(reference, force) }
+    fn build_args(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Vec<String> { DockerProtocol.build_args(spec, image_name) }
     fn create_network_args(&self, name: &str, config: &NetworkConfig) -> Vec<String> { DockerProtocol.create_network_args(name, config) }
     fn create_volume_args(&self, name: &str, config: &VolumeConfig) -> Vec<String> { DockerProtocol.create_volume_args(name, config) }
     fn parse_list_output(&self, stdout: &str) -> Result<Vec<ContainerInfo>> { DockerProtocol.parse_list_output(stdout) }
@@ -360,6 +384,7 @@ impl CliProtocol for LimaProtocol {
     }
 
     fn run_args(&self, spec: &ContainerSpec) -> Vec<String> { DockerProtocol.run_args(spec) }
+    fn build_args(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Vec<String> { DockerProtocol.build_args(spec, image_name) }
     fn create_args(&self, spec: &ContainerSpec) -> Vec<String> { DockerProtocol.create_args(spec) }
     fn stop_args(&self, id: &str, timeout: Option<u32>) -> Vec<String> { DockerProtocol.stop_args(id, timeout) }
     fn remove_args(&self, id: &str, force: bool) -> Vec<String> { DockerProtocol.remove_args(id, force) }
@@ -516,6 +541,11 @@ impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
         let args = self.protocol.exec_args(id, cmd, env, workdir);
         let (stdout, stderr) = self.exec_raw(args).await?;
         Ok(ContainerLogs { stdout, stderr })
+    }
+
+    async fn build(&self, spec: &crate::types::ComposeServiceBuild, image_name: &str) -> Result<()> {
+        let args = self.protocol.build_args(spec, image_name);
+        self.exec_raw(args).await.map(|_| ())
     }
 
     async fn pull_image(&self, reference: &str) -> Result<()> {
