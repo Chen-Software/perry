@@ -278,6 +278,10 @@ impl ComposeEngine {
         self.stop(services).await?;
         self.start(services).await
     }
+
+    pub fn resolve_startup_order(&self) -> Result<Vec<String>> {
+        resolve_startup_order(&self.spec)
+    }
 }
 
 pub fn resolve_startup_order(spec: &ComposeSpec) -> Result<Vec<String>> {

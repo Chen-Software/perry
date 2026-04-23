@@ -73,6 +73,9 @@ pub trait ContainerBackend: Send + Sync {
     /// List images.
     async fn list_images(&self) -> Result<Vec<ImageInfo>, ContainerError>;
 
+    /// Build an image from a build spec.
+    async fn build(&self, spec: &perry_container_compose::types::ComposeServiceBuild, image_name: &str) -> Result<(), ContainerError>;
+
     /// Remove an image.
     async fn remove_image(&self, reference: &str, force: bool) -> Result<(), ContainerError>;
 
@@ -239,6 +242,11 @@ impl ContainerBackend for AppleContainerBackend {
             size: img.size,
             created: img.created,
         }).collect())
+    }
+
+    async fn build(&self, spec: &perry_container_compose::types::ComposeServiceBuild, image_name: &str) -> Result<(), ContainerError> {
+        use perry_container_compose::backend::ContainerBackend as CCB;
+        CCB::build(&self.inner, spec, image_name).await.map_err(map_compose_err)
     }
 
     async fn remove_image(&self, reference: &str, force: bool) -> Result<(), ContainerError> {
@@ -593,6 +601,24 @@ impl ContainerBackend for PodmanBackend {
         Ok(items.iter().filter_map(parse_image_info).collect())
     }
 
+    async fn build(&self, spec: &perry_container_compose::types::ComposeServiceBuild, image_name: &str) -> Result<(), ContainerError> {
+        let binary = Self::find_binary().ok_or_else(|| ContainerError::BackendError {
+            code: 1,
+            message: "podman binary not found".to_string(),
+        })?;
+        let mut cmd = Command::new(&binary);
+        cmd.arg("build").arg("-t").arg(image_name);
+        if let Some(ctx) = &spec.context { cmd.arg(ctx); }
+        if let Some(df) = &spec.dockerfile { cmd.arg("-f").arg(df); }
+        if let Some(args_map) = &spec.args {
+            for (k, v) in args_map.to_map() {
+                cmd.arg("--build-arg").arg(format!("{}={}", k, v));
+            }
+        }
+        let output = execute_cmd(&mut cmd).await?;
+        require_success(output)
+    }
+
     async fn remove_image(&self, reference: &str, force: bool) -> Result<(), ContainerError> {
         let binary = Self::find_binary().ok_or_else(|| ContainerError::BackendError {
             code: 1,
@@ -835,6 +861,10 @@ impl perry_container_compose::backend::ContainerBackend for BackendAdapter {
             size: img.size,
             created: img.created,
         }).collect())
+    }
+
+    async fn build(&self, spec: &perry_container_compose::types::ComposeServiceBuild, image_name: &str) -> perry_container_compose::Result<()> {
+        self.inner.build(spec, image_name).await.map_err(to_compose_err)
     }
 
     async fn remove_image(&self, reference: &str, force: bool) -> perry_container_compose::Result<()> {

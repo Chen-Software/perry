@@ -176,6 +176,8 @@ pub struct CompilationContext {
     /// promise rejections via `catch_unwind` in `perry-runtime/src/thread.rs`
     /// instead of aborting the whole process.
     pub needs_thread: bool,
+    /// Whether `perry/container` or `perry/workloads` is imported.
+    pub needs_container: bool,
 }
 
 impl std::fmt::Debug for CompilationContext {
@@ -212,6 +214,7 @@ impl CompilationContext {
             uses_fetch: false,
             uses_crypto_builtins: false,
             needs_thread: false,
+            needs_container: false,
         }
     }
 }
@@ -1059,6 +1062,7 @@ fn build_optimized_libs(
     // and the matching landing pads / Drop glue.
     let panic_abort_safe = !ctx.needs_ui
         && !ctx.needs_thread
+        && !ctx.needs_container
         && !ctx.needs_plugins
         && !ctx.needs_geisterhand;
 
@@ -2206,6 +2210,9 @@ fn collect_modules(
                 // promise rejections via `catch_unwind` — auto-mode keeps
                 // panic = "unwind" when this is set.
                 ctx.needs_thread = true;
+            }
+            if import.source == "perry/container" || import.source == "perry/container-compose" || import.source == "perry/compose" || import.source == "perry/workloads" {
+                ctx.needs_container = true;
             }
             if perry_hir::requires_stdlib(&import.source) {
                 ctx.needs_stdlib = true;

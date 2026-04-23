@@ -2441,8 +2441,8 @@ fn lower_module_decl(
             // Check if this is a native module import
             let is_native = is_native_module(&source);
 
-            // Special handling for perry/container and perry/container-compose
-            if source == "perry/container" || source == "perry/container-compose" {
+            // Special handling for perry/container, perry/container-compose, perry/compose, and perry/workloads
+            if source == "perry/container" || source == "perry/container-compose" || source == "perry/compose" || source == "perry/workloads" {
                 for spec in &import_decl.specifiers {
                     if let ast::ImportSpecifier::Named(named) = spec {
                         let local = named.local.sym.to_string();
@@ -2653,6 +2653,7 @@ fn lower_module_decl(
                                                     let method_name = method_ident.sym.as_ref();
                                                     // Map factory functions to their class names
                                                     let class_name = match (module_name_owned.as_str(), method_name) {
+                                                        ("perry/workloads", "graph") => Some("WorkloadGraph"),
                                                         ("mysql2" | "mysql2/promise", "createPool") => Some("Pool"),
                                                         ("mysql2" | "mysql2/promise", "createConnection") => Some("Connection"),
                                                         ("pg", "connect") => Some("Client"),
@@ -2701,6 +2702,14 @@ fn lower_module_decl(
                                                     "State" | "Sheet" | "Toolbar" | "Window" | "LazyVStack"
                                                     | "NavigationStack" | "Picker" | "Table" | "TabBar" => {
                                                         ctx.register_native_instance(name.clone(), module_name.to_string(), method_name.to_string());
+                                                    }
+                                                    _ => {}
+                                                }
+                                            }
+                                            if module_name == "perry/workloads" {
+                                                match method_name {
+                                                    "graph" => {
+                                                        ctx.register_native_instance(name.clone(), module_name.to_string(), "WorkloadGraph".to_string());
                                                     }
                                                     _ => {}
                                                 }

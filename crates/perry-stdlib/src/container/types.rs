@@ -39,6 +39,14 @@ pub fn get_compose_engine(id: u64) -> Option<std::sync::Arc<perry_container_comp
     handle::get_handle::<std::sync::Arc<perry_container_compose::ComposeEngine>>(id as Handle).cloned()
 }
 
+pub fn register_workload_engine(engine: std::sync::Arc<perry_container_compose::workload::WorkloadGraphEngine>, handle_id: u64) -> u64 {
+    handle::register_handle_with_id(engine, handle_id as Handle) as u64
+}
+
+pub fn get_workload_engine(id: u64) -> Option<std::sync::Arc<perry_container_compose::workload::WorkloadGraphEngine>> {
+    handle::get_handle::<std::sync::Arc<perry_container_compose::workload::WorkloadGraphEngine>>(id as Handle).cloned()
+}
+
 pub fn register_string(s: String) -> u64 {
     handle::register_handle(s) as u64
 }

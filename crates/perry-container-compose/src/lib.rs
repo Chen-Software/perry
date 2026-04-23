@@ -8,6 +8,7 @@ pub mod error;
 pub mod project;
 pub mod service;
 pub mod types;
+pub mod workload;
 pub mod yaml;
 
 // FFI exports (Perry TypeScript integration)
