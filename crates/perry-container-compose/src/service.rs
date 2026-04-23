@@ -7,15 +7,15 @@ use md5::{Digest, Md5};
 
 /// Generate a stable container name for a service.
 ///
-/// Format: `{md5_8chars}-{random_hex}`
-pub fn generate_name(service_yaml: &str) -> String {
+/// Format: `{short_hash}{random_suffix_hex}`
+pub fn generate_name(_service_name: &str, image_name: &str) -> String {
     let mut hasher = Md5::new();
-    hasher.update(service_yaml.as_bytes());
+    hasher.update(image_name.as_bytes());
     let hash = hasher.finalize();
     let short_hash = &hex::encode(hash)[..8];
 
     let random_suffix: u32 = rand::random();
-    format!("{}-{:08x}", short_hash, random_suffix)
+    format!("{}{:08x}", short_hash, random_suffix)
 }
 
 /// Compute a short hash of the service configuration.
@@ -48,13 +48,13 @@ impl ServiceState {
 }
 
 /// Generate a container name for a service, using explicit name if set.
-pub fn service_container_name(svc: &ComposeService, _service_name: &str) -> String {
+pub fn service_container_name(svc: &ComposeService, service_name: &str) -> String {
     if let Some(explicit) = svc.explicit_name() {
         return explicit.to_string();
     }
 
-    let service_yaml = serde_yaml::to_string(svc).unwrap_or_default();
-    generate_name(&service_yaml)
+    let image_name = svc.image.as_deref().unwrap_or(service_name);
+    generate_name(service_name, image_name)
 }
 
 impl ComposeService {
@@ -118,6 +118,7 @@ impl ComposeService {
             network: self.network_mode.clone(),
             rm: Some(false),
             read_only: self.read_only,
+            labels: self.labels.as_ref().map(|l| l.to_map()),
             ..Default::default()
         }
     }
@@ -129,12 +130,9 @@ mod tests {
 
     #[test]
     fn test_generate_name_format() {
-        let name = generate_name("image: nginx");
-        // Format: {md5_8chars}-{random_hex}
-        let parts: Vec<&str> = name.split('-').collect();
-        assert_eq!(parts.len(), 2);
-        assert_eq!(parts[0].len(), 8);
-        assert_eq!(parts[1].len(), 8);
+        let name = generate_name("web", "nginx");
+        // Format: {short_hash}{random_suffix_hex}
+        assert_eq!(name.len(), 8 + 8);
     }
 
     #[test]

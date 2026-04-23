@@ -350,24 +350,44 @@ impl ComposeEngine {
             }));
         }
 
-        // 2. Remove session networks (non-external, idempotent)
-        let networks = {
-            let mut guard = self.session_networks.lock().unwrap();
-            std::mem::take(&mut *guard)
-        };
-        for net_name in networks {
-            let _ = self.backend.remove_network(&net_name).await;
-        }
+        // 2. Remove networks (non-external)
+        if let Some(networks) = &self.spec.networks {
+            for (net_name, net_config_opt) in networks {
+                let external = net_config_opt
+                    .as_ref()
+                    .map_or(false, |c| c.external.unwrap_or(false));
+                if external {
+                    continue;
+                }
+                let resolved_name = net_config_opt
+                    .as_ref()
+                    .and_then(|c| c.name.as_deref())
+                    .unwrap_or(net_name.as_str());
 
-        // 3. Remove session volumes (if requested)
-        if remove_volumes {
-            let volumes = {
-                let mut guard = self.session_volumes.lock().unwrap();
-                std::mem::take(&mut *guard)
-            };
-            for vol_name in volumes {
-                let _ = self.backend.remove_volume(&vol_name).await;
+                let _ = self.backend.remove_network(resolved_name).await;
             }
+        }
+        self.session_networks.lock().unwrap().clear();
+
+        // 3. Remove volumes (if requested)
+        if remove_volumes {
+            if let Some(volumes) = &self.spec.volumes {
+                for (vol_name, vol_config_opt) in volumes {
+                    let external = vol_config_opt
+                        .as_ref()
+                        .map_or(false, |c| c.external.unwrap_or(false));
+                    if external {
+                        continue;
+                    }
+                    let resolved_name = vol_config_opt
+                        .as_ref()
+                        .and_then(|c| c.name.as_deref())
+                        .unwrap_or(vol_name.as_str());
+
+                    let _ = self.backend.remove_volume(resolved_name).await;
+                }
+            }
+            self.session_volumes.lock().unwrap().clear();
         }
 
         Ok(())
@@ -470,8 +490,70 @@ impl ComposeEngine {
         resolve_startup_order(&self.spec)
     }
 
-    // ============ start / stop / restart ============
+    pub async fn status(&self) -> Result<crate::types::StackStatus> {
+        let containers = self.ps().await?;
+        let mut services = Vec::new();
+        let mut healthy = true;
 
+        for info in containers {
+            let state = match info.status.as_str() {
+                "running" => "running",
+                "stopped" | "exited" => "stopped",
+                "not found" => "unknown",
+                _ => "pending",
+            };
+            if state != "running" {
+                healthy = false;
+            }
+            services.push(crate::types::ServiceStatus {
+                service: info.name.clone(),
+                state: state.to_string(),
+                container_id: Some(info.id),
+                error: None,
+            });
+        }
+
+        Ok(crate::types::StackStatus { services, healthy })
+    }
+
+    pub fn graph(&self) -> Result<crate::types::ServiceGraph> {
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
+
+        for (name, svc) in &self.spec.services {
+            nodes.push(name.clone());
+            if let Some(deps) = &svc.depends_on {
+                for dep in deps.service_names() {
+                    edges.push(crate::types::ServiceEdge {
+                        from: dep,
+                        to: name.clone(),
+                    });
+                }
+            }
+        }
+
+        Ok(crate::types::ServiceGraph { nodes, edges })
+    }
+}
+
+pub struct WorkloadGraphEngine {
+    pub backend: Arc<dyn ContainerBackend>,
+}
+
+impl WorkloadGraphEngine {
+    pub fn new(backend: Arc<dyn ContainerBackend>) -> Self {
+        Self { backend }
+    }
+
+    pub async fn run(&self, graph_json: &str, _opts_json: &str) -> Result<u64> {
+        let spec: ComposeSpec = serde_json::from_str(graph_json).map_err(ComposeError::JsonError)?;
+        let engine = ComposeEngine::new(spec, "workload".to_string(), self.backend.clone());
+        let handle = Arc::new(engine).up(&[], true, false, false).await?;
+        Ok(handle.stack_id)
+    }
+}
+
+impl ComposeEngine {
     /// Start existing stopped services.
     pub async fn start(&self, services: &[String]) -> Result<()> {
         let target: Vec<String> = if services.is_empty() {
