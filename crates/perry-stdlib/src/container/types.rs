@@ -78,6 +78,14 @@ pub fn take_image_info_list(id: u64) -> Option<Vec<ImageInfo>> {
     handle::take_handle(id as Handle)
 }
 
+pub fn register_graph_status(status: crate::container::workload::GraphStatus) -> u64 {
+    handle::register_handle(status) as u64
+}
+
+pub fn register_node_info_list(list: Vec<crate::container::workload::NodeInfo>) -> u64 {
+    handle::register_handle(list) as u64
+}
+
 pub fn drop_container_handle(id: u64) -> bool {
     handle::drop_handle(id as Handle)
 }
@@ -206,11 +214,33 @@ unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
 /// Parse `ContainerSpec` from a JSON StringHeader pointer.
 pub fn parse_container_spec(spec_ptr: *const StringHeader) -> Result<ContainerSpec, String> {
     let json = unsafe { string_from_header(spec_ptr) }.ok_or("Invalid spec pointer")?;
+    let env = std::env::vars().collect();
+    let interpolated = perry_container_compose::yaml::interpolate(&json, &env);
+    serde_json::from_str(&interpolated).map_err(|e| e.to_string())
+}
+
+/// Parse `WorkloadGraph` from a JSON StringHeader pointer.
+pub fn parse_workload_graph(ptr: *const StringHeader) -> Result<crate::container::workload::WorkloadGraph, String> {
+    let json = unsafe { string_from_header(ptr) }.ok_or("Invalid workload graph pointer")?;
+    serde_json::from_str(&json).map_err(|e| e.to_string())
+}
+
+/// Parse `RunGraphOptions` from a JSON StringHeader pointer.
+pub fn parse_run_graph_options(ptr: *const StringHeader) -> Result<crate::container::workload::RunGraphOptions, String> {
+    let json = unsafe { string_from_header(ptr) }.ok_or("Invalid run graph options pointer")?;
+    serde_json::from_str(&json).map_err(|e| e.to_string())
+}
+
+/// Parse `ComposeServiceBuild` from a JSON StringHeader pointer.
+pub fn parse_build_spec(ptr: *const StringHeader) -> Result<perry_container_compose::types::ComposeServiceBuild, String> {
+    let json = unsafe { string_from_header(ptr) }.ok_or("Invalid build spec pointer")?;
     serde_json::from_str(&json).map_err(|e| e.to_string())
 }
 
 /// Parse `ComposeSpec` from a JSON StringHeader pointer.
 pub fn parse_compose_spec(spec_ptr: *const StringHeader) -> Result<ComposeSpec, String> {
     let json = unsafe { string_from_header(spec_ptr) }.ok_or("Invalid spec pointer")?;
-    serde_json::from_str(&json).map_err(|e| e.to_string())
+    let env = std::env::vars().collect();
+    let interpolated = perry_container_compose::yaml::interpolate(&json, &env);
+    serde_json::from_str(&interpolated).map_err(|e| e.to_string())
 }

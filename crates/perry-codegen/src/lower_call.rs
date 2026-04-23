@@ -4027,7 +4027,7 @@ enum NativeArgKind {
     /// `name: i64` and internally calls `string_from_nanboxed(name)` or
     /// similar — the callee expects the full NaN-boxed value, not an
     /// unboxed raw pointer. Common pattern in fastify context methods.
-    JsvalI64,
+    JsvalI64, Json,
 }
 
 /// What the runtime function returns.
@@ -4067,7 +4067,7 @@ struct NativeModSig {
 const NA_F64: NativeArgKind = NativeArgKind::F64;
 const NA_STR: NativeArgKind = NativeArgKind::StrPtr;
 const NA_PTR: NativeArgKind = NativeArgKind::PtrI64;
-const NA_JSV: NativeArgKind = NativeArgKind::JsvalI64;
+const NA_JSV: NativeArgKind = NativeArgKind::JsvalI64; const NA_JSON: NativeArgKind = NativeArgKind::Json;
 const NR_PTR: NativeRetKind = NativeRetKind::Ptr;
 const NR_STR: NativeRetKind = NativeRetKind::Str;
 const NR_F64: NativeRetKind = NativeRetKind::F64;
@@ -4573,10 +4573,10 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
     // ========== Container Module ==========
     NativeModSig { module: "perry/container", has_receiver: false, method: "run",
         class_filter: None,
-        runtime: "js_container_run", args: &[NA_STR], ret: NR_PTR },
+        runtime: "js_container_run", args: &[NA_JSON], ret: NR_PTR },
     NativeModSig { module: "perry/container", has_receiver: false, method: "create",
         class_filter: None,
-        runtime: "js_container_create", args: &[NA_STR], ret: NR_PTR },
+        runtime: "js_container_create", args: &[NA_JSON], ret: NR_PTR },
     NativeModSig { module: "perry/container", has_receiver: false, method: "start",
         class_filter: None,
         runtime: "js_container_start", args: &[NA_STR], ret: NR_PTR },
@@ -4598,9 +4598,15 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
     NativeModSig { module: "perry/container", has_receiver: false, method: "exec",
         class_filter: None,
         runtime: "js_container_exec", args: &[NA_STR, NA_STR, NA_STR, NA_STR], ret: NR_PTR },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "build",
+        class_filter: None,
+        runtime: "js_container_build", args: &[NA_JSON, NA_STR], ret: NR_PTR },
     NativeModSig { module: "perry/container", has_receiver: false, method: "pullImage",
         class_filter: None,
         runtime: "js_container_pullImage", args: &[NA_STR], ret: NR_PTR },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "inspectNetwork",
+        class_filter: None,
+        runtime: "js_container_inspectNetwork", args: &[NA_STR], ret: NR_PTR },
     NativeModSig { module: "perry/container", has_receiver: false, method: "listImages",
         class_filter: None,
         runtime: "js_container_listImages", args: &[], ret: NR_PTR },
@@ -4615,63 +4621,71 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
         runtime: "js_container_detectBackend", args: &[], ret: NR_PTR },
     NativeModSig { module: "perry/container", has_receiver: false, method: "composeUp",
         class_filter: None,
-        runtime: "js_container_composeUp", args: &[NA_STR], ret: NR_PTR },
+        runtime: "js_container_composeUp", args: &[NA_JSON], ret: NR_PTR },
 
     // ========== Container Compose Module ==========
     NativeModSig { module: "perry/compose", has_receiver: false, method: "up",
         class_filter: None,
-        runtime: "js_compose_up", args: &[NA_STR], ret: NR_PTR },
+        runtime: "js_container_compose_up", args: &[NA_JSON], ret: NR_PTR },
     NativeModSig { module: "perry/compose", has_receiver: false, method: "down",
         class_filter: None,
-        runtime: "js_compose_down", args: &[NA_F64, NA_F64], ret: NR_PTR },
+        runtime: "js_container_compose_down", args: &[NA_F64, NA_F64], ret: NR_PTR },
     NativeModSig { module: "perry/compose", has_receiver: false, method: "ps",
         class_filter: None,
-        runtime: "js_compose_ps", args: &[NA_F64], ret: NR_PTR },
+        runtime: "js_container_compose_ps", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "perry/compose", has_receiver: false, method: "logs",
         class_filter: None,
-        runtime: "js_compose_logs", args: &[NA_F64, NA_STR, NA_F64], ret: NR_PTR },
+        runtime: "js_container_compose_logs", args: &[NA_F64, NA_STR, NA_F64], ret: NR_PTR },
     NativeModSig { module: "perry/compose", has_receiver: false, method: "exec",
         class_filter: None,
-        runtime: "js_compose_exec", args: &[NA_F64, NA_STR, NA_STR], ret: NR_PTR },
+        runtime: "js_container_compose_exec", args: &[NA_F64, NA_STR, NA_JSON], ret: NR_PTR },
     NativeModSig { module: "perry/compose", has_receiver: false, method: "start",
         class_filter: None,
-        runtime: "js_compose_start", args: &[NA_F64, NA_STR], ret: NR_PTR },
+        runtime: "js_container_compose_start", args: &[NA_F64, NA_JSON], ret: NR_PTR },
     NativeModSig { module: "perry/compose", has_receiver: false, method: "stop",
         class_filter: None,
-        runtime: "js_compose_stop", args: &[NA_F64, NA_STR], ret: NR_PTR },
+        runtime: "js_container_compose_stop", args: &[NA_F64, NA_JSON], ret: NR_PTR },
     NativeModSig { module: "perry/compose", has_receiver: false, method: "restart",
         class_filter: None,
-        runtime: "js_compose_restart", args: &[NA_F64, NA_STR], ret: NR_PTR },
+        runtime: "js_container_compose_restart", args: &[NA_F64, NA_JSON], ret: NR_PTR },
     NativeModSig { module: "perry/compose", has_receiver: false, method: "config",
         class_filter: None,
-        runtime: "js_compose_config", args: &[NA_STR], ret: NR_PTR },
+        runtime: "js_container_compose_config", args: &[NA_STR], ret: NR_PTR },
     NativeModSig { module: "perry/container-compose", has_receiver: false, method: "up",
         class_filter: None,
-        runtime: "js_compose_up", args: &[NA_STR], ret: NR_PTR },
+        runtime: "js_container_compose_up", args: &[NA_JSON], ret: NR_PTR },
     NativeModSig { module: "perry/container-compose", has_receiver: false, method: "down",
         class_filter: None,
-        runtime: "js_compose_down", args: &[NA_F64, NA_F64], ret: NR_PTR },
+        runtime: "js_container_compose_down", args: &[NA_F64, NA_F64], ret: NR_PTR },
     NativeModSig { module: "perry/container-compose", has_receiver: false, method: "ps",
         class_filter: None,
-        runtime: "js_compose_ps", args: &[NA_F64], ret: NR_PTR },
+        runtime: "js_container_compose_ps", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "perry/container-compose", has_receiver: false, method: "logs",
         class_filter: None,
-        runtime: "js_compose_logs", args: &[NA_F64, NA_STR, NA_F64], ret: NR_PTR },
+        runtime: "js_container_compose_logs", args: &[NA_F64, NA_STR, NA_F64], ret: NR_PTR },
     NativeModSig { module: "perry/container-compose", has_receiver: false, method: "exec",
         class_filter: None,
-        runtime: "js_compose_exec", args: &[NA_F64, NA_STR, NA_STR], ret: NR_PTR },
+        runtime: "js_container_compose_exec", args: &[NA_F64, NA_STR, NA_JSON], ret: NR_PTR },
     NativeModSig { module: "perry/container-compose", has_receiver: false, method: "start",
         class_filter: None,
-        runtime: "js_compose_start", args: &[NA_F64, NA_STR], ret: NR_PTR },
+        runtime: "js_container_compose_start", args: &[NA_F64, NA_JSON], ret: NR_PTR },
     NativeModSig { module: "perry/container-compose", has_receiver: false, method: "stop",
         class_filter: None,
-        runtime: "js_compose_stop", args: &[NA_F64, NA_STR], ret: NR_PTR },
+        runtime: "js_container_compose_stop", args: &[NA_F64, NA_JSON], ret: NR_PTR },
     NativeModSig { module: "perry/container-compose", has_receiver: false, method: "restart",
         class_filter: None,
-        runtime: "js_compose_restart", args: &[NA_F64, NA_STR], ret: NR_PTR },
+        runtime: "js_container_compose_restart", args: &[NA_F64, NA_JSON], ret: NR_PTR },
     NativeModSig { module: "perry/container-compose", has_receiver: false, method: "config",
         class_filter: None,
-        runtime: "js_compose_config", args: &[NA_STR], ret: NR_PTR },
+        runtime: "js_container_compose_config", args: &[NA_JSON], ret: NR_PTR },
+
+    // ========== Workloads Module ==========
+    NativeModSig { module: "perry/workloads", has_receiver: false, method: "runGraph",
+        class_filter: None,
+        runtime: "js_workload_runGraph", args: &[NA_JSON, NA_JSON], ret: NR_PTR },
+    NativeModSig { module: "perry/workloads", has_receiver: false, method: "handleStatus",
+        class_filter: None,
+        runtime: "js_workload_handle_status", args: &[NA_F64], ret: NR_PTR },
 ];
 
 /// Look up a native module method in the static dispatch table.
@@ -4742,6 +4756,14 @@ fn lower_native_module_dispatch(
                 let blk = ctx.block();
                 let bits = blk.bitcast_double_to_i64(&lowered);
                 llvm_args.push((I64, bits));
+                arg_types.push(I64);
+            }
+            NativeArgKind::Json => {
+                let blk = ctx.block();
+                // Call js_json_stringify(value, type_hint=0)
+                let type_hint = blk.const_i32(0);
+                let str_ptr = blk.call(I64, "js_json_stringify", &[(DOUBLE, &lowered), (I32, &type_hint)]);
+                llvm_args.push((I64, str_ptr));
                 arg_types.push(I64);
             }
         }

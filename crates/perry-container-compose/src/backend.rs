@@ -3,7 +3,7 @@
 //! generic `CliBackend<P>`, and `detect_backend()`.
 
 use crate::error::{ComposeError, Result};
-use crate::types::{
+use crate::types::{ ComposeServiceBuild,
     ComposeNetwork, ComposeVolume, ContainerHandle, ContainerInfo, ContainerLogs, ContainerSpec,
     ImageInfo,
 };
@@ -96,6 +96,8 @@ pub trait ContainerBackend: Send + Sync {
     async fn remove_network(&self, name: &str) -> Result<()>;
     async fn create_volume(&self, name: &str, config: &VolumeConfig) -> Result<()>;
     async fn remove_volume(&self, name: &str) -> Result<()>;
+    async fn build(&self, spec: &ComposeServiceBuild, image_name: &str) -> Result<()>;
+    async fn inspect_network(&self, name: &str) -> Result<()>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -427,6 +429,20 @@ pub trait CliProtocol: Send + Sync {
 
     fn remove_volume_args(&self, name: &str) -> Vec<String> {
         vec!["volume".into(), "rm".into(), name.into()]
+    }
+
+    fn build_args(&self, spec: &ComposeServiceBuild, image_name: &str) -> Vec<String> {
+        let mut args = vec!["build".into(), "-t".into(), image_name.into()];
+        if let Some(ctx) = &spec.context {
+            args.push(ctx.clone());
+        } else {
+            args.push(".".into());
+        }
+        args
+    }
+
+    fn inspect_network_args(&self, name: &str) -> Vec<String> {
+        vec!["network".into(), "inspect".into(), name.into()]
     }
 
     // ── Output parsers (Docker JSON defaults) ─────────────────────────────
@@ -816,6 +832,18 @@ impl<P: CliProtocol + Send + Sync> ContainerBackend for CliBackend<P> {
         }
         Ok(())
     }
+
+    async fn build(&self, spec: &ComposeServiceBuild, image_name: &str) -> Result<()> {
+        self.exec_ok(self.protocol.build_args(spec, image_name))
+            .await?;
+        Ok(())
+    }
+
+    async fn inspect_network(&self, name: &str) -> Result<()> {
+        self.exec_ok(self.protocol.inspect_network_args(name))
+            .await?;
+        Ok(())
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1111,7 +1139,7 @@ pub struct ExecResult {
 pub trait Backend: Send + Sync {
     fn name(&self) -> &'static str;
 
-    async fn build(
+    async fn legacy_build(
         &self,
         context: &str,
         dockerfile: Option<&str>,
@@ -1161,6 +1189,8 @@ pub trait Backend: Send + Sync {
         labels: Option<&HashMap<String, String>>,
     ) -> Result<()>;
     async fn remove_volume(&self, name: &str) -> Result<()>;
+    async fn build(&self, spec: &ComposeServiceBuild, image_name: &str) -> Result<()>;
+    async fn inspect_network(&self, name: &str) -> Result<()>;
 }
 
 /// Synchronous best-effort backend selector for legacy callers.
