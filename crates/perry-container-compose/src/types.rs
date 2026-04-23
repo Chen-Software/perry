@@ -686,6 +686,8 @@ pub struct ContainerSpec {
     pub cmd: Option<Vec<String>>,
     pub entrypoint: Option<Vec<String>>,
     pub network: Option<String>,
+    pub read_only: Option<bool>,
+    pub seccomp: Option<String>,
     pub rm: Option<bool>,
 }
 

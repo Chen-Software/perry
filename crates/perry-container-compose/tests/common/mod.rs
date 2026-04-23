@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use perry_container_compose::backend::{ContainerBackend, NetworkConfig, VolumeConfig, SecurityProfile};
 use perry_container_compose::types::{
     ContainerHandle, ContainerInfo, ContainerLogs, ImageInfo,
-    ContainerSpec
+    ContainerSpec, ComposeServiceBuild
 };
 use perry_container_compose::error::{ComposeError, Result};
 use std::collections::HashMap;
@@ -24,7 +24,7 @@ pub struct MockBackend {
 
 #[async_trait]
 impl ContainerBackend for MockBackend {
-    fn backend_name(&self) -> &'static str { "mock" }
+    fn backend_name(&self) -> &str { "mock" }
 
     async fn check_available(&self) -> Result<()> { Ok(()) }
 
@@ -143,9 +143,9 @@ impl ContainerBackend for MockBackend {
         Ok(())
     }
 
-    async fn inspect_network(&self, _name: &str) -> Result<serde_json::Value> { Ok(serde_json::json!({})) }
+    async fn inspect_network(&self, _name: &str) -> Result<()> { Ok(()) }
     async fn inspect_volume(&self, _name: &str) -> Result<serde_json::Value> { Ok(serde_json::json!({})) }
-    async fn build_image(&self, _image: &str, _context: &str, _dockerfile: Option<&str>, _args: Option<&HashMap<String, String>>) -> Result<()> { Ok(()) }
+    async fn build(&self, _spec: &ComposeServiceBuild, _image_name: &str) -> Result<()> { Ok(()) }
     async fn inspect_image(&self, _reference: &str) -> Result<serde_json::Value> { Ok(serde_json::json!({})) }
     async fn manifest_inspect(&self, _reference: &str) -> Result<serde_json::Value> { Ok(serde_json::json!({})) }
     async fn run_with_security(&self, spec: &ContainerSpec, _profile: &SecurityProfile) -> Result<ContainerHandle> { self.run(spec).await }

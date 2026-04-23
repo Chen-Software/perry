@@ -4,8 +4,8 @@
 
 use crate::error::{ComposeError, Result};
 use crate::types::{
-    ComposeNetwork, ComposeVolume, ContainerHandle, ContainerInfo, ContainerLogs, ContainerSpec,
-    ImageInfo,
+    ComposeNetwork, ComposeServiceBuild, ComposeVolume, ContainerHandle, ContainerInfo,
+    ContainerLogs, ContainerSpec, ImageInfo,
 };
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -104,16 +104,10 @@ pub trait ContainerBackend: Send + Sync {
     async fn create_volume(&self, name: &str, config: &VolumeConfig) -> Result<()>;
     async fn remove_volume(&self, name: &str) -> Result<()>;
 
-    async fn inspect_network(&self, name: &str) -> Result<serde_json::Value>;
+    async fn inspect_network(&self, name: &str) -> Result<()>;
     async fn inspect_volume(&self, name: &str) -> Result<serde_json::Value>;
 
-    async fn build_image(
-        &self,
-        context: &str,
-        tag: &str,
-        dockerfile: Option<&str>,
-        args: Option<&HashMap<String, String>>,
-    ) -> Result<()>;
+    async fn build(&self, spec: &ComposeServiceBuild, image_name: &str) -> Result<()>;
 
     async fn inspect_image(&self, reference: &str) -> Result<serde_json::Value>;
     async fn manifest_inspect(&self, reference: &str) -> Result<serde_json::Value>;
@@ -925,6 +919,12 @@ impl ContainerBackend for OciBackend {
         Ok(())
     }
 
+    async fn inspect_network(&self, name: &str) -> Result<()> {
+        self.exec_ok(OciCommandBuilder::inspect_network_args(&self.driver, name))
+            .await?;
+        Ok(())
+    }
+
     async fn run_with_security(
         &self,
         spec: &ContainerSpec,
@@ -944,15 +944,19 @@ impl ContainerBackend for OciBackend {
         self.logs(id, None).await
     }
 
-    async fn build_image(
-        &self,
-        context: &str,
-        tag: &str,
-        dockerfile: Option<&str>,
-        args: Option<&HashMap<String, String>>,
-    ) -> Result<()> {
-        self.exec_ok(OciCommandBuilder::build_args(&self.driver, context, tag, dockerfile, args))
-            .await?;
+    async fn build(&self, spec: &ComposeServiceBuild, image_name: &str) -> Result<()> {
+        let context = spec.context.as_deref().unwrap_or(".");
+        let dockerfile = spec.dockerfile.as_deref();
+        let args_map = spec.args.as_ref().map(|l| l.to_map());
+
+        self.exec_ok(OciCommandBuilder::build_args(
+            &self.driver,
+            context,
+            image_name,
+            dockerfile,
+            args_map.as_ref(),
+        ))
+        .await?;
         Ok(())
     }
 
@@ -966,13 +970,6 @@ impl ContainerBackend for OciBackend {
     async fn manifest_inspect(&self, reference: &str) -> Result<serde_json::Value> {
         let stdout = self
             .exec_ok(OciCommandBuilder::manifest_inspect_args(&self.driver, reference))
-            .await?;
-        serde_json::from_str(&stdout).map_err(ComposeError::JsonError)
-    }
-
-    async fn inspect_network(&self, name: &str) -> Result<serde_json::Value> {
-        let stdout = self
-            .exec_ok(OciCommandBuilder::inspect_network_args(&self.driver, name))
             .await?;
         serde_json::from_str(&stdout).map_err(ComposeError::JsonError)
     }
@@ -1283,6 +1280,8 @@ mod tests {
             cmd: Some(vec!["sh".into(), "-c".into(), "echo hi".into()]),
             entrypoint: None,
             network: Some("mynet".into()),
+            read_only: Some(false),
+            seccomp: None,
             rm: Some(true),
         }
     }

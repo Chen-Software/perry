@@ -183,15 +183,9 @@ impl ComposeEngine {
             if build || svc.needs_build() {
                 if let Some(build_spec) = &svc.build {
                     let build_config = build_spec.as_build();
-                    let context = build_config.context.as_deref().unwrap_or(".");
                     tracing::info!("Building service '{}' (image: {})...", svc_name, image_ref);
                     self.backend
-                        .build_image(
-                            context,
-                            &image_ref,
-                            build_config.dockerfile.as_deref(),
-                            build_config.args.as_ref().map(|l| l.to_map()).as_ref(),
-                        )
+                        .build(&build_config, &image_ref)
                         .await
                         .map_err(|e| ComposeError::ServiceStartupFailed {
                             service: svc_name.clone(),
@@ -515,6 +509,11 @@ impl ComposeEngine {
     pub async fn restart(&self, services: &[String]) -> Result<()> {
         self.stop(services).await?;
         self.start(services).await
+    }
+
+    /// Resolve startup order for this engine's spec.
+    pub fn resolve_startup_order(&self) -> Result<Vec<String>> {
+        resolve_startup_order(&self.spec)
     }
 }
 

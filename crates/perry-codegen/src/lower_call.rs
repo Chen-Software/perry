@@ -3463,6 +3463,7 @@ static PERRY_CONTAINER_TABLE: &[(&str, &str)] = &[
     ("listImages",  "js_container_listImages"),
     ("removeImage", "js_container_removeImage"),
     ("getBackend",  "js_container_getBackend"),
+    ("detectBackend", "js_container_detectBackend"),
     ("composeUp",   "js_container_composeUp"),
 ];
 

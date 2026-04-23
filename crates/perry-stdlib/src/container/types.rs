@@ -54,18 +54,6 @@ pub fn take_compose_handle(id: u64) -> Option<ComposeHandle> {
     handle::take_handle(id as Handle)
 }
 
-pub fn register_compose_wrapper(w: crate::container::compose::ComposeWrapper) -> u64 {
-    handle::register_handle(w) as u64
-}
-
-pub fn get_compose_wrapper(id: u64) -> Option<&'static crate::container::compose::ComposeWrapper> {
-    handle::get_handle(id as Handle)
-}
-
-pub fn take_compose_wrapper(id: u64) -> Option<crate::container::compose::ComposeWrapper> {
-    handle::take_handle(id as Handle)
-}
-
 pub fn register_container_logs(logs: ContainerLogs) -> u64 {
     handle::register_handle(logs) as u64
 }

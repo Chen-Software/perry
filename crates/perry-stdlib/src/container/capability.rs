@@ -17,7 +17,7 @@ pub async fn alloy_container_run_capability(
     grants: &CapabilityGrants,
 ) -> Result<ContainerLogs, String> {
     // 1. Verify image
-    let _digest = verification::verify_image(image).await?;
+    let _digest = verification::verify_image(image).await.map_err(|e| e.to_string())?;
 
     // 2. Build spec
     let spec = ContainerSpec {
@@ -39,11 +39,13 @@ pub async fn alloy_container_run_capability(
         ports: spec.ports,
         volumes: spec.volumes,
         env: spec.env,
+        labels: spec.labels,
         cmd: spec.cmd,
         entrypoint: spec.entrypoint,
         network: spec.network,
         rm: spec.rm,
         read_only: spec.read_only,
+        seccomp: spec.seccomp,
     }).await.map_err(|e| e.to_string())?;
 
     // 4. Logs (simplified: wait for completion should be here)

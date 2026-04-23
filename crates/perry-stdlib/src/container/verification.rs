@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
-use super::types::ComposeError;
+use perry_container_compose::error::ComposeError;
 
 pub const CHAINGUARD_IDENTITY: &str =
     "https://github.com/chainguard-images/images/.github/workflows/sign.yaml@refs/heads/main";
@@ -10,6 +10,7 @@ pub const CHAINGUARD_ISSUER: &str =
 #[derive(Debug, Clone)]
 enum VerificationResult {
     Verified(String), // digest
+    #[allow(dead_code)]
     Failed(String),   // reason
 }
 
