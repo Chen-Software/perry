@@ -125,10 +125,16 @@ fn check_system_linker() -> CheckResult {
                 status: CheckStatus::Ok,
                 details: Some(linker.display().to_string()),
             },
-            Err(e) => CheckResult {
+            Err(_) => CheckResult {
                 name: "system linker (MSVC link.exe)".to_string(),
                 status: CheckStatus::Error,
-                details: Some(format!("link.exe not found: {}. Install Visual Studio Build Tools.", e)),
+                details: Some(
+                    "link.exe not found. Install the MSVC linker + Windows SDK via one of:\n      \
+                     A) Visual Studio Installer → Modify → check \"Desktop development with C++\"\n      \
+                     B) winget install Microsoft.VisualStudio.2022.BuildTools --override \
+                     \"--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended\""
+                        .to_string(),
+                ),
             },
         }
     }

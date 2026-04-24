@@ -6362,13 +6362,26 @@ pub fn run_with_parse_cache(
         // lld-link may handle large COFF objects differently than MSVC's linker.
         let linker = if let Ok(lld) = std::env::var("PERRY_LLD_LINK") {
             PathBuf::from(lld)
+        } else if let Some(path) = find_msvc_link_exe() {
+            path
+        } else if is_cross_windows {
+            eprintln!("Warning: lld-link not found for cross-compilation. Install: rustup component add llvm-tools");
+            PathBuf::from("link.exe")
         } else {
-            find_msvc_link_exe().unwrap_or_else(|| {
-                if is_cross_windows {
-                    eprintln!("Warning: lld-link not found for cross-compilation. Install: rustup component add llvm-tools");
-                }
-                PathBuf::from("link.exe")
-            })
+            // Native Windows: vswhere didn't find a VCTools-enabled VS install.
+            // Fail fast with an actionable message before we try to invoke an
+            // absent `link.exe` and get a confusing generic IO error. Matches
+            // the `find_clang` context pattern in perry-codegen/src/linker.rs.
+            return Err(anyhow!(
+                "MSVC link.exe not found. Perry needs the MSVC linker + Windows SDK \
+                 (from the \"Desktop development with C++\" workload). Install via:\n\
+                 \n\
+                 \x20  A) Visual Studio Installer → Modify → check \"Desktop development with C++\"\n\
+                 \x20  B) winget install Microsoft.VisualStudio.2022.BuildTools --override \
+                 \"--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended\"\n\
+                 \n\
+                 Then open a new terminal and retry. Run `perry doctor` to verify."
+            ));
         };
         let mut c = Command::new(linker);
         // /ENTRY:mainCRTStartup works for both subsystems: Perry emits
