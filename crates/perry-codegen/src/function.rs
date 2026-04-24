@@ -69,6 +69,18 @@ pub struct LlFunction {
     /// the init prelude has been emitted; left as `None` for functions
     /// with no init prelude.
     entry_init_boundary: Option<usize>,
+    /// Shadow-stack frame slot (gen-GC Phase A sub-phase 2). When
+    /// `Some(slot_reg)`, `to_ir()` rewrites every `ret` in the
+    /// function body to call `js_shadow_frame_pop` first, reading
+    /// the frame handle stored at `slot_reg`. The push is emitted
+    /// into `entry_allocas` by `enable_shadow_frame` — runs at the
+    /// very top of block 0, before any user code.
+    ///
+    /// `None` means no shadow frame — `ret` instructions pass
+    /// through unchanged. Currently gated per-function so we can
+    /// land wiring incrementally (e.g. just `main`) before
+    /// flipping the default across every user function.
+    shadow_frame_slot: Option<String>,
 }
 
 impl LlFunction {
@@ -86,7 +98,41 @@ impl LlFunction {
             entry_allocas: Vec::new(),
             entry_post_init_setup: Vec::new(),
             entry_init_boundary: None,
+            shadow_frame_slot: None,
         }
+    }
+
+    /// Enable shadow-stack frame emission for this function (gen-GC
+    /// Phase A sub-phase 2). Emits `js_shadow_frame_push(slot_count)`
+    /// into `entry_allocas` so it runs at the top of block 0, stores
+    /// the returned u64 handle into a fresh alloca, and records the
+    /// slot for the `to_ir()` ret-rewriting pass to load from.
+    ///
+    /// Safe to call at most once per function. After this call,
+    /// `to_ir()` will insert a matching
+    /// `js_shadow_frame_pop(loaded_handle)` before every `ret` in
+    /// the function body, regardless of which codegen path emitted
+    /// the ret. Frame balance is preserved automatically.
+    ///
+    /// Passing `slot_count = 0` is legal — the frame just holds
+    /// a header and zero data slots. Useful for sub-phase 2 where
+    /// no pointer-typed locals are materialized yet; the goal is
+    /// just to prove push/pop wiring works without touching every
+    /// slot-store site.
+    pub fn enable_shadow_frame(&mut self, slot_count: u32) {
+        use crate::types::I64;
+        if self.shadow_frame_slot.is_some() { return; }
+        let handle_slot = self.alloca_entry(I64);
+        let handle_reg = format!("%r{}", self.reg_counter.next());
+        self.entry_allocas.push(format!(
+            "  {} = call i64 @js_shadow_frame_push(i32 {})",
+            handle_reg, slot_count
+        ));
+        self.entry_allocas.push(format!(
+            "  store i64 {}, ptr {}",
+            handle_reg, handle_slot
+        ));
+        self.shadow_frame_slot = Some(handle_slot);
     }
 
     /// Mark the current end of the entry block as the boundary between
@@ -294,6 +340,46 @@ impl LlFunction {
         }
 
         ir.push_str("}\n");
+
+        // Shadow-stack pop rewrite (gen-GC Phase A sub-phase 2).
+        // When `shadow_frame_slot` is set, every `  ret <ty> <val>`
+        // line in the IR must be prefixed with a load of the frame
+        // handle and a call to `js_shadow_frame_pop`. Textual
+        // rewrite on the full IR is the simplest way to intercept
+        // every ret site regardless of which codegen path emitted
+        // it (Stmt::Return, implicit return, error-handling early
+        // return, generator-transform machinery, etc.) — passing
+        // through the normal `LlBlock::ret` emit hook would miss
+        // any hand-emitted ret via `emit("ret ...")`.
+        //
+        // Unique SSA names: `%shadow_pop_<seq>` where `<seq>` is a
+        // monotonic counter over the function's ret sites. No
+        // collision with codegen's `%r<N>` namespace.
+        if let Some(handle_slot) = &self.shadow_frame_slot {
+            let mut out = String::with_capacity(ir.len() + 512);
+            let mut seq: u32 = 0;
+            for line in ir.lines() {
+                let trimmed = line.trim_start();
+                if (trimmed.starts_with("ret ") || trimmed == "ret void")
+                    && !trimmed.starts_with("ret ptr ")  // skip rare ptr rets
+                {
+                    let load_reg = format!("%shadow_pop_l_{}", seq);
+                    seq += 1;
+                    out.push_str(&format!(
+                        "  {} = load i64, ptr {}\n",
+                        load_reg, handle_slot
+                    ));
+                    out.push_str(&format!(
+                        "  call void @js_shadow_frame_pop(i64 {})\n",
+                        load_reg
+                    ));
+                }
+                out.push_str(line);
+                out.push('\n');
+            }
+            return out;
+        }
+
         ir
     }
 }

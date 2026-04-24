@@ -1432,6 +1432,21 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
 }
 
 /// Compile a single user function into the module.
+/// Gen-GC Phase A sub-phase 2: enable shadow-stack push/pop
+/// emission for every user function? Cached at first call so
+/// subsequent compile_* calls skip the env-var lookup.
+///
+/// `PERRY_SHADOW_STACK=1` / `on` / `true` → enabled.
+/// Anything else → disabled (default).
+fn shadow_stack_enabled() -> bool {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| matches!(
+        std::env::var("PERRY_SHADOW_STACK").as_deref(),
+        Ok("1") | Ok("on") | Ok("true")
+    ))
+}
+
 fn compile_function(
     llmod: &mut LlModule,
     f: &Function,
@@ -1467,6 +1482,22 @@ fn compile_function(
     let ic_base = llmod.ic_counter;
     let buffer_alias_base = llmod.buffer_alias_counter;
     let lf = llmod.define_function(&llvm_name, DOUBLE, params);
+
+    // Gen-GC Phase A sub-phase 2: opt-in shadow-frame emission for
+    // user functions. Default OFF — flipping the default requires
+    // sub-phase 3 (slot updates at safepoints) so the frames carry
+    // useful data. For now, `PERRY_SHADOW_STACK=1` at compile time
+    // just exercises push/pop wiring around every return site,
+    // proving the textual `ret`-rewrite pass in `LlFunction::to_ir`
+    // catches every emission path without regressing output.
+    //
+    // slot_count = 0 is intentional — we're not yet storing any
+    // pointer-typed locals into the frame. When slot updates land
+    // (sub-phase 3), this becomes the count of live pointer locals.
+    if shadow_stack_enabled() {
+        lf.enable_shadow_frame(0);
+    }
+
     // Small leaf functions (≤ 8 statements) get alwaysinline so LLVM
     // exposes their operations to the caller's optimizer context — critical
     // for vectorizing clamp helpers and similar patterns.
