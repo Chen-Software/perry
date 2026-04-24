@@ -952,6 +952,23 @@ pub unsafe extern "C" fn js_json_parse(text_ptr: *const StringHeader) -> JSValue
     let data_ptr = (text_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data_ptr, len);
 
+    // Issue #179 Step 2 Phase 1: opt-in tape-based parse path. Builds
+    // a flat tape of structural positions in one pass, then
+    // materializes the same JSValue tree the direct path would
+    // produce. Currently strictly more work (tape build + walk) than
+    // the direct path — its value lands when Phase 2+ intercept
+    // access and skip materialization. Enabled via `PERRY_JSON_TAPE=1`
+    // so production default is unchanged; the flag is the correctness
+    // gate used by tests to verify tape-path parity before the lazy
+    // rollout begins.
+    if std::env::var_os("PERRY_JSON_TAPE").is_some() {
+        if let Some(result) = try_parse_via_tape(text_ptr, bytes) {
+            return result;
+        }
+        // Malformed input — fall through to direct parser, which has
+        // the full error-reporting path.
+    }
+
     if len == 0 {
         let msg = "Unexpected end of JSON input";
         let msg_ptr = js_string_from_bytes(msg.as_ptr(), msg.len() as u32);
@@ -1019,6 +1036,43 @@ pub unsafe extern "C" fn js_json_parse(text_ptr: *const StringHeader) -> JSValue
     }
 
     result
+}
+
+/// Issue #179 Step 2 Phase 1: tape-path entry. Builds a tape from
+/// the input bytes, then materializes the full JSValue tree via
+/// `json_tape::materialize`. Returns `None` on malformed input so
+/// the caller can fall through to the direct parser.
+///
+/// Wraps the tape path in the same GC-safety contract as the direct
+/// parser (gc_check_trigger → suppress → parse → unsuppress → bump
+/// malloc trigger + cache trim) so it's a drop-in replacement behind
+/// the feature flag.
+unsafe fn try_parse_via_tape(
+    text_ptr: *const StringHeader,
+    bytes: &[u8],
+) -> Option<JSValue> {
+    let tape = crate::json_tape::build_tape(bytes)?;
+
+    crate::gc::gc_check_trigger();
+    crate::gc::gc_suppress();
+    let text_root = parse_root_push(JSValue::string_ptr(text_ptr as *mut StringHeader));
+
+    let result = crate::json_tape::materialize(&tape, bytes);
+    parse_root_push(result);
+
+    parse_root_restore(text_root);
+    crate::gc::gc_unsuppress();
+    crate::gc::gc_bump_malloc_trigger();
+
+    PARSE_KEY_CACHE.with(|c| {
+        let cache = c.borrow();
+        if cache.len() > 4096 {
+            drop(cache);
+            c.borrow_mut().clear();
+        }
+    });
+
+    Some(result)
 }
 
 // ─── JSON.parse<T[]>: schema-directed typed parse ─────────────────────────────
