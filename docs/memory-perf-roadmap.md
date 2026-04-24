@@ -8,19 +8,41 @@ loop over a ~1 MB blob with a 10k-record module-level setup array.
 This doc is a living plan. Each tier has ship criteria and a rough impact estimate;
 update numbers and strike through items as they land.
 
-## Current standings (v0.5.196, macOS ARM64, best-of-5)
+## Current standings (v0.5.211, macOS ARM64, best-of-5)
+
+### bench_json_roundtrip
 
 | Runtime | Time | Peak RSS |
 |---|---:|---:|
-| **Perry v0.5.196** | **373 ms** | **144 MB** |
-| Node 25.8.0 | 385 ms | 188 MB |
-| Bun 1.3.12 | 250 ms | 83 MB |
+| **Perry v0.5.211 (lazy, default)** | **90 ms** | **130 MB** |
+| Perry v0.5.211 (PERRY_JSON_TAPE=0) | 400 ms | 137 MB |
+| Node 25.8.0 | 520 ms | 180 MB |
+| Bun 1.3.12 | 290 ms | 81 MB |
 
-**🎯 Perry now beats Node on both axes** (−3% time, −23% RSS). Perry still
-trails Bun on both axes by ~1.5× — closing the remaining gap requires
-tier 2 and tier 3 architectural work per this roadmap.
+### bench_json_readonly (.length only)
 
-Historical reference:
+| Runtime | Time | Peak RSS |
+|---|---:|---:|
+| **Perry v0.5.211** | **80 ms** | **90 MB** |
+| Perry v0.5.211 (forced direct) | 290 ms | 120 MB |
+| Node 25.8.0 | 450 ms | 169 MB |
+| Bun 1.3.12 | 200 ms | 68 MB |
+
+### bench_json_readonly_indexed (.length + 3 indexed reads)
+
+| Runtime | Time | Peak RSS |
+|---|---:|---:|
+| **Perry v0.5.211** | **90 ms** | **90 MB** |
+| Perry v0.5.211 (forced direct) | 300 ms | 120 MB |
+| Node 25.8.0 | 450 ms | 169 MB |
+| Bun 1.3.12 | 210 ms | 68 MB |
+
+**🎯 Perry now beats BOTH Node and Bun on TIME for every measured JSON
+benchmark.** Node beaten on both axes. Bun beaten on time by 2.1-3.2×;
+Bun still leads on RSS by ~50% (~70 MB vs ~90 MB). Closing the RSS gap
+requires tier 2 and tier 3 architectural work below.
+
+Historical reference (`bench_json_roundtrip`):
 
 | Version | Time | Peak RSS | Notes |
 |---|---:|---:|---|
@@ -29,7 +51,14 @@ Historical reference:
 | v0.5.193 | 384 ms | 213 MB | age-restricted block-persist + no 2-cycle grace |
 | v0.5.194 | 322 ms | 199 MB | block size 8 MB → 1 MB (tier 1 #1) |
 | v0.5.195 | 322 ms | 199 MB | NEON/SSE2 string scanner (tier 1 #3 partial) |
-| **v0.5.196** | **373 ms** | **144 MB** | **GC initial threshold 128 MB → 64 MB** |
+| v0.5.196 | 373 ms | 144 MB | GC initial threshold 128 MB → 64 MB |
+| v0.5.203 | 789 ms | 294 MB | tape-based parse foundation (opt-in `PERRY_JSON_TAPE=1`) |
+| v0.5.204 | 69 ms (flag on) | 108 MB | lazy parse + lazy stringify memcpy |
+| v0.5.206 | 69 ms (flag on) | 108 MB | lazy-safe indexed access, edge case coverage |
+| v0.5.207 | 69 ms (pragma) | 108 MB | `@perry-lazy` JSDoc pragma for per-file opt-in |
+| v0.5.208 | 90 ms (flag on) | 130 MB | per-element sparse materialization — indexed bench cliff eliminated |
+| v0.5.209 | 90 ms (flag on) | 130 MB | walk cursor + adaptive threshold — sequential + random cliffs eliminated |
+| **v0.5.210** | **90 ms (default)** | **130 MB** | **flipped lazy to default above 1024-byte threshold** |
 
 ## Why Perry loses each axis
 
