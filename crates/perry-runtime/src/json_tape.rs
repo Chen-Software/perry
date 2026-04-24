@@ -701,6 +701,28 @@ pub struct LazyArrayHeader {
     /// the corresponding slot in `materialized_elements` holds a
     /// valid materialized JSValue.
     pub materialized_bitmap: *mut u64,
+    /// Walk cursor: the top-level element index we most recently
+    /// visited, and the tape offset it lives at. Lets sequential
+    /// access (`for i in 0..len { parsed[i] }`) walk in O(1) per
+    /// step instead of O(n²) from the root. `walk_idx == u32::MAX`
+    /// means "no prior walk" — start from root+1.
+    ///
+    /// Invariant: if `walk_idx != u32::MAX`, then `walk_tape_pos`
+    /// points at the tape entry for the element at `walk_idx`.
+    /// Updated at the end of every `lazy_get` call on a cold path.
+    pub walk_idx: u32,
+    pub walk_tape_pos: u32,
+    /// Cumulative tape steps walked across all cold-path `lazy_get`
+    /// calls on this header. When this exceeds `2 × cached_length`,
+    /// we've spent enough on per-element walks that full-
+    /// materializing (O(cached_length)) is cheaper for future
+    /// accesses — trigger it and route subsequent reads through the
+    /// `ArrayHeader` tree. This is the "random access" adaptive
+    /// fallback: sequential walks stay at ~1 step per element and
+    /// never trip; random walks average n/2 steps and trip after
+    /// ~4 accesses on a 10k-element array, flipping to O(1) access
+    /// and saving 50-100× on the rest of the workload.
+    pub cumulative_walk_steps: u64,
     // Followed by `tape_len` `TapeEntry` elements inline.
 }
 
@@ -744,6 +766,9 @@ pub unsafe fn alloc_lazy_array(
     (*hdr).tape_len = tape_entries.len() as u32;
     (*hdr).blob_str = blob_str;
     (*hdr).materialized = std::ptr::null_mut();
+    (*hdr).walk_idx = u32::MAX;
+    (*hdr).walk_tape_pos = 0;
+    (*hdr).cumulative_walk_steps = 0;
     // Allocate the sparse cache + bitmap in the arena so GC traces
     // them together with the header. The cache is an array of
     // `cached_length` JSValue slots; the bitmap is
@@ -867,8 +892,25 @@ pub unsafe fn lazy_get(hdr: *mut LazyArrayHeader, i: u32) -> JSValue {
         return JSValue::from_bits(crate::value::TAG_UNDEFINED);
     }
     let end = tape[root].link as usize;
-    let mut idx = root + 1;
-    let mut element_count: u32 = 0;
+
+    // Walk cursor optimization: sequential access
+    // (`for i in 0..len { parsed[i] }`) would otherwise be O(n²) —
+    // 50M pointer chases for n=10k. If we previously visited index
+    // `walk_idx` at tape offset `walk_tape_pos` and `i` is ahead of
+    // it, resume walking from there. For the fully sequential
+    // workload this amortizes to O(1) per step.
+    let prev_walk = (*hdr).walk_idx;
+    let start_count: u32;
+    let mut idx: usize;
+    if prev_walk != u32::MAX && i >= prev_walk {
+        idx = (*hdr).walk_tape_pos as usize;
+        start_count = prev_walk;
+    } else {
+        idx = root + 1;
+        start_count = 0;
+    }
+
+    let mut element_count = start_count;
     while idx < end && element_count < i {
         let k = tape[idx].kind;
         if k == KIND_OBJ_START || k == KIND_ARR_START {
@@ -881,6 +923,17 @@ pub unsafe fn lazy_get(hdr: *mut LazyArrayHeader, i: u32) -> JSValue {
     if idx >= end {
         return JSValue::from_bits(crate::value::TAG_UNDEFINED);
     }
+
+    // Update cursor + cumulative walk counter. The step count for
+    // this call is (i - start_count) at minimum (one step per
+    // element) — container-skipping via `link` is O(1) per element
+    // regardless of subtree size, so this bound matches the actual
+    // work done.
+    let step_cost = (i - start_count) as u64;
+    (*hdr).walk_idx = i;
+    (*hdr).walk_tape_pos = idx as u32;
+    (*hdr).cumulative_walk_steps = (*hdr).cumulative_walk_steps.saturating_add(step_cost);
+
     let value = materialize_from_idx(tape, bytes, idx);
     if !bitmap.is_null() && !cache.is_null() {
         *cache.add(i as usize) = value;
@@ -888,6 +941,18 @@ pub unsafe fn lazy_get(hdr: *mut LazyArrayHeader, i: u32) -> JSValue {
         let bit_idx = (i as usize) % 64;
         *bitmap.add(word_idx) |= 1u64 << bit_idx;
     }
+
+    // Adaptive threshold: if cumulative walk steps exceed 2× the
+    // array length, future per-element walks cost more than a
+    // single full-materialize — trigger it now. Sequential access
+    // (1 step per element) never trips; random access (n/2 per
+    // step) trips after ~4 accesses on a 10k array. Post-trip,
+    // every subsequent `lazy_get` hits the fast path at the top of
+    // the function (materialized != null → direct ArrayHeader read).
+    if (*hdr).cumulative_walk_steps > (cached_length as u64) * 2 {
+        force_materialize_lazy(hdr);
+    }
+
     value
 }
 
