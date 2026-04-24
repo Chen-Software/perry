@@ -4301,10 +4301,19 @@ impl<'a> FuncEmitCtx<'a> {
                 match callee.as_ref() {
                     Expr::FuncRef(id) => {
                         if let Some(&idx) = self.emitter.func_map.get(id) {
-                            // Pad missing arguments with TAG_UNDEFINED (for optional params)
+                            // Reconcile source arg count with callee arity. JS semantics
+                            // allow a call to pass any number of args, but WASM `call`
+                            // consumes exactly the declared param count. Pad up with
+                            // `undefined` for missing optional args and drop excess
+                            // evaluated args from the top of the operand stack, which
+                            // would otherwise accumulate past the call and trip the
+                            // validator at the enclosing `end` (#183).
                             if let Some(&expected) = self.emitter.func_param_counts.get(&idx) {
                                 for _ in args.len()..expected {
                                     func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
+                                }
+                                for _ in expected..args.len() {
+                                    func.instruction(&Instruction::Drop);
                                 }
                             }
                             func.instruction(&Instruction::Call(idx));
@@ -4322,12 +4331,16 @@ impl<'a> FuncEmitCtx<'a> {
                         }
                     }
                     Expr::ExternFuncRef { name, return_type, .. } => {
-                        // Cross-module or FFI function call — look up by name
+                        // Cross-module or FFI function call — look up by name.
+                        // See FuncRef arm above for why both pad-up and drop-excess
+                        // are required (#183).
                         if let Some(&idx) = self.emitter.func_name_map.get(name) {
-                            // Pad missing arguments with TAG_UNDEFINED (for optional params)
                             if let Some(&expected) = self.emitter.func_param_counts.get(&idx) {
                                 for _ in args.len()..expected {
                                     func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
+                                }
+                                for _ in expected..args.len() {
+                                    func.instruction(&Instruction::Drop);
                                 }
                             }
                             func.instruction(&Instruction::Call(idx));
@@ -5833,11 +5846,17 @@ impl<'a> FuncEmitCtx<'a> {
                     for arg in args {
                         self.emit_expr(func, arg);
                     }
-                    // Pad missing arguments with TAG_UNDEFINED
+                    // Keep the operand stack aligned with the ctor's arity: pad
+                    // missing optional args with `undefined`, and drop excess
+                    // evaluated args so they don't outlive the `call` and
+                    // accumulate on the enclosing block's stack (#183).
                     if let Some(&expected) = self.emitter.func_param_counts.get(&ctor_idx) {
                         let provided = args.len() + 1;
                         for _ in provided..expected {
                             func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
+                        }
+                        for _ in expected..provided {
+                            func.instruction(&Instruction::Drop);
                         }
                     }
                     func.instruction(&Instruction::Call(ctor_idx));
@@ -5882,6 +5901,9 @@ impl<'a> FuncEmitCtx<'a> {
                                 let provided = args.len() + 1;
                                 for _ in provided..expected {
                                     func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
+                                }
+                                for _ in expected..provided {
+                                    func.instruction(&Instruction::Drop);
                                 }
                             }
                             func.instruction(&Instruction::Call(ctor_idx));
@@ -5956,9 +5978,19 @@ impl<'a> FuncEmitCtx<'a> {
                 // Try to call compiled static method directly
                 if let Some(statics) = self.emitter.class_static_map.get(class_name.as_str()) {
                     if let Some(&static_idx) = statics.get(method_name.as_str()) {
-                        // Direct call to compiled static method (no this param)
+                        // Direct call to compiled static method (no this param).
+                        // Same arity reconciliation as FuncRef/ExternFuncRef arms
+                        // (#183): pad-up for missing args, drop-excess for extras.
                         for arg in args {
                             self.emit_expr(func, arg);
+                        }
+                        if let Some(&expected) = self.emitter.func_param_counts.get(&static_idx) {
+                            for _ in args.len()..expected {
+                                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
+                            }
+                            for _ in expected..args.len() {
+                                func.instruction(&Instruction::Drop);
+                            }
                         }
                         func.instruction(&Instruction::Call(static_idx));
                         return;
