@@ -319,6 +319,13 @@ pub(crate) struct FnCtx<'a> {
     /// LLVM's SCEV hoists the conversions. Turned factorial
     /// (`sum += i % 1000` in a 100M loop) from 1550ms → ~150ms on ARM.
     pub integer_locals: &'a std::collections::HashSet<u32>,
+    /// Gen-GC Phase A sub-phase 3a: pointer-typed local → shadow-
+    /// frame slot index. Empty when `PERRY_SHADOW_STACK` is off.
+    /// Sub-phase 3b uses this map at `Stmt::Let` / `LocalSet`
+    /// lowering sites to emit `js_shadow_slot_set(idx, bits)` so
+    /// the frame reflects the live pointer state at the following
+    /// safepoint. Today — just tracked, not consumed.
+    pub shadow_slot_map: std::collections::HashMap<u32, u32>,
 
     /// Cached pointer to this function's `InlineArenaState` slot —
     /// allocated lazily on the first `new ClassName()` site that uses

@@ -1483,20 +1483,21 @@ fn compile_function(
     let buffer_alias_base = llmod.buffer_alias_counter;
     let lf = llmod.define_function(&llvm_name, DOUBLE, params);
 
-    // Gen-GC Phase A sub-phase 2: opt-in shadow-frame emission for
-    // user functions. Default OFF — flipping the default requires
-    // sub-phase 3 (slot updates at safepoints) so the frames carry
-    // useful data. For now, `PERRY_SHADOW_STACK=1` at compile time
-    // just exercises push/pop wiring around every return site,
-    // proving the textual `ret`-rewrite pass in `LlFunction::to_ir`
-    // catches every emission path without regressing output.
-    //
-    // slot_count = 0 is intentional — we're not yet storing any
-    // pointer-typed locals into the frame. When slot updates land
-    // (sub-phase 3), this becomes the count of live pointer locals.
-    if shadow_stack_enabled() {
-        lf.enable_shadow_frame(0);
-    }
+    // Gen-GC Phase A sub-phase 3a: opt-in shadow-frame emission
+    // for user functions. Pointer-typed param + local slots are
+    // assigned pre-lowering via `collect_pointer_typed_locals`;
+    // the frame is sized to hold all of them. Sub-phase 3b emits
+    // the slot-set calls at Let/LocalSet sites to actually
+    // populate the frame with live values; today the slots stay
+    // zero (the tracer doesn't consume them yet — Phase A ship
+    // criterion is "shadow stack is built but not yet consumed").
+    let shadow_slot_map = if shadow_stack_enabled() {
+        let m = crate::collectors::collect_pointer_typed_locals(&f.params, &f.body);
+        lf.enable_shadow_frame(m.len() as u32);
+        m
+    } else {
+        std::collections::HashMap::new()
+    };
 
     // Small leaf functions (≤ 8 statements) get alwaysinline so LLVM
     // exposes their operations to the caller's optimizer context — critical
@@ -1596,6 +1597,7 @@ fn compile_function(
         imported_func_return_types: &cross_module.imported_func_return_types,
         pending_declares: Vec::new(),
         integer_locals: &integer_locals,
+        shadow_slot_map,
         arena_state_slot: None,
         class_keys_slots: HashMap::new(),
         cached_lengths: HashMap::new(),
@@ -1916,6 +1918,7 @@ fn compile_closure(
         imported_func_return_types: &cross_module.imported_func_return_types,
         pending_declares: Vec::new(),
         integer_locals: &integer_locals,
+        shadow_slot_map: std::collections::HashMap::new(),
         arena_state_slot: None,
         class_keys_slots: HashMap::new(),
         cached_lengths: HashMap::new(),
@@ -2101,6 +2104,7 @@ fn compile_method(
         imported_func_return_types: &cross_module.imported_func_return_types,
         pending_declares: Vec::new(),
         integer_locals: &integer_locals,
+        shadow_slot_map: std::collections::HashMap::new(),
         arena_state_slot: None,
         class_keys_slots: HashMap::new(),
         cached_lengths: HashMap::new(),
@@ -2317,6 +2321,7 @@ fn compile_module_entry(
             imported_func_return_types: &cross_module.imported_func_return_types,
             pending_declares: Vec::new(),
             integer_locals: &main_integer_locals,
+            shadow_slot_map: std::collections::HashMap::new(),
             arena_state_slot: None,
             class_keys_slots: HashMap::new(),
             cached_lengths: HashMap::new(),
@@ -2531,6 +2536,7 @@ fn compile_module_entry(
             imported_func_return_types: &cross_module.imported_func_return_types,
             pending_declares: Vec::new(),
             integer_locals: &init_integer_locals,
+            shadow_slot_map: std::collections::HashMap::new(),
             arena_state_slot: None,
             class_keys_slots: HashMap::new(),
             cached_lengths: HashMap::new(),
@@ -2901,6 +2907,7 @@ fn compile_static_method(
         imported_func_return_types: &cross_module.imported_func_return_types,
         pending_declares: Vec::new(),
         integer_locals: &integer_locals,
+        shadow_slot_map: std::collections::HashMap::new(),
         arena_state_slot: None,
         class_keys_slots: HashMap::new(),
         cached_lengths: HashMap::new(),
