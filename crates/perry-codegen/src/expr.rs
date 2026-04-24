@@ -6125,15 +6125,42 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(ctx.block().call(DOUBLE, "js_date_set_utc_month", &[(DOUBLE, &d), (DOUBLE, &v)]))
         }
         Expr::ArrayIsArray(o) => {
-            // Compile-time check: emit TAG_TRUE if the operand is
-            // statically an array, else TAG_FALSE. NaN-boxed booleans
-            // so console.log prints "true"/"false".
-            let _ = lower_expr(ctx, o)?;
+            // Fast path: static type is definitively array → emit
+            // TAG_TRUE at compile time. Slow path: indeterminate
+            // type (Any / Unknown / no annotation) → emit runtime
+            // call to `js_array_is_array`, which correctly handles
+            // JSON.parse results, closure-captured values, function
+            // returns typed `any`, and lazy arrays
+            // (GC_TYPE_LAZY_ARRAY). Emitting TAG_FALSE as a compile-
+            // time constant (the previous behavior) was wrong
+            // whenever the operand's static type was Any: the user's
+            // `Array.isArray(JSON.parse("[...]"))` would always
+            // return false despite being a real array at runtime.
+            let v = lower_expr(ctx, o)?;
             if is_array_expr(ctx, o) {
-                Ok(double_literal(f64::from_bits(crate::nanbox::TAG_TRUE)))
-            } else {
-                Ok(double_literal(f64::from_bits(crate::nanbox::TAG_FALSE)))
+                return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_TRUE)));
             }
+            if let Some(ty) = crate::type_analysis::static_type_of(ctx, o) {
+                // Definitively not an array: emit TAG_FALSE. Leaves
+                // numeric / string / boolean literals and known
+                // object-class instances on the fast path.
+                let definitely_not_array = matches!(
+                    ty,
+                    perry_types::Type::Number
+                        | perry_types::Type::Int32
+                        | perry_types::Type::String
+                        | perry_types::Type::Boolean
+                        | perry_types::Type::Null
+                        | perry_types::Type::Void
+                        | perry_types::Type::BigInt
+                        | perry_types::Type::Symbol
+                );
+                if definitely_not_array {
+                    return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_FALSE)));
+                }
+            }
+            // Indeterminate — dispatch to runtime.
+            Ok(ctx.block().call(DOUBLE, "js_array_is_array", &[(DOUBLE, &v)]))
         }
 
         // -------- new AggregateError(errors, message) --------

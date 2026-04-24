@@ -1861,10 +1861,14 @@ pub extern "C" fn js_array_is_array(value: f64) -> f64 {
         return false_val;
     }
 
-    // Check the GC header's obj_type to confirm this is an array
+    // Check the GC header's obj_type. Both regular arrays and lazy
+    // arrays (Phase 5 JSON.parse result) are arrays from the user's
+    // perspective — `Array.isArray(JSON.parse("[...]"))` must return
+    // true without forcing the lazy header to materialize.
     unsafe {
         let gc_header = raw_ptr.sub(GC_HEADER_SIZE) as *const GcHeader;
-        if (*gc_header).obj_type == GC_TYPE_ARRAY {
+        let obj_type = (*gc_header).obj_type;
+        if obj_type == GC_TYPE_ARRAY || obj_type == crate::gc::GC_TYPE_LAZY_ARRAY {
             true_val
         } else {
             false_val

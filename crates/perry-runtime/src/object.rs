@@ -2863,7 +2863,9 @@ pub extern "C" fn js_instanceof(value: f64, class_id: u32) -> f64 {
 
     // Array — Perry arrays are heap allocations with `GC_TYPE_ARRAY` in
     // their gc_header (one byte at obj-8). Pointer can arrive NaN-boxed
-    // (POINTER_TAG) or as a raw bitcast f64; handle both.
+    // (POINTER_TAG) or as a raw bitcast f64; handle both. Lazy arrays
+    // (Phase 5 JSON.parse result) are also arrays from the user's
+    // perspective — must return true without force-materializing.
     const CLASS_ID_ARRAY: u32 = 0xFFFF0024;
     if class_id == CLASS_ID_ARRAY {
         let addr = if jsval.is_pointer() {
@@ -2875,7 +2877,10 @@ pub extern "C" fn js_instanceof(value: f64, class_id: u32) -> f64 {
         if addr != 0 && addr >= crate::gc::GC_HEADER_SIZE {
             let gc_header = (addr - crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
             unsafe {
-                if (*gc_header).obj_type == crate::gc::GC_TYPE_ARRAY {
+                let obj_type = (*gc_header).obj_type;
+                if obj_type == crate::gc::GC_TYPE_ARRAY
+                    || obj_type == crate::gc::GC_TYPE_LAZY_ARRAY
+                {
                     return true_val;
                 }
             }
