@@ -6648,6 +6648,7 @@ pub fn run_with_parse_cache(
            .arg("-framework").arg("AVFoundation") // Camera capture (AVCaptureSession)
            .arg("-framework").arg("CoreMedia") // CMSampleBuffer
            .arg("-framework").arg("CoreVideo") // CVPixelBuffer
+           .arg("-framework").arg("UserNotifications") // UNUserNotificationCenter (perry/system notificationSend)
            .arg("-liconv")
            .arg("-lresolv")
            .arg("-lobjc")

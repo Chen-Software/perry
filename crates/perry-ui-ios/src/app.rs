@@ -84,7 +84,10 @@ define_class!(
     impl PerryAppDelegate {
         #[unsafe(method(application:didFinishLaunchingWithOptions:))]
         fn did_finish_launching(&self, _application: &AnyObject, _options: *const AnyObject) -> bool {
-            // Window creation is handled by PerrySceneDelegate
+            // Window creation is handled by PerrySceneDelegate.
+            // Fire notification auth prompt once here so notificationSend() doesn't
+            // re-prompt on every call (per #94).
+            crate::notifications::request_authorization();
             true
         }
     }

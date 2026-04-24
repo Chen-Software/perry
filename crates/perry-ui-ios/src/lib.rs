@@ -6,6 +6,7 @@ pub mod crash_log;
 pub mod file_dialog;
 pub mod location;
 pub mod menu;
+pub mod notifications;
 pub mod screenshot;
 pub mod state;
 pub mod websocket;
@@ -1546,7 +1547,9 @@ pub extern "C" fn perry_system_keychain_delete(key_ptr: i64) {
 // =============================================================================
 
 #[no_mangle]
-pub extern "C" fn perry_system_notification_send(_title: i64, _body: i64) {}
+pub extern "C" fn perry_system_notification_send(title_ptr: i64, body_ptr: i64) {
+    notifications::send(title_ptr as *const u8, body_ptr as *const u8);
+}
 
 #[no_mangle]
 pub extern "C" fn perry_system_get_locale() -> i64 {
