@@ -247,6 +247,148 @@ thread_local! {
         std::cell::Cell::new(GC_MALLOC_COUNT_STEP_INITIAL);
 }
 
+// ---------------------------------------------------------------------------
+// Phase A — precise root tracking via shadow stack
+// (docs/generational-gc-plan.md Phase A)
+// ---------------------------------------------------------------------------
+//
+// Each compiled function gets a *shadow-stack frame* that holds the
+// currently-live heap-pointer-typed locals. Codegen emits:
+//   - push at function entry with a precomputed slot count
+//   - slot stores at each safepoint (allocation + runtime-call sites)
+//   - pop at every return path
+//
+// The shadow stack is built but not yet consumed by GC in this phase.
+// Phase B+ will teach the GC tracer to walk it as a precise-root source
+// in parallel with the existing conservative scanner.
+//
+// Layout: the shadow stack is a contiguous `Vec<u64>` (per-thread).
+// Each frame is:
+//   [u64 prev_frame_top, u64 slot_count, u64 slot_0, u64 slot_1, ...]
+// `SHADOW_STACK_FRAME_TOP` points at the current frame's slot_0 so
+// slot stores are a single indexed write. `prev_frame_top` is the
+// saved top from before this frame was pushed — so pop is a single
+// load + store.
+//
+// Slots hold NaN-boxed `JSValue` bits (u64) — same format codegen
+// already uses for pointer-typed locals. The GC tracer in Phase B+
+// will call `try_mark_value` on each non-zero slot, matching the
+// closure-capture tracer's pattern.
+
+pub const SHADOW_STACK_HEADER_SLOTS: usize = 2; // prev_frame_top + slot_count
+pub const SHADOW_STACK_GROW_RESERVE: usize = 1024; // initial capacity (slots)
+
+thread_local! {
+    /// The shadow stack itself. `Vec<u64>` instead of `Vec<*mut u8>`
+    /// because slots hold NaN-boxed JSValue bits (upper 16 bits are
+    /// the tag, lower 48 the pointer) — the GC tracer unwraps the
+    /// NaN-box the same way it already does for closure captures.
+    pub(crate) static SHADOW_STACK: std::cell::RefCell<Vec<u64>> =
+        std::cell::RefCell::new(Vec::with_capacity(SHADOW_STACK_GROW_RESERVE));
+
+    /// Index into SHADOW_STACK where the current frame's slot_0 lives.
+    /// `usize::MAX` when no frame is pushed (initial state + after
+    /// the outermost function returns). Hot-path-critical: every
+    /// slot-store is `SHADOW_STACK[SHADOW_STACK_FRAME_TOP + slot_idx]`,
+    /// so the `Cell` access lets codegen compile this to one load +
+    /// one index, no borrow.
+    pub(crate) static SHADOW_STACK_FRAME_TOP: std::cell::Cell<usize> =
+        std::cell::Cell::new(usize::MAX);
+}
+
+/// Push a new shadow-stack frame with `slot_count` live-pointer
+/// slots. Slots start zero-initialized (codegen fills them with
+/// NaN-boxed pointer values via `js_shadow_slot_set`). Returns an
+/// opaque `frame_handle` (the pre-push top index) that the matching
+/// pop must be passed — lets the GC assert frame balance in debug
+/// builds and detects codegen misemission.
+///
+/// Not marked `#[inline(always)]` because it's called once per
+/// function entry; the 3-line body inlines naturally.
+#[no_mangle]
+pub extern "C" fn js_shadow_frame_push(slot_count: u32) -> u64 {
+    let prev_top = SHADOW_STACK_FRAME_TOP.with(|c| c.get());
+    SHADOW_STACK.with(|s| {
+        let mut stack = s.borrow_mut();
+        let base = stack.len();
+        // Header: prev_frame_top + slot_count. Slots follow,
+        // initialized to 0 (GC_FLAG_NONE + null pointer).
+        stack.push(prev_top as u64);
+        stack.push(slot_count as u64);
+        let slots_start = stack.len();
+        stack.resize(slots_start + slot_count as usize, 0);
+        SHADOW_STACK_FRAME_TOP.with(|c| c.set(slots_start));
+        base as u64
+    })
+}
+
+/// Pop the current shadow-stack frame. `frame_handle` must match
+/// the return value of the matching `js_shadow_frame_push` (debug
+/// assertion). Restores the prior `SHADOW_STACK_FRAME_TOP`.
+#[no_mangle]
+pub extern "C" fn js_shadow_frame_pop(frame_handle: u64) {
+    SHADOW_STACK.with(|s| {
+        let mut stack = s.borrow_mut();
+        let base = frame_handle as usize;
+        debug_assert!(base + SHADOW_STACK_HEADER_SLOTS <= stack.len(),
+            "shadow-stack pop past end (corrupted frame handle)");
+        let prev_top = stack[base] as usize;
+        stack.truncate(base);
+        SHADOW_STACK_FRAME_TOP.with(|c| c.set(prev_top));
+    });
+}
+
+/// Update slot `idx` in the current frame with NaN-boxed `value`.
+/// Codegen emits this at safepoints for each live pointer-typed
+/// local. Hot path — compiled code calls this directly or inlines
+/// an equivalent sequence; Rust version exists for runtime tests
+/// and debug builds.
+#[no_mangle]
+pub extern "C" fn js_shadow_slot_set(idx: u32, value: u64) {
+    let top = SHADOW_STACK_FRAME_TOP.with(|c| c.get());
+    if top == usize::MAX { return; }  // no frame active — no-op
+    SHADOW_STACK.with(|s| {
+        let mut stack = s.borrow_mut();
+        let slot = top + idx as usize;
+        if slot < stack.len() {
+            stack[slot] = value;
+        }
+    });
+}
+
+/// Read the current frame's slot `idx` — test-only; Phase B GC
+/// tracer walks the raw Vec directly instead of going through a
+/// function call per slot.
+#[no_mangle]
+pub extern "C" fn js_shadow_slot_get(idx: u32) -> u64 {
+    let top = SHADOW_STACK_FRAME_TOP.with(|c| c.get());
+    if top == usize::MAX { return 0; }
+    SHADOW_STACK.with(|s| {
+        let stack = s.borrow();
+        let slot = top + idx as usize;
+        if slot < stack.len() { stack[slot] } else { 0 }
+    })
+}
+
+/// Current frame depth — test-only.
+pub fn shadow_stack_depth() -> usize {
+    SHADOW_STACK.with(|s| {
+        let stack = s.borrow();
+        // Count frames by walking prev_frame_top pointers from the
+        // top back to the bottom. Depth = number of hops to reach
+        // `usize::MAX`.
+        let mut top = SHADOW_STACK_FRAME_TOP.with(|c| c.get());
+        let mut depth = 0;
+        while top != usize::MAX && top >= SHADOW_STACK_HEADER_SLOTS {
+            depth += 1;
+            let header_base = top - SHADOW_STACK_HEADER_SLOTS;
+            if header_base >= stack.len() { break; }
+            top = stack[header_base] as usize;
+        }
+        depth
+    })
+}
+
 /// Allocate memory via malloc with GcHeader prepended.
 /// Returns pointer to usable memory AFTER the header.
 /// The allocation is tracked in MALLOC_STATE.
@@ -2094,6 +2236,110 @@ mod tests {
         // Our malloc objects should be in the valid set
         assert!(valid_set.contains(&(ptr1 as usize)), "ptr1 should be in valid set");
         assert!(valid_set.contains(&(ptr2 as usize)), "ptr2 should be in valid set");
+    }
+
+    /// Helper: reset the shadow stack to a known-empty state
+    /// between tests. Needed because Rust's thread-local state
+    /// persists across tests in the same thread.
+    fn reset_shadow_stack() {
+        SHADOW_STACK.with(|s| s.borrow_mut().clear());
+        SHADOW_STACK_FRAME_TOP.with(|c| c.set(usize::MAX));
+    }
+
+    #[test]
+    fn test_shadow_stack_push_pop_single_frame() {
+        reset_shadow_stack();
+        assert_eq!(shadow_stack_depth(), 0);
+        let h = js_shadow_frame_push(3);
+        assert_eq!(shadow_stack_depth(), 1);
+        // Slots initialized to 0.
+        for i in 0..3 {
+            assert_eq!(js_shadow_slot_get(i), 0, "slot {} not zero", i);
+        }
+        js_shadow_frame_pop(h);
+        assert_eq!(shadow_stack_depth(), 0);
+        // After pop, reads return 0 (no active frame).
+        assert_eq!(js_shadow_slot_get(0), 0);
+    }
+
+    #[test]
+    fn test_shadow_stack_slot_store_load() {
+        reset_shadow_stack();
+        let h = js_shadow_frame_push(4);
+        // Store some pointer bit patterns.
+        js_shadow_slot_set(0, 0x7FFD_0000_1234_5678);  // POINTER_TAG
+        js_shadow_slot_set(1, 0x7FFF_0000_9ABC_DEF0);  // STRING_TAG
+        js_shadow_slot_set(2, 0);                       // hole
+        js_shadow_slot_set(3, 0x7FF9_0200_0000_6B6F);  // SSO "ok"
+        assert_eq!(js_shadow_slot_get(0), 0x7FFD_0000_1234_5678);
+        assert_eq!(js_shadow_slot_get(1), 0x7FFF_0000_9ABC_DEF0);
+        assert_eq!(js_shadow_slot_get(2), 0);
+        assert_eq!(js_shadow_slot_get(3), 0x7FF9_0200_0000_6B6F);
+        // Out-of-range read returns 0 (clamp).
+        assert_eq!(js_shadow_slot_get(4), 0);
+        js_shadow_frame_pop(h);
+    }
+
+    #[test]
+    fn test_shadow_stack_nested_frames() {
+        reset_shadow_stack();
+        let outer = js_shadow_frame_push(2);
+        js_shadow_slot_set(0, 0x1111);
+        js_shadow_slot_set(1, 0x2222);
+        assert_eq!(shadow_stack_depth(), 1);
+
+        let inner = js_shadow_frame_push(3);
+        js_shadow_slot_set(0, 0xAAAA);
+        js_shadow_slot_set(1, 0xBBBB);
+        js_shadow_slot_set(2, 0xCCCC);
+        assert_eq!(shadow_stack_depth(), 2);
+        // Inner frame sees its own slots, not the outer's.
+        assert_eq!(js_shadow_slot_get(0), 0xAAAA);
+        assert_eq!(js_shadow_slot_get(1), 0xBBBB);
+        assert_eq!(js_shadow_slot_get(2), 0xCCCC);
+
+        js_shadow_frame_pop(inner);
+        assert_eq!(shadow_stack_depth(), 1);
+        // Outer slots preserved across the inner push+pop — this is
+        // the load-bearing invariant for codegen: a called function
+        // can freely mutate its own frame without corrupting the
+        // caller's.
+        assert_eq!(js_shadow_slot_get(0), 0x1111);
+        assert_eq!(js_shadow_slot_get(1), 0x2222);
+
+        js_shadow_frame_pop(outer);
+        assert_eq!(shadow_stack_depth(), 0);
+    }
+
+    #[test]
+    fn test_shadow_stack_frame_with_zero_slots() {
+        reset_shadow_stack();
+        let h = js_shadow_frame_push(0);
+        assert_eq!(shadow_stack_depth(), 1);
+        // No slots to read; get returns 0 anyway (out-of-range path).
+        assert_eq!(js_shadow_slot_get(0), 0);
+        js_shadow_frame_pop(h);
+        assert_eq!(shadow_stack_depth(), 0);
+    }
+
+    #[test]
+    fn test_shadow_stack_deep_nesting() {
+        reset_shadow_stack();
+        let mut handles = Vec::new();
+        for i in 0..16 {
+            let h = js_shadow_frame_push(2);
+            js_shadow_slot_set(0, i as u64);
+            js_shadow_slot_set(1, (i * 2) as u64);
+            handles.push(h);
+        }
+        assert_eq!(shadow_stack_depth(), 16);
+        // Pop back down; slots restore on each pop.
+        for i in (0..16).rev() {
+            assert_eq!(js_shadow_slot_get(0), i as u64);
+            assert_eq!(js_shadow_slot_get(1), (i * 2) as u64);
+            js_shadow_frame_pop(handles.pop().unwrap());
+        }
+        assert_eq!(shadow_stack_depth(), 0);
     }
 
     #[test]

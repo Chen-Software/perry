@@ -866,6 +866,17 @@ pub fn declare_phase_b_arrays(module: &mut LlModule) {
     // can't prove the receiver is an Array/String.
     module.declare_function("js_value_length_f64", DOUBLE, &[DOUBLE]);
 
+    // Shadow stack for precise root tracking (gen-GC Phase A per
+    // docs/generational-gc-plan.md). Declared now so codegen can
+    // reference them; emission at function entry/exit + safepoints
+    // is the next milestone.
+    //   js_shadow_frame_push(slot_count: u32) -> u64 (frame handle)
+    //   js_shadow_frame_pop(frame_handle: u64)
+    //   js_shadow_slot_set(idx: u32, value: u64)
+    module.declare_function("js_shadow_frame_push", I64, &[I32]);
+    module.declare_function("js_shadow_frame_pop", VOID, &[I64]);
+    module.declare_function("js_shadow_slot_set", VOID, &[I32, I64]);
+
     // Array methods (Phase B.12).
     // - js_array_pop_f64(arr) -> f64    (last element, NaN if empty)
     // - js_array_join(arr, sep) -> *mut StringHeader (i64)
