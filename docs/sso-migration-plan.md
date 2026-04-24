@@ -162,17 +162,33 @@ Estimated effort: ~2 hours, one codegen site, ~20 lines of new IR
 emission. Ship criterion: 10/10 `test_json_*.ts` tests match Node
 under `PERRY_SSO_FORCE=1`.
 
-### Step 2 — DirectParser emits SSO
+### Step 2 — DirectParser + lazy tape emit SSO ✅ landed v0.5.216
 
-Flip `parse_string_value` to call `JSValue::try_short_string(b)`
-first, fall back to heap on `None`. Verify test_json_* regression
-suite still passes after Step 1's stringify arms.
+Both `DirectParser::parse_string_value` (json.rs) and tape-path
+`materialize_string_value` (json_tape.rs) now emit SSO
+unconditionally for values ≤ 5 bytes. Also fixed `js_number_coerce`
+to accept SSO via `is_any_string` + `str_bytes_from_jsvalue` — the
+one producer-flip regression (reviver → `Number(sso)` returning
+NaN).
 
-Expected win: for the bench_json_roundtrip shape, many keys (`id`,
-`name` ≤ 5 bytes fits: "alpha"=5, "beta"=4, "gamma"=5 fit) but most
-values in the bench (`"item_" + i` ≥ 6 bytes) don't. Measured
-improvement will be small on that specific bench; larger on
-string-heavy synthetic workloads.
+**Measurements:**
+
+| Bench | v0.5.215 direct-only | v0.5.216 default (lazy+SSO) | Delta |
+|---|---|---|---|
+| bench_json_roundtrip | 410 ms / 138 MB | 80 ms / 108 MB | — (lazy dominates) |
+| bench_json_readonly | 290 ms / 120 MB | 80 ms / 90 MB | — (lazy dominates) |
+| bench_json_readonly_indexed | 300 ms / 120 MB | 90 ms / 90 MB | — (lazy dominates) |
+| bench_sso_strings (direct) | 290 ms / 123 MB | 150 ms / 76 MB | **-48% time, -38% RSS** |
+
+SSO is most visible on workloads that:
+- Fall through to the direct parser (< 1 KB blobs, non-array roots, `PERRY_JSON_TAPE=0`).
+- Hit indexed access on a lazy result (force-materialize invokes `materialize_string_value`).
+- Contain many short string values (enum strings, status codes, short IDs).
+
+The 3 main JSON benches are dominated by the lazy fast paths
+(`.length` direct from `cached_length`, stringify via blob memcpy),
+where SSO has smaller impact because string materialization isn't
+on their hot paths.
 
 ### Step 3 — object key storage (object.rs)
 

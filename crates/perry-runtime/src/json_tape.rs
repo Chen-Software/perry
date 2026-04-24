@@ -409,10 +409,22 @@ unsafe fn materialize_string_value(bytes: &[u8], offset: usize) -> JSValue {
     let bytes_at_val = &bytes[offset..];
     match parse_string_bytes_static(bytes_at_val) {
         Some(ParsedStr::Borrowed(slice)) => {
+            // v0.5.216 SSO: short-string values inline into the
+            // NaN-box payload, zero heap allocation. Only fires
+            // when consumers (stringify, equality, length, property
+            // access) can handle both forms — Step 1 + 1.5 of the
+            // SSO migration landed those consumer arms in v0.5.214
+            // / v0.5.215.
+            if let Some(sso) = JSValue::try_short_string(slice) {
+                return sso;
+            }
             let ptr = crate::string::js_string_from_bytes(slice.as_ptr(), slice.len() as u32);
             JSValue::string_ptr(ptr)
         }
         Some(ParsedStr::Owned(vec)) => {
+            if let Some(sso) = JSValue::try_short_string(&vec) {
+                return sso;
+            }
             let ptr = crate::string::js_string_from_bytes(vec.as_ptr(), vec.len() as u32);
             JSValue::string_ptr(ptr)
         }

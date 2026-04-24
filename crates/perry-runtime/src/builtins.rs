@@ -1251,42 +1251,47 @@ pub extern "C" fn js_number_coerce(value: f64) -> f64 {
         0.0
     } else if jsval.is_bool() {
         if jsval.as_bool() { 1.0 } else { 0.0 }
-    } else if jsval.is_string() {
-        // Parse string as number
-        let ptr = jsval.as_string_ptr();
-        if ptr.is_null() {
-            return f64::NAN;
-        }
-        unsafe {
-            let len = (*ptr).byte_len as usize;
-            let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
-            let bytes = std::slice::from_raw_parts(data, len);
-            if let Ok(s) = std::str::from_utf8(bytes) {
-                let trimmed = s.trim();
-                if trimmed.is_empty() {
-                    return 0.0;
-                }
-                // Handle hex strings (0x/0X prefix) — JavaScript Number() supports these
-                if trimmed.starts_with("0x") || trimmed.starts_with("0X") {
-                    return match u64::from_str_radix(&trimmed[2..], 16) {
-                        Ok(n) => n as f64,
-                        Err(_) => f64::NAN,
-                    };
-                }
-                // Handle negative hex
-                if trimmed.starts_with("-0x") || trimmed.starts_with("-0X") {
-                    return match u64::from_str_radix(&trimmed[3..], 16) {
-                        Ok(n) => -(n as f64),
-                        Err(_) => f64::NAN,
-                    };
-                }
-                match trimmed.parse::<f64>() {
-                    Ok(n) => n,
-                    Err(_) => f64::NAN,
-                }
-            } else {
-                f64::NAN
+    } else if jsval.is_any_string() {
+        // Parse string as number. Accepts both STRING_TAG heap
+        // pointers and SHORT_STRING_TAG inline SSO values
+        // (v0.5.216). Decode via `str_bytes_from_jsvalue` into a
+        // stack scratch buffer for SSO; heap strings get a direct
+        // view over the StringHeader payload.
+        let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+        let view = crate::string::str_bytes_from_jsvalue(value, &mut scratch);
+        if let Some((data, len)) = view {
+            if data.is_null() && len == 0 {
+                return 0.0;
             }
+            unsafe {
+                let bytes = std::slice::from_raw_parts(data, len as usize);
+                if let Ok(s) = std::str::from_utf8(bytes) {
+                    let trimmed = s.trim();
+                    if trimmed.is_empty() {
+                        return 0.0;
+                    }
+                    if trimmed.starts_with("0x") || trimmed.starts_with("0X") {
+                        return match u64::from_str_radix(&trimmed[2..], 16) {
+                            Ok(n) => n as f64,
+                            Err(_) => f64::NAN,
+                        };
+                    }
+                    if trimmed.starts_with("-0x") || trimmed.starts_with("-0X") {
+                        return match u64::from_str_radix(&trimmed[3..], 16) {
+                            Ok(n) => -(n as f64),
+                            Err(_) => f64::NAN,
+                        };
+                    }
+                    match trimmed.parse::<f64>() {
+                        Ok(n) => n,
+                        Err(_) => f64::NAN,
+                    }
+                } else {
+                    f64::NAN
+                }
+            }
+        } else {
+            f64::NAN
         }
     } else if jsval.is_int32() {
         // INT32 NaN-boxed value → convert to f64

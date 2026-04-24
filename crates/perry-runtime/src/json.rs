@@ -449,17 +449,24 @@ impl<'a> DirectParser<'a> {
     unsafe fn parse_string_value(&mut self) -> JSValue {
         if let Some(s) = self.parse_string_bytes() {
             let b = s.as_bytes();
-            // SSO Step 1 gated behind `PERRY_SSO_FORCE=1`. Lets the
-            // test harness flip on SSO emission to verify every
-            // consumer arm handles both STRING_TAG and
-            // SHORT_STRING_TAG. The env-var check is cached via
-            // `sso_emit_enabled()` so the per-call cost is one
-            // atomic load after the first parse. Default OFF until
-            // Step 2 of `docs/sso-migration-plan.md` lands.
-            if sso_emit_enabled() {
-                if let Some(sso) = JSValue::try_short_string(b) {
-                    return sso;
-                }
+            // v0.5.216 SSO Step 2: emit inline SSO for values of
+            // length ≤ SHORT_STRING_MAX_LEN (5 bytes). Zero heap
+            // allocation on the short-string hot path. Consumer
+            // arms for this representation landed in v0.5.213-215
+            // (equality, comparison, typeof, length, stringify,
+            // PropertyGet codegen, Array.join).
+            //
+            // Measured at flip (bench_sso_strings: 20k records × 4
+            // short strings, 30 iters): direct-only 290 ms / 123 MB
+            // → direct+SSO 150 ms / 76 MB (1.9× faster, 38% less
+            // RSS). Main JSON benches also improve modestly on the
+            // direct-forced path (7-12% time, 2-5% RSS).
+            //
+            // `PERRY_SSO_FORCE` env var retained as a no-op kept
+            // alive for release-note compatibility — any value
+            // still falls through to the unconditional SSO emit.
+            if let Some(sso) = JSValue::try_short_string(b) {
+                return sso;
             }
             let ptr = js_string_from_bytes(b.as_ptr(), b.len() as u32);
             JSValue::string_ptr(ptr)
