@@ -1,9 +1,11 @@
 //! `perry setup` — guided credential setup wizard for App Store / Google Play distribution
+//! (and toolchain setup for the "lightweight" Windows target — LLVM + xwin'd SDK)
 
 use anyhow::{bail, Context, Result};
 use clap::Args;
 use console::style;
 use dialoguer::{Confirm, Input, Password, Select};
+use std::path::PathBuf;
 use std::process::Command;
 
 use super::publish::{
@@ -13,13 +15,23 @@ use super::publish::{
 
 #[derive(Args, Debug)]
 pub struct SetupArgs {
-    /// Platform to configure: android, ios, visionos, macos, tvos, watchos
+    /// Platform to configure: android, ios, visionos, macos, tvos, watchos, windows
     pub platform: Option<String>,
+
+    /// (windows only) Accept the Microsoft Visual Studio Build Tools redistributable
+    /// license required to download CRT + Windows SDK via xwin. Equivalent to
+    /// answering "yes" at the interactive prompt; enables non-interactive / CI use.
+    #[arg(long)]
+    pub accept_license: bool,
 }
 
 pub fn run(args: SetupArgs) -> Result<()> {
-    if !is_interactive() {
-        bail!("`perry setup` requires an interactive terminal.");
+    // Credential wizards always need interactive (secret prompts); the windows
+    // toolchain wizard accepts --accept-license for CI.
+    let is_windows_platform = args.platform.as_deref() == Some("windows");
+    let needs_interactive = !(is_windows_platform && args.accept_license);
+    if needs_interactive && !is_interactive() {
+        bail!("`perry setup` requires an interactive terminal (pass --accept-license for `windows` to skip)");
     }
 
     println!();
@@ -29,7 +41,7 @@ pub fn run(args: SetupArgs) -> Result<()> {
     let platform = match args.platform.as_deref() {
         Some(p) => p.to_string(),
         None => {
-            let options = &["Android", "iOS", "visionOS", "macOS", "tvOS", "watchOS"];
+            let options = &["Android", "iOS", "visionOS", "macOS", "tvOS", "watchOS", "Windows (toolchain)"];
             let selection = Select::new()
                 .with_prompt("  Which platform to configure?")
                 .items(options)
@@ -41,10 +53,16 @@ pub fn run(args: SetupArgs) -> Result<()> {
                 2 => "visionos".to_string(),
                 3 => "macos".to_string(),
                 4 => "tvos".to_string(),
-                _ => "watchos".to_string(),
+                5 => "watchos".to_string(),
+                _ => "windows".to_string(),
             }
         }
     };
+
+    // Windows is a toolchain setup (not a credential wizard) — doesn't touch PerryConfig.
+    if platform == "windows" {
+        return windows_wizard(args.accept_license);
+    }
 
     let mut saved = load_config();
 
@@ -55,10 +73,151 @@ pub fn run(args: SetupArgs) -> Result<()> {
         "macos" => macos_wizard(&mut saved)?,
         "tvos" => tvos_wizard(&mut saved)?,
         "watchos" => watchos_wizard(&mut saved)?,
-        other => bail!("Unknown platform '{other}'. Use: android, ios, visionos, macos, tvos, watchos"),
+        other => bail!("Unknown platform '{other}'. Use: android, ios, visionos, macos, tvos, watchos, windows"),
     }
 
     save_config(&saved)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Windows toolchain wizard (lightweight path — LLVM + xwin'd SDK, no MSVC)
+// ---------------------------------------------------------------------------
+
+/// Locate `xwin.exe`:
+///   1. Bundled next to `perry.exe` (the release zip ships it there)
+///   2. `~/.cargo/bin/xwin.exe` (for dev installs via `cargo install xwin`)
+///   3. PATH lookup
+fn find_xwin_exe() -> Option<PathBuf> {
+    if let Ok(perry) = std::env::current_exe() {
+        if let Some(dir) = perry.parent() {
+            let bundled = dir.join(if cfg!(windows) { "xwin.exe" } else { "xwin" });
+            if bundled.exists() {
+                return Some(bundled);
+            }
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        let cargo_bin = home
+            .join(".cargo")
+            .join("bin")
+            .join(if cfg!(windows) { "xwin.exe" } else { "xwin" });
+        if cargo_bin.exists() {
+            return Some(cargo_bin);
+        }
+    }
+    let which_cmd = if cfg!(windows) { "where" } else { "which" };
+    if let Ok(out) = Command::new(which_cmd).arg("xwin").output() {
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if let Some(first) = s.lines().next() {
+                let p = PathBuf::from(first);
+                if p.exists() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn windows_wizard(accept_license: bool) -> Result<()> {
+    use std::time::Instant;
+
+    println!("  {}", style("Windows Toolchain Setup").bold());
+    println!();
+    println!("  This downloads the Microsoft CRT + Windows SDK libraries (via xwin)");
+    println!("  so Perry can link Windows executables without Visual Studio Build Tools.");
+    println!();
+
+    // 1. Verify LLVM is present (provides clang for codegen + lld-link for linking).
+    match perry_codegen::linker::find_clang() {
+        Some(p) => println!("  {} LLVM found: {}", style("✓").green(), p.display()),
+        None => bail!(
+            "LLVM not found. Install it first, then rerun:\n  \
+             winget install LLVM.LLVM    (or: choco install llvm / scoop install llvm)"
+        ),
+    }
+
+    // 2. Locate xwin.
+    let xwin = find_xwin_exe().ok_or_else(|| anyhow::anyhow!(
+        "xwin.exe not found. The Perry Windows release zip bundles it alongside \
+         perry.exe. If you installed Perry from source (cargo install), install xwin \
+         separately:\n  \
+         cargo install xwin --locked --version 0.9.0"
+    ))?;
+    println!("  {} xwin found: {}", style("✓").green(), xwin.display());
+    println!();
+
+    // 3. Microsoft license acceptance. xwin's own URL (src/main.rs:269 in xwin 0.9.0).
+    let license_url = "https://go.microsoft.com/fwlink/?LinkId=2086102";
+    if !accept_license {
+        println!("  {} Microsoft Visual Studio Build Tools License", style("⚠").yellow().bold());
+        println!();
+        println!("  The Microsoft CRT + Windows SDK libraries are redistributable under");
+        println!("  the Microsoft Software License Terms. By proceeding you accept:");
+        println!();
+        println!("    {}", style(license_url).underlined().blue());
+        println!();
+        let accepted = Confirm::new()
+            .with_prompt("  Do you accept the license?")
+            .default(false)
+            .interact()?;
+        if !accepted {
+            bail!("License not accepted — aborting.");
+        }
+    } else {
+        println!("  {} License accepted via --accept-license", style("ℹ").cyan());
+    }
+
+    // 4. Output directory — %LOCALAPPDATA%\perry\windows-sdk (matches what
+    //    find_perry_windows_sdk() in compile.rs probes at link time).
+    let output_dir = dirs::data_local_dir()
+        .ok_or_else(|| anyhow::anyhow!("Could not resolve %LOCALAPPDATA%"))?
+        .join("perry")
+        .join("windows-sdk");
+
+    println!();
+    println!("  Output: {}", output_dir.display());
+    println!("  Expect ~700 MB download / ~1.5 GB unpacked. Takes 2–4 minutes on a");
+    println!("  typical connection. Partial downloads are resumable — safe to re-run.");
+    println!();
+
+    std::fs::create_dir_all(&output_dir)
+        .with_context(|| format!("Failed to create {}", output_dir.display()))?;
+
+    // 5. Run xwin. --disable-symlinks avoids noisy case-sensitivity symlinks on
+    //    NTFS (xwin adds them on case-sensitive filesystems for windows.h vs
+    //    Windows.h; Windows' NTFS is case-insensitive by default so they're a
+    //    no-op). --accept-license since we already prompted.
+    // xwin arg order: top-level flags (--accept-license, --arch) come BEFORE
+    // the subcommand; splat-level flags (--output, --disable-symlinks) come AFTER.
+    let start = Instant::now();
+    let mut cmd = Command::new(&xwin);
+    cmd.arg("--accept-license")
+        .arg("--arch").arg("x86_64")
+        .arg("splat")
+        .arg("--disable-symlinks")
+        .arg("--output").arg(&output_dir);
+
+    let status = cmd.status().with_context(|| format!("Failed to invoke {}", xwin.display()))?;
+    if !status.success() {
+        bail!(
+            "xwin splat failed (status {}). The partial download at {} can be retried \
+             safely — re-run `perry setup windows`.",
+            status,
+            output_dir.display()
+        );
+    }
+
+    let elapsed = start.elapsed();
+    println!();
+    println!("  {} Windows SDK ready at {}", style("✓").green().bold(), output_dir.display());
+    println!("    ({:.1}s)", elapsed.as_secs_f64());
+    println!();
+    println!("  Try it:  {}", style("perry compile hello.ts && ./hello.exe").bold());
+    println!();
+    println!("  Run `perry doctor` to verify the full toolchain.");
     Ok(())
 }
 

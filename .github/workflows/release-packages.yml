@@ -193,12 +193,23 @@ jobs:
           cd staging
           tar czf ../${{ matrix.artifact }}.tar.gz *
 
+      # Bundle xwin.exe so `perry setup windows` can download the MS CRT + Windows
+      # SDK without requiring users to have Rust installed. xwin is pinned here to
+      # control updates — bump the version when switching to a newer xwin release.
+      # See crates/perry/src/commands/setup.rs::windows_wizard for the consumer.
+      - name: Build xwin.exe for bundling (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo install xwin --locked --version 0.9.0 --root xwin-install --target ${{ matrix.target }}
+
       - name: Package release archive (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path staging
           Copy-Item "target/${{ matrix.target }}/release/perry.exe" staging/
+          Copy-Item "xwin-install/bin/xwin.exe" staging/
           # Include static libraries for linking (runtime, stdlib, UI)
           $libs = @("perry_runtime.lib", "perry_stdlib.lib", "perry_ui_windows.lib")
           foreach ($lib in $libs) {

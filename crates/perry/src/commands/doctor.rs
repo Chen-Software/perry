@@ -90,10 +90,51 @@ fn check_clang() -> CheckResult {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn find_xwin_sysroot() -> Option<PathBuf> {
+    let explicit = std::env::var("PERRY_WINDOWS_SYSROOT").ok().map(PathBuf::from);
+    let default = dirs::data_local_dir().map(|p| p.join("perry").join("windows-sdk"));
+    for candidate in [explicit, default].into_iter().flatten() {
+        if candidate.join("crt").join("lib").join("x86_64").exists()
+            || candidate.join("crt").join("lib").join("x64").exists()
+        {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn find_lld_link() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("PERRY_LLD_LINK") {
+        let candidate = PathBuf::from(p);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    let standalone = PathBuf::from(r"C:\Program Files\LLVM\bin\lld-link.exe");
+    if standalone.exists() {
+        return Some(standalone);
+    }
+    None
+}
+
 fn check_system_linker() -> CheckResult {
     #[cfg(target_os = "windows")]
     {
-        // On Windows, check for MSVC link.exe via vswhere or PATH
+        // Two valid toolchains — either suffices. Prefer xwin when present
+        // (matches compile.rs precedence: user ran `perry setup windows` ⇒ opted in).
+        let xwin = find_xwin_sysroot();
+        let lld = find_lld_link();
+        if let (Some(sysroot), Some(lld_path)) = (&xwin, &lld) {
+            return CheckResult {
+                name: "system linker (lld-link + xwin sysroot)".to_string(),
+                status: CheckStatus::Ok,
+                details: Some(format!("{} + {}", lld_path.display(), sysroot.display())),
+            };
+        }
+
+        // Fall back to MSVC detection
         let mut linker = PathBuf::from("link.exe");
         let vswhere = PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe");
         if vswhere.exists() {
@@ -125,17 +166,29 @@ fn check_system_linker() -> CheckResult {
                 status: CheckStatus::Ok,
                 details: Some(linker.display().to_string()),
             },
-            Err(_) => CheckResult {
-                name: "system linker (MSVC link.exe)".to_string(),
-                status: CheckStatus::Error,
-                details: Some(
-                    "link.exe not found. Install the MSVC linker + Windows SDK via one of:\n      \
-                     A) Visual Studio Installer → Modify → check \"Desktop development with C++\"\n      \
-                     B) winget install Microsoft.VisualStudio.2022.BuildTools --override \
-                     \"--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended\""
-                        .to_string(),
-                ),
-            },
+            Err(_) => {
+                // Neither path is complete. Report partial state when possible.
+                let hint = match (xwin, lld) {
+                    (Some(sysroot), None) => format!(
+                        "xwin sysroot at {} but lld-link.exe missing — run `winget install LLVM.LLVM`",
+                        sysroot.display()
+                    ),
+                    (None, Some(lld_path)) => format!(
+                        "lld-link at {} but no Windows SDK libs — run `perry setup windows`",
+                        lld_path.display()
+                    ),
+                    _ => String::from(
+                        "no Windows linker. Install EITHER (lightweight ~1.5 GB):\n      \
+                         winget install LLVM.LLVM && perry setup windows\n      \
+                         OR (MSVC ~8 GB): Visual Studio Installer → Modify → \"Desktop development with C++\""
+                    ),
+                };
+                CheckResult {
+                    name: "system linker".to_string(),
+                    status: CheckStatus::Error,
+                    details: Some(hint),
+                }
+            }
         }
     }
     #[cfg(not(target_os = "windows"))]

@@ -1168,6 +1168,65 @@ fn find_msvc_link_exe() -> Option<PathBuf> {
     find_llvm_tool("lld-link")
 }
 
+/// Find `lld-link.exe` — LLVM's drop-in replacement for MSVC `link.exe`. Ships
+/// with `winget install LLVM.LLVM`. Enables the "lightweight Windows toolchain"
+/// path: LLVM for codegen + linking, xwin'd sysroot for CRT + Windows SDK libs,
+/// no Visual Studio required. See `perry setup windows`.
+#[cfg(target_os = "windows")]
+fn find_lld_link() -> Option<PathBuf> {
+    // Honor explicit override (shared with MSVC path).
+    if let Ok(p) = std::env::var("PERRY_LLD_LINK") {
+        let candidate = PathBuf::from(p);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    // Standard LLVM installer location.
+    let standalone = PathBuf::from(r"C:\Program Files\LLVM\bin\lld-link.exe");
+    if standalone.exists() {
+        return Some(standalone);
+    }
+    // PATH fallback.
+    if let Ok(output) = Command::new("where").arg("lld-link").output() {
+        if output.status.success() {
+            let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if let Some(first) = s.lines().next() {
+                let p = PathBuf::from(first);
+                if p.exists() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Location where `perry setup windows` writes the xwin'd Microsoft CRT +
+/// Windows SDK. Returns `Some(root)` only when `<root>/crt/lib/x86_64` exists,
+/// so callers can treat `Some` as "toolchain is complete and ready to link."
+///
+/// Default location is `%LOCALAPPDATA%\perry\windows-sdk` on Windows; can be
+/// overridden via `PERRY_WINDOWS_SYSROOT` (same env var already used by the
+/// cross-compile branch, so a single env var works for both hosts).
+#[cfg(target_os = "windows")]
+fn find_perry_windows_sdk() -> Option<PathBuf> {
+    let explicit = std::env::var("PERRY_WINDOWS_SYSROOT")
+        .ok()
+        .map(PathBuf::from);
+    let default = dirs::data_local_dir().map(|p| p.join("perry").join("windows-sdk"));
+    for candidate in [explicit, default].into_iter().flatten() {
+        // Sanity-check: xwin splat populates crt/lib/x86_64 (or crt/lib/x64 with
+        // --preserve-ms-arch-notation). If neither exists, the directory isn't a
+        // completed xwin output — skip it.
+        if candidate.join("crt").join("lib").join("x86_64").exists()
+            || candidate.join("crt").join("lib").join("x64").exists()
+        {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 /// Returns the `/SUBSYSTEM:…` flag for MSVC `link.exe` / `lld-link`.
 ///
 /// CLI programs must use `CONSOLE` (3) so the OS loader attaches stdin/stdout/stderr
@@ -1179,10 +1238,60 @@ fn windows_pe_subsystem_flag(needs_ui: bool) -> &'static str {
     if needs_ui { "/SUBSYSTEM:WINDOWS" } else { "/SUBSYSTEM:CONSOLE" }
 }
 
+/// Given a sysroot directory populated by `xwin splat` (or a compatible layout),
+/// return the lib search paths for MSVC / lld-link's LIB env var. Callers pass
+/// the directory root (e.g. `%LOCALAPPDATA%\perry\windows-sdk`) and get back a
+/// `Vec<String>` of absolute lib dirs: `<root>/crt/lib/x86_64`,
+/// `<root>/sdk/lib/um/x86_64`, `<root>/sdk/lib/ucrt/x86_64`. Falls through to
+/// `<root>/lib` and finally `<root>` itself if the structured layout isn't
+/// present (e.g. a user pointed PERRY_WINDOWS_SYSROOT at a custom dir).
+fn xwin_sysroot_lib_paths(root: &Path) -> Vec<String> {
+    let mut paths = Vec::new();
+
+    // xwin default layout — also covers --preserve-ms-arch-notation (x64 suffix).
+    for (crt_sub, um_sub, ucrt_sub) in &[
+        ("crt/lib/x86_64", "sdk/lib/um/x86_64", "sdk/lib/ucrt/x86_64"),
+        ("crt/lib/x64", "sdk/lib/um/x64", "sdk/lib/ucrt/x64"),
+    ] {
+        let crt = root.join(crt_sub);
+        let um = root.join(um_sub);
+        let ucrt = root.join(ucrt_sub);
+        if crt.exists() || um.exists() || ucrt.exists() {
+            if crt.exists() { paths.push(crt.to_string_lossy().to_string()); }
+            if um.exists() { paths.push(um.to_string_lossy().to_string()); }
+            if ucrt.exists() { paths.push(ucrt.to_string_lossy().to_string()); }
+            return paths;
+        }
+    }
+
+    let flat_lib = root.join("lib");
+    if flat_lib.exists() {
+        paths.push(flat_lib.to_string_lossy().to_string());
+        return paths;
+    }
+
+    paths.push(root.to_string_lossy().to_string());
+    paths
+}
+
 /// Find MSVC library search paths (MSVC CRT, Windows SDK um, Windows SDK ucrt).
 /// Returns a semicolon-separated string suitable for the LIB environment variable.
+///
+/// On Windows, prefers `perry setup windows`'s xwin'd sysroot when present
+/// (matches the "lightweight toolchain" opt-in mental model), then falls back
+/// to vswhere-located Visual Studio install paths.
 #[cfg(target_os = "windows")]
 fn find_msvc_lib_paths() -> Option<String> {
+    // If the user ran `perry setup windows`, use that sysroot — they've
+    // expressed intent to use the lightweight LLVM + xwin path even if MSVC
+    // is also installed. Same precedence as find_msvc_link_exe_or_lld_link().
+    if let Some(sysroot) = find_perry_windows_sdk() {
+        let paths = xwin_sysroot_lib_paths(&sysroot);
+        if !paths.is_empty() {
+            return Some(paths.join(";"));
+        }
+    }
+
     let mut paths = Vec::new();
 
     // Find MSVC CRT lib path via vswhere
@@ -1248,38 +1357,7 @@ fn find_msvc_lib_paths() -> Option<String> {
         return None;
     }
 
-    let mut paths = Vec::new();
-
-    // Search for xwin-style structured layout (crt/lib/x86_64, sdk/lib/um/x86_64, etc.)
-    for (crt_sub, um_sub, ucrt_sub) in &[
-        ("crt/lib/x86_64", "sdk/lib/um/x86_64", "sdk/lib/ucrt/x86_64"),
-        ("crt/lib/x64", "sdk/lib/um/x64", "sdk/lib/ucrt/x64"),
-    ] {
-        let crt = root.join(crt_sub);
-        let um = root.join(um_sub);
-        let ucrt = root.join(ucrt_sub);
-        if crt.exists() || um.exists() || ucrt.exists() {
-            if crt.exists() { paths.push(crt.to_string_lossy().to_string()); }
-            if um.exists() { paths.push(um.to_string_lossy().to_string()); }
-            if ucrt.exists() { paths.push(ucrt.to_string_lossy().to_string()); }
-            break;
-        }
-    }
-
-    // Flat lib/ directory
-    if paths.is_empty() {
-        let flat_lib = root.join("lib");
-        if flat_lib.exists() {
-            paths.push(flat_lib.to_string_lossy().to_string());
-        }
-    }
-
-    // Root itself as last resort
-    if paths.is_empty() {
-        paths.push(root.to_string_lossy().to_string());
-    }
-
-    Some(paths.join(";"))
+    Some(xwin_sysroot_lib_paths(&root).join(";"))
 }
 
 /// Find a library by name, optionally searching cross-compilation target directories.
@@ -6357,27 +6435,53 @@ pub fn run_with_parse_cache(
         // that should fail the link rather than produce a broken binary.
         c
     } else if is_windows {
-        // Windows target — use MSVC link.exe (native) or lld-link (cross)
-        // Check for PERRY_LLD_LINK override to use lld-link instead of MSVC link.exe.
-        // lld-link may handle large COFF objects differently than MSVC's linker.
+        // Windows target — two linker paths supported:
+        //   Lightweight: lld-link (from LLVM) + xwin'd sysroot (from `perry setup windows`)
+        //   MSVC:        link.exe + Visual Studio's VCTools + Windows SDK
+        //
+        // Precedence on native Windows:
+        //   1. PERRY_LLD_LINK env var (explicit override — always wins)
+        //   2. xwin'd sysroot present at %LOCALAPPDATA%\perry\windows-sdk → lld-link
+        //      (if user ran `perry setup windows`, they've opted into this path)
+        //   3. vswhere finds VCTools-enabled VS install → MSVC link.exe
+        //   4. Bail with two-option install hint
         let linker = if let Ok(lld) = std::env::var("PERRY_LLD_LINK") {
             PathBuf::from(lld)
+        } else if !is_cross_windows && find_perry_windows_sdk().is_some() {
+            // User ran `perry setup windows`. Use LLVM's lld-link.
+            match find_lld_link() {
+                Some(p) => p,
+                None => {
+                    return Err(anyhow!(
+                        "`perry setup windows` has populated a Windows SDK at {} but \
+                         LLVM's lld-link.exe is missing. Install LLVM via:\n\
+                         \x20  winget install LLVM.LLVM\n\
+                         then open a new terminal and retry.",
+                        find_perry_windows_sdk().unwrap().display()
+                    ));
+                }
+            }
         } else if let Some(path) = find_msvc_link_exe() {
             path
         } else if is_cross_windows {
             eprintln!("Warning: lld-link not found for cross-compilation. Install: rustup component add llvm-tools");
             PathBuf::from("link.exe")
         } else {
-            // Native Windows: vswhere didn't find a VCTools-enabled VS install.
-            // Fail fast with an actionable message before we try to invoke an
-            // absent `link.exe` and get a confusing generic IO error. Matches
-            // the `find_clang` context pattern in perry-codegen/src/linker.rs.
+            // Native Windows: neither MSVC (via vswhere) nor the xwin'd sysroot
+            // is present. Fail fast with both install paths — matches the
+            // `find_clang` context pattern in perry-codegen/src/linker.rs.
             return Err(anyhow!(
-                "MSVC link.exe not found. Perry needs the MSVC linker + Windows SDK \
-                 (from the \"Desktop development with C++\" workload). Install via:\n\
+                "No Windows linker toolchain found. Perry needs either MSVC link.exe + \
+                 Windows SDK, or LLVM's lld-link + the xwin'd sysroot from `perry setup \
+                 windows`. Pick whichever is lighter for you:\n\
                  \n\
-                 \x20  A) Visual Studio Installer → Modify → check \"Desktop development with C++\"\n\
-                 \x20  B) winget install Microsoft.VisualStudio.2022.BuildTools --override \
+                 \x20  A) Lightweight (LLVM + xwin, ~1.5 GB, no Visual Studio needed):\n\
+                 \x20       winget install LLVM.LLVM\n\
+                 \x20       perry setup windows\n\
+                 \n\
+                 \x20  B) MSVC (Visual Studio Build Tools + C++ workload, ~8 GB):\n\
+                 \x20       Visual Studio Installer → Modify → \"Desktop development with C++\"\n\
+                 \x20       or: winget install Microsoft.VisualStudio.2022.BuildTools --override \
                  \"--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended\"\n\
                  \n\
                  Then open a new terminal and retry. Run `perry doctor` to verify."
