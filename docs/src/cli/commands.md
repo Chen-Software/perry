@@ -269,17 +269,20 @@ On first use, `publish` auto-registers a free license key.
 
 ## setup
 
-Interactive credential wizard for app distribution.
+Interactive credential wizard for app distribution, plus toolchain setup for Windows.
 
 ```bash
 perry setup          # Show platform menu
-perry setup macos    # macOS setup
-perry setup ios      # iOS setup
-perry setup visionos # visionOS setup
-perry setup android  # Android setup
+perry setup macos    # macOS setup (signing credentials)
+perry setup ios      # iOS setup (signing credentials)
+perry setup visionos # visionOS setup (signing credentials)
+perry setup android  # Android setup (signing credentials)
+perry setup windows  # Windows toolchain (downloads MS CRT + Windows SDK via xwin)
 ```
 
-Stores credentials in `~/.perry/config.toml`.
+`perry setup windows` downloads the Microsoft CRT + Windows SDK libraries (~1.5 GB) so Perry can link without Visual Studio Build Tools. Requires LLVM (`winget install LLVM.LLVM`) and prompts to accept the Microsoft redistributable license — pass `--accept-license` to skip the prompt for CI. Output lands at `%LOCALAPPDATA%\perry\windows-sdk`. See the [Windows platform guide](../platforms/windows.md) for the full toolchain comparison.
+
+Credential wizards store their output in `~/.perry/config.toml`.
 
 ## update
 
