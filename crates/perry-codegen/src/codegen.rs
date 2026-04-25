@@ -245,6 +245,15 @@ pub(crate) struct CrossModuleCtx {
     /// scanning `hir.init`; threaded through every FnCtx so the IndexGet
     /// lowering can intercept `X[i][j]` / `krow[j]` patterns.
     pub flat_const_arrays: std::collections::HashMap<u32, crate::expr::FlatConstInfo>,
+    /// FFI manifest signatures from `package.json`'s `nativeLibrary.functions`.
+    /// Maps function name → (param_kinds, return_kind) where each kind is
+    /// `"i64"`, `"f64"`, `"void"`, `"string"`, or `"ptr"`. Without this map,
+    /// `lower_call` falls back to a heuristic that puts all numeric args/returns
+    /// into d-registers (DOUBLE) — incorrect for handle-returning C functions
+    /// like `hone_editor_create() -> *mut EditorView` whose actual ABI returns
+    /// the pointer in `x0`, not `d0`. The manifest tells us when to use
+    /// `i64`/`I64` so the LLVM declaration matches the platform C ABI.
+    pub ffi_signatures: std::collections::HashMap<String, (Vec<String>, String)>,
 }
 
 /// Compile a Perry HIR module to an object file via LLVM IR.
@@ -660,6 +669,20 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
             }
             map
         },
+        // FFI manifest: each `native_library_functions` entry is
+        // `(function_name, param_kinds, return_kind)` from the package.json
+        // `nativeLibrary.functions` declaration. Build a name → (params, returns)
+        // map so `lower_call` can emit the correct LLVM signature for direct
+        // calls to native C/Rust functions (matters when the C ABI differs
+        // from Perry's all-double default — e.g. `*mut View` returns in `x0`,
+        // not `d0`).
+        ffi_signatures: opts
+            .native_library_functions
+            .iter()
+            .map(|(name, params, ret)| {
+                (name.clone(), (params.clone(), ret.clone()))
+            })
+            .collect(),
     };
 
     // Module-level globals registry. Pre-walk:
@@ -1669,6 +1692,7 @@ fn compile_function(
         type_aliases: &cross_module.type_aliases,
         imported_func_param_counts: &cross_module.imported_func_param_counts,
         imported_func_return_types: &cross_module.imported_func_return_types,
+        ffi_signatures: &cross_module.ffi_signatures,
         pending_declares: Vec::new(),
         integer_locals: &integer_locals,
         shadow_slot_map,
@@ -1990,6 +2014,7 @@ fn compile_closure(
         type_aliases: &cross_module.type_aliases,
         imported_func_param_counts: &cross_module.imported_func_param_counts,
         imported_func_return_types: &cross_module.imported_func_return_types,
+        ffi_signatures: &cross_module.ffi_signatures,
         pending_declares: Vec::new(),
         integer_locals: &integer_locals,
         shadow_slot_map: std::collections::HashMap::new(),
@@ -2176,6 +2201,7 @@ fn compile_method(
         type_aliases: &cross_module.type_aliases,
         imported_func_param_counts: &cross_module.imported_func_param_counts,
         imported_func_return_types: &cross_module.imported_func_return_types,
+        ffi_signatures: &cross_module.ffi_signatures,
         pending_declares: Vec::new(),
         integer_locals: &integer_locals,
         shadow_slot_map: std::collections::HashMap::new(),
@@ -2393,6 +2419,7 @@ fn compile_module_entry(
             type_aliases: &cross_module.type_aliases,
             imported_func_param_counts: &cross_module.imported_func_param_counts,
             imported_func_return_types: &cross_module.imported_func_return_types,
+        ffi_signatures: &cross_module.ffi_signatures,
             pending_declares: Vec::new(),
             integer_locals: &main_integer_locals,
             shadow_slot_map: std::collections::HashMap::new(),
@@ -2608,6 +2635,7 @@ fn compile_module_entry(
             type_aliases: &cross_module.type_aliases,
             imported_func_param_counts: &cross_module.imported_func_param_counts,
             imported_func_return_types: &cross_module.imported_func_return_types,
+        ffi_signatures: &cross_module.ffi_signatures,
             pending_declares: Vec::new(),
             integer_locals: &init_integer_locals,
             shadow_slot_map: std::collections::HashMap::new(),
@@ -2979,6 +3007,7 @@ fn compile_static_method(
         type_aliases: &cross_module.type_aliases,
         imported_func_param_counts: &cross_module.imported_func_param_counts,
         imported_func_return_types: &cross_module.imported_func_return_types,
+        ffi_signatures: &cross_module.ffi_signatures,
         pending_declares: Vec::new(),
         integer_locals: &integer_locals,
         shadow_slot_map: std::collections::HashMap::new(),

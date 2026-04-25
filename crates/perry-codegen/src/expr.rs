@@ -292,6 +292,14 @@ pub(crate) struct FnCtx<'a> {
     /// Imported function return types, keyed by local function name.
     /// Used for type-aware dispatch on cross-module call results.
     pub imported_func_return_types: &'a std::collections::HashMap<String, perry_types::Type>,
+    /// FFI manifest: `name → (param_kinds, return_kind)` from
+    /// `package.json` `nativeLibrary.functions`. Each kind is a string like
+    /// `"i64"`, `"f64"`, `"void"`, `"string"`, or `"ptr"`. `lower_call` consults
+    /// this at native-library call sites so handle-returning functions
+    /// (`*mut View`-typed C entries) declare an `i64` LLVM return type that
+    /// reads the C ABI's `x0` register. Without it, the call defaults to
+    /// `double` (reads `d0`) and observes 0 instead of the real handle.
+    pub ffi_signatures: &'a std::collections::HashMap<String, (Vec<String>, String)>,
 
     /// Cross-module function declarations to add to `LlModule` after
     /// lowering finishes. Each entry is `(llvm_name, return_type, param_types)`.

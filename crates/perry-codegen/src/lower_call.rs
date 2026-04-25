@@ -412,22 +412,22 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
             // take a mix of i64 (pointers/handles) and f64 (floats).
             //
             // The LLVM IR declaration type determines ARM64 register
-            // placement: i64 → x-register, double → d-register. Since
-            // Perry can't know the actual C signature, we use a
-            // heuristic: if the arg expression is a VARIABLE (LocalGet,
-            // PropertyGet, etc.) that's not a literal number, assume
-            // it's an integer handle → pass as i64 via fptosi. If it's
-            // a number literal, keep as double (likely a real float
-            // like width/height/color).
+            // placement: i64 → x-register, double → d-register.
+            //
+            // When the FFI manifest (`ffi_signatures`) declares a param
+            // as `"i64"`, lower it via `fptosi` to put the value in an
+            // x-register. This is required for handle-typed params like
+            // `view: *mut EditorView` — without it the C ABI reads a
+            // garbage value out of x0/x1 since Perry put the handle in
+            // d-registers.
+            let manifest_sig = ctx.ffi_signatures.get(name).cloned();
             let mut lowered: Vec<String> = Vec::with_capacity(args.len());
             let mut arg_types: Vec<crate::types::LlvmType> = Vec::with_capacity(args.len());
-            // Native library functions (Bloom, etc.) pass numbers as f64
-            // (d-registers) but need raw pointers for string/array args
-            // (x-registers). Strings are unboxed to *const u8; arrays are
-            // unboxed and offset past the 8-byte ArrayHeader to the
-            // inline f64 data so the C/Rust side gets a valid *const f64.
-            for a in args.iter() {
+            for (idx, a) in args.iter().enumerate() {
                 let val = lower_expr(ctx, a)?;
+                let manifest_kind: Option<&str> = manifest_sig
+                    .as_ref()
+                    .and_then(|(p, _)| p.get(idx).map(|s| s.as_str()));
                 if is_string_expr(ctx, a) {
                     let blk = ctx.block();
                     let raw_ptr = blk.call(I64, "js_get_string_pointer_unified", &[(DOUBLE, &val)]);
@@ -445,6 +445,16 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
                     let data_ptr = blk.gep(I8, &header_ptr, &[(I64, &eight)]);
                     lowered.push(data_ptr);
                     arg_types.push(PTR);
+                } else if matches!(manifest_kind, Some("i64")) {
+                    // Manifest declares this param as i64 → place in
+                    // x-register. JS numbers are stored as f64 directly
+                    // (a handle of `0x305b42a0c00` is the f64 value
+                    // 13190580238336.0, not a NaN-box payload), so
+                    // truncate via `fptosi` to recover the integer.
+                    let blk = ctx.block();
+                    let i = blk.fptosi(DOUBLE, &val, I64);
+                    lowered.push(i);
+                    arg_types.push(I64);
                 } else {
                     lowered.push(val);
                     arg_types.push(DOUBLE);
@@ -452,24 +462,26 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
             }
             let arg_slices: Vec<(crate::types::LlvmType, &str)> =
                 arg_types.iter().zip(lowered.iter()).map(|(t, v)| (*t, v.as_str())).collect();
-            // Determine return type. If the ExternFuncRef declares
-            // return_type: String, the native function returns
-            // *const u8 (ptr in x0). If return_type: Void, no return.
-            // Otherwise (Number/Any), assume f64 (d0).
+            // Determine return type.
             //
-            // Heuristic fallback: even if declared as Number, if the
-            // function name matches a known "returns-string" pattern
-            // AND has string args, treat as ptr return. This covers
-            // native libraries like Bloom that declare string-returning
-            // functions as `number` for NaN-boxing compat.
+            // Manifest takes precedence: `"i64"` → I64 return (x0), then
+            // `sitofp` back to f64 so JS sees a normal number; `"void"` →
+            // no return; `"string"`/`"ptr"` → PTR return + nanbox.
+            //
+            // Without a manifest entry, fall back to the original
+            // heuristic on `ExternFuncRef.return_type` (Number/Void/String).
             let has_string_args = arg_types.iter().any(|t| *t == PTR);
-            let returns_string = matches!(ext_return_type, HirType::String)
-                || (has_string_args && (
+            let manifest_ret: Option<&str> = manifest_sig.as_ref().map(|(_, r)| r.as_str());
+            let returns_string = matches!(manifest_ret, Some("string") | Some("ptr"))
+                || matches!(ext_return_type, HirType::String)
+                || (manifest_ret.is_none() && has_string_args && (
                     name.contains("read_file")
                     || name.contains("clipboard_text")
                     || name.contains("file_dialog")
                 ));
-            let returns_void = matches!(ext_return_type, HirType::Void);
+            let returns_void = matches!(manifest_ret, Some("void"))
+                || (manifest_ret.is_none() && matches!(ext_return_type, HirType::Void));
+            let returns_i64 = matches!(manifest_ret, Some("i64"));
             if returns_void {
                 ctx.pending_declares
                     .push((name.clone(), crate::types::VOID, arg_types));
@@ -483,6 +495,17 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
                 let blk = ctx.block();
                 let ptr_i64 = blk.ptrtoint(&raw_ptr, I64);
                 return Ok(nanbox_string_inline(blk, &ptr_i64));
+            } else if returns_i64 {
+                // C function returns i64 in x0 (e.g. `*mut View`
+                // handles). Declare as I64; the value comes back as a
+                // raw integer. Convert via `sitofp` so callers see a
+                // normal JS number; subsequent FFI calls that pass it
+                // back as an i64 param will truncate via `fptosi`.
+                ctx.pending_declares
+                    .push((name.clone(), I64, arg_types));
+                let raw = ctx.block().call(I64, name, &arg_slices);
+                let blk = ctx.block();
+                return Ok(blk.sitofp(I64, &raw, DOUBLE));
             } else {
                 // Native library functions (Bloom, etc.) return f64 in
                 // the d0 register — they use the Perry double-based ABI,
