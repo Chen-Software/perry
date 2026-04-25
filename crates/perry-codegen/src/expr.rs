@@ -2499,6 +2499,20 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 "js_object_set_field_by_name",
                 &[(I64, &obj_handle), (I64, &key_raw), (DOUBLE, &val_double)],
             );
+            // Gen-GC Phase C2: write barrier on the object field
+            // store. Records old→young pointer writes in the
+            // remembered set so minor GC can scan precise roots +
+            // RS instead of the full old-gen. Gated behind
+            // PERRY_WRITE_BARRIERS=1 — default OFF, no codegen
+            // change for production until C3 (minor GC) lands.
+            // See docs/generational-gc-plan.md §Phase C.
+            if crate::codegen::write_barriers_enabled() {
+                let val_bits = ctx.block().bitcast_double_to_i64(&val_double);
+                ctx.block().call_void(
+                    "js_write_barrier",
+                    &[(I64, &obj_bits), (I64, &val_bits)],
+                );
+            }
             Ok(val_double)
         }
 
