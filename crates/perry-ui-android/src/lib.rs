@@ -999,10 +999,12 @@ pub extern "C" fn perry_system_notification_schedule_location(
 #[no_mangle]
 pub extern "C" fn perry_system_notification_cancel(_id_ptr: i64) {}
 
-/// Stub: PendingIntent + broadcast receiver wiring is a separate PR (#97
-/// follow-up). Symbol exists so TS calling `notificationOnTap` links + runs.
+/// Real impl (#97): register the tap callback so `PerryNotificationReceiver`
+/// can dispatch back to it when the user taps a delivered notification.
 #[no_mangle]
-pub extern "C" fn perry_system_notification_on_tap(_callback: f64) {}
+pub extern "C" fn perry_system_notification_on_tap(callback: f64) {
+    system::notification_on_tap(callback);
+}
 
 #[no_mangle]
 pub extern "C" fn perry_system_request_location(callback: f64) {

@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -810,6 +811,13 @@ object PerryBridge {
     @JvmStatic
     external fun nativeMenuItemSelected(menuHandle: Long, index: Int)
 
+    /// Forwarded by `PerryNotificationReceiver.onReceive` when the user taps
+    /// a notification. The Rust side dispatches to the JS closure registered
+    /// via `notificationOnTap` with `(id, undefined)` — `action` will become
+    /// the action-button id once button registration lands (#97 follow-up).
+    @JvmStatic
+    external fun nativeNotificationTap(id: String)
+
     // --- Notifications (#94) ---
 
     /**
@@ -856,12 +864,30 @@ object PerryBridge {
             }
         }
 
+        // Tap PendingIntent (#97). Targets `PerryNotificationReceiver` which
+        // forwards back to the JS closure registered via `notificationOnTap`.
+        // FLAG_IMMUTABLE is required at API 31+ and harmless before.
+        // FLAG_UPDATE_CURRENT lets the same PendingIntent be reused across
+        // calls (matching the fixed-id replace-by-id semantics on the
+        // notification itself).
+        val tapIntent = Intent(activity, PerryNotificationReceiver::class.java).apply {
+            action = "com.perry.app.NOTIFICATION_TAP"
+            putExtra("id", "perry_notification")
+        }
+        val tapPending = PendingIntent.getBroadcast(
+            activity,
+            PERRY_DEFAULT_NOTIFICATION_ID,
+            tapIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
         val notification = NotificationCompat.Builder(activity, PERRY_DEFAULT_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentTitle(title)
             .setContentText(body)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setAutoCancel(true)
+            .setContentIntent(tapPending)
             .build()
 
         try {

@@ -19,5 +19,13 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- Routes notification taps to the JS callback registered via
+             `notificationOnTap` (#97). exported=false because the action is
+             internal — only PerryBridge fires this PendingIntent. -->
+        <receiver android:name=".PerryNotificationReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="com.perry.app.NOTIFICATION_TAP" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

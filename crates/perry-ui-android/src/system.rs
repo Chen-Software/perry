@@ -296,6 +296,50 @@ pub fn keychain_delete(key_ptr: *const u8) {
     unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
 }
 
+/// Tap-callback registration key (#97). Set via `notification_on_tap` and
+/// read by `Java_com_perry_app_PerryBridge_nativeNotificationTap` when the
+/// user taps a notification. `0` means "no tap callback registered".
+static NOTIFICATION_TAP_KEY: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+
+/// Store the JS closure that fires when a notification is tapped (#97).
+/// The closure is stashed in `crate::callback::register` so the global
+/// callback table keeps it alive across GC; the returned key is saved in
+/// `NOTIFICATION_TAP_KEY` for the JNI side to look up.
+pub fn notification_on_tap(callback: f64) {
+    let key = crate::callback::register(callback);
+    NOTIFICATION_TAP_KEY.store(key, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// JNI entry point — fired from `PerryNotificationReceiver.onReceive` when
+/// the user taps a notification. Looks up the registered tap callback and
+/// invokes it with `(id, undefined)`. The `action` parameter (from the TS
+/// surface) is always `undefined` for #97 because action-button registration
+/// isn't wired yet — same shape as the Apple side.
+#[no_mangle]
+pub extern "C" fn Java_com_perry_app_PerryBridge_nativeNotificationTap(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    id: jni::objects::JString,
+) {
+    let key = NOTIFICATION_TAP_KEY.load(std::sync::atomic::Ordering::Relaxed);
+    if key == 0 {
+        return;
+    }
+
+    let rust_str: String = env.get_string(&id).map(|s| s.into()).unwrap_or_default();
+    let bytes = rust_str.as_bytes();
+    let id_value = unsafe {
+        let ptr = js_string_from_bytes(bytes.as_ptr(), bytes.len());
+        js_nanbox_string(ptr)
+    };
+    // `action` is always undefined until #97 follow-up wires action buttons.
+    const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+    let action_value = f64::from_bits(TAG_UNDEFINED);
+
+    crate::callback::invoke2(key, id_value, action_value);
+}
+
 /// Send a notification via PerryBridge.
 pub fn notification_send(title_ptr: *const u8, body_ptr: *const u8) {
     let title = str_from_header(title_ptr);
