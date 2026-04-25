@@ -1312,6 +1312,62 @@ pub extern "C" fn perry_system_notification_on_receive(callback: f64) {
     crate::notifications::on_receive(callback);
 }
 
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_interval(
+    id_ptr: i64,
+    title_ptr: i64,
+    body_ptr: i64,
+    seconds: f64,
+    repeats: f64,
+) {
+    crate::notifications::schedule_interval(
+        id_ptr as *const u8,
+        title_ptr as *const u8,
+        body_ptr as *const u8,
+        seconds,
+        repeats,
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_calendar(
+    id_ptr: i64,
+    title_ptr: i64,
+    body_ptr: i64,
+    timestamp_ms: f64,
+) {
+    crate::notifications::schedule_calendar(
+        id_ptr as *const u8,
+        title_ptr as *const u8,
+        body_ptr as *const u8,
+        timestamp_ms,
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_location(
+    id_ptr: i64,
+    title_ptr: i64,
+    body_ptr: i64,
+    lat: f64,
+    lon: f64,
+    radius: f64,
+) {
+    crate::notifications::schedule_location(
+        id_ptr as *const u8,
+        title_ptr as *const u8,
+        body_ptr as *const u8,
+        lat,
+        lon,
+        radius,
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_cancel(id_ptr: i64) {
+    crate::notifications::cancel(id_ptr as *const u8);
+}
+
 // =============================================================================
 // Location (perry/system) — stub on macOS, iOS only
 // =============================================================================

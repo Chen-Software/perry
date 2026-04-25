@@ -5293,6 +5293,8 @@ pub fn run_with_parse_cache(
                                         source_prefix: origin_prefix.clone(),
                                         constructor_param_count: class.constructor.as_ref().map(|c| c.params.len()).unwrap_or(0),
                                         method_names: class.methods.iter().map(|m| m.name.clone()).collect(),
+                                        getter_names: class.getters.iter().map(|(n, _)| n.clone()).collect(),
+                                        setter_names: class.setters.iter().map(|(n, _)| n.clone()).collect(),
                                         parent_name: class.extends_name.clone(),
                                         field_names: class.fields.iter().map(|f| f.name.clone()).collect(),
                                         source_class_id: Some(class.id),
@@ -5351,6 +5353,8 @@ pub fn run_with_parse_cache(
                             source_prefix: effective_prefix.clone(),
                             constructor_param_count: class.constructor.as_ref().map(|c| c.params.len()).unwrap_or(0),
                             method_names: class.methods.iter().map(|m| m.name.clone()).collect(),
+                            getter_names: class.getters.iter().map(|(n, _)| n.clone()).collect(),
+                            setter_names: class.setters.iter().map(|(n, _)| n.clone()).collect(),
                             parent_name: class.extends_name.clone(),
                             field_names: class.fields.iter().map(|f| f.name.clone()).collect(),
                             source_class_id: Some(class.id),
@@ -5449,6 +5453,8 @@ pub fn run_with_parse_cache(
                             source_prefix: class_prefix,
                             constructor_param_count: class.constructor.as_ref().map(|c| c.params.len()).unwrap_or(0),
                             method_names: class.methods.iter().map(|m| m.name.clone()).collect(),
+                            getter_names: class.getters.iter().map(|(n, _)| n.clone()).collect(),
+                            setter_names: class.setters.iter().map(|(n, _)| n.clone()).collect(),
                             parent_name: class.extends_name.clone(),
                             field_names: class.fields.iter().map(|f| f.name.clone()).collect(),
                             source_class_id: Some(class.id),
@@ -6758,6 +6764,7 @@ pub fn run_with_parse_cache(
            .arg("-framework").arg("CoreMedia") // CMSampleBuffer
            .arg("-framework").arg("CoreVideo") // CVPixelBuffer
            .arg("-framework").arg("UserNotifications") // UNUserNotificationCenter (perry/system notificationSend)
+           .arg("-framework").arg("CoreLocation") // CLCircularRegion for UNLocationNotificationTrigger (#96)
            .arg("-liconv")
            .arg("-lresolv")
            .arg("-lobjc")
@@ -8750,6 +8757,8 @@ mod object_cache_tests {
             source_prefix: "src".into(),
             constructor_param_count: 1,
             method_names: vec!["bar".into()],
+            getter_names: vec![],
+            setter_names: vec![],
             parent_name: None,
             field_names: vec!["x".into()],
             source_class_id: Some(42),
@@ -8760,6 +8769,8 @@ mod object_cache_tests {
             source_prefix: "src".into(),
             constructor_param_count: 2, // different arity
             method_names: vec!["bar".into()],
+            getter_names: vec![],
+            setter_names: vec![],
             parent_name: None,
             field_names: vec!["x".into()],
             source_class_id: Some(42),

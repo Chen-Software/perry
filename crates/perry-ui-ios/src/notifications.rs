@@ -1,6 +1,7 @@
 use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject};
+use objc2::{Encode, Encoding, RefEncode};
 use objc2_foundation::NSString;
 use std::cell::RefCell;
 
@@ -21,6 +22,35 @@ extern "C" {
     fn js_json_parse(text_ptr: *const perry_runtime::string::StringHeader) -> u64;
     fn js_stdlib_process_pending();
     fn js_promise_run_microtasks() -> i32;
+    fn js_is_truthy(value: f64) -> i32;
+}
+
+unsafe fn build_content(title: &str, body: &str) -> Option<Retained<AnyObject>> {
+    let content_cls = AnyClass::get(c"UNMutableNotificationContent")?;
+    let content: Retained<AnyObject> = msg_send![content_cls, new];
+    let ns_title = NSString::from_str(title);
+    let _: () = msg_send![&*content, setTitle: &*ns_title];
+    let ns_body = NSString::from_str(body);
+    let _: () = msg_send![&*content, setBody: &*ns_body];
+    Some(content)
+}
+
+unsafe fn submit_request(identifier: &str, content: &AnyObject, trigger: &AnyObject) {
+    let Some(request_cls) = AnyClass::get(c"UNNotificationRequest") else { return; };
+    let ident = NSString::from_str(identifier);
+    let request: Retained<AnyObject> = msg_send![
+        request_cls,
+        requestWithIdentifier: &*ident,
+        content: content,
+        trigger: trigger
+    ];
+    let Some(center_cls) = AnyClass::get(c"UNUserNotificationCenter") else { return; };
+    let center: Retained<AnyObject> = msg_send![center_cls, currentNotificationCenter];
+    let _: () = msg_send![
+        &*center,
+        addNotificationRequest: &*request,
+        withCompletionHandler: std::ptr::null::<AnyObject>()
+    ];
 }
 
 fn str_from_header(ptr: *const u8) -> &'static str {
@@ -155,6 +185,162 @@ pub unsafe fn dispatch_remote_payload(user_info: *mut AnyObject) {
     let ptr = js_nanbox_get_pointer(callback) as *const u8;
     if !ptr.is_null() {
         js_closure_call1(ptr, parsed_f64);
+    }
+}
+
+/// Schedule a notification firing after `seconds` (#96, interval trigger).
+/// `repeats` is a NaN-boxed JS value coerced via `js_is_truthy`.
+/// Per UN constraints, `repeats=true` requires `seconds >= 60`; otherwise
+/// the OS rejects the trigger silently.
+pub fn schedule_interval(
+    id_ptr: *const u8,
+    title_ptr: *const u8,
+    body_ptr: *const u8,
+    seconds: f64,
+    repeats: f64,
+) {
+    let id = str_from_header(id_ptr);
+    let title = str_from_header(title_ptr);
+    let body = str_from_header(body_ptr);
+    let repeats_bool = unsafe { js_is_truthy(repeats) != 0 };
+    let interval = if seconds < 0.0 { 0.0 } else { seconds };
+
+    unsafe {
+        let Some(content) = build_content(title, body) else { return; };
+        let Some(trigger_cls) = AnyClass::get(c"UNTimeIntervalNotificationTrigger") else { return; };
+        let trigger: Retained<AnyObject> = msg_send![
+            trigger_cls,
+            triggerWithTimeInterval: interval,
+            repeats: repeats_bool
+        ];
+        submit_request(id, &*content, &*trigger);
+    }
+}
+
+/// Schedule a notification firing once at `timestamp_ms` (#96, calendar
+/// trigger). The timestamp is a JS-Date-style millisecond value since the
+/// Unix epoch. Decomposed into `NSDateComponents` via `NSCalendar` because
+/// `UNCalendarNotificationTrigger` requires components, not an `NSDate`.
+pub fn schedule_calendar(
+    id_ptr: *const u8,
+    title_ptr: *const u8,
+    body_ptr: *const u8,
+    timestamp_ms: f64,
+) {
+    let id = str_from_header(id_ptr);
+    let title = str_from_header(title_ptr);
+    let body = str_from_header(body_ptr);
+
+    unsafe {
+        let Some(content) = build_content(title, body) else { return; };
+        let Some(date_cls) = AnyClass::get(c"NSDate") else { return; };
+        let date: Retained<AnyObject> = msg_send![
+            date_cls,
+            dateWithTimeIntervalSince1970: timestamp_ms / 1000.0
+        ];
+        let Some(cal_cls) = AnyClass::get(c"NSCalendar") else { return; };
+        let cal: Retained<AnyObject> = msg_send![cal_cls, currentCalendar];
+        // NSCalendarUnit bitmask: Year(4)|Month(8)|Day(16)|Hour(32)|Minute(64)|Second(128) = 252.
+        let units: u64 = 4 | 8 | 16 | 32 | 64 | 128;
+        let comps: Retained<AnyObject> = msg_send![
+            &*cal,
+            components: units,
+            fromDate: &*date
+        ];
+        let Some(trigger_cls) = AnyClass::get(c"UNCalendarNotificationTrigger") else { return; };
+        let trigger: Retained<AnyObject> = msg_send![
+            trigger_cls,
+            triggerWithDateMatchingComponents: &*comps,
+            repeats: false
+        ];
+        submit_request(id, &*content, &*trigger);
+    }
+}
+
+/// Schedule a notification firing on geofence entry (#96, location trigger).
+/// Uses `CLCircularRegion` (CoreLocation) wrapped in
+/// `UNLocationNotificationTrigger`. CoreLocation must be linked
+/// (`-framework CoreLocation` in compile.rs's iOS link line) and the app
+/// must request `NSLocationWhenInUseUsageDescription` in Info.plist.
+pub fn schedule_location(
+    id_ptr: *const u8,
+    title_ptr: *const u8,
+    body_ptr: *const u8,
+    lat: f64,
+    lon: f64,
+    radius: f64,
+) {
+    let id = str_from_header(id_ptr);
+    let title = str_from_header(title_ptr);
+    let body = str_from_header(body_ptr);
+
+    unsafe {
+        let Some(content) = build_content(title, body) else { return; };
+        let Some(region_cls) = AnyClass::get(c"CLCircularRegion") else {
+            eprintln!("[perry] schedule_location: CoreLocation not loaded — region trigger skipped");
+            return;
+        };
+        // CLLocationCoordinate2D is two consecutive f64s — pass via the
+        // `initWithCenter:radius:identifier:` selector that takes the struct
+        // by value. `CLCircularRegion *` is allocated then init'd.
+        let region_alloc: *mut AnyObject = msg_send![region_cls, alloc];
+        let coord = CLLocationCoordinate2D { latitude: lat, longitude: lon };
+        let ident_ns = NSString::from_str(id);
+        let region_raw: *mut AnyObject = msg_send![
+            region_alloc,
+            initWithCenter: coord,
+            radius: radius,
+            identifier: &*ident_ns
+        ];
+        if region_raw.is_null() { return; }
+        // notifyOnEntry / notifyOnExit default to true on iOS 14+, but be explicit.
+        let _: () = msg_send![region_raw, setNotifyOnEntry: true];
+        let _: () = msg_send![region_raw, setNotifyOnExit: false];
+
+        let Some(trigger_cls) = AnyClass::get(c"UNLocationNotificationTrigger") else { return; };
+        let trigger: Retained<AnyObject> = msg_send![
+            trigger_cls,
+            triggerWithRegion: region_raw,
+            repeats: false
+        ];
+        submit_request(id, &*content, &*trigger);
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct CLLocationCoordinate2D {
+    latitude: f64,
+    longitude: f64,
+}
+
+unsafe impl Encode for CLLocationCoordinate2D {
+    const ENCODING: Encoding = Encoding::Struct(
+        "CLLocationCoordinate2D",
+        &[Encoding::Double, Encoding::Double],
+    );
+}
+
+unsafe impl RefEncode for CLLocationCoordinate2D {
+    const ENCODING_REF: Encoding = Encoding::Pointer(&Self::ENCODING);
+}
+
+/// Cancel a previously scheduled notification by id (#96).
+pub fn cancel(id_ptr: *const u8) {
+    let id = str_from_header(id_ptr);
+    unsafe {
+        let Some(center_cls) = AnyClass::get(c"UNUserNotificationCenter") else { return; };
+        let center: Retained<AnyObject> = msg_send![center_cls, currentNotificationCenter];
+        let ident = NSString::from_str(id);
+        let Some(arr_cls) = AnyClass::get(c"NSArray") else { return; };
+        let ident_ref: *const AnyObject = &*ident as *const NSString as *const AnyObject;
+        let arr: Retained<AnyObject> = msg_send![
+            arr_cls,
+            arrayWithObjects: &ident_ref,
+            count: 1usize
+        ];
+        let _: () = msg_send![&*center, removePendingNotificationRequestsWithIdentifiers: &*arr];
+        let _: () = msg_send![&*center, removeDeliveredNotificationsWithIdentifiers: &*arr];
     }
 }
 

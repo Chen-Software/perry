@@ -85,6 +85,41 @@ export function notificationRegisterRemote(onToken: (token: string) => void): vo
  */
 export function notificationOnReceive(cb: (payload: object) => void): void;
 
+/**
+ * Schedule a local notification to fire on a trigger. The `id` lets you
+ * cancel it later via `notificationCancel(id)`; scheduling a fresh trigger
+ * with an existing id replaces the previous one (Apple-platform OS semantics).
+ *
+ * `trigger.type` must be a string literal at the call site so the codegen
+ * can route to the right native trigger constructor:
+ * - `"interval"` — fires after `seconds` (must be ≥ 60 if `repeats` is true,
+ *    per UN constraints). Backed by `UNTimeIntervalNotificationTrigger` on
+ *    Apple, `AlarmManager` on Android (not yet wired).
+ * - `"calendar"` — fires once when wall-clock reaches `date`. Backed by
+ *    `UNCalendarNotificationTrigger` on Apple.
+ * - `"location"` — fires when the device enters the circular region. iOS-
+ *    only via `UNLocationNotificationTrigger`; logged + skipped on macOS
+ *    (no `CLLocationManager` notification trigger on the desktop OS).
+ *
+ * No-op on tvOS/visionOS/watchOS/GTK4/Windows/Web until the equivalent
+ * native pipeline is wired.
+ */
+export function notificationSchedule(opts: {
+    id: string;
+    title: string;
+    body: string;
+    trigger:
+        | { type: "interval"; seconds: number; repeats?: boolean }
+        | { type: "calendar"; date: Date }
+        | { type: "location"; latitude: number; longitude: number; radius: number };
+}): void;
+
+/**
+ * Cancel a previously scheduled notification by id. No-op if no scheduled
+ * notification with that id exists.
+ */
+export function notificationCancel(id: string): void;
+
 // ---------------------------------------------------------------------------
 // Audio input
 // ---------------------------------------------------------------------------

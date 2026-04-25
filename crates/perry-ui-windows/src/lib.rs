@@ -1015,6 +1015,25 @@ pub extern "C" fn perry_system_notification_register_remote(_callback: f64) {}
 #[no_mangle]
 pub extern "C" fn perry_system_notification_on_receive(_callback: f64) {}
 
+/// Stub: ToastNotifier.AddToSchedule wiring is a separate PR (#96 follow-up).
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_interval(
+    _id_ptr: i64, _title_ptr: i64, _body_ptr: i64, _seconds: f64, _repeats: f64,
+) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_calendar(
+    _id_ptr: i64, _title_ptr: i64, _body_ptr: i64, _timestamp_ms: f64,
+) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_location(
+    _id_ptr: i64, _title_ptr: i64, _body_ptr: i64, _lat: f64, _lon: f64, _radius: f64,
+) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_cancel(_id_ptr: i64) {}
+
 #[no_mangle]
 pub extern "C" fn perry_system_get_locale() -> i64 {
     extern "C" { fn js_string_from_bytes(ptr: *const u8, len: i64) -> *const u8; }

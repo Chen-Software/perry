@@ -21,6 +21,40 @@ extern "C" {
     fn js_json_parse(text_ptr: *const crate::string_header::StringHeader) -> u64;
     fn js_stdlib_process_pending();
     fn js_promise_run_microtasks() -> i32;
+    fn js_is_truthy(value: f64) -> i32;
+}
+
+/// Build a `UNMutableNotificationContent` with title + body. Caller is
+/// responsible for keeping the returned `Retained<AnyObject>` alive long
+/// enough to attach it to the trigger / request chain.
+unsafe fn build_content(title: &str, body: &str) -> Option<Retained<AnyObject>> {
+    let content_cls = AnyClass::get(c"UNMutableNotificationContent")?;
+    let content: Retained<AnyObject> = msg_send![content_cls, new];
+    let ns_title = NSString::from_str(title);
+    let _: () = msg_send![&*content, setTitle: &*ns_title];
+    let ns_body = NSString::from_str(body);
+    let _: () = msg_send![&*content, setBody: &*ns_body];
+    Some(content)
+}
+
+/// Submit a `UNNotificationRequest` with the given identifier + content +
+/// trigger to the current notification center.
+unsafe fn submit_request(identifier: &str, content: &AnyObject, trigger: &AnyObject) {
+    let Some(request_cls) = AnyClass::get(c"UNNotificationRequest") else { return; };
+    let ident = NSString::from_str(identifier);
+    let request: Retained<AnyObject> = msg_send![
+        request_cls,
+        requestWithIdentifier: &*ident,
+        content: content,
+        trigger: trigger
+    ];
+    let Some(center_cls) = AnyClass::get(c"UNUserNotificationCenter") else { return; };
+    let center: Retained<AnyObject> = msg_send![center_cls, currentNotificationCenter];
+    let _: () = msg_send![
+        &*center,
+        addNotificationRequest: &*request,
+        withCompletionHandler: std::ptr::null::<AnyObject>()
+    ];
 }
 
 fn str_from_header(ptr: *const u8) -> &'static str {
@@ -180,6 +214,116 @@ pub unsafe fn dispatch_remote_payload(user_info: *mut AnyObject) {
     let ptr = js_nanbox_get_pointer(callback) as *const u8;
     if !ptr.is_null() {
         js_closure_call1(ptr, parsed_f64);
+    }
+}
+
+/// Schedule a notification firing after `seconds` (#96, interval trigger).
+/// `repeats` is a NaN-boxed JS value coerced via `js_is_truthy`.
+/// Per UN constraints, `repeats=true` requires `seconds >= 60`; otherwise the
+/// OS rejects the trigger silently.
+pub fn schedule_interval(
+    id_ptr: *const u8,
+    title_ptr: *const u8,
+    body_ptr: *const u8,
+    seconds: f64,
+    repeats: f64,
+) {
+    let id = str_from_header(id_ptr);
+    let title = str_from_header(title_ptr);
+    let body = str_from_header(body_ptr);
+    let repeats_bool = unsafe { js_is_truthy(repeats) != 0 };
+    let interval = if seconds < 0.0 { 0.0 } else { seconds };
+
+    unsafe {
+        let Some(content) = build_content(title, body) else { return; };
+        let Some(trigger_cls) = AnyClass::get(c"UNTimeIntervalNotificationTrigger") else { return; };
+        let trigger: Retained<AnyObject> = msg_send![
+            trigger_cls,
+            triggerWithTimeInterval: interval,
+            repeats: repeats_bool
+        ];
+        submit_request(id, &*content, &*trigger);
+    }
+}
+
+/// Schedule a notification firing once at `timestamp_ms` (#96, calendar
+/// trigger). The timestamp is a JS-Date-style millisecond value since the
+/// Unix epoch. Decomposed into `NSDateComponents` (year/month/day/hour/
+/// minute/second) via `NSCalendar.currentCalendar` because
+/// `UNCalendarNotificationTrigger` requires components, not an `NSDate`.
+pub fn schedule_calendar(
+    id_ptr: *const u8,
+    title_ptr: *const u8,
+    body_ptr: *const u8,
+    timestamp_ms: f64,
+) {
+    let id = str_from_header(id_ptr);
+    let title = str_from_header(title_ptr);
+    let body = str_from_header(body_ptr);
+
+    unsafe {
+        let Some(content) = build_content(title, body) else { return; };
+        let Some(date_cls) = AnyClass::get(c"NSDate") else { return; };
+        let date: Retained<AnyObject> = msg_send![
+            date_cls,
+            dateWithTimeIntervalSince1970: timestamp_ms / 1000.0
+        ];
+        let Some(cal_cls) = AnyClass::get(c"NSCalendar") else { return; };
+        let cal: Retained<AnyObject> = msg_send![cal_cls, currentCalendar];
+        // NSCalendarUnit bitmask: Year(4) | Month(8) | Day(16) | Hour(32) |
+        // Minute(64) | Second(128) = 252.
+        let units: u64 = 4 | 8 | 16 | 32 | 64 | 128;
+        let comps: Retained<AnyObject> = msg_send![
+            &*cal,
+            components: units,
+            fromDate: &*date
+        ];
+        let Some(trigger_cls) = AnyClass::get(c"UNCalendarNotificationTrigger") else { return; };
+        let trigger: Retained<AnyObject> = msg_send![
+            trigger_cls,
+            triggerWithDateMatchingComponents: &*comps,
+            repeats: false
+        ];
+        submit_request(id, &*content, &*trigger);
+    }
+}
+
+/// Schedule a notification firing on geofence entry (#96, location trigger).
+///
+/// Logged-no-op on macOS: `UNLocationNotificationTrigger` is iOS-only.
+/// CoreLocation on the desktop OS uses `CLLocationManager`-pushed updates
+/// rather than UN-side region triggers; surfacing that as a separate API
+/// is out of scope for #96.
+pub fn schedule_location(
+    _id_ptr: *const u8,
+    _title_ptr: *const u8,
+    _body_ptr: *const u8,
+    _lat: f64,
+    _lon: f64,
+    _radius: f64,
+) {
+    eprintln!(
+        "[perry] notificationSchedule: trigger.type=\"location\" is iOS-only; \
+         macOS has no UNLocationNotificationTrigger equivalent."
+    );
+}
+
+/// Cancel a previously scheduled notification by id (#96).
+pub fn cancel(id_ptr: *const u8) {
+    let id = str_from_header(id_ptr);
+    unsafe {
+        let Some(center_cls) = AnyClass::get(c"UNUserNotificationCenter") else { return; };
+        let center: Retained<AnyObject> = msg_send![center_cls, currentNotificationCenter];
+        let ident = NSString::from_str(id);
+        let Some(arr_cls) = AnyClass::get(c"NSArray") else { return; };
+        let ident_ref: *const AnyObject = &*ident as *const NSString as *const AnyObject;
+        let arr: Retained<AnyObject> = msg_send![
+            arr_cls,
+            arrayWithObjects: &ident_ref,
+            count: 1usize
+        ];
+        let _: () = msg_send![&*center, removePendingNotificationRequestsWithIdentifiers: &*arr];
+        let _: () = msg_send![&*center, removeDeliveredNotificationsWithIdentifiers: &*arr];
     }
 }
 
