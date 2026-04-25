@@ -564,9 +564,15 @@ every other measured runtime.
 | `07_object_create` | 0 | 6 |
 | `12_binary_trees` | 0 | 6 |
 | `bench_gc_pressure` | 16 | 25 |
-| `04_array_read` | 4 | 211 |
+| `04_array_read` | 4 | 211 [^arr] |
 | `05_fibonacci` | 309 | 6 |
 | `08_string_concat` | 0 | 6 |
+
+[^arr]: Working set, not a leak — index-based fill (`arr[i] = i`) triggers
+    doubling reallocation; the last grow temporarily holds both 8M-cap
+    (64 MB) and 16M-cap (128 MB) buffers in the arena. Full math +
+    `PERRY_GC_DIAG=1` trace in
+    [`benchmarks/polyglot/ARRAY_READ_NOTES.md`](polyglot/ARRAY_READ_NOTES.md).
 
 ---
 
