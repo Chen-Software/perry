@@ -614,6 +614,24 @@ impl<'a> FnCtx<'a> {
 
 /// Lower an expression to a raw LLVM `double` value. Returns the string form
 /// of the value (either a `%rN` register or a literal like `42.0`).
+/// Gen-GC Phase C2 helper: emit `js_write_barrier(parent_bits,
+/// child_bits)` after a heap-store site when `PERRY_WRITE_BARRIERS=1`.
+/// `parent_bits` and `child_bits` are SSA names already bitcast to
+/// i64. No-op when the gate is off — branchless at codegen time
+/// because the env var is read once, OnceLock-cached.
+///
+/// Called from every emit site that writes a child value into a
+/// heap-allocated parent: PropertySet, IndexSet (array element +
+/// object key), class field set fast path, closure capture set
+/// (boxed + non-boxed), array push, etc.
+fn emit_write_barrier(ctx: &mut FnCtx<'_>, parent_bits: &str, child_bits: &str) {
+    if !crate::codegen::write_barriers_enabled() { return; }
+    ctx.block().call_void(
+        "js_write_barrier",
+        &[(I64, parent_bits), (I64, child_bits)],
+    );
+}
+
 pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
     match expr {
         // -------- Literals --------
@@ -826,11 +844,17 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     );
                     let box_ptr = blk.bitcast_double_to_i64(&cap_dbl);
                     blk.call_void("js_box_set", &[(I64, &box_ptr), (DOUBLE, &v)]);
+                    // Gen-GC Phase C2: barrier — box is the parent.
+                    let v_bits = ctx.block().bitcast_double_to_i64(&v);
+                    emit_write_barrier(ctx, &box_ptr, &v_bits);
                 } else {
                     ctx.block().call_void(
                         "js_closure_set_capture_f64",
                         &[(I64, &closure_ptr), (I32, &idx_str), (DOUBLE, &v)],
                     );
+                    // Gen-GC Phase C2: barrier — closure is the parent.
+                    let v_bits = ctx.block().bitcast_double_to_i64(&v);
+                    emit_write_barrier(ctx, &closure_ptr, &v_bits);
                 }
             } else if ctx.boxed_vars.contains(id) && !ctx.module_globals.contains_key(id) {
                 // Box path — only for non-global locals. Module globals
@@ -2297,6 +2321,9 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                             "js_array_set_f64",
                             &[(I64, &arr_handle), (I32, &idx_i32), (DOUBLE, &val_double)],
                         );
+                        // Gen-GC Phase C2: write barrier on array element store.
+                        let val_bits = ctx.block().bitcast_double_to_i64(&val_double);
+                        emit_write_barrier(ctx, &arr_bits, &val_bits);
                     }
                 } else {
                     let blk = ctx.block();
@@ -2307,6 +2334,9 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                         "js_array_set_f64",
                         &[(I64, &arr_handle), (I32, &idx_i32), (DOUBLE, &val_double)],
                     );
+                    // Gen-GC Phase C2: write barrier on array element store.
+                    let val_bits = ctx.block().bitcast_double_to_i64(&val_double);
+                    emit_write_barrier(ctx, &arr_bits, &val_bits);
                 }
                 return Ok(val_double);
             }
@@ -2326,6 +2356,9 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     "js_object_set_field_by_name",
                     &[(I64, &obj_handle), (I64, &key_raw), (DOUBLE, &val_double)],
                 );
+                // Gen-GC Phase C2: write barrier on object key store.
+                let val_bits = ctx.block().bitcast_double_to_i64(&val_double);
+                emit_write_barrier(ctx, &obj_bits, &val_bits);
                 return Ok(val_double);
             }
             if is_string_expr(ctx, index) {
@@ -2333,12 +2366,16 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 let key_box = lower_expr(ctx, index)?;
                 let val_double = lower_expr(ctx, value)?;
                 let blk = ctx.block();
-                let obj_handle = unbox_to_i64(blk, &obj_box);
+                let obj_bits = blk.bitcast_double_to_i64(&obj_box);
+                let obj_handle = blk.and(I64, &obj_bits, POINTER_MASK_I64);
                 let key_handle = unbox_to_i64(blk, &key_box);
                 blk.call_void(
                     "js_object_set_field_by_name",
                     &[(I64, &obj_handle), (I64, &key_handle), (DOUBLE, &val_double)],
                 );
+                // Gen-GC Phase C2: write barrier on string-keyed obj write.
+                let val_bits = ctx.block().bitcast_double_to_i64(&val_double);
+                emit_write_barrier(ctx, &obj_bits, &val_bits);
                 return Ok(val_double);
             }
             // Fallback with runtime STRING_TAG check, matching IndexGet.
@@ -2499,20 +2536,10 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 "js_object_set_field_by_name",
                 &[(I64, &obj_handle), (I64, &key_raw), (DOUBLE, &val_double)],
             );
-            // Gen-GC Phase C2: write barrier on the object field
-            // store. Records old→young pointer writes in the
-            // remembered set so minor GC can scan precise roots +
-            // RS instead of the full old-gen. Gated behind
-            // PERRY_WRITE_BARRIERS=1 — default OFF, no codegen
-            // change for production until C3 (minor GC) lands.
-            // See docs/generational-gc-plan.md §Phase C.
-            if crate::codegen::write_barriers_enabled() {
-                let val_bits = ctx.block().bitcast_double_to_i64(&val_double);
-                ctx.block().call_void(
-                    "js_write_barrier",
-                    &[(I64, &obj_bits), (I64, &val_bits)],
-                );
-            }
+            // Gen-GC Phase C2 (per docs/generational-gc-plan.md §C):
+            // see emit_write_barrier — gated PERRY_WRITE_BARRIERS=1.
+            let val_bits = ctx.block().bitcast_double_to_i64(&val_double);
+            emit_write_barrier(ctx, &obj_bits, &val_bits);
             Ok(val_double)
         }
 
@@ -8989,6 +9016,16 @@ fn lower_index_set_fast(
     }
 
     ctx.current_block = merge_idx;
+    // Gen-GC Phase C2: write barrier on the array element store.
+    // Both fast and slow paths funnel here. We use `arr_handle`
+    // (already in scope) as the parent. Note: post-realloc, the
+    // local slot has been updated with the new pointer; the
+    // barrier sees the OLD `arr_handle` which is fine for Phase C
+    // — the new pointer points into the same arena, same gen-flag
+    // status, and the parent is what we record (not the new
+    // location).
+    let val_bits = ctx.block().bitcast_double_to_i64(val_double);
+    emit_write_barrier(ctx, &arr_handle, &val_bits);
     Ok(())
 }
 
