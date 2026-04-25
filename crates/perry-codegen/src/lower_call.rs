@@ -3355,6 +3355,20 @@ pub(crate) fn lower_builtin_new(
         }
         // (`WebSocketServer` is handled by an earlier branch lower in this
         // file — pre-existing from 2026-04-14. No new branch needed here.)
+        // async_hooks.AsyncLocalStorage — `new AsyncLocalStorage()` produces a
+        // real handle so `.run(store, cb)` / `.getStore()` / `.enterWith(store)`
+        // / `.exit(cb)` / `.disable()` find their registered store stack.
+        // Same #187-shape bug — pre-fix `new AsyncLocalStorage()` fell into the
+        // empty-placeholder branch and `.run(store, cb)` dispatched against a
+        // junk pointer (callback never fired, store never recorded).
+        "AsyncLocalStorage" => {
+            for a in args {
+                let _ = lower_expr(ctx, a)?;
+            }
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_async_local_storage_new", &[]);
+            return Ok(Some(nanbox_pointer_inline(blk, &handle)));
+        }
         // decimal.js Decimal — `new Decimal(value)` where value is a number,
         // string, or another Decimal. Routes through `js_decimal_coerce_to_handle`
         // which NaN-decodes the JSValue and dispatches to `from_number` /
@@ -5211,6 +5225,29 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
     NativeModSig { module: "commander", has_receiver: true, method: "opts",
         class_filter: None,
         runtime: "js_commander_opts", args: &[], ret: NR_PTR },
+
+    // ========== async_hooks.AsyncLocalStorage ==========
+    // `new AsyncLocalStorage()` is dispatched by `lower_builtin_new`; the rows
+    // below cover the instance methods. `run(store, cb)` and `exit(cb)` need
+    // the closure pointer arg coerced via NA_PTR (the runtime function takes
+    // it as a raw `i64` ClosureHeader pointer + invokes `js_closure_call0`
+    // internally). Pre-fix every method silently no-op'd through the
+    // unknown-method sentinel.
+    NativeModSig { module: "async_hooks", has_receiver: true, method: "run",
+        class_filter: None,
+        runtime: "js_async_local_storage_run", args: &[NA_F64, NA_PTR], ret: NR_F64 },
+    NativeModSig { module: "async_hooks", has_receiver: true, method: "getStore",
+        class_filter: None,
+        runtime: "js_async_local_storage_get_store", args: &[], ret: NR_F64 },
+    NativeModSig { module: "async_hooks", has_receiver: true, method: "enterWith",
+        class_filter: None,
+        runtime: "js_async_local_storage_enter_with", args: &[NA_F64], ret: NR_VOID },
+    NativeModSig { module: "async_hooks", has_receiver: true, method: "exit",
+        class_filter: None,
+        runtime: "js_async_local_storage_exit", args: &[NA_PTR], ret: NR_F64 },
+    NativeModSig { module: "async_hooks", has_receiver: true, method: "disable",
+        class_filter: None,
+        runtime: "js_async_local_storage_disable", args: &[], ret: NR_VOID },
 
     // ========== decimal.js (arbitrary-precision math) ==========
     // `new Decimal(value)` is dispatched by `lower_builtin_new` (calls
