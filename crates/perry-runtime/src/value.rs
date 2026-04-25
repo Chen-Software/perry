@@ -864,6 +864,21 @@ pub extern "C" fn js_get_string_pointer_unified(value: f64) -> i64 {
         return jsval.as_string_ptr() as i64;
     }
 
+    // SSO inline value (SHORT_STRING_TAG = 0x7FF9) — caller wants a
+    // `*const StringHeader`, so materialize the inline bytes onto the
+    // heap. Pre-fix this fell through every branch (SSO bits are NaN
+    // so the raw-pointer / number-to-string fallbacks rejected it),
+    // returned 0, and any consumer that did
+    // `js_string_equals(handle_a, handle_b)` saw "one side is null
+    // → not equal" — which is why `JSON.parse(...).foo === "perry"`
+    // returned false (SSO === heap string mixed compare). Materialize
+    // here defeats the SSO win for the comparison path but is the
+    // smallest-blast-radius correctness fix; future codegen sites can
+    // avoid the alloc by routing through `js_jsvalue_equals` directly.
+    if jsval.is_short_string() {
+        return crate::string::js_string_materialize_to_heap(value) as i64;
+    }
+
     // Check if it's a POINTER_TAG (0x7FFD) NaN-boxed pointer (used for cross-module returns)
     if jsval.is_pointer() {
         return (bits & 0x0000_FFFF_FFFF_FFFF) as i64;

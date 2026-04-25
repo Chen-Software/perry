@@ -13,6 +13,33 @@ fn is_negative_zero(n: f64) -> bool {
     n.to_bits() == 0x8000_0000_0000_0000u64
 }
 
+/// Decode the textual content of any string-shaped JSValue (heap
+/// `STRING_TAG` or inline `SHORT_STRING_TAG`) into a fresh `String`.
+/// Returns `None` for non-string values. SSO values are decoded
+/// inline via the value's NaN-box payload — no heap touch.
+///
+/// Centralizes the SSO-aware dispatch every print/format/coerce
+/// path needs: pre-SSO (≤ v0.5.215), the `is_string()` check used
+/// throughout this file rejected SSO so any short string returned
+/// by `JSON.parse` (e.g. `"perry"` from `{"foo":"perry"}`) fell
+/// through to the "regular number" branch and printed as `NaN`
+/// (because SHORT_STRING_TAG bits are NaN bits).
+fn jsvalue_string_content(value: f64) -> Option<String> {
+    let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+    let (ptr, len) = crate::string::str_bytes_from_jsvalue(value, &mut scratch)?;
+    if ptr.is_null() {
+        return Some(String::new());
+    }
+    unsafe {
+        let bytes = std::slice::from_raw_parts(ptr, len as usize);
+        Some(
+            std::str::from_utf8(bytes)
+                .unwrap_or("[invalid utf8]")
+                .to_string(),
+        )
+    }
+}
+
 /// Print a value to stdout (console.log implementation)
 #[no_mangle]
 pub extern "C" fn js_console_log(value: JSValue) {
@@ -56,22 +83,11 @@ pub extern "C" fn js_console_log_dynamic(value: f64) {
         println!("{}null", p);
     } else if jsval.is_bool() {
         println!("{}{}", p, jsval.as_bool());
-    } else if jsval.is_string() {
-        // String pointer (uses STRING_TAG 0x7FFF)
-        let ptr = jsval.as_string_ptr();
-        if ptr.is_null() {
-            println!("{}null", p);
-        } else {
-            unsafe {
-                let len = (*ptr).byte_len as usize;
-                let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
-                let bytes = std::slice::from_raw_parts(data, len);
-                if let Ok(s) = std::str::from_utf8(bytes) {
-                    println!("{}{}", p, s);
-                } else {
-                    println!("{}[invalid utf8]", p);
-                }
-            }
+    } else if jsval.is_any_string() {
+        // Heap STRING_TAG or inline SHORT_STRING_TAG (SSO).
+        match jsvalue_string_content(value) {
+            Some(s) => println!("{}{}", p, s),
+            None => println!("{}null", p),
         }
     } else if jsval.is_pointer() {
         // Object/array pointer - format as JSON
@@ -147,21 +163,10 @@ pub extern "C" fn js_console_error_dynamic(value: f64) {
         eprintln!("null");
     } else if jsval.is_bool() {
         eprintln!("{}", jsval.as_bool());
-    } else if jsval.is_string() {
-        let ptr = jsval.as_string_ptr();
-        if ptr.is_null() {
-            eprintln!("null");
-        } else {
-            unsafe {
-                let len = (*ptr).byte_len as usize;
-                let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
-                let bytes = std::slice::from_raw_parts(data, len);
-                if let Ok(s) = std::str::from_utf8(bytes) {
-                    eprintln!("{}", s);
-                } else {
-                    eprintln!("[invalid utf8]");
-                }
-            }
+    } else if jsval.is_any_string() {
+        match jsvalue_string_content(value) {
+            Some(s) => eprintln!("{}", s),
+            None => eprintln!("null"),
         }
     } else if jsval.is_pointer() {
         // Object/array pointer - format as JSON
@@ -213,21 +218,10 @@ pub extern "C" fn js_console_warn_dynamic(value: f64) {
         eprintln!("null");
     } else if jsval.is_bool() {
         eprintln!("{}", jsval.as_bool());
-    } else if jsval.is_string() {
-        let ptr = jsval.as_string_ptr();
-        if ptr.is_null() {
-            eprintln!("null");
-        } else {
-            unsafe {
-                let len = (*ptr).byte_len as usize;
-                let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
-                let bytes = std::slice::from_raw_parts(data, len);
-                if let Ok(s) = std::str::from_utf8(bytes) {
-                    eprintln!("{}", s);
-                } else {
-                    eprintln!("[invalid utf8]");
-                }
-            }
+    } else if jsval.is_any_string() {
+        match jsvalue_string_content(value) {
+            Some(s) => eprintln!("{}", s),
+            None => eprintln!("null"),
         }
     } else if jsval.is_pointer() {
         // Object/array pointer - format as JSON
@@ -292,16 +286,8 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
             "null".to_string()
         } else if jsval.is_bool() {
             jsval.as_bool().to_string()
-        } else if jsval.is_string() {
-            let ptr = jsval.as_string_ptr();
-            if ptr.is_null() {
-                "null".to_string()
-            } else {
-                let len = (*ptr).byte_len as usize;
-                let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
-                let bytes = std::slice::from_raw_parts(data, len);
-                std::str::from_utf8(bytes).unwrap_or("[invalid utf8]").to_string()
-            }
+        } else if jsval.is_any_string() {
+            jsvalue_string_content(value).unwrap_or_else(|| "null".to_string())
         } else if jsval.is_bigint() {
             // Format BigInt by converting to string
             let ptr = jsval.as_bigint_ptr();
@@ -397,7 +383,7 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
                         let elem_value = *data_ptr.add(i);
                         let elem_jsval = JSValue::from_bits(elem_value.to_bits());
                         // Quote string elements like Node's util.inspect: 'hello'
-                        if elem_jsval.is_string() {
+                        if elem_jsval.is_any_string() {
                             let s = format_jsvalue(elem_value, depth + 1);
                             parts.push(format!("'{}'", s));
                         } else {
@@ -594,18 +580,11 @@ fn format_jsvalue_for_json(value: f64, depth: usize) -> String {
             "null".to_string()
         } else if jsval.is_bool() {
             jsval.as_bool().to_string()
-        } else if jsval.is_string() {
-            let ptr = jsval.as_string_ptr();
-            if ptr.is_null() {
-                "null".to_string()
-            } else {
-                let len = (*ptr).byte_len as usize;
-                let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
-                let bytes = std::slice::from_raw_parts(data, len);
-                let s = std::str::from_utf8(bytes).unwrap_or("[invalid utf8]");
-                // Escape and quote strings for JSON-like output
-                format!("'{}'", escape_string(s))
-            }
+        } else if jsval.is_any_string() {
+            // Escape and quote strings for JSON-like output. SSO + heap
+            // strings handled identically via the central decoder.
+            let s = jsvalue_string_content(value).unwrap_or_default();
+            format!("'{}'", escape_string(&s))
         } else if jsval.is_bigint() {
             let ptr = jsval.as_bigint_ptr();
             if ptr.is_null() {
@@ -844,14 +823,21 @@ pub extern "C" fn js_mod(a: JSValue, b: JSValue) -> JSValue {
 
 #[no_mangle]
 pub extern "C" fn js_eq(a: JSValue, b: JSValue) -> JSValue {
-    // Strict equality for numbers
-    if a.is_number() && b.is_number() {
-        JSValue::bool(a.as_number() == b.as_number())
-    } else if a.bits() == b.bits() {
-        JSValue::bool(true)
-    } else {
-        JSValue::bool(false)
-    }
+    // Delegate to the SSO-aware strict-equality entry in value.rs,
+    // which already handles cross-representation string compares
+    // (heap STRING_TAG + inline SHORT_STRING_TAG, in any order) plus
+    // BigInt-by-value, INT32-vs-f64, and the negative-zero / NaN
+    // edge cases. The previous implementation was bit-equality with
+    // a number-only special case — `JSON.parse(...).foo === "perry"`
+    // returned `false` because the JSON parser emits SSO for ≤ 5-byte
+    // strings while `"perry"` literals are interned to heap strings,
+    // and the bits diverge across representations even when the text
+    // is identical.
+    let result = crate::value::js_jsvalue_equals(
+        f64::from_bits(a.bits()),
+        f64::from_bits(b.bits()),
+    );
+    JSValue::bool(result != 0)
 }
 
 /// JS abstract equality (==). Implements the coercion rules:
@@ -878,11 +864,16 @@ pub extern "C" fn js_loose_eq(a: JSValue, b: JSValue) -> JSValue {
     if a.is_number() && b.is_number() {
         return JSValue::bool(a.as_number() == b.as_number());
     }
-    // Both strings: content compare
-    if a.is_string() && b.is_string() {
-        let result = crate::string::js_string_equals(
-            a.as_string_ptr(),
-            b.as_string_ptr(),
+    // Both strings (heap STRING_TAG and/or inline SHORT_STRING_TAG):
+    // content compare. The previous `is_string() && is_string()` test
+    // missed any SSO operand — `JSON.parse(...).foo == "perry"` returned
+    // false because the JSON parser emits SSO for ≤5-byte strings while
+    // string literals are interned to heap strings, and the bit patterns
+    // diverged across representations even with identical text.
+    if a.is_any_string() && b.is_any_string() {
+        let result = crate::value::js_jsvalue_equals(
+            f64::from_bits(a.bits()),
+            f64::from_bits(b.bits()),
         );
         return JSValue::bool(result != 0);
     }
@@ -895,12 +886,13 @@ pub extern "C" fn js_loose_eq(a: JSValue, b: JSValue) -> JSValue {
         let b_num = if b.as_bool() { 1.0 } else { 0.0 };
         return js_loose_eq(a, JSValue::number(b_num));
     }
-    // String vs number: coerce string to number
-    if a.is_number() && b.is_string() {
+    // String vs number: coerce string to number. `is_any_string` so
+    // SSO operands get the same coercion as heap strings.
+    if a.is_number() && b.is_any_string() {
         let b_num = js_number_coerce(f64::from_bits(b.bits()));
         return JSValue::bool(a.as_number() == b_num);
     }
-    if a.is_string() && b.is_number() {
+    if a.is_any_string() && b.is_number() {
         let a_num = js_number_coerce(f64::from_bits(a.bits()));
         return JSValue::bool(a_num == b.as_number());
     }
@@ -1329,8 +1321,15 @@ pub extern "C" fn js_string_coerce(value: f64) -> *mut StringHeader {
     } else if jsval.is_bool() {
         if jsval.as_bool() { "true".to_string() } else { "false".to_string() }
     } else if jsval.is_string() {
-        // Already a string, return as-is
+        // Already a heap string, return as-is
         return jsval.as_string_ptr() as *mut StringHeader;
+    } else if jsval.is_short_string() {
+        // SSO inline value — caller wants a `*mut StringHeader`, so
+        // materialize the inline bytes onto the heap. Defeats the SSO
+        // win for this value but preserves correctness on coercion
+        // paths (`String(x)`, `'' + x` via the runtime fallback, etc.)
+        // that pass the result downstream as a heap pointer.
+        return crate::string::js_string_materialize_to_heap(value);
     } else if jsval.is_bigint() {
         let ptr = jsval.as_bigint_ptr();
         if ptr.is_null() {
