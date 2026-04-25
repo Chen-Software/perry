@@ -18,21 +18,24 @@ low — the lazy path can avoid materializing the parse tree entirely.
 
 | Implementation | Profile | Median (ms) | p95 (ms) | σ | Min | Max | Peak RSS (MB) |
 |---|---|---:|---:|---:|---:|---:|---:|
-| perry (gen-gc + lazy tape) | optimized | 70 | 74 | 1.7 | 68 | 74 | 85 |
-| rust serde_json (LTO+1cgu) | optimized | 187 | 318 | 40.6 | 184 | 318 | 13 |
-| rust serde_json | idiomatic | 202 | 208 | 2.2 | 198 | 208 | 12 |
-| bun (default) | idiomatic | 260 | 270 | 5.0 | 255 | 270 | 84 |
-| perry (mark-sweep, no lazy) | idiomatic | 366 | 393 | 11.8 | 359 | 393 | 102 |
-| node --max-old=4096 | optimized | 395 | 761 | 123.4 | 381 | 761 | 182 |
-| node (default) | idiomatic | 396 | 486 | 28.8 | 379 | 486 | 182 |
-| kotlin -server -Xmx512m | optimized | 457 | 490 | 12.8 | 451 | 490 | 426 |
-| kotlin (kotlinx.serialization) | idiomatic | 484 | 495 | 7.1 | 469 | 495 | 608 |
-| c++ -O3 -flto (nlohmann/json) | optimized | 788 | 807 | 6.5 | 780 | 807 | 25 |
-| go -ldflags="-s -w" -trimpath | optimized | 823 | 885 | 18.7 | 812 | 885 | 22 |
-| go (encoding/json) | idiomatic | 831 | 1123 | 92.9 | 811 | 1123 | 23 |
-| c++ -O2 (nlohmann/json) | idiomatic | 872 | 1550 | 304.2 | 858 | 1550 | 28 |
-| swift -O (Foundation) | idiomatic | 3747 | 5108 | 391.2 | 3713 | 5108 | 34 |
-| swift -O -wmo (Foundation) | optimized | 3778 | 4395 | 178.1 | 3763 | 4395 | 35 |
+| c++ -O3 -flto (simdjson) | optimized | 28 | 48 | 6.9 | 25 | 48 | 9 |
+| c++ -O2 (simdjson) | idiomatic | 32 | 80 | 13.9 | 30 | 80 | 9 |
+| perry (gen-gc + lazy tape) | optimized | 89 | 114 | 12.7 | 74 | 114 | 85 |
+| rust serde_json (LTO+1cgu) | optimized | 186 | 188 | 1.1 | 184 | 188 | 11 |
+| rust serde_json | idiomatic | 200 | 202 | 1.0 | 198 | 202 | 11 |
+| bun (default) | idiomatic | 252 | 257 | 3.2 | 248 | 257 | 84 |
+| perry (mark-sweep, no lazy) | idiomatic | 368 | 381 | 7.0 | 360 | 381 | 102 |
+| node (default) | idiomatic | 381 | 399 | 7.1 | 377 | 399 | 182 |
+| node --max-old=4096 | optimized | 386 | 389 | 3.7 | 377 | 389 | 182 |
+| kotlin -server -Xmx512m | optimized | 461 | 466 | 6.4 | 443 | 466 | 421 |
+| kotlin (kotlinx.serialization) | idiomatic | 473 | 484 | 7.4 | 457 | 484 | 603 |
+| assemblyscript+json-as (wasmtime) | idiomatic | 669 | 694 | 10.7 | 657 | 694 | 58 |
+| c++ -O3 -flto (nlohmann/json) | optimized | 798 | 803 | 3.5 | 792 | 803 | 25 |
+| go (encoding/json) | idiomatic | 805 | 818 | 5.1 | 797 | 818 | 23 |
+| go -ldflags="-s -w" -trimpath | optimized | 806 | 814 | 3.2 | 802 | 814 | 23 |
+| c++ -O2 (nlohmann/json) | idiomatic | 871 | 930 | 19.7 | 858 | 930 | 26 |
+| swift -O (Foundation) | idiomatic | 3748 | 3778 | 17.8 | 3716 | 3778 | 34 |
+| swift -O -wmo (Foundation) | optimized | 3782 | 4196 | 120.3 | 3758 | 4196 | 34 |
 
 ## JSON parse-and-iterate
 
@@ -43,18 +46,21 @@ JSON content. 10k records, ~1 MB blob, 50 iterations per run.
 
 | Implementation | Profile | Median (ms) | p95 (ms) | σ | Min | Max | Peak RSS (MB) |
 |---|---|---:|---:|---:|---:|---:|---:|
-| rust serde_json | idiomatic | 201 | 211 | 3.6 | 200 | 211 | 12 |
-| bun (default) | idiomatic | 260 | 265 | 2.7 | 255 | 265 | 86 |
-| rust serde_json (LTO+1cgu) | optimized | 270 | 469 | 82.3 | 196 | 469 | 13 |
-| node --max-old=4096 | optimized | 369 | 406 | 12.7 | 356 | 406 | 119 |
-| node (default) | idiomatic | 370 | 419 | 16.8 | 358 | 419 | 179 |
-| perry (mark-sweep, no lazy) | idiomatic | 384 | 485 | 30.8 | 381 | 485 | 102 |
-| kotlin -server -Xmx512m | optimized | 468 | 479 | 7.4 | 457 | 479 | 423 |
-| perry (gen-gc + lazy tape) | optimized | 482 | 509 | 10.7 | 468 | 509 | 100 |
-| kotlin (kotlinx.serialization) | idiomatic | 588 | 841 | 108.9 | 484 | 841 | 607 |
-| c++ -O3 -flto (nlohmann/json) | optimized | 820 | 1249 | 125.4 | 814 | 1249 | 26 |
-| go -ldflags="-s -w" -trimpath | optimized | 854 | 1232 | 114.9 | 826 | 1232 | 23 |
-| go (encoding/json) | idiomatic | 858 | 930 | 33.0 | 826 | 930 | 23 |
-| c++ -O2 (nlohmann/json) | idiomatic | 887 | 901 | 4.7 | 884 | 901 | 25 |
-| swift -O (Foundation) | idiomatic | 3735 | 6942 | 1186.6 | 3709 | 6942 | 37 |
-| swift -O -wmo (Foundation) | optimized | 3759 | 6279 | 719.6 | 3731 | 6279 | 35 |
+| c++ -O3 -flto (simdjson) | optimized | 25 | 62 | 10.6 | 25 | 62 | 9 |
+| c++ -O2 (simdjson) | idiomatic | 26 | 30 | 1.5 | 25 | 30 | 9 |
+| rust serde_json (LTO+1cgu) | optimized | 187 | 190 | 1.5 | 185 | 190 | 11 |
+| rust serde_json | idiomatic | 205 | 244 | 11.5 | 202 | 244 | 12 |
+| bun (default) | idiomatic | 257 | 260 | 2.0 | 252 | 260 | 87 |
+| node (default) | idiomatic | 360 | 368 | 4.1 | 352 | 368 | 119 |
+| node --max-old=4096 | optimized | 365 | 378 | 5.1 | 358 | 378 | 119 |
+| perry (mark-sweep, no lazy) | idiomatic | 373 | 376 | 2.7 | 367 | 376 | 102 |
+| kotlin -server -Xmx512m | optimized | 462 | 470 | 4.6 | 454 | 470 | 423 |
+| perry (gen-gc + lazy tape) | optimized | 476 | 482 | 3.8 | 470 | 482 | 100 |
+| kotlin (kotlinx.serialization) | idiomatic | 484 | 494 | 5.4 | 476 | 494 | 606 |
+| assemblyscript+json-as (wasmtime) | idiomatic | 660 | 746 | 26.7 | 648 | 746 | 58 |
+| c++ -O3 -flto (nlohmann/json) | optimized | 814 | 1379 | 163.7 | 810 | 1379 | 27 |
+| c++ -O2 (nlohmann/json) | idiomatic | 900 | 1004 | 31.2 | 893 | 1004 | 25 |
+| go (encoding/json) | idiomatic | 944 | 1618 | 316.2 | 800 | 1618 | 22 |
+| go -ldflags="-s -w" -trimpath | optimized | 1332 | 1565 | 159.5 | 990 | 1565 | 22 |
+| swift -O (Foundation) | idiomatic | 3714 | 7079 | 1000.8 | 3690 | 7079 | 36 |
+| swift -O -wmo (Foundation) | optimized | 3746 | 3850 | 33.3 | 3725 | 3850 | 34 |

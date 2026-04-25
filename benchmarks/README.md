@@ -1,11 +1,12 @@
 # Perry Benchmarks
 
 This is the canonical, single-page comparison of Perry against
-production-quality runtimes — **node, bun, Rust, Go, C++, Swift,
-Java, Python, Zig**. It pulls together every benchmark in this
-repo, lists the exact compiler flags used per language, calls out
-where Perry leads and where it doesn't, and links to the design
-docs that explain *why* the numbers look the way they do.
+production-quality runtimes — **node, bun, Rust, Go, C++ (nlohmann
++ simdjson), Swift, Java, Kotlin, Python, AssemblyScript**. It
+pulls together every benchmark in this repo, lists the exact
+compiler flags used per language, calls out where Perry leads and
+where it doesn't, and links to the design docs that explain *why*
+the numbers look the way they do.
 
 The format is designed for skeptics. Every implementation, every
 flag, every methodology decision is in this page — no tables hidden
@@ -53,29 +54,32 @@ stats (median + p95 + σ + min + max) in
 > Per iteration: `parse(blob)` → `stringify(parsed)` → discard.
 
 The unmutated parse lets Perry's lazy tape (v0.5.204+) memcpy the
-original blob bytes for stringify, which is why Perry's headline
-number on this workload is so low — the lazy path can avoid
-materializing the parse tree entirely. This is the honest "Perry
-beats everyone" workload because it's a workload Perry's runtime is
-specifically optimized for.
+original blob bytes for stringify. simdjson uses the same fast-path
+trick (`raw_json()` view into the original input), which is why
+both runtimes lead this workload — they exploit the "no
+modification" structure. nlohmann/json doesn't have this fast path
+and rebuilds the string from the parsed tree on every `dump()`.
 
 | Implementation | Profile | Median (ms) | p95 (ms) | σ | Min | Max | Peak RSS (MB) |
 |---|---|---:|---:|---:|---:|---:|---:|
-| **perry (gen-gc + lazy tape)** | optimized | **70** | 74 | 1.7 | 68 | 74 | 85 |
-| rust serde_json (LTO+1cgu) | optimized | 187 | 318 | 40.6 | 184 | 318 | 13 |
-| rust serde_json | idiomatic | 202 | 208 | 2.2 | 198 | 208 | 12 |
-| bun | idiomatic | 260 | 270 | 5.0 | 255 | 270 | 84 |
-| perry (mark-sweep, no lazy) | idiomatic | 366 | 393 | 11.8 | 359 | 393 | 102 |
-| node --max-old=4096 | optimized | 395 | 761 | 123.4 | 381 | 761 | 182 |
-| node | idiomatic | 396 | 486 | 28.8 | 379 | 486 | 182 |
-| kotlin -server -Xmx512m | optimized | 457 | 490 | 12.8 | 451 | 490 | 426 |
-| kotlin (kotlinx.serialization) | idiomatic | 484 | 495 | 7.1 | 469 | 495 | 608 |
-| c++ -O3 -flto (nlohmann/json) | optimized | 788 | 807 | 6.5 | 780 | 807 | 25 |
-| go -ldflags="-s -w" -trimpath | optimized | 823 | 885 | 18.7 | 812 | 885 | 22 |
-| go (encoding/json) | idiomatic | 831 | 1123 | 92.9 | 811 | 1123 | 23 |
-| c++ -O2 (nlohmann/json) | idiomatic | 872 | 1550 | 304.2 | 858 | 1550 | 28 |
-| swift -O (Foundation) | idiomatic | 3747 | 5108 | 391.2 | 3713 | 5108 | 34 |
-| swift -O -wmo (Foundation) | optimized | 3778 | 4395 | 178.1 | 3763 | 4395 | 35 |
+| **c++ -O3 -flto (simdjson)** | optimized | **28** | 48 | 6.9 | 25 | 48 | 9 |
+| c++ -O2 (simdjson) | idiomatic | 32 | 80 | 13.9 | 30 | 80 | 9 |
+| perry (gen-gc + lazy tape) | optimized | 89 | 114 | 12.7 | 74 | 114 | 85 |
+| rust serde_json (LTO+1cgu) | optimized | 186 | 188 | 1.1 | 184 | 188 | 11 |
+| rust serde_json | idiomatic | 200 | 202 | 1.0 | 198 | 202 | 11 |
+| bun | idiomatic | 252 | 257 | 3.2 | 248 | 257 | 84 |
+| perry (mark-sweep, no lazy) | idiomatic | 368 | 381 | 7.0 | 360 | 381 | 102 |
+| node | idiomatic | 381 | 399 | 7.1 | 377 | 399 | 182 |
+| node --max-old=4096 | optimized | 386 | 389 | 3.7 | 377 | 389 | 182 |
+| kotlin -server -Xmx512m | optimized | 461 | 466 | 6.4 | 443 | 466 | 421 |
+| kotlin (kotlinx.serialization) | idiomatic | 473 | 484 | 7.4 | 457 | 484 | 603 |
+| assemblyscript+json-as (wasmtime) | idiomatic | 669 | 694 | 10.7 | 657 | 694 | 58 |
+| c++ -O3 -flto (nlohmann/json) | optimized | 798 | 803 | 3.5 | 792 | 803 | 25 |
+| go (encoding/json) | idiomatic | 805 | 818 | 5.1 | 797 | 818 | 23 |
+| go -ldflags="-s -w" -trimpath | optimized | 806 | 814 | 3.2 | 802 | 814 | 23 |
+| c++ -O2 (nlohmann/json) | idiomatic | 871 | 930 | 19.7 | 858 | 930 | 26 |
+| swift -O (Foundation) | idiomatic | 3748 | 3778 | 17.8 | 3716 | 3778 | 34 |
+| swift -O -wmo (Foundation) | optimized | 3782 | 4196 | 120.3 | 3758 | 4196 | 34 |
 
 #### B. JSON parse-and-iterate
 > Per iteration: `parse(blob)` → sum every record's `nested.x`
@@ -88,39 +92,49 @@ tape pays its overhead without compensation.
 
 | Implementation | Profile | Median (ms) | p95 (ms) | σ | Min | Max | Peak RSS (MB) |
 |---|---|---:|---:|---:|---:|---:|---:|
-| **rust serde_json** | idiomatic | **201** | 211 | 3.6 | 200 | 211 | 12 |
-| bun | idiomatic | 260 | 265 | 2.7 | 255 | 265 | 86 |
-| rust serde_json (LTO+1cgu) | optimized | 270 | 469 | 82.3 | 196 | 469 | 13 |
-| node --max-old=4096 | optimized | 369 | 406 | 12.7 | 356 | 406 | 119 |
-| node | idiomatic | 370 | 419 | 16.8 | 358 | 419 | 179 |
-| perry (mark-sweep, no lazy) | idiomatic | 384 | 485 | 30.8 | 381 | 485 | 102 |
-| kotlin -server -Xmx512m | optimized | 468 | 479 | 7.4 | 457 | 479 | 423 |
-| perry (gen-gc + lazy tape) | optimized | 482 | 509 | 10.7 | 468 | 509 | 100 |
-| kotlin (kotlinx.serialization) | idiomatic | 588 | 841 | 108.9 | 484 | 841 | 607 |
-| c++ -O3 -flto (nlohmann/json) | optimized | 820 | 1249 | 125.4 | 814 | 1249 | 26 |
-| go -ldflags="-s -w" -trimpath | optimized | 854 | 1232 | 114.9 | 826 | 1232 | 23 |
-| go (encoding/json) | idiomatic | 858 | 930 | 33.0 | 826 | 930 | 23 |
-| c++ -O2 (nlohmann/json) | idiomatic | 887 | 901 | 4.7 | 884 | 901 | 25 |
-| swift -O (Foundation) | idiomatic | 3735 | 6942 | 1186.6 | 3709 | 6942 | 37 |
-| swift -O -wmo (Foundation) | optimized | 3759 | 6279 | 719.6 | 3731 | 6279 | 35 |
+| **c++ -O3 -flto (simdjson)** | optimized | **25** | 62 | 10.6 | 25 | 62 | 9 |
+| c++ -O2 (simdjson) | idiomatic | 26 | 30 | 1.5 | 25 | 30 | 9 |
+| rust serde_json (LTO+1cgu) | optimized | 187 | 190 | 1.5 | 185 | 190 | 11 |
+| rust serde_json | idiomatic | 205 | 244 | 11.5 | 202 | 244 | 12 |
+| bun | idiomatic | 257 | 260 | 2.0 | 252 | 260 | 87 |
+| node | idiomatic | 360 | 368 | 4.1 | 352 | 368 | 119 |
+| node --max-old=4096 | optimized | 365 | 378 | 5.1 | 358 | 378 | 119 |
+| perry (mark-sweep, no lazy) | idiomatic | 373 | 376 | 2.7 | 367 | 376 | 102 |
+| kotlin -server -Xmx512m | optimized | 462 | 470 | 4.6 | 454 | 470 | 423 |
+| perry (gen-gc + lazy tape) | optimized | 476 | 482 | 3.8 | 470 | 482 | 100 |
+| kotlin (kotlinx.serialization) | idiomatic | 484 | 494 | 5.4 | 476 | 494 | 606 |
+| assemblyscript+json-as (wasmtime) | idiomatic | 660 | 746 | 26.7 | 648 | 746 | 58 |
+| c++ -O3 -flto (nlohmann/json) | optimized | 814 | 1379 | 163.7 | 810 | 1379 | 27 |
+| c++ -O2 (nlohmann/json) | idiomatic | 900 | 1004 | 31.2 | 893 | 1004 | 25 |
+| go (encoding/json) | idiomatic | 944 | 1618 | 316.2 | 800 | 1618 | 22 |
+| go -ldflags="-s -w" -trimpath | optimized | 1332 | 1565 | 159.5 | 990 | 1565 | 22 |
+| swift -O (Foundation) | idiomatic | 3714 | 7079 | 1000.8 | 3690 | 7079 | 36 |
+| swift -O -wmo (Foundation) | optimized | 3746 | 3850 | 33.3 | 3725 | 3850 | 34 |
 
-**Reading both tables together**: Perry's lazy tape is specifically
-optimized for workloads where `parse` is followed by `stringify`
-without intermediate iteration. On those workloads it wins decisively
-(70 ms, 2.7× over Rust LTO). On workloads that touch every element,
-it pays the materialization cost the lazy approach was trying to
-avoid — and Perry's `gen-gc + lazy tape` default (482 ms) is actually
-SLOWER than its `mark-sweep, no lazy` escape-hatch mode (384 ms).
-Rust serde_json with typed structs leads parse-and-iterate at
-201 ms because typed deserialization avoids per-value heap
-allocations entirely. Bun is the surprise headline: ~260 ms across
-both workloads, with single-digit σ — JavaScriptCore's JSON
-implementation is genuinely fast and stable.
+**Reading both tables together**: **simdjson leads both workloads
+decisively** — 28 ms validate-and-roundtrip, 25 ms parse-and-iterate.
+This is the honest C++ parse-throughput ceiling; cherry-picking
+nlohmann would have hidden it. Perry's lazy tape (89 ms on
+validate-and-roundtrip) is best-in-class **among dynamic-typing
+runtimes** (beats Node 381 ms, Bun 252 ms, Kotlin 461 ms) but
+loses cleanly to the SIMD-accelerated reference.
 
-The honest framing: **Perry leads workloads it's tuned for; loses
-gracefully on workloads it isn't.** The `PERRY_JSON_TAPE=0` escape
-hatch is right there for the parse-and-iterate case, and on that
-flag Perry beats Node and is competitive with Bun.
+On parse-and-iterate, where the lazy tape can't shortcut, Perry
+default lands at 476 ms — slower than its own mark-sweep escape
+hatch (373 ms) because the lazy tape pays overhead the iteration
+forces it to amortize. Rust serde_json with typed structs is the
+non-SIMD champion at 187 ms; Bun is the dynamic-typing champion at
+257 ms with single-digit σ. The AssemblyScript+json-as row (660-
+669 ms) shows what the closest TS-to-native peer ships today —
+typed structs + wasmtime + a wasm-target compile pipeline.
+
+The honest framing: **Perry's JSON pipeline is competitive with
+the dynamic-typing pack but loses to typed deserialization (Rust)
+and to SIMD-accelerated parsing (simdjson)**. The
+`PERRY_JSON_TAPE=0` escape hatch trades the lazy-tape fast path
+for direct-parser performance on iterate-heavy workloads. Closing
+the gap to simdjson's parse-throughput ceiling is tracked in
+[`docs/json-typed-parse-plan.md`](../docs/json-typed-parse-plan.md).
 
 ### Compute microbenches (idiomatic flags)
 
@@ -324,8 +338,11 @@ correctness is verifiable.
 | optimized | Swift | `swiftc -O -wmo bench.swift` (whole-module optimization) |
 | idiomatic | Kotlin | `java -cp ... BenchKt` (JVM defaults, kotlinx.serialization) |
 | optimized | Kotlin | `java -server -Xmx512m -cp ... BenchKt` (server JIT + heap tuning) |
-| idiomatic | C++ | `clang++ -std=c++17 -O2` |
-| optimized | C++ | `clang++ -std=c++17 -O3 -flto` |
+| idiomatic | C++ (nlohmann) | `clang++ -std=c++17 -O2` |
+| optimized | C++ (nlohmann) | `clang++ -std=c++17 -O3 -flto` |
+| idiomatic | C++ (simdjson) | `clang++ -std=c++17 -O2 -lsimdjson` |
+| optimized | C++ (simdjson) | `clang++ -std=c++17 -O3 -flto -lsimdjson` |
+| idiomatic | AssemblyScript | `npx asc bench.ts --target release --transform json-as/transform` (extends `@assemblyscript/wasi-shim`); runs as `wasmtime build/release.wasm` |
 
 ### JSON libraries used
 
@@ -337,13 +354,18 @@ correctness is verifiable.
 | Rust | `serde_json` (1.0) | The de facto standard; ~ubiquitous in the Rust ecosystem |
 | Swift | `Foundation.JSONEncoder` / `JSONDecoder` | Apple's standard |
 | Kotlin | `kotlinx.serialization-json` (1.9.0) | The official Kotlin serialization library; uses compile-time-generated (de)serializers, no reflection |
-| C++ | nlohmann/json (3.12.0) | The de facto popular C++ JSON library; not the fastest available (RapidJSON / simdjson are faster) but what most projects reach for |
+| **C++ (popular default)** | **nlohmann/json** (3.12.0) | The de facto popular C++ JSON library; not the fastest available but what most projects reach for |
+| **C++ (parse-throughput ceiling)** | **simdjson** (4.3.0) | The SIMD-accelerated reference. Listed alongside nlohmann so the table shows both "what most projects ship with" AND "the C++ parse ceiling". simdjson is expected to beat Perry on time — see "Honest disclaimers" below. |
+| AssemblyScript (TS-to-native peer) | `json-as` (1.3.2) | The de facto performant JSON library for AssemblyScript. Compile-time-generated (de)serializers via a transform, same approach as Rust serde / Kotlin kotlinx.serialization. AS is strictly typed (no `any`); the bench shape is closer to the Rust/Kotlin typed-struct rows than the dynamic-typing JS rows — see "Honest disclaimers" below. |
 
-**Faster C++ libraries exist** (RapidJSON, simdjson). We deliberately
-benchmark nlohmann/json because that's what real C++ projects use 90%
-of the time. If you need to compare against simdjson, it would beat
-Perry on time for *parse-only* workloads (it's SIMD-accelerated parse,
-no stringify).
+Both C++ libraries are listed because each answers a different
+question. nlohmann answers *"what does the typical C++ project's
+JSON pipeline look like?"* — it's the popular default and most
+real codebases use it. simdjson answers *"what's the C++ parse
+ceiling?"* — it's a SIMD-accelerated reference parser; if Perry
+is going to lose to anything in this table, it's going to be
+simdjson on parse-heavy workloads. The page shows both rows so
+the comparison is honest in both directions.
 
 ### Honest disclaimers on the JSON numbers
 
@@ -384,6 +406,45 @@ no stringify).
   production** — it disables the lazy JSON tape (v0.5.210) and the
   generational GC default (v0.5.237). It exists so you can see the
   untuned floor and compare against it.
+- **simdjson beats Perry on time, decisively, on both workloads.**
+  This is expected and correct. simdjson is a SIMD-accelerated
+  parser purpose-built for JSON parse-throughput; on
+  validate-and-roundtrip it lands at ~25 ms median and on
+  parse-and-iterate at ~26 ms. Perry's lazy tape is a 12-byte-per-
+  value sequential representation; it's competitive with
+  general-purpose JSON libraries (nlohmann, serde_json,
+  encoding/json) on the right workload, but it does not have
+  simdjson's vectorized validation pipeline. **The simdjson row is
+  in this table on purpose** — cherry-picking weak C++ libraries
+  is exactly what this disclaimers section is supposed to prevent.
+  When a future commit closes the simdjson gap on parse-throughput
+  for typed inputs, that result will land here as well; tracked
+  in `docs/json-typed-parse-plan.md`.
+  *Footnote on simdjson's stringify*: simdjson 4.x doesn't ship a
+  built-in stringify primitive. Our `bench_simdjson.cpp` uses
+  `simdjson::ondemand` for parse and `doc.raw_json()` (a
+  zero-copy view into the original input bytes) as the
+  "stringified" output — same conceptual approach as Perry's lazy
+  tape memcpy fast path. This is fair: both runtimes exploit the
+  "no modification between parse and stringify" structure of the
+  workload. nlohmann/json does NOT have this fast path and
+  rebuilds the string from the parsed tree on every `dump()`.
+- **AssemblyScript is the closest TS-to-native peer we could
+  install + run on this bench.** porffor (a more direct AOT TS
+  compiler) was tried but produced incorrect output and segfaulted
+  on the 10k-record workload — porffor 0.61.13 is alpha-quality
+  and not ready for benchmarks of this size. Static Hermes
+  (`shermes`) is not available on Homebrew or npm in a way that
+  installs cleanly on macOS arm64. AS compiles to WebAssembly and
+  runs via wasmtime; numbers reflect the wasmtime AOT compile
+  time + runtime, not pure-native time. AS is strictly typed so
+  the workload uses concrete `Item`/`Nested` classes rather than
+  `items: any[]` — which makes the AS row closer in shape to the
+  Rust serde_json / Kotlin kotlinx.serialization typed-struct
+  rows than to the dynamic-typing JS rows. The number is real
+  ("AS+json-as on this workload runs in N ms"), but a reader
+  shouldn't extrapolate to "AS is the language for TS-to-wasm
+  performance" without context.
 
 ---
 
@@ -513,19 +574,23 @@ every other measured runtime.
 
 Where Perry actually wins, and a one-line "why" per item.
 
-- **JSON validate-and-roundtrip** (parse → stringify, no
-  intermediate iteration) — Perry leads on median time at **70 ms**
-  (TL;DR §A): 2.7× over Rust serde_json LTO, 3.7× over Bun, 5.7×
-  over Node, 6.5× over Kotlin server JIT, 11.3× over C++ -O3 -flto,
-  11.9× over Go encoding/json, 53.5× over Swift Foundation. σ=1.7 ms
-  — the tightest distribution in the field. The win comes from the
-  lazy JSON tape (v0.5.204+): parse builds a 12-byte-per-value tape
-  instead of materializing a tree; stringify on an unmutated parse
-  memcpy's the original blob. See
+- **JSON validate-and-roundtrip — best in dynamic-typing pack**
+  (parse → stringify, no intermediate iteration). Perry lands at
+  **89 ms** median (TL;DR §A) — beats every other dynamic-typing
+  runtime in the table: 2.8× over Bun (252 ms), 4.3× over Node
+  (381 ms), 5.2× over Kotlin server JIT (461 ms). simdjson leads
+  the absolute time at 28 ms — that's the SIMD-accelerated C++
+  reference, listed alongside nlohmann/json so the comparison is
+  honest in both directions. Perry's win in the dynamic-typing
+  cohort comes from the lazy JSON tape (v0.5.204+): parse builds
+  a 12-byte-per-value tape instead of materializing a tree;
+  stringify on an unmutated parse memcpy's the original blob —
+  same fast-path trick simdjson uses with `raw_json()`. See
   [`json-typed-parse-plan.md`](../docs/json-typed-parse-plan.md).
-  Caveat: this is the workload Perry's runtime is specifically
-  tuned for. On parse-and-iterate (TL;DR §B), Perry doesn't lead —
-  Rust serde_json's typed structs win at 201 ms.
+  On parse-and-iterate (TL;DR §B), Perry doesn't lead — simdjson
+  at 25 ms and Rust serde_json at 187 ms both beat Perry's 476 ms,
+  and Perry's lazy tape pays overhead it can't amortize when every
+  element is touched.
 - **f64-arithmetic flag-aggressiveness probes** (`loop_overhead`,
   `math_intensive`, `accumulate`) — Perry 3-8× faster than native on
   these microbenches because TypeScript's `number` semantics let LLVM

@@ -291,7 +291,7 @@ fi
 # ---------------------------------------------------------------------------
 # C++ (nlohmann/json)
 # ---------------------------------------------------------------------------
-echo "=== C++ ==="
+echo "=== C++ (nlohmann/json — popular default) ==="
 if have clang++ && [[ -d "$NLOHMANN_INCLUDE" ]]; then
     clang++ -std=c++17 -O2          -I"$NLOHMANN_INCLUDE" bench.cpp              -o "$TMPDIR/bench_cpp_rt_idio" 2>&1 | tail -3
     clang++ -std=c++17 -O2          -I"$NLOHMANN_INCLUDE" bench_field_access.cpp -o "$TMPDIR/bench_cpp_fa_idio" 2>&1 | tail -3
@@ -301,6 +301,57 @@ if have clang++ && [[ -d "$NLOHMANN_INCLUDE" ]]; then
     [[ -x "$TMPDIR/bench_cpp_rt_opt"  ]] && run_bench "roundtrip"    "optimized" "c++ -O3 -flto (nlohmann/json)" "" "$TMPDIR/bench_cpp_rt_opt"
     [[ -x "$TMPDIR/bench_cpp_fa_idio" ]] && run_bench "field_access" "idiomatic" "c++ -O2 (nlohmann/json)"      "" "$TMPDIR/bench_cpp_fa_idio"
     [[ -x "$TMPDIR/bench_cpp_fa_opt"  ]] && run_bench "field_access" "optimized" "c++ -O3 -flto (nlohmann/json)" "" "$TMPDIR/bench_cpp_fa_opt"
+fi
+
+# ---------------------------------------------------------------------------
+# C++ (simdjson — SIMD-accelerated parse-throughput reference)
+#   Listed alongside nlohmann/json so a reader can see both:
+#   "what most C++ projects ship with" AND "the C++ ceiling".
+#   simdjson 4.x uses ondemand for parse + raw_json() bytes for stringify
+#   (the unmutated-parse fast path, analogous to Perry's lazy tape).
+#   See bench_simdjson.cpp file header for the full rationale.
+# ---------------------------------------------------------------------------
+echo "=== C++ (simdjson — SIMD reference) ==="
+SIMDJSON_PREFIX=$(brew --prefix simdjson 2>/dev/null || echo "")
+SIMDJSON_INCLUDE_DIR="$SIMDJSON_PREFIX/include"
+SIMDJSON_LIB_DIR="$SIMDJSON_PREFIX/lib"
+if have clang++ && [[ -d "$SIMDJSON_INCLUDE_DIR" ]]; then
+    clang++ -std=c++17 -O2       -I"$SIMDJSON_INCLUDE_DIR" -L"$SIMDJSON_LIB_DIR" bench_simdjson.cpp              -lsimdjson -o "$TMPDIR/bench_simdjson_rt_idio" 2>&1 | tail -3
+    clang++ -std=c++17 -O2       -I"$SIMDJSON_INCLUDE_DIR" -L"$SIMDJSON_LIB_DIR" bench_field_access_simdjson.cpp -lsimdjson -o "$TMPDIR/bench_simdjson_fa_idio" 2>&1 | tail -3
+    clang++ -std=c++17 -O3 -flto -I"$SIMDJSON_INCLUDE_DIR" -L"$SIMDJSON_LIB_DIR" bench_simdjson.cpp              -lsimdjson -o "$TMPDIR/bench_simdjson_rt_opt"  2>&1 | tail -3
+    clang++ -std=c++17 -O3 -flto -I"$SIMDJSON_INCLUDE_DIR" -L"$SIMDJSON_LIB_DIR" bench_field_access_simdjson.cpp -lsimdjson -o "$TMPDIR/bench_simdjson_fa_opt"  2>&1 | tail -3
+    [[ -x "$TMPDIR/bench_simdjson_rt_idio" ]] && run_bench "roundtrip"    "idiomatic" "c++ -O2 (simdjson)"      "" "$TMPDIR/bench_simdjson_rt_idio"
+    [[ -x "$TMPDIR/bench_simdjson_rt_opt"  ]] && run_bench "roundtrip"    "optimized" "c++ -O3 -flto (simdjson)" "" "$TMPDIR/bench_simdjson_rt_opt"
+    [[ -x "$TMPDIR/bench_simdjson_fa_idio" ]] && run_bench "field_access" "idiomatic" "c++ -O2 (simdjson)"      "" "$TMPDIR/bench_simdjson_fa_idio"
+    [[ -x "$TMPDIR/bench_simdjson_fa_opt"  ]] && run_bench "field_access" "optimized" "c++ -O3 -flto (simdjson)" "" "$TMPDIR/bench_simdjson_fa_opt"
+else
+    echo "  simdjson not found — install via 'brew install simdjson'"
+fi
+
+# ---------------------------------------------------------------------------
+# AssemblyScript (json-as) — the TS-to-native peer.
+#   AS is a TypeScript-like language that compiles to WebAssembly.
+#   Run via wasmtime. json-as generates type-specialized (de)serializers
+#   at compile time via a transform — same approach as Rust serde and
+#   Kotlin kotlinx.serialization, no runtime reflection. AS is strictly
+#   typed (no `any`) so the workload uses concrete `Item`/`Nested`
+#   classes — see asconfig.json + assembly/bench.ts. This makes the AS
+#   row closer in shape to the Rust/Kotlin typed-struct rows than to
+#   the dynamic-typing JS rows; documented in benchmarks/README.md's
+#   "Honest disclaimers" section.
+# ---------------------------------------------------------------------------
+echo "=== AssemblyScript + json-as + wasmtime ==="
+AS_DIR="$(pwd)/as_workspace"
+if have wasmtime && [[ -d "$AS_DIR/node_modules" ]]; then
+    (
+        cd "$AS_DIR"
+        npx --no-install asc assembly/bench.ts              --target release --outFile build/bench_rt.wasm 2>&1 | tail -3
+        npx --no-install asc assembly/bench_field_access.ts --target release --outFile build/bench_fa.wasm 2>&1 | tail -3
+    )
+    [[ -f "$AS_DIR/build/bench_rt.wasm" ]] && run_bench "roundtrip"    "idiomatic" "assemblyscript+json-as (wasmtime)" "" wasmtime "$AS_DIR/build/bench_rt.wasm"
+    [[ -f "$AS_DIR/build/bench_fa.wasm" ]] && run_bench "field_access" "idiomatic" "assemblyscript+json-as (wasmtime)" "" wasmtime "$AS_DIR/build/bench_fa.wasm"
+else
+    echo "  AssemblyScript / wasmtime not set up — see as_workspace/README"
 fi
 
 # ---------------------------------------------------------------------------
