@@ -13,21 +13,41 @@ each delta.
 
 ## Results
 
-**Run date:** 2026-04-25 — Perry commit `main` (v0.5.241).
+**Run date:** 2026-04-25 — Perry commit `main` (v0.5.243).
 **Hardware:** Apple M1 Max (10 cores, 64 GB RAM), macOS 26.4.
-**Methodology:** best of 5 runs per cell, monotonic clock, no warmup.
-All times in milliseconds. Lower is better.
+**Methodology:** RUNS=11 per cell. **Median wall-clock ms below**;
+full per-cell stats (median + p95 + σ + min + max) in `RESULTS_AUTO.md`.
+**Pinning:** macOS scheduler hint via `taskpolicy -t 0 -l 0`
+(P-core preferred via throughput/latency tiers, NOT strict affinity —
+Apple does not expose unprivileged hard core pinning). Lower is better.
 
 | Benchmark      | Perry |  Rust |   C++ |    Go | Swift |  Java |  Node |   Bun |  Python |
 |----------------|-------|-------|-------|-------|-------|-------|-------|-------|---------|
-| fibonacci      |   302 |   314 |   304 |   440 |   394 |   276 |   991 |   510 |   15661 |
-| loop_overhead  |    12 |    95 |    94 |    94 |    94 |    96 |    52 |    40 |    2934 |
-| array_write    |     3 |     7 |     2 |     8 |     2 |     6 |     8 |     5 |     389 |
-| array_read     |     4 |     9 |     9 |    10 |     9 |    10 |    12 |    15 |     337 |
-| math_intensive |    14 |    46 |    49 |    47 |    47 |    50 |    48 |    50 |    2204 |
-| object_create  |     0 |     0 |     0 |     0 |     0 |     4 |     8 |     6 |     158 |
-| nested_loops   |    17 |     8 |     8 |     9 |     8 |    10 |    16 |    19 |     470 |
-| accumulate     |    33 |    94 |    94 |    94 |    95 |    96 |   585 |    96 |    4916 |
+| fibonacci      |   312 |   319 |   308 |   454 |   400 |   283 |  1016 |   518 |   15814 |
+| loop_overhead  |    12 |    96 |    97 |    98 |    97 |    99 |    56 |    41 |    2986 |
+| array_write    |     4 |     7 |     3 |     9 |     3 |     9 |     9 |     6 |     396 |
+| array_read     |     4 |     9 |     9 |    11 |     9 |    11 |    13 |    15 |     342 |
+| math_intensive |    14 |    48 |    50 |    51 |    49 |    51 |    49 |    50 |    2244 |
+| object_create  |     1 |     0 |     0 |     0 |     0 |     5 |     8 |     6 |     163 |
+| nested_loops   |    17 |     8 |     8 |    11 |     8 |    10 |    17 |    19 |     485 |
+| accumulate     |    34 |    95 |    95 |    98 |    98 |    98 |   598 |    98 |    5052 |
+
+**Interesting tails surfaced by RUNS=11:**
+
+- Python `accumulate` median 5052 ms but p95 9388 ms (σ=1454) — one
+  run took 9.4 s, likely from GC pressure or thermal throttling
+  during a 10 s+ tight loop. Best-of-5 hid this; the p95 is real.
+- Python `math_intensive` median 2244 ms but p95 4091 ms (σ=531) —
+  same pattern.
+- Most other cells have σ < 5% of median — distributions are tight.
+
+The `nested_loops` and `accumulate` regressions vs the v0.5.164
+baseline (8 → 17 ms and 24 → 34 ms) are still present and still
+caused by the v0.5.237 generational-GC default flip — `PERRY_GEN_GC=0`
+recovers the 8 / 24 ms baseline. The slight jitter on `fibonacci`
+(302 → 312 ms median across runs) is genuine variance from the
+underlying recursive call chain; best-of-5 had been picking the
+lower tail, median is more representative.
 
 **Honest regressions vs v0.5.164** (when this table was last refreshed,
 before generational GC became the default in v0.5.237):

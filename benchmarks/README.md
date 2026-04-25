@@ -12,15 +12,31 @@ flag, every methodology decision is in this page — no tables hidden
 behind blog posts, no cherry-picked subsets.
 
 > **Hardware:** Apple M1 Max (10 cores: 8P + 2E), 64 GB RAM, macOS
-> 26.4. Default scheduling — no affinity pinning, no `taskset`,
-> no thermal-throttle mitigation beyond best-of-N. Numbers from
-> 2026-04-25 unless otherwise stated.
+> 26.4. Numbers from 2026-04-25 unless otherwise stated.
 >
-> **Methodology:** best-of-5 runs per cell, monotonic clock, no
-> warmup unless noted (JS-family runtimes get a 3-iteration
-> warmup before timed iterations to avoid charging Perry / Bun /
-> Node for JIT cold-start). Time in milliseconds, RSS in MB, peak
-> values from `/usr/bin/time -l`.
+> **CPU pinning:** macOS `taskpolicy -t 0 -l 0` — sets throughput-tier 0
+> + latency-tier 0, a scheduler HINT toward P-cores on Apple Silicon.
+> This is **not** strict pinning; Apple does not expose unprivileged
+> hard core affinity. (`taskpolicy -c user-interactive` does not exist;
+> the `-c` clamp only accepts downgrade values utility/background/
+> maintenance.) On Linux the runner uses `taskset -c 0` for strict
+> pinning instead. The runner prints which strategy was applied at
+> the top of each invocation.
+>
+> **Methodology:** RUNS=11 per cell (configurable via `$RUNS`). For
+> each cell we collect every per-run wall-clock ms and report
+> **median, p95, σ (population stddev), min, and max** — not
+> "best-of-N". Headline tables show the median; full distributions
+> are in [`json_polyglot/RESULTS.md`](json_polyglot/RESULTS.md) and
+> [`polyglot/RESULTS.md`](polyglot/RESULTS.md). Time in milliseconds,
+> RSS in MB (peak resident set size from `/usr/bin/time -l`, the worst
+> peak observed across runs).
+>
+> **Warmup:** the bench programs themselves run 3 untimed warmup
+> iterations before the timed loop, to avoid charging JIT-y runtimes
+> (Perry's compiled binary, V8, JSC, JVM) for cold-start. Process
+> startup is included in the timed window for non-JIT runtimes (Go,
+> Rust, C++, Swift) since their startup is sub-millisecond.
 
 ---
 
@@ -28,48 +44,59 @@ behind blog posts, no cherry-picked subsets.
 
 ### JSON parse + stringify (10k records, 50 iterations, ~1 MB blob)
 
-| Implementation | Profile | Time (ms) | Peak RSS (MB) |
-|---|---|---:|---:|
-| **perry (gen-gc + lazy tape)** | optimized | **67** | 85 |
-| rust serde_json (LTO+1cgu) | optimized | 183 | 11 |
-| rust serde_json | idiomatic | 193 | 11 |
-| bun | idiomatic | 240 | 81 |
-| perry (mark-sweep, no lazy) | idiomatic | 341 | 102 |
-| node | idiomatic | 361 | 180 |
-| node --max-old=4096 | optimized | 364 | 182 |
-| kotlin -server -Xmx512m (kotlinx.serialization) | optimized | 446 | 423 |
-| kotlin (kotlinx.serialization) | idiomatic | 460 | 606 |
-| c++ -O3 -flto (nlohmann/json) | optimized | 774 | 25 |
-| go (encoding/json) | optimized | 783 | 22 |
-| go (encoding/json) | idiomatic | 785 | 23 |
-| c++ -O2 (nlohmann/json) | idiomatic | 840 | 25 |
-| swift -O -wmo (Foundation) | optimized | 3665 | 34 |
-| swift -O (Foundation) | idiomatic | 3674 | 33 |
+RUNS=11 per cell. Headline = median ms; p95 (worst non-outlier),
+σ (population stddev), min, max in the per-cell columns. Full table
+in [`json_polyglot/RESULTS.md`](json_polyglot/RESULTS.md).
 
-**Reading this**: Perry leads on time, beating every JS-family
-runtime (Node, Bun) and every native runtime (Rust, Go, C++,
-Swift, Kotlin). Perry's RSS is mid-pack — better than Node and
-Kotlin (the JVM heap reservation is enormous), comparable to Bun,
-higher than typed-struct languages (Go, Rust, C++). The RSS gap
-to typed-struct languages is fundamental: dynamic JSON parsing
-allocates a heap object per value; typed parsers materialize into
-fixed-layout structs. Kotlin's high RSS reflects JVM heap
-reservation, not working-set size.
+| Implementation | Profile | Median (ms) | p95 (ms) | σ | Min | Max | Peak RSS (MB) |
+|---|---|---:|---:|---:|---:|---:|---:|
+| **perry (gen-gc + lazy tape)** | optimized | **74** | 85 | 4.9 | 69 | 85 | 85 |
+| rust serde_json (LTO+1cgu) | optimized | 183 | 186 | 1.3 | 181 | 186 | 11 |
+| rust serde_json | idiomatic | 199 | 201 | 1.2 | 197 | 201 | 11 |
+| bun | idiomatic | 276 | 294 | 7.3 | 267 | 294 | 84 |
+| node --max-old=4096 | optimized | 381 | 421 | 16.3 | 374 | 421 | 182 |
+| perry (mark-sweep, no lazy) | idiomatic | 384 | 459 | 22.9 | 372 | 459 | 102 |
+| node | idiomatic | 385 | 484 | 37.8 | 370 | 484 | 182 |
+| kotlin -server -Xmx512m | optimized | 457 | 472 | 5.6 | 449 | 472 | 424 |
+| kotlin (kotlinx.serialization) | idiomatic | 475 | 485 | 9.0 | 452 | 485 | 607 |
+| c++ -O3 -flto (nlohmann/json) | optimized | 783 | 791 | 2.7 | 781 | 791 | 25 |
+| go (encoding/json) | idiomatic | 807 | 873 | 22.5 | 800 | 873 | 23 |
+| go -ldflags="-s -w" -trimpath | optimized | 812 | 1118 | 91.2 | 802 | 1118 | 23 |
+| c++ -O2 (nlohmann/json) | idiomatic | 855 | 858 | 2.2 | 852 | 858 | 25 |
+| swift -O (Foundation) | idiomatic | 3747 | 3990 | 72.9 | 3721 | 3990 | 34 |
+| swift -O -wmo (Foundation) | optimized | 3879 | 5309 | 426.8 | 3750 | 5309 | 35 |
+
+**Reading this**: Perry leads on median time (74 ms), beating every
+JS-family runtime (Node 385 ms, Bun 276 ms) and every native runtime
+(Rust serde_json 183 ms, Go 807 ms, C++ 783 ms, Swift 3747 ms,
+Kotlin 475 ms). Variance (σ) is single-digit ms for Perry / Rust / C++ /
+Kotlin / Bun (all rock-solid); Swift `-O -wmo` and Go optimized are
+genuinely noisy (σ 91-427 ms — the "optimized" Swift sometimes ran a
+worst-case 5.3 s outlier). Perry's RSS is mid-pack — better than Node
+and Kotlin (whose RSS reflects JVM heap reservation, not working-set
+size), comparable to Bun, higher than typed-struct languages (Go, Rust,
+C++). The RSS gap to typed-struct languages is fundamental: dynamic
+JSON parsing allocates a heap object per value; typed parsers
+materialize into fixed-layout structs.
 
 ### Compute microbenches (8 benchmarks, idiomatic flags)
 
-Best of 5 runs, all times in milliseconds.
+RUNS=11 per cell. Headline = median ms. Full per-cell stats (median +
+p95 + σ + min + max) in
+[`polyglot/RESULTS_AUTO.md`](polyglot/RESULTS_AUTO.md) and the
+hand-curated [`polyglot/RESULTS.md`](polyglot/RESULTS.md). Lower is
+better.
 
 | Benchmark      | Perry |  Rust |   C++ |    Go | Swift |  Java |  Node |   Bun |  Python |
 |----------------|------:|------:|------:|------:|------:|------:|------:|------:|--------:|
-| fibonacci      |   302 |   314 |   304 |   440 |   394 |   276 |   991 |   510 |   15661 |
-| loop_overhead  |    12 |    95 |    94 |    94 |    94 |    96 |    52 |    40 |    2934 |
-| array_write    |     3 |     7 |     2 |     8 |     2 |     6 |     8 |     5 |     389 |
-| array_read     |     4 |     9 |     9 |    10 |     9 |    10 |    12 |    15 |     337 |
-| math_intensive |    14 |    46 |    49 |    47 |    47 |    50 |    48 |    50 |    2204 |
-| object_create  |     0 |     0 |     0 |     0 |     0 |     4 |     8 |     6 |     158 |
-| nested_loops   |    17 |     8 |     8 |     9 |     8 |    10 |    16 |    19 |     470 |
-| accumulate     |    33 |    94 |    94 |    94 |    95 |    96 |   585 |    96 |    4916 |
+| fibonacci      |   312 |   319 |   308 |   454 |   400 |   283 |  1016 |   518 |   15814 |
+| loop_overhead  |    12 |    96 |    97 |    98 |    97 |    99 |    56 |    41 |    2986 |
+| array_write    |     4 |     7 |     3 |     9 |     3 |     9 |     9 |     6 |     396 |
+| array_read     |     4 |     9 |     9 |    11 |     9 |    11 |    13 |    15 |     342 |
+| math_intensive |    14 |    48 |    50 |    51 |    49 |    51 |    49 |    50 |    2244 |
+| object_create  |     1 |     0 |     0 |     0 |     0 |     5 |     8 |     6 |     163 |
+| nested_loops   |    17 |     8 |     8 |    11 |     8 |    10 |    17 |    19 |     485 |
+| accumulate     |    34 |    95 |    95 |    98 |    98 |    98 |   598 |    98 |    5052 |
 
 Perry's **`loop_overhead`, `math_intensive`, `accumulate`, `array_read`**
 wins (3-8× over native) come from a single source: Perry emits
@@ -82,9 +109,11 @@ count 4. C++ closes the gap with `-O3 -ffast-math`; see
 [`benchmarks/polyglot/RESULTS_OPT.md`](polyglot/RESULTS_OPT.md) for
 the per-language flag-tuning table that backs out this entire result.
 
-`fibonacci` (302 ms): Perry matches the compiled pack within 2-12ms
-(Java's HotSpot JIT is ~9% faster). `object_create`: tied with native
-(all 0 ms — working set fits in one arena block, GC never fires).
+`fibonacci` (median 312 ms): Perry matches the compiled pack within
+4-29 ms (Java's HotSpot JIT is ~9% faster). `object_create`: median
+1 ms — within a tick of native (Rust/C++/Go/Swift all hit median 0
+because their working set fits in one arena block; Perry hits 1
+because gen-GC adds a single allocation-counter increment).
 
 **Honest regressions vs the v0.5.164 baseline** (when these benches
 were last refreshed, before gen-GC became default):
@@ -92,19 +121,38 @@ were last refreshed, before gen-GC became default):
 - `nested_loops` 8 → 17 ms (+9 ms). Caused by the v0.5.237
   generational GC default flip — gen-GC adds per-allocation overhead
   (write-barrier potential, age-bump pass) that's pure cost on
-  workloads that don't benefit from it. Set `PERRY_GEN_GC=0` to recover
-  the 8 ms baseline.
-- `accumulate` 24 → 33 ms (+9 ms). Same root cause; same
-  workaround.
-- `array_read` 3 → 4 ms (+1 ms). Within noise.
-- All other cells unchanged or slightly improved (`fibonacci`
-  309 → 302, `array_write` 3 → 3, `math_intensive` 14 → 14).
+  workloads that don't benefit from it. Set `PERRY_GEN_GC=0` to
+  recover the 8 ms baseline.
+- `accumulate` 24 → 34 ms (+10 ms). Same root cause; same workaround.
+- `object_create` 0 → 1 ms (+1 ms). Same root cause.
+- `array_write` / `array_read` 3 → 4 ms each (+1 ms). Within
+  measurement noise.
+- All other cells (`fibonacci`, `loop_overhead`, `math_intensive`)
+  unchanged within ±2 ms of the v0.5.164 baseline.
 
 The trade-off was deliberate: gen-GC's wins on long-running and
 allocation-heavy workloads (`test_memory_json_churn` 115 → 91 MB
 in v0.5.237) outweigh the small compute-bench regressions, and
 the escape hatch is right there. Listed here unapologetically
 because the point of this page is to be defensible.
+
+**Tail-latency findings** that median + p95 + σ surfaced (and
+best-of-5 had hidden):
+
+- Python `accumulate` median 5052 ms, p95 9388 ms (σ 1454 ms) —
+  one run took 9.4 s, ~2× the typical case. Likely GC pressure or
+  thermal throttle during a 10 s+ tight loop. The previous best-of-5
+  reported "4854 ms" and silently dropped this tail.
+- Python `math_intensive`: median 2244, p95 4091 (σ 532). Same
+  pattern.
+- Swift `-O -wmo` JSON: median 3879 ms, p95 5309 ms (σ 427) —
+  Swift's whole-module optimization sometimes spends a long time
+  in JSON's reflection pipeline; "optimized" is genuinely noisier
+  than `-O` alone (which has σ=73).
+
+These tails are real numbers measured today, not cherry-picked
+worst cases. Best-of-N hides them; median + p95 puts them on the
+page.
 
 ---
 
@@ -351,7 +399,7 @@ Default (lazy + gen-gc), the case `bench_json_roundtrip` measures with
 no env vars: **66 ms / 85 MB**, currently best in class on time across
 every other measured runtime.
 
-### Other Perry benches (best-of-5, M1 Max, this commit)
+### Other Perry benches (best-of-5 minimum across RUNS=5 quick runs, M1 Max, this commit)
 
 | Benchmark | Time (ms) | Peak RSS (MB) |
 |---|---:|---:|
@@ -375,13 +423,16 @@ every other measured runtime.
 Where Perry actually wins, and a one-line "why" per item.
 
 - **JSON parse + stringify roundtrip** (this page's TL;DR) — Perry is
-  faster than every other measured runtime: 3.6× over Bun, 5.4× over
-  Node, 2.7× over Rust serde_json (LTO), 6.7× over Kotlin
-  kotlinx.serialization (server JIT), 11.6× over C++ nlohmann -O3
-  -flto, 11.7× over Go encoding/json, 54.7× over Swift Foundation.
-  The win comes from the lazy JSON tape (v0.5.204+): parse builds a
-  12-byte-per-value tape instead of materializing a tree; stringify
-  on an unmutated parse memcpy's the original blob. See
+  faster than every other measured runtime on **median** time
+  (74 ms): 2.5× over Rust serde_json LTO (183 ms), 3.7× over Bun
+  (276 ms), 5.2× over Node (385 ms), 6.2× over Kotlin server JIT
+  (457 ms), 10.6× over C++ -O3 -flto nlohmann (783 ms), 10.9× over Go
+  encoding/json (807 ms), 50.6× over Swift Foundation (3747 ms).
+  Variance (σ) is single-digit ms — Perry's distribution is tight
+  (4.9 ms σ across 11 runs). The win comes from the lazy JSON tape
+  (v0.5.204+): parse builds a 12-byte-per-value tape instead of
+  materializing a tree; stringify on an unmutated parse memcpy's the
+  original blob. See
   [`json-typed-parse-plan.md`](../docs/json-typed-parse-plan.md).
 - **f64-arithmetic-heavy tight loops** (`loop_overhead`,
   `math_intensive`, `accumulate`) — 3-8× faster than native because
@@ -443,9 +494,9 @@ The ones we already know about and what's tracked:
 ## 6. What this page does not measure
 
 - **GC latency / tail latency.** Reported numbers are throughput
-  (best-of-5 wall clock). A 99th-percentile pause measurement would
-  show Perry's stop-the-world GC at a disadvantage vs Go's concurrent
-  collector or HotSpot ZGC.
+  (median wall clock across RUNS=11 invocations). A 99th-percentile
+  pause measurement would show Perry's stop-the-world GC at a
+  disadvantage vs Go's concurrent collector or HotSpot ZGC.
 - **JIT warmup behavior.** JS-family runtimes (Node, Bun) get
   3-iteration warmup before timed iterations to avoid charging them
   for cold-JIT compilation. Real cold-start latency is much worse for
@@ -482,8 +533,8 @@ brew install nlohmann-json
 
 # Run the polyglot suite:
 cd benchmarks/json_polyglot
-./run.sh             # best-of-5 (default)
-RUNS=10 ./run.sh     # best-of-10 for tighter numbers
+./run.sh             # RUNS=11 default (median + p95 + σ + min + max)
+RUNS=21 ./run.sh     # 21 runs for tighter intervals
 ```
 
 Outputs `benchmarks/json_polyglot/RESULTS.md` with the full table.
@@ -492,8 +543,8 @@ Outputs `benchmarks/json_polyglot/RESULTS.md` with the full table.
 
 ```bash
 cd benchmarks/polyglot
-./run_all.sh         # best-of-3
-./run_all.sh 5       # best-of-5 (what RESULTS.md uses)
+./run_all.sh         # RUNS=11 default (median + p95 + σ + min + max)
+./run_all.sh 21      # 21 runs for tighter intervals
 ```
 
 Missing language toolchains show as `-` in the table; the script

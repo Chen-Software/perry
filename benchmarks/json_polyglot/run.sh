@@ -7,24 +7,39 @@
 # achievable with full tuning" number.
 #
 # Workload: 10k records, ~1 MB blob, parse + stringify, 50 iterations.
-# Runs each best-of-5 (configurable via $RUNS env var). Captures
-# wall-clock ms (from program-printed `ms:N` line) and peak RSS
-# (from /usr/bin/time -l on macOS / -v on Linux).
+#
+# Methodology (v0.5.243+):
+#   RUNS=11 (default; configurable via $RUNS env var). For each cell
+#   we collect every per-run wall-clock ms and emit median, p95,
+#   stddev (σ), min, and max — not "best-of-N" — so noise and outlier
+#   sensitivity are visible. RSS is captured per-run via
+#   /usr/bin/time -l (peak RSS, not average); we report the max
+#   observed peak across runs.
+#
+# CPU pinning:
+#   macOS: taskpolicy -t 0 -l 0 (sets throughput-tier 0 + latency-tier 0
+#          — a scheduler HINT toward P-cores on Apple Silicon, NOT
+#          strict pinning. Apple does not expose unprivileged hard
+#          affinity. -c user-interactive doesn't exist; that flag only
+#          accepts downgrade clamps utility/background/maintenance.)
+#   Linux: taskset -c 0 (strict pinning to CPU 0).
+#   Otherwise: no pinning, with a caveat banner at run start.
 #
 # Toolchains expected on PATH:
 #   perry  (built locally — falls back to ../../target/release/perry)
 #   bun, node
 #   go, cargo, swiftc, clang++
 #   nlohmann/json (brew install nlohmann-json on macOS)
+#   kotlinc + gradle (brew install kotlin gradle)
 #
 # Outputs:
-#   RESULTS.md — markdown table sorted by time (best first)
+#   RESULTS.md — markdown table sorted by median time
 
 set -uo pipefail
 cd "$(dirname "$0")"
 
 PERRY=${PERRY:-../../target/release/perry}
-RUNS=${RUNS:-5}
+RUNS=${RUNS:-11}
 TMPDIR=$(mktemp -d)
 KEEP=${KEEP:-0}
 [[ "${1:-}" == "--keep" ]] && KEEP=1
@@ -34,34 +49,99 @@ NLOHMANN_INCLUDE=$(brew --prefix nlohmann-json 2>/dev/null || echo "")/include
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# Results accumulator — each line is "ms|label|rss_mb|profile".
-# `profile` is "idiomatic" or "optimized" so we can group in the table.
+# ---------------------------------------------------------------------------
+# CPU pinning detection. Sets PIN_CMD (array, may be empty) and PIN_NOTE.
+# ---------------------------------------------------------------------------
+PIN_CMD=()
+PIN_NOTE=""
+case "$(uname)" in
+    Darwin)
+        if have taskpolicy; then
+            PIN_CMD=(taskpolicy -t 0 -l 0)
+            PIN_NOTE="macOS scheduler hint (taskpolicy -t 0 -l 0 — P-core preferred via throughput/latency tiers, NOT strict affinity)"
+        else
+            PIN_NOTE="macOS without taskpolicy — no pinning available"
+        fi
+        ;;
+    Linux)
+        if have taskset; then
+            PIN_CMD=(taskset -c 0)
+            PIN_NOTE="Linux strict (taskset -c 0)"
+        else
+            PIN_NOTE="Linux without taskset — no pinning available"
+        fi
+        ;;
+    *)
+        PIN_NOTE="Unknown platform $(uname) — no pinning attempted"
+        ;;
+esac
+
+echo "==============================================================="
+echo "JSON polyglot benchmark — Perry v$(grep '^version' ../../Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+echo "Hardware: $(uname -srm) on $(hostname -s)"
+echo "Runs per cell: $RUNS (median + p95 + σ + min + max reported)"
+echo "Pinning strategy: $PIN_NOTE"
+echo "==============================================================="
+echo
+
+# Results accumulator — TSV: median|label|profile|p95|stddev|min|max|rss_mb
 RESULTS_FILE="$TMPDIR/results.tsv"
 : > "$RESULTS_FILE"
 
-# Run a binary RUNS times, parse "ms:N" from stdout + RSS from time -l,
-# pick best (min ms, max RSS observed since RSS is "peak" anyway), and
-# append to RESULTS_FILE.
+# Compute median, p95, stddev, min, max from a list of integer ms values.
+# Reads values one per line on stdin. Outputs single line:
+#   "median|p95|stddev|min|max"
+# stddev is population stddev (n divisor), one decimal.
+compute_stats() {
+    awk '
+    { v[NR] = $1 + 0 }
+    END {
+        n = NR
+        if (n == 0) { print "0|0|0|0|0"; exit }
+        # sort ascending (insertion sort — fine for n=11..30)
+        for (i = 2; i <= n; i++) {
+            x = v[i]; j = i - 1
+            while (j >= 1 && v[j] > x) { v[j+1] = v[j]; j-- }
+            v[j+1] = x
+        }
+        # median
+        if (n % 2 == 1) { median = v[(n+1)/2] }
+        else { median = (v[n/2] + v[n/2+1]) / 2 }
+        # p95: index = ceil(0.95 * n) (1-based)
+        p95_idx = int(0.95 * n + 0.99999)
+        if (p95_idx > n) p95_idx = n
+        if (p95_idx < 1) p95_idx = 1
+        p95 = v[p95_idx]
+        # mean + stddev (population)
+        sum = 0
+        for (i = 1; i <= n; i++) sum += v[i]
+        mean = sum / n
+        ss = 0
+        for (i = 1; i <= n; i++) ss += (v[i] - mean) ^ 2
+        stddev = sqrt(ss / n)
+        printf "%d|%d|%.1f|%d|%d", median, p95, stddev, v[1], v[n]
+    }'
+}
+
+# Run a binary RUNS times under the pinning prefix, collect all ms values
+# and the worst-case RSS, write a row to RESULTS_FILE plus a stdout line.
 #
 # Usage: run_bench <profile> <label> <env-string> <command...>
-#   profile: "idiomatic" or "optimized"
-#   label:   what shows in the table
-#   env:     extra env vars (space-separated KEY=VAL); pass "" for none
 run_bench() {
     local profile="$1"; shift
     local label="$1"; shift
     local env_str="$1"; shift
-    # Remaining args are the command.
-    local best_ms=999999
-    local best_rss=0
+    local samples_file="$TMPDIR/samples.$$"
+    : > "$samples_file"
+    local worst_rss=0
     local i
     for i in $(seq 1 "$RUNS"); do
         local stderr_file="$TMPDIR/stderr.$$.$i"
         local out
         if [[ -n "$env_str" ]]; then
-            out=$(env $env_str /usr/bin/time -l "$@" 2>"$stderr_file" || true)
+            out=$(env $env_str "${PIN_CMD[@]}" /usr/bin/time -l "$@" 2>"$stderr_file" || true)
         else
-            out=$(/usr/bin/time -l "$@" 2>"$stderr_file" || true)
+            out=$("${PIN_CMD[@]}" /usr/bin/time -l "$@" 2>"$stderr_file" || true)
         fi
         local ms
         ms=$(printf '%s\n' "$out" | sed -n 's/^ms:\([0-9]*\)$/\1/p' | head -1)
@@ -70,17 +150,28 @@ run_bench() {
         rm -f "$stderr_file"
         [[ -z "$ms" ]] && continue
         [[ -z "$rss_bytes" ]] && rss_bytes=0
-        if [[ "$ms" -lt "$best_ms" ]]; then best_ms="$ms"; fi
-        if [[ "$rss_bytes" -gt "$best_rss" ]]; then best_rss="$rss_bytes"; fi
+        echo "$ms" >> "$samples_file"
+        if [[ "$rss_bytes" -gt "$worst_rss" ]]; then worst_rss="$rss_bytes"; fi
     done
-    if [[ "$best_ms" -eq 999999 ]]; then
+    local sample_count
+    sample_count=$(wc -l < "$samples_file" | awk '{print $1}')
+    if [[ "$sample_count" -eq 0 ]]; then
         printf "  %-44s  FAILED (no successful runs)\n" "$label"
+        rm -f "$samples_file"
         return
     fi
+    local stats
+    stats=$(compute_stats < "$samples_file")
+    rm -f "$samples_file"
+    local median p95 stddev min max
+    IFS='|' read -r median p95 stddev min max <<< "$stats"
     local rss_mb
-    rss_mb=$(awk -v b="$best_rss" 'BEGIN { printf "%d", b/1048576 }')
-    printf "  %-44s  %5s ms  %4s MB\n" "$label ($profile)" "$best_ms" "$rss_mb"
-    printf "%s\t%s\t%s\t%s\n" "$best_ms" "$label" "$rss_mb" "$profile" >> "$RESULTS_FILE"
+    rss_mb=$(awk -v b="$worst_rss" 'BEGIN { printf "%d", b/1048576 }')
+    printf "  %-44s  median=%-4s p95=%-4s σ=%-4s [%s..%s] ms · %s MB\n" \
+        "$label ($profile)" "$median" "$p95" "$stddev" "$min" "$max" "$rss_mb"
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+        "$median" "$label" "$profile" "$p95" "$stddev" "$min" "$max" "$rss_mb" \
+        >> "$RESULTS_FILE"
 }
 
 # ---------------------------------------------------------------------------
@@ -89,11 +180,10 @@ run_bench() {
 #                     for compiled output; the lazy JSON tape IS the
 #                     optimization. Direct path is shown for honesty.)
 # ---------------------------------------------------------------------------
-echo "=== Perry (v$(grep '^version' ../../Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')) ==="
+echo "=== Perry ==="
 if [[ -x "$PERRY" ]]; then
     "$PERRY" compile bench.ts -o "$TMPDIR/perry_bin" >/dev/null 2>&1
     if [[ -x "$TMPDIR/perry_bin" ]]; then
-        # idiomatic = default (lazy tape on for ≥1KB blobs as of v0.5.210, gen-GC default ON since v0.5.237)
         run_bench "optimized"  "perry (gen-gc + lazy tape)"   ""                      "$TMPDIR/perry_bin"
         run_bench "idiomatic"  "perry (mark-sweep, no lazy)"  "PERRY_GEN_GC=0 PERRY_JSON_TAPE=0" "$TMPDIR/perry_bin"
     fi
@@ -102,35 +192,24 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Bun — JavaScriptCore JIT. Bun doesn't ship distinct release-tier
-# build flags (it's an interpreter+JIT, not a compiled language), so
-# we list it once. Listed under "idiomatic" because that's how every
-# Bun user invokes it. (For honesty: if anyone proposes a Bun
-# "optimized" flag, drop it in here.)
+# Bun — JavaScriptCore JIT.
 # ---------------------------------------------------------------------------
 echo "=== Bun ==="
 if have bun; then
-    run_bench "idiomatic" "bun (default)"     ""                  bun     bench.ts
+    run_bench "idiomatic" "bun (default)" "" bun bench.ts
 fi
 
 # ---------------------------------------------------------------------------
-# Node.js — V8. Default vs. --jitless contrast would test the JIT;
-# we show default vs. --max-old-space-size tuning instead since that's
-# the closest analog to a heap-pressure tweak.
+# Node.js — V8.
 # ---------------------------------------------------------------------------
 echo "=== Node.js ==="
 if have node; then
-    run_bench "idiomatic" "node (default)"        ""                  node     --experimental-strip-types bench.ts
-    run_bench "optimized" "node --max-old=4096"   ""                  node     --experimental-strip-types --max-old-space-size=4096 bench.ts
+    run_bench "idiomatic" "node (default)"        ""  node --experimental-strip-types bench.ts
+    run_bench "optimized" "node --max-old=4096"   ""  node --experimental-strip-types --max-old-space-size=4096 bench.ts
 fi
 
 # ---------------------------------------------------------------------------
-# Go — encoding/json. `go build` is already release. The aggressive tier
-# is `-ldflags="-s -w"` + `-trimpath` (smaller binary, no measurable
-# perf impact) — included for honesty / completeness, not because we
-# expect a delta. The real "optimized" variant in Go-land would be
-# swapping encoding/json for github.com/goccy/go-json (3-5× faster);
-# we include it under "optimized" as well to show the ceiling.
+# Go — encoding/json.
 # ---------------------------------------------------------------------------
 echo "=== Go ==="
 if have go; then
@@ -146,9 +225,6 @@ fi
 
 # ---------------------------------------------------------------------------
 # Rust serde_json
-#  idiomatic = `cargo build --release` (opt-level=3, no LTO, 16 codegen units)
-#  optimized = `cargo build --profile release-aggressive` (LTO=fat,
-#              codegen-units=1, panic=abort, strip)
 # ---------------------------------------------------------------------------
 echo "=== Rust ==="
 if have cargo; then
@@ -164,9 +240,6 @@ fi
 
 # ---------------------------------------------------------------------------
 # Swift
-#   idiomatic = `swiftc -O` (the standard release build)
-#   optimized = `swiftc -O -wmo` (whole-module optimization, common in
-#               Swift Package Manager release builds)
 # ---------------------------------------------------------------------------
 echo "=== Swift ==="
 if have swiftc; then
@@ -182,10 +255,6 @@ fi
 
 # ---------------------------------------------------------------------------
 # Kotlin (kotlinx.serialization on JVM)
-#   idiomatic = JVM defaults (java -cp ...)
-#   optimized = JVM with server-class JIT + larger initial heap
-# Both go through the JVM JIT, so we add an extra warmup margin via the
-# in-program 3-iteration warmup loop (already in bench.kt).
 # ---------------------------------------------------------------------------
 echo "=== Kotlin ==="
 GRADLE_LIB=$(brew --prefix gradle 2>/dev/null)/libexec/lib
@@ -197,7 +266,6 @@ if have kotlinc && [[ -d "$GRADLE_LIB" ]] && [[ -d "$KOTLINC_LIB" ]]; then
     if [[ -f "$TMPDIR/bench_kt.jar" ]]; then
         run_bench "idiomatic" "kotlin (kotlinx.serialization)" "" \
             java -cp "$TMPDIR/bench_kt.jar:$SERIALIZATION_CP" BenchKt
-        # JVM "optimized" — server compiler tier 4 + larger heap.
         run_bench "optimized" "kotlin -server -Xmx512m" "" \
             java -server -Xmx512m -cp "$TMPDIR/bench_kt.jar:$SERIALIZATION_CP" BenchKt
     fi
@@ -207,8 +275,6 @@ fi
 
 # ---------------------------------------------------------------------------
 # C++ (nlohmann/json)
-#   idiomatic = `clang++ -O2` (most projects' default)
-#   optimized = `clang++ -O3 -flto` (full LTO)
 # ---------------------------------------------------------------------------
 echo "=== C++ ==="
 if have clang++ && [[ -d "$NLOHMANN_INCLUDE" ]]; then
@@ -223,21 +289,23 @@ if have clang++ && [[ -d "$NLOHMANN_INCLUDE" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Write RESULTS.md (sorted by time, ascending; best first)
+# Write RESULTS.md (sorted by median time, ascending)
 # ---------------------------------------------------------------------------
 {
     echo "# JSON Polyglot Benchmark Results"
     echo
-    echo "**Workload:** parse + stringify a 10,000-record (~1 MB) JSON array, 50 iterations, best-of-$RUNS."
+    echo "**Workload:** parse + stringify a 10,000-record (~1 MB) JSON array, 50 iterations per run."
+    echo "**Runs per cell:** $RUNS · **Pinning:** $PIN_NOTE"
     echo "**Hardware:** $(uname -srm) on $(hostname -s)."
     echo "**Date:** $(date -u +%Y-%m-%d)."
     echo
-    echo "Each language listed twice — *idiomatic* (default release-mode flags most projects use) and *optimized* (aggressive tuning). Lower is better; sorted by time."
+    echo "Each language listed twice — *idiomatic* (default release-mode flags most projects use) and *optimized* (aggressive tuning). Median wall-clock time is the headline number; p95 (worst-of-best-95%), σ (population stddev), min, and max are reported per cell so noise is visible. Lower is better; sorted by median time."
     echo
-    echo "| Implementation | Profile | Time (ms) | Peak RSS (MB) |"
-    echo "|---|---|---:|---:|"
-    sort -n "$RESULTS_FILE" | while IFS=$'\t' read -r ms label rss profile; do
-        printf "| %s | %s | %d | %d |\n" "$label" "$profile" "$ms" "$rss"
+    echo "| Implementation | Profile | Median (ms) | p95 (ms) | σ | Min | Max | Peak RSS (MB) |"
+    echo "|---|---|---:|---:|---:|---:|---:|---:|"
+    sort -t$'\t' -k1 -n "$RESULTS_FILE" | while IFS=$'\t' read -r median label profile p95 stddev mn mx rss; do
+        printf "| %s | %s | %s | %s | %s | %s | %s | %s |\n" \
+            "$label" "$profile" "$median" "$p95" "$stddev" "$mn" "$mx" "$rss"
     done
 } > RESULTS.md
 

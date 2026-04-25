@@ -25,9 +25,16 @@ specific compiler choices, not a general benchmark.
 
 ## Hardware
 
-Apple M1 Max (10 cores: 8P + 2E), 64 GB RAM, macOS 26.4. All benchmarks
-run on performance cores via default scheduling — no explicit affinity
-pinning, no `taskset`, no thermal throttle mitigation beyond best-of-N.
+Apple M1 Max (10 cores: 8P + 2E), 64 GB RAM, macOS 26.4.
+
+**CPU pinning (v0.5.243+):** `taskpolicy -t 0 -l 0` on macOS — sets
+throughput-tier 0 + latency-tier 0, a scheduler hint biasing the
+process toward P-cores on Apple Silicon. This is **not** strict
+affinity; Apple does not expose unprivileged hard core pinning.
+On Linux the runner uses `taskset -c 0` for true strict pinning
+to CPU 0. The runner prints which strategy was applied at the
+top of every invocation, so a reader can confirm pinning was
+attempted.
 
 ## Compiler / runtime versions
 
@@ -76,13 +83,24 @@ benchmarks (e.g. object_create on Rust/C++/Go/Swift, which is 0 ms after
 dead-code elimination) are reported as `0` — this is a real result, not a
 missing value. See the "where Perry loses" discussion in `RESULTS.md`.
 
-### Best-of-N
+### Statistics (v0.5.243+)
 
-The runner invokes each binary 5 times and reports the minimum. Best-of-N
-tracks the compiler's asymptotic output rather than scheduler noise,
-thermal throttling, or interference from other processes. The variance on
-these benchmarks is small (<5% across runs on an idle system) — `best-of-5`
-vs `best-of-10` produces the same numbers to the millisecond.
+The runner invokes each binary `RUNS` times (default 11) and reports
+**median, p95, σ (population stddev), min, and max** — not "best-of-N".
+This shows where the noise actually lives:
+
+- Median is the headline (better than mean — outlier-robust).
+- p95 surfaces tail latency on the 95th-percentile run.
+- σ (stddev) flags genuinely noisy cells; cells with σ > 5% of median
+  are worth a second look.
+- Min/max bracket the full distribution.
+
+The previous methodology was best-of-5 — reporting the minimum of 5
+runs. That hides variance entirely and overstates compiler-asymptotic
+performance by silently dropping the upper 80% of the distribution.
+Median + p95 + σ is what the bench results table actually reports
+now; full per-cell distributions are in `RESULTS_AUTO.md` after each
+run, with hand-curated commentary in `RESULTS.md`.
 
 ### Warmup
 
@@ -286,7 +304,8 @@ This methodology will drift as the Perry codegen changes. Key moments:
 
 ```bash
 cd benchmarks/polyglot
-bash run_all.sh 5      # best of 5 per benchmark
+bash run_all.sh        # default RUNS=11, median + p95 + σ + min + max
+bash run_all.sh 21     # 21 runs per cell for tighter intervals
 ```
 
 Requires: Perry built from this repo (`cargo build --release`), plus
@@ -294,5 +313,6 @@ any subset of Node, Bun, Static Hermes (`shermes`), Rust, C++, Go,
 Swift, Java, Python. Missing runtimes produce `-` cells; the script
 does not fail.
 
-Runtime is ~10 minutes on an M1 Max at best-of-5, dominated by Python
-(~30 s per full bench.py invocation).
+Runtime is ~25 minutes on an M1 Max at RUNS=11 (≈ 2× the previous
+best-of-5 wall time), dominated by Python (each invocation runs the
+full bench.py ≈ 28 s; Python alone is ~5 minutes at RUNS=11).

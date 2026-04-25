@@ -2,6 +2,77 @@
 
 Detailed changelog for Perry. See CLAUDE.md for concise summaries.
 
+## v0.5.248 — Benchmark methodology overhaul: replace "best-of-N" with median + p95 + σ + min + max per cell, attempt CPU pinning, document the macOS-pinning caveat honestly. Targets the "no error bars + no core pinning on M1" objection class on `benchmarks/README.md`.
+
+**`benchmarks/json_polyglot/run.sh`** rewritten:
+
+- Default `RUNS=11` (was 5). For each cell, every per-run wall-clock ms is captured; median, p95 (95th percentile, 1-based ceil-index lookup), σ (population stddev), min, and max are computed via a single `awk` pass with insertion-sort.
+- Pinning: `taskpolicy -t 0 -l 0` on macOS — sets throughput-tier 0 + latency-tier 0, the unprivileged equivalent of "prefer P-cores" on Apple Silicon. **NOT strict pinning**: Apple does not expose unprivileged hard core affinity. The original ask was for `taskpolicy -c user-interactive`, but `-c` only accepts the downgrade clamps `utility`/`background`/`maintenance` — `user-interactive` is not a valid clamp value (verified empirically: `taskpolicy: Could not parse 'user-interactive' as a QoS clamp`). On Linux the runner uses `taskset -c 0` for genuine strict pinning. Otherwise: no pinning, with a banner caveat.
+- Banner at run start prints exactly which pinning strategy was applied. Acceptance criterion satisfied: a reader can confirm pinning was attempted by reading the first 5 lines of stdout.
+- `RESULTS.md` template now has per-cell columns Median / p95 / σ / Min / Max / Peak RSS, sorted by median.
+
+**`benchmarks/polyglot/run_all.sh`** rewritten with the same shape:
+
+- Default `RUNS=11`, per-cell median + p95 + σ + min + max.
+- Same pinning logic, same banner.
+- Two output tables: a compact median-only headline (fits a markdown table column per language), and a full per-cell stats dump in `median (p95: X, σ: S, min: Y, max: Z)` format.
+- Writes both to `RESULTS_AUTO.md` (auto-generated) alongside the curated `RESULTS.md` so the hand-written commentary is preserved.
+
+**Re-run results (RUNS=11, M1 Max, macOS 26.4, taskpolicy P-core hint):**
+
+JSON polyglot — Perry leads on median time:
+
+| Implementation | Profile | Median (ms) | p95 (ms) | σ | Min | Max | Peak RSS (MB) |
+|---|---|---:|---:|---:|---:|---:|---:|
+| **perry (gen-gc + lazy tape)** | optimized | **74** | 85 | 4.9 | 69 | 85 | 85 |
+| rust serde_json (LTO+1cgu) | optimized | 183 | 186 | 1.3 | 181 | 186 | 11 |
+| rust serde_json | idiomatic | 199 | 201 | 1.2 | 197 | 201 | 11 |
+| bun (default) | idiomatic | 276 | 294 | 7.3 | 267 | 294 | 84 |
+| node --max-old=4096 | optimized | 381 | 421 | 16.3 | 374 | 421 | 182 |
+| perry (mark-sweep, no lazy) | idiomatic | 384 | 459 | 22.9 | 372 | 459 | 102 |
+| node (default) | idiomatic | 385 | 484 | 37.8 | 370 | 484 | 182 |
+| kotlin -server -Xmx512m | optimized | 457 | 472 | 5.6 | 449 | 472 | 424 |
+| kotlin (kotlinx.serialization) | idiomatic | 475 | 485 | 9.0 | 452 | 485 | 607 |
+| c++ -O3 -flto (nlohmann/json) | optimized | 783 | 791 | 2.7 | 781 | 791 | 25 |
+| go (encoding/json) | idiomatic | 807 | 873 | 22.5 | 800 | 873 | 23 |
+| go -ldflags="-s -w" -trimpath | optimized | 812 | 1118 | 91.2 | 802 | 1118 | 23 |
+| c++ -O2 (nlohmann/json) | idiomatic | 855 | 858 | 2.2 | 852 | 858 | 25 |
+| swift -O (Foundation) | idiomatic | 3747 | 3990 | 72.9 | 3721 | 3990 | 34 |
+| swift -O -wmo (Foundation) | optimized | 3879 | 5309 | 426.8 | 3750 | 5309 | 35 |
+
+Compute polyglot — RUNS=11 surfaces tail-latency outliers best-of-5 had hidden:
+
+- Python `accumulate` median 5052 ms but p95 9388 ms (σ 1454) — one run took 9.4 s, ~2× the typical case. Likely GC pressure or thermal throttle during a 10 s+ tight loop.
+- Python `math_intensive` median 2244 vs p95 4091 (σ 532). Same pattern.
+- Swift `-O -wmo` JSON median 3879 vs p95 5309 (σ 427) — Swift's whole-module optimization sometimes spends much longer in the JSON reflection pipeline; idiomatic `-O` alone is tighter (σ 73).
+- Most other cells have σ < 5% of median — distributions are tight.
+
+Compute polyglot median table refreshed. The two regressions vs the v0.5.164 baseline (`nested_loops` 8 → 17 ms, `accumulate` 24 → 34 ms) are still present; they're caused by the v0.5.237 generational-GC default flip. `PERRY_GEN_GC=0` recovers the baseline. Documented unapologetically.
+
+**`benchmarks/polyglot/METHODOLOGY.md`** updated:
+
+- "Best-of-N" section replaced with "Statistics (v0.5.246+)" describing median/p95/σ/min/max reporting + rationale (best-of-N hides distribution, overstates compiler-asymptotic perf by silently dropping the upper 80%).
+- Hardware section: pinning strategy documented with the same honest caveat about macOS not exposing unprivileged hard affinity.
+- Reproducing section: `bash run_all.sh` now means RUNS=11 default; runtime ~25 minutes (≈ 2× best-of-5 wall time, dominated by Python).
+
+**`benchmarks/README.md` (the canonical single page)** updated:
+
+- TL;DR JSON table now shows Median / p95 / σ / Min / Max / Peak RSS columns.
+- Methodology box rewritten: matches the runner exactly. Says RUNS=11, says "median + p95 + σ + min + max — not best-of-N", documents the macOS pinning caveat in plain terms ("scheduler HINT toward P-cores, NOT strict; Apple does not expose unprivileged hard affinity"), tells the reader where the runner prints which strategy was used.
+- Compute polyglot table refreshed with median ms.
+- Strengths section ratios recomputed against median (Perry 74 ms vs Rust LTO 183 ms = 2.5×, vs Bun 276 = 3.7×, vs Node 385 = 5.2×, vs Kotlin 457 = 6.2×, vs C++ 783 = 10.6×, vs Go 807 = 10.9×, vs Swift 3747 = 50.6×).
+- New "Tail-latency findings" subsection in compute section calls out the outliers RUNS=11 surfaced.
+- All "best-of-5" / "best-of-N" / "RUNS=5" references swept and updated.
+
+**`benchmarks/polyglot/RESULTS.md`** updated similarly: new median table, new methodology paragraph, "Interesting tails surfaced by RUNS=11" callout.
+
+Acceptance criteria from the original ask:
+- ✅ `RUNS=11 ./run.sh` in either bench dir produces tables with median+p95+σ per cell.
+- ✅ A line at the top of run output says exactly which CPU pinning strategy was used (or that pinning was unavailable). Verified: `Pinning strategy: macOS scheduler hint (taskpolicy -t 0 -l 0 — P-core preferred via throughput/latency tiers, NOT strict affinity)`.
+- ✅ README methodology box matches what the runner actually does.
+
+Out-of-scope follow-ups noted but not done in this PR: switching to monotonic-clock measurement instead of `Date.now()`/`time.Now()` (millisecond resolution is enough for these ranges, but would tighten σ further); pinning on a P-core specifically (would need either hardware-affinity APIs we don't have or a workaround like running in foreground with QoS UserInteractive — both have their own portability concerns).
+
 ## v0.5.242 — Kotlin added to JSON polyglot, full benchmark sweep refresh, `benchmarks/README.md` updated as the canonical single source for every measurement. Touchpoints:
 
 **`benchmarks/json_polyglot/bench.kt`** — new Kotlin implementation of the identical 10k-record / ~1 MB blob / 50-iteration parse + stringify workload. Uses `kotlinx.serialization-json` 1.9.0 (the official Kotlin serialization library; compile-time-generated (de)serializers via the kotlinx-serialization compiler plugin, no runtime reflection). Compiles via `kotlinc -Xplugin=...kotlinx-serialization-compiler-plugin.jar` against the JARs shipped with `brew install gradle` (the brew kotlin formula doesn't bundle the runtime libs but gradle does). Listed twice in `RESULTS.md` — idiomatic JVM defaults and `-server -Xmx512m`.
