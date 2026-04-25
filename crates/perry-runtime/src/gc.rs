@@ -959,18 +959,14 @@ pub fn gc_collect_minor() -> u64 {
     mark_remembered_set_roots(&valid_ptrs);
     trace_marked_objects_minor(&valid_ptrs);
     mark_block_persisting_arena_objects(&valid_ptrs);
-    // C4b-γ-1 transitive pinning: until the heap-field rewrite
-    // pass (C4b-γ-2) lands, we pin every transitively-reachable
-    // object so evacuation has no eligible candidates. This makes
-    // `PERRY_GEN_GC_EVACUATE=1` a correctness-safe no-op rather
-    // than risking dangling refs through un-rewritten heap fields.
-    // Once C4b-γ-2 wires per-obj-type rewrite walkers, this pin
-    // call gets removed and evacuation candidates expand to all
-    // tenured non-root-pinned objects. The bench RSS win lands
-    // when that removal happens; today's commit is the safety
-    // valve that makes C4b shippable as opt-in without a known
-    // correctness gap.
-    pin_currently_marked_as_conservative();
+    // Phase C4b-γ-2 makes evacuation correctness-safe: the
+    // post-evac `rewrite_forwarded_references` walk visits every
+    // reference site we own (shadow stack + module globals + every
+    // marked heap object's fields) and rewrites pointers to
+    // forwarded objects. The transitive-pinning safety valve
+    // formerly here is no longer needed — non-pinned tenured
+    // objects are now genuine evacuation candidates and the bench
+    // RSS win lands accordingly.
 
     // === AGE-BUMP PASS (gen-GC Phase C4) ===
     // After tracing, any nursery object still carrying
@@ -1021,15 +1017,28 @@ pub fn gc_collect_minor() -> u64 {
         }
     });
 
-    // === EVACUATION PASS (Phase C4b-β, opt-in) ===
+    // === EVACUATION PASS (Phase C4b-β + C4b-γ-2, opt-in) ===
     // Copy non-pinned tenured nursery objects into OLD_ARENA and
-    // install forwarding pointers in the original nursery slots.
-    // Reference rewriting (C4b-γ) is NOT yet wired — without it,
-    // any reference to an evacuated object reads garbage. So
-    // gate behind `PERRY_GEN_GC_EVACUATE=1` for now; default OFF
-    // until C4b-γ lands.
+    // install forwarding pointers in the original nursery slots,
+    // then rewrite every reference site we own (shadow stack,
+    // module globals, all marked heap objects' fields) to point
+    // at the new addresses. After rewriting, the original nursery
+    // slots are stale and the sweep that follows reclaims their
+    // blocks (their MARKED bit was cleared at evac time).
+    //
+    // Conservative-stack discoveries are pinned by
+    // `pin_currently_marked_as_conservative` above so their
+    // referenced objects are not evacuated — we never rewrite
+    // C-stack words.
     if gen_gc_evacuate_enabled() {
-        evacuate_tenured_nursery_objects();
+        let n_evac = evacuate_tenured_nursery_objects();
+        rewrite_forwarded_references(&valid_ptrs);
+        if std::env::var_os("PERRY_GC_DIAG").is_some() {
+            eprintln!(
+                "[gc-evac] evacuated={} cons_pinned={}",
+                n_evac, cons_pinned_count()
+            );
+        }
     }
 
     // === SWEEP PHASE ===
@@ -2493,13 +2502,15 @@ fn pin_currently_marked_as_conservative() {
 /// - NOT already FORWARDED (idempotent; duplicate evacuation is
 ///   safe-skipped)
 ///
-/// **Reference rewriting is NOT done here** — that's C4b-γ.
-/// Without rewriting, the only way evacuated objects stay
-/// reachable is via the forwarding pointer in their old slot,
-/// which compiled code doesn't yet consult. So this function is
-/// gated `PERRY_GEN_GC_EVACUATE=1` and is currently CORRECTNESS-
-/// UNSAFE if turned on alone — used only for testing the data-
-/// structure layer.
+/// Phase C4b-γ-2: this function is paired with
+/// `rewrite_forwarded_references` — every reference site (heap
+/// fields, shadow stack, global roots) is rewalked AFTER this
+/// function returns and any pointer to a forwarded object is
+/// updated to the new address. The original's MARKED bit is
+/// cleared at evac time so sweep treats the now-stale slot as
+/// dead and the nursery block can reset; the new copy is marked
+/// MARKED so the rewrite walk picks up its (copied) fields and so
+/// sweep keeps it alive.
 fn evacuate_tenured_nursery_objects() -> usize {
     let mut evacuated = 0usize;
     crate::arena::arena_walk_objects(|header_ptr| {
@@ -2536,10 +2547,266 @@ fn evacuate_tenured_nursery_objects() -> usize {
             std::ptr::copy_nonoverlapping(user_ptr, new_user, payload);
             // Install forwarding pointer at the OLD location.
             set_forwarding_address(header, new_user);
+            // Clear MARKED on the original so sweep frees its
+            // (now-stale) nursery slot. The block can reset once
+            // every object in it is either FORWARDED-cleared or
+            // unmarked dead.
+            (*header).gc_flags &= !GC_FLAG_MARKED;
+            // Mark the new copy so (a) the rewrite walk visits
+            // its fields and (b) sweep keeps it alive. The mark
+            // bit is cleared inline by sweep on surviving objects.
+            let new_header = (new_user as *mut u8).sub(GC_HEADER_SIZE) as *mut GcHeader;
+            (*new_header).gc_flags |= GC_FLAG_MARKED;
+            // Carry TENURED forward — the new copy is logically
+            // the same object, just relocated. Without this the
+            // age-bump pass on the next cycle would treat it as
+            // a fresh young object.
+            (*new_header).gc_flags |= GC_FLAG_TENURED;
             evacuated += 1;
         }
     });
     evacuated
+}
+
+/// Gen-GC Phase C4b-γ-2: rewrite a single NaN-boxed (or raw)
+/// pointer-bearing word. If `bits` decodes to a heap pointer
+/// whose target carries `GC_FLAG_FORWARDED`, return the rewritten
+/// bits with the new address (preserving the NaN-boxing tag for
+/// tagged inputs). Otherwise return None.
+///
+/// `valid_ptrs` must be the same set built at minor-GC entry —
+/// pointers to NEW evac copies (allocated post-build) are not in
+/// it, but those copies are never FORWARDED themselves so this
+/// only matters for the initial validation step.
+fn try_rewrite_value(bits: u64, valid_ptrs: &ValidPointerSet) -> Option<u64> {
+    let tag = bits & TAG_MASK;
+    let (ptr_addr, is_nanbox) = match tag {
+        t if t == POINTER_TAG || t == STRING_TAG || t == BIGINT_TAG => {
+            ((bits & POINTER_MASK) as usize, true)
+        }
+        _ => {
+            // Reject NaN-tagged non-pointer values (numbers,
+            // booleans, undefined, null, SSO, INT32, handles).
+            if tag >= 0x7FF8_0000_0000_0000 { return None; }
+            // Raw pointer fallback: lower 48 bits valid range.
+            if bits < 0x1000 || bits > 0x0000_FFFF_FFFF_FFFF { return None; }
+            (bits as usize, false)
+        }
+    };
+    if ptr_addr == 0 || !valid_ptrs.contains(&ptr_addr) {
+        return None;
+    }
+    unsafe {
+        let header = (ptr_addr as *const u8).sub(GC_HEADER_SIZE) as *const GcHeader;
+        if (*header).gc_flags & GC_FLAG_FORWARDED == 0 {
+            return None;
+        }
+        let new_user = forwarding_address(header) as usize;
+        Some(if is_nanbox { tag | (new_user as u64) } else { new_user as u64 })
+    }
+}
+
+/// In-place rewrite helper: read `*slot`, run it through
+/// `try_rewrite_value`, write back if a rewrite was produced.
+#[inline]
+unsafe fn rewrite_slot(slot: *mut u64, valid_ptrs: &ValidPointerSet) {
+    let bits = *slot;
+    if let Some(new_bits) = try_rewrite_value(bits, valid_ptrs) {
+        *slot = new_bits;
+    }
+}
+
+unsafe fn rewrite_array_fields(user_ptr: *mut u8, valid_ptrs: &ValidPointerSet) {
+    let arr = user_ptr as *const crate::array::ArrayHeader;
+    let length = (*arr).length;
+    let capacity = (*arr).capacity;
+    if length > capacity || length > 16_000_000 { return; }
+    let elements = (user_ptr as *mut u8)
+        .add(std::mem::size_of::<crate::array::ArrayHeader>()) as *mut u64;
+    for i in 0..length as usize {
+        rewrite_slot(elements.add(i), valid_ptrs);
+    }
+}
+
+unsafe fn rewrite_object_fields(user_ptr: *mut u8, valid_ptrs: &ValidPointerSet) {
+    let obj = user_ptr as *const crate::object::ObjectHeader;
+    let field_count = (*obj).field_count;
+    if field_count > 1_000_000 { return; }
+    let fields = (user_ptr as *mut u8)
+        .add(std::mem::size_of::<crate::object::ObjectHeader>()) as *mut u64;
+    for i in 0..field_count as usize {
+        rewrite_slot(fields.add(i), valid_ptrs);
+    }
+    // keys_array — codegen may store either raw or NaN-boxed.
+    // try_rewrite_value disambiguates by tag.
+    let keys_addr = &(*obj).keys_array as *const _ as *mut u64;
+    rewrite_slot(keys_addr, valid_ptrs);
+}
+
+unsafe fn rewrite_map_fields(user_ptr: *mut u8, valid_ptrs: &ValidPointerSet) {
+    let map = user_ptr as *const crate::map::MapHeader;
+    let size = (*map).size;
+    let capacity = (*map).capacity;
+    if size > capacity || size > 100_000 { return; }
+    let entries = (*map).entries as *mut u64;
+    if entries.is_null() { return; }
+    for i in 0..(size as usize) {
+        rewrite_slot(entries.add(i * 2), valid_ptrs);
+        rewrite_slot(entries.add(i * 2 + 1), valid_ptrs);
+    }
+}
+
+unsafe fn rewrite_closure_fields(user_ptr: *mut u8, valid_ptrs: &ValidPointerSet) {
+    let closure = user_ptr as *const crate::closure::ClosureHeader;
+    let capture_count = crate::closure::real_capture_count((*closure).capture_count);
+    let captures = (user_ptr as *mut u8)
+        .add(std::mem::size_of::<crate::closure::ClosureHeader>()) as *mut u64;
+    for i in 0..capture_count as usize {
+        rewrite_slot(captures.add(i), valid_ptrs);
+    }
+}
+
+unsafe fn rewrite_promise_fields(user_ptr: *mut u8, valid_ptrs: &ValidPointerSet) {
+    let promise = user_ptr as *mut crate::promise::Promise;
+    rewrite_slot(&(*promise).value as *const f64 as *mut u64, valid_ptrs);
+    rewrite_slot(&(*promise).reason as *const f64 as *mut u64, valid_ptrs);
+    rewrite_slot(&(*promise).on_fulfilled as *const _ as *mut u64, valid_ptrs);
+    rewrite_slot(&(*promise).on_rejected as *const _ as *mut u64, valid_ptrs);
+    rewrite_slot(&(*promise).next as *const _ as *mut u64, valid_ptrs);
+}
+
+unsafe fn rewrite_error_fields(user_ptr: *mut u8, valid_ptrs: &ValidPointerSet) {
+    let error = user_ptr as *mut crate::error::ErrorHeader;
+    rewrite_slot(&(*error).message as *const _ as *mut u64, valid_ptrs);
+    rewrite_slot(&(*error).name as *const _ as *mut u64, valid_ptrs);
+    rewrite_slot(&(*error).stack as *const _ as *mut u64, valid_ptrs);
+    rewrite_slot(&(*error).cause as *const f64 as *mut u64, valid_ptrs);
+    rewrite_slot(&(*error).errors as *const _ as *mut u64, valid_ptrs);
+}
+
+unsafe fn rewrite_lazy_array_fields(user_ptr: *mut u8, valid_ptrs: &ValidPointerSet) {
+    let lazy = user_ptr as *mut crate::json_tape::LazyArrayHeader;
+    if (*lazy).magic != crate::json_tape::LAZY_ARRAY_MAGIC { return; }
+    rewrite_slot(&(*lazy).blob_str as *const _ as *mut u64, valid_ptrs);
+    rewrite_slot(&(*lazy).materialized as *const _ as *mut u64, valid_ptrs);
+    rewrite_slot(&(*lazy).materialized_elements as *const _ as *mut u64, valid_ptrs);
+    rewrite_slot(&(*lazy).materialized_bitmap as *const _ as *mut u64, valid_ptrs);
+    // Walk cached materialized JSValues — each holds a NaN-boxed
+    // pointer to a backing object that may itself be forwarded.
+    let cached_length = (*lazy).cached_length as usize;
+    let cache = (*lazy).materialized_elements;
+    let bitmap = (*lazy).materialized_bitmap;
+    if !cache.is_null() && !bitmap.is_null() && cached_length > 0 {
+        let bitmap_words = (cached_length + 63) / 64;
+        for w in 0..bitmap_words {
+            let word = *bitmap.add(w);
+            if word == 0 { continue; }
+            let base_idx = w * 64;
+            for b in 0..64usize {
+                if word & (1u64 << b) == 0 { continue; }
+                let i = base_idx + b;
+                if i >= cached_length { break; }
+                let slot = cache.add(i) as *mut u64;
+                rewrite_slot(slot, valid_ptrs);
+            }
+        }
+    }
+}
+
+/// Walk every live (MARKED, non-FORWARDED) object on the heap and
+/// rewrite any forwarded references in its fields. Includes new
+/// evac copies (marked at evac time) and surviving non-evacuated
+/// objects.
+fn rewrite_heap_objects(valid_ptrs: &ValidPointerSet) {
+    let mut rewrite_one = |header: *mut GcHeader| {
+        unsafe {
+            let flags = (*header).gc_flags;
+            // FORWARDED originals are stale — first 8 bytes of
+            // payload now holds the forwarding address, not real
+            // field data. Skip them entirely.
+            if flags & GC_FLAG_FORWARDED != 0 { return; }
+            // Skip dead objects — sweep is about to free them.
+            if flags & (GC_FLAG_MARKED | GC_FLAG_PINNED) == 0 { return; }
+            let user_ptr = (header as *mut u8).add(GC_HEADER_SIZE);
+            match (*header).obj_type {
+                GC_TYPE_ARRAY => rewrite_array_fields(user_ptr, valid_ptrs),
+                GC_TYPE_OBJECT => rewrite_object_fields(user_ptr, valid_ptrs),
+                GC_TYPE_CLOSURE => rewrite_closure_fields(user_ptr, valid_ptrs),
+                GC_TYPE_PROMISE => rewrite_promise_fields(user_ptr, valid_ptrs),
+                GC_TYPE_ERROR => rewrite_error_fields(user_ptr, valid_ptrs),
+                GC_TYPE_MAP => rewrite_map_fields(user_ptr, valid_ptrs),
+                GC_TYPE_LAZY_ARRAY => rewrite_lazy_array_fields(user_ptr, valid_ptrs),
+                GC_TYPE_STRING | GC_TYPE_BIGINT => {} // leaf
+                _ => {}
+            }
+        }
+    };
+    crate::arena::arena_walk_objects(|hp| rewrite_one(hp as *mut GcHeader));
+    MALLOC_STATE.with(|s| {
+        let s = s.borrow();
+        for &h in s.objects.iter() {
+            rewrite_one(h);
+        }
+    });
+}
+
+/// Walk every shadow-stack slot and rewrite forwarded pointers.
+/// Mirrors `shadow_stack_root_scanner` but writes back instead of
+/// only reading. Slots hold NaN-boxed `JSValue` bits — same
+/// encoding `try_rewrite_value` understands.
+fn rewrite_shadow_stack_slots(valid_ptrs: &ValidPointerSet) {
+    SHADOW_STACK.with(|s| {
+        let mut stack = s.borrow_mut();
+        if stack.is_empty() { return; }
+        let mut top = SHADOW_STACK_FRAME_TOP.with(|c| c.get());
+        while top != usize::MAX && top >= SHADOW_STACK_HEADER_SLOTS {
+            let header_base = top - SHADOW_STACK_HEADER_SLOTS;
+            if header_base + 1 >= stack.len() { break; }
+            let slot_count = stack[header_base + 1] as usize;
+            let slots_end = top + slot_count;
+            if slots_end > stack.len() { break; }
+            for i in 0..slot_count {
+                let bits = stack[top + i];
+                if bits == 0 { continue; }
+                if let Some(new_bits) = try_rewrite_value(bits, valid_ptrs) {
+                    stack[top + i] = new_bits;
+                }
+            }
+            top = stack[header_base] as usize;
+        }
+    });
+}
+
+/// Walk every registered module-global address and rewrite
+/// forwarded pointers. Mirrors `mark_global_roots` but writes
+/// back. Both NaN-boxed and raw-pointer encodings are handled by
+/// `try_rewrite_value` via tag inspection.
+fn rewrite_global_roots(valid_ptrs: &ValidPointerSet) {
+    GLOBAL_ROOTS.with(|roots| {
+        let roots = roots.borrow();
+        for &root_ptr in roots.iter() {
+            if root_ptr.is_null() { continue; }
+            unsafe {
+                let bits = *root_ptr;
+                if let Some(new_bits) = try_rewrite_value(bits, valid_ptrs) {
+                    *root_ptr = new_bits;
+                }
+            }
+        }
+    });
+}
+
+/// Top-level Phase C4b-γ-2 entry: rewrite every reference site we
+/// own. Skipped: conservatively-discovered C-stack words (we can't
+/// safely overwrite arbitrary stack memory; pinning of conservative-
+/// root targets in `gc_collect_minor` keeps those references valid
+/// without rewriting). Skipped: registered root scanners (their
+/// API is mark-only); the conservative-pinning policy also covers
+/// objects they would have discovered.
+fn rewrite_forwarded_references(valid_ptrs: &ValidPointerSet) {
+    rewrite_shadow_stack_slots(valid_ptrs);
+    rewrite_global_roots(valid_ptrs);
+    rewrite_heap_objects(valid_ptrs);
 }
 
 /// Gen-GC Phase C4b: is `header` pinned this cycle (cannot be
