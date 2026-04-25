@@ -247,7 +247,39 @@ const GC_FLAG_SUPPRESSED: u8 = 0b10;
 /// their working sets fit in one 1 MB arena block each, well under
 /// the threshold, 0-1 ms as before.
 const GC_THRESHOLD_INITIAL_BYTES: usize = 64 * 1024 * 1024; // 64 MB
-const GC_THRESHOLD_MAX_BYTES: usize = 1024 * 1024 * 1024; // 1GB cap on adaptive growth
+/// Sanity bound on the adaptive step itself. Step growth past 1 GB is
+/// only theoretically possible on multi-day services where GC fires
+/// rarely; we keep the cap loose here since the *real* peak-RSS
+/// guardrail is `GC_TRIGGER_ABSOLUTE_CEILING` below.
+const GC_THRESHOLD_MAX_BYTES: usize = 1024 * 1024 * 1024; // 1 GB
+
+/// Hard ceiling on the next-GC trigger (arena_total bytes), independent
+/// of how productive recent sweeps have been. Without this, the
+/// >90%-freed branch doubles the step on every productive collection,
+/// and `next_trigger = new_total + step` lets peak nursery occupancy
+/// grow unboundedly even when most of what we collected was garbage.
+/// On `bench_json_roundtrip` direct (50 iters × ~5 MB / iter, GC fires
+/// 3 times), the step doubled from 64 MB → 67 MB → 134 MB and the
+/// trigger followed it, so peak nursery hit 115 MB at GC #3 — the
+/// dealloc pass from C4b-δ then returned 91 MB to the OS, but the
+/// peak-RSS damage was already done. Capping the trigger at the
+/// initial threshold prevents that runaway: after GC, trigger ≤ 64 MB
+/// regardless of how much step adapted, so peak nursery stays bounded
+/// to roughly initial + one iter's allocation buffer + headroom for
+/// non-arena overhead.
+///
+/// Floor: even if `arena_total` is already near or past the ceiling
+/// (large old-gen + longlived combined live set), keep at least the
+/// 16 MB step floor as headroom — `next_trigger = max(new_total + 16 MB,
+/// min(new_total + step, ceiling))`. This avoids GC thrash when the
+/// non-nursery component of arena_total alone exceeds the ceiling.
+///
+/// Workloads unaffected: `07_object_create` / `12_binary_trees` /
+/// `bench_gc_pressure` all fit their working sets under 64 MB and
+/// fire GC at most once. The cap only changes behavior when the step
+/// would otherwise have pushed the trigger past the initial threshold,
+/// which is exactly the bench-RSS scenario this is targeting.
+const GC_TRIGGER_ABSOLUTE_CEILING: usize = GC_THRESHOLD_INITIAL_BYTES;
 
 thread_local! {
     /// Lower bound for the next GC trigger. Bumped after each
@@ -768,7 +800,17 @@ pub fn gc_check_trigger() {
             }
         }
         let new_total = arena_total_bytes();
-        GC_NEXT_TRIGGER_BYTES.with(|c| c.set(new_total + step));
+        // C4b-δ-tune: hard cap on next_trigger so the >90%-freed
+        // step-doubling can't drive peak nursery past the initial
+        // threshold. Floor: at least 16 MB of headroom past
+        // `new_total` so a workload whose post-GC live set already
+        // approaches the ceiling doesn't thrash on every fresh
+        // allocation.
+        let stepped = new_total.saturating_add(step);
+        let capped = stepped.min(GC_TRIGGER_ABSOLUTE_CEILING);
+        let floor = new_total.saturating_add(16 * 1024 * 1024);
+        let next_trigger = std::cmp::max(capped, floor);
+        GC_NEXT_TRIGGER_BYTES.with(|c| c.set(next_trigger));
         // Rebaseline malloc trigger too — the just-completed collection
         // swept malloc objects, so the next malloc-count trigger should
         // be relative to the new survivor count.

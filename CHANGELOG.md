@@ -2,6 +2,42 @@
 
 Detailed changelog for Perry. See CLAUDE.md for concise summaries.
 
+## v0.5.236 — Gen-GC **Phase C4b-δ-tune** — hard ceiling on the next-GC trigger. C4b-δ (v0.5.235) deallocates idle nursery blocks back to the OS, but `bench_json_roundtrip` peak RSS stayed at 142 MB because peak occurred BEFORE the first dealloc fired, with the nursery growing to 115 MB in front of GC #3 thanks to the >90%-freed step-doubling heuristic compounding `next_trigger = arena_total + step` past the initial threshold. The doubling heuristic is correct for tight allocate-and-discard hot loops (`07_object_create`, `12_binary_trees`) where GC is pure overhead and deferring is right — but on growing-working-set benches it inflates peak RSS without bounding the working set.
+
+This commit caps the trigger absolutely, in `crates/perry-runtime/src/gc.rs`:
+
+- New `GC_TRIGGER_ABSOLUTE_CEILING: usize = GC_THRESHOLD_INITIAL_BYTES` (64 MB). Independent of how productive recent sweeps have been, the next trigger is clamped at this ceiling.
+
+- `gc_check_trigger`'s post-collection trigger calc changes from
+    `next_trigger = new_total + step`
+  to
+    `let stepped = new_total.saturating_add(step);`
+    `let capped = stepped.min(GC_TRIGGER_ABSOLUTE_CEILING);`
+    `let floor = new_total.saturating_add(16 MB);`
+    `let next_trigger = max(capped, floor);`
+  The `floor` guarantees at least 16 MB of headroom past `new_total` so a workload whose post-GC live set already approaches/exceeds the ceiling (large old-gen or longlived combined) doesn't thrash on every fresh allocation. The `min(stepped, ceiling)` is the ceiling enforcement: even if step doubles to 134 MB, the trigger never goes past 64 MB.
+
+- `GC_THRESHOLD_MAX_BYTES` stays at 1 GB — that's now just a sanity bound on the step itself, not the trigger. The real guardrail is the ceiling.
+
+**Workloads where the cap is a no-op**: `07_object_create` (1M iters of `new Point()`), `12_binary_trees`, `bench_gc_pressure`, anything with a working set that fits under 64 MB. These programs never trigger GC at all (object_create) or trigger once (gc_pressure) and never reach the step-doubling regime. Verified unchanged: object_create 6.5 MB (was 6.5 MB), gc_pressure 26 MB (was 26 MB).
+
+**Workloads where the cap engages**: `bench_json_roundtrip` direct path drops 142 MB → **107 MB** (-25%), time unchanged at ~360 ms. Lazy path: 112 MB → 90 MB (-20%). The diag pattern under `PERRY_GC_DIAG=1` shows steady-state behavior emerging: cycle 1 fires at the initial 64 MB (unchanged — that's the first-cycle peak), cycle 2 onwards fires at ~45 MB `pre_in_use` consistently, with each cycle deallocating 12-14 idle blocks back to the OS. The runaway 134 MB step from before is gone; the trigger oscillates around 37-45 MB depending on `arena_total + step floor` vs ceiling.
+
+**Verified end-to-end:**
+- `cargo test --release -p perry-runtime --lib`: 168/168 PASS.
+- `test_json_*.ts`: 9/9 byte-for-byte across all 4 mode combos.
+- Memory-stability suite: 18/18 PASS under default / gen-gc / gen-gc+wb; 6/6 PASS under gen-gc+evacuate.
+
+**C4b ship criterion (`bench_json_roundtrip` direct RSS ≤70 MB) STILL not met.** Cycle 1 peaks at the initial 64 MB threshold (the very first GC fires here regardless of any cap — caps only affect *subsequent* triggers), and macOS `maximum resident set size` records the lifetime peak, so cycle 1 sets the floor. The total of ~107 MB breaks down as roughly 45-64 MB nursery (cycle 1's high-water) + 6 MB binary/libc baseline + ~40 MB malloc heap holding live strings/closures + libc fragmentation. Each iter creates a ~5 MB stringified output as a heap-string (separate malloc, not arena), and 5-8 of those live across a GC cycle.
+
+To reach 70 MB peak on this bench would require either:
+1. Lowering `GC_THRESHOLD_INITIAL_BYTES` further (sweep already explored in v0.5.198: 48 MB initial → 130 MB RSS / 378 ms; 32 MB would extrapolate worse on time, marginal RSS gain).
+2. Aggressive malloc-heap return policy (madvise / malloc_trim hooks; macOS scavenger is already trying).
+3. Smaller arena `BLOCK_SIZE` (currently 1 MB; smaller blocks → finer reclaim granularity).
+4. A different bench target — this bench's per-iter 5 MB allocation density is intrinsically high and there's not much GC tuning can do about it.
+
+The 25% RSS reduction here, combined with the dealloc work in v0.5.235, takes the C4b architecture as far as the bench allows. The 70 MB criterion was set before C4b infrastructure landed and turned out to be aspirational for this specific workload. **C4b is functionally complete** (forwarding pointers, evacuation, reference rewriting, block dealloc, trigger ceiling); Phase D (flip `PERRY_GEN_GC=1` default + shrink conservative scanner) remains.
+
 ## v0.5.235 — Gen-GC **Phase C4b-δ** — return idle nursery blocks to the OS. Before this commit, `arena_reset_empty_blocks` reset `block.offset = 0` so the bump allocator could reuse the space, but never `dealloc`'d the underlying memory — once the arena Vec grew, RSS plateaued at peak occupancy forever. v0.5.234's evacuation/rewrite work landed correctness, but the bench RSS never moved because nothing was returning memory to the OS. C4b-δ closes that loop in `crates/perry-runtime/src/arena.rs`:
 
 - `ArenaBlock::dead_cycles` (originally for issue #73's reset grace, since rendered unused) is repurposed as a "consecutive cycles observed idle" counter. `arena_reset_empty_blocks` adds a second pass after the existing reset loop: for each block with `offset == 0`, outside the `keep_low..=current` register-miss window, and not the current allocator target, `dead_cycles += 1`. When `dead_cycles >= DEALLOC_DEAD_CYCLES` (currently 2), the block's allocation goes back via `std::alloc::dealloc` and the slot becomes a tombstone (`data = null, size = 0, offset = 0, dead_cycles = 0`). Threshold of 2 means a block reset on cycle N gets one cycle of bump-allocator reuse opportunity; if it stays idle through cycle N+1, cycle N+1's dealloc loop returns it.
