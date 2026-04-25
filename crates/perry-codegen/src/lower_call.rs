@@ -3355,6 +3355,26 @@ pub(crate) fn lower_builtin_new(
         }
         // (`WebSocketServer` is handled by an earlier branch lower in this
         // file — pre-existing from 2026-04-14. No new branch needed here.)
+        // ioredis Redis — `new Redis()` or `new Redis(opts)`. The runtime's
+        // `js_ioredis_new` reads connection settings from REDIS_HOST /
+        // REDIS_PORT / REDIS_PASSWORD / REDIS_TLS env vars and ignores its
+        // config arg; connection is lazy (the handle is registered immediately
+        // and the actual TCP/TLS connect runs on the first `.get`/`.set`/etc.).
+        // Pre-fix `new Redis()` fell into the empty-placeholder branch and
+        // every chained method (set/get/del/exists/incr/decr/expire/quit)
+        // dispatched against junk. The instance methods are wired in
+        // NATIVE_MODULE_TABLE for module: "ioredis"; this branch makes the
+        // ctor produce a real RedisClient handle so the dispatch lands on it.
+        "Redis" => {
+            for a in args {
+                let _ = lower_expr(ctx, a)?;
+            }
+            let blk = ctx.block();
+            // The runtime sig takes one i64 (currently *const c_void, ignored).
+            // Pass 0 — semantically "use env-var defaults".
+            let handle = blk.call(I64, "js_ioredis_new", &[(I64, "0")]);
+            return Ok(Some(nanbox_pointer_inline(blk, &handle)));
+        }
         // async_hooks.AsyncLocalStorage — `new AsyncLocalStorage()` produces a
         // real handle so `.run(store, cb)` / `.getStore()` / `.enterWith(store)`
         // / `.exit(cb)` / `.disable()` find their registered store stack.
@@ -4979,33 +4999,43 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
         runtime: "js_pg_client_end", args: &[], ret: NR_PTR },
 
     // ========== ioredis ==========
+    // NB: every row was previously emitting `js_redis_*` symbols which don't
+    // exist in perry-stdlib (the actual fns are `js_ioredis_*`). The bug was
+    // dormant because pre-#187 no codepath could land on a real Redis handle
+    // — `new Redis()` fell into the empty-placeholder branch in lower_new and
+    // every method dispatched against junk. With the v0.5.262 ctor branch
+    // making the receiver real, these rows have to point at the actual
+    // runtime symbols. Fixed throughout below.
     NativeModSig { module: "ioredis", has_receiver: false, method: "createClient",
         class_filter: None,
-        runtime: "js_redis_create_client", args: &[NA_F64], ret: NR_PTR },
+        // npm `redis`'s createClient(opts) and ioredis's `new Redis(opts)` are
+        // shape-compatible (both produce a client; opts is host/port/etc.).
+        // js_ioredis_new ignores its arg and reads env vars — same behavior.
+        runtime: "js_ioredis_new", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "ioredis", has_receiver: true, method: "set",
         class_filter: None,
-        runtime: "js_redis_set", args: &[NA_STR, NA_STR], ret: NR_PTR },
+        runtime: "js_ioredis_set", args: &[NA_STR, NA_STR], ret: NR_PTR },
     NativeModSig { module: "ioredis", has_receiver: true, method: "get",
         class_filter: None,
-        runtime: "js_redis_get", args: &[NA_STR], ret: NR_PTR },
+        runtime: "js_ioredis_get", args: &[NA_STR], ret: NR_PTR },
     NativeModSig { module: "ioredis", has_receiver: true, method: "del",
         class_filter: None,
-        runtime: "js_redis_del", args: &[NA_STR], ret: NR_PTR },
+        runtime: "js_ioredis_del", args: &[NA_STR], ret: NR_PTR },
     NativeModSig { module: "ioredis", has_receiver: true, method: "exists",
         class_filter: None,
-        runtime: "js_redis_exists", args: &[NA_STR], ret: NR_PTR },
+        runtime: "js_ioredis_exists", args: &[NA_STR], ret: NR_PTR },
     NativeModSig { module: "ioredis", has_receiver: true, method: "incr",
         class_filter: None,
-        runtime: "js_redis_incr", args: &[NA_STR], ret: NR_PTR },
+        runtime: "js_ioredis_incr", args: &[NA_STR], ret: NR_PTR },
     NativeModSig { module: "ioredis", has_receiver: true, method: "decr",
         class_filter: None,
-        runtime: "js_redis_decr", args: &[NA_STR], ret: NR_PTR },
+        runtime: "js_ioredis_decr", args: &[NA_STR], ret: NR_PTR },
     NativeModSig { module: "ioredis", has_receiver: true, method: "expire",
         class_filter: None,
-        runtime: "js_redis_expire", args: &[NA_STR, NA_F64], ret: NR_PTR },
+        runtime: "js_ioredis_expire", args: &[NA_STR, NA_F64], ret: NR_PTR },
     NativeModSig { module: "ioredis", has_receiver: true, method: "quit",
         class_filter: None,
-        runtime: "js_redis_quit", args: &[], ret: NR_PTR },
+        runtime: "js_ioredis_quit", args: &[], ret: NR_PTR },
 
     // ========== MongoDB ==========
     NativeModSig { module: "mongodb", has_receiver: false, method: "connect",

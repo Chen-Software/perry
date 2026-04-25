@@ -41,8 +41,17 @@ pub const NATIVE_MODULES: &[&str] = &[
     "pg",
     "uuid",
     "bcrypt",
-    // Note: ioredis NOT in NATIVE_MODULES - native class tracking happens via class name detection
-    // in lower.rs. Adding it here would make imports skip JS module loading.
+    // ioredis is now in NATIVE_MODULES — the prior workaround (class-name-only
+    // tracking in lower.rs:910) was needed when `import { Redis } from 'ioredis'`
+    // was expected to fall through to a JS interpreter, but Perry's native Rust
+    // ioredis impl is the canonical path and the JS fallback path no longer
+    // runs anything. Keeping it out of NATIVE_MODULES forced `requires_stdlib`
+    // to return false, which made `Linking (runtime-only)` skip the stdlib
+    // archive — every direct `js_ioredis_*` reference (e.g. from the new
+    // `lower_builtin_new` "Redis" branch below) link-failed with `Undefined
+    // symbols: _js_ioredis_new`. Listing it here lets the linker pull in
+    // perry-stdlib (gated on the `database-redis` feature via stdlib_features.rs).
+    "ioredis",
     "axios",
     "node-fetch",
     "ws",
