@@ -279,6 +279,19 @@ jobs:
       - name: Fastify integration tests
         run: ./scripts/run_fastify_tests.sh
 
+      # Memory-stability regression suite. Two failure modes microbenchs
+      # don't catch: (1) slow RSS accumulation across 100k-200k iterations
+      # of allocate-and-discard (would catch a future block-pinning /
+      # cache-leak / tenuring-trap regression in the gen-GC work), and
+      # (2) crashes when gc() is forced aggressively during JSON parse,
+      # deep recursion, or closure init. Each test runs under default,
+      # PERRY_GEN_GC=1, and PERRY_GEN_GC=1 PERRY_WRITE_BARRIERS=1 so a
+      # regression in any GC mode is caught. Linux-only because /usr/bin/time
+      # availability + RSS reporting differs on Windows runners.
+      - name: Memory stability tests
+        if: runner.os == 'Linux' || runner.os == 'macOS'
+        run: ./scripts/run_memory_stability_tests.sh
+
   # ---------------------------------------------------------------------------
   # Doc-example tests: compile + run every .ts under docs/examples/.
   # UI examples launch with PERRY_UI_TEST_MODE=1 so they auto-exit after one
