@@ -3306,6 +3306,68 @@ pub(crate) fn lower_builtin_new(
             let handle = blk.call(I64, "js_commander_new", &[]);
             return Ok(Some(nanbox_pointer_inline(blk, &handle)));
         }
+        // events.EventEmitter — `new EventEmitter()` produces a real
+        // EventEmitterHandle so `.on(...)` / `.emit(...)` find their
+        // registered handle (NATIVE_MODULE_TABLE wires those methods
+        // through `js_event_emitter_*`). Same #187-shape bug — pre-fix
+        // every .on/.emit call dispatched against a junk pointer and
+        // silently registered nothing / fired nothing.
+        "EventEmitter" => {
+            for a in args {
+                let _ = lower_expr(ctx, a)?;
+            }
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_event_emitter_new", &[]);
+            return Ok(Some(nanbox_pointer_inline(blk, &handle)));
+        }
+        // lru-cache LRUCache — `new LRUCache({ max: N })`. Runtime takes
+        // a single `max: f64`. Extract the `max` field from the options
+        // literal (handles both raw `Expr::Object(props)` and Phase 3's
+        // `Expr::New { __AnonShape_N }` shape via `extract_options_fields`);
+        // default to 100 when no options literal is detected (matches the
+        // npm `lru-cache` library's behavior for `new LRUCache()` with
+        // missing max — it warns + falls back, we just fall back).
+        "LRUCache" => {
+            let max_val = if let Some(opts_arg) = args.first() {
+                let mut found_max: Option<String> = None;
+                if let Some(props) = extract_options_fields(ctx, opts_arg) {
+                    for (k, vexpr) in &props {
+                        if k == "max" {
+                            found_max = Some(lower_expr(ctx, vexpr)?);
+                        } else {
+                            // Lower other fields for side effects (e.g. ttl
+                            // option's setter calls).
+                            let _ = lower_expr(ctx, vexpr)?;
+                        }
+                    }
+                } else {
+                    // Non-literal arg (variable, dynamic shape) — lower for
+                    // side effects only; cannot extract max statically.
+                    let _ = lower_expr(ctx, opts_arg)?;
+                }
+                found_max.unwrap_or_else(|| "100.0".to_string())
+            } else {
+                "100.0".to_string()
+            };
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_lru_cache_new", &[(DOUBLE, &max_val)]);
+            return Ok(Some(nanbox_pointer_inline(blk, &handle)));
+        }
+        // ws WebSocketServer — `new WebSocketServer({ port: N })`. Runtime
+        // takes the full options object as a NaN-boxed f64 and reads `port`
+        // / `host` from it via dynamic property access.
+        "WebSocketServer" => {
+            let opts_val = if let Some(opts_arg) = args.first() {
+                lower_expr(ctx, opts_arg)?
+            } else {
+                // No opts → pass TAG_UNDEFINED so the runtime defaults take
+                // over (port 8080, host 127.0.0.1).
+                double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED))
+            };
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_ws_server_new", &[(DOUBLE, &opts_val)]);
+            return Ok(Some(nanbox_pointer_inline(blk, &handle)));
+        }
         "Array" => {
             // `new Array()` → empty array, `new Array(n)` → length-n array
             // (zero-initialized slots), `new Array(a, b, c)` → 3-element array
