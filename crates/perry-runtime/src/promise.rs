@@ -758,17 +758,19 @@ pub extern "C" fn js_promise_all(promises_arr: *const crate::array::ArrayHeader)
     for i in 0..count {
         let promise_f64 = js_array_get_f64(promises_arr, i);
 
-        // Extract promise pointer from NaN-boxed value
-        let promise_ptr = js_nanbox_get_pointer(promise_f64) as *mut Promise;
-
-        if promise_ptr.is_null() {
-            // Not a promise - treat as already resolved value
-            // Store the value directly and decrement count
+        // Discriminate via the GC-header obj_type, not via raw pointer
+        // extraction: string/bigint NaN-boxed values produce non-null
+        // pointers from js_nanbox_get_pointer and would be passed to
+        // js_promise_then as if they were Promises.
+        if js_value_is_promise(promise_f64) == 0 {
+            // Not a promise — treat as already resolved value
             js_array_set_f64(results_arr, i, promise_f64);
             let remaining = js_array_get_f64(state_arr, 0) - 1.0;
             js_array_set_f64(state_arr, 0, remaining);
             continue;
         }
+
+        let promise_ptr = js_nanbox_get_pointer(promise_f64) as *mut Promise;
 
         // Create fulfill closure for this promise
         // Captures: [result_promise, results_arr, state_arr, index]
@@ -882,12 +884,15 @@ pub extern "C" fn js_promise_race(promises_arr: *const crate::array::ArrayHeader
     // For each promise, attach resolve/reject handlers that settle the result promise
     for i in 0..count {
         let promise_f64 = js_array_get_f64(promises_arr, i);
-        let promise_ptr = js_nanbox_get_pointer(promise_f64) as *mut Promise;
-        if promise_ptr.is_null() {
+        // Discriminate via GC-header obj_type — string/bigint NaN-boxed
+        // values would otherwise pass through pointer extraction and crash
+        // js_promise_then.
+        if js_value_is_promise(promise_f64) == 0 {
             // Non-promise value — resolve immediately with the value
             js_promise_resolve(result_promise, promise_f64);
             return result_promise;
         }
+        let promise_ptr = js_nanbox_get_pointer(promise_f64) as *mut Promise;
 
         // Check if already settled — resolve/reject immediately
         let state = unsafe { (*promise_ptr).state };
@@ -1154,9 +1159,10 @@ pub extern "C" fn js_promise_any(promises_arr: *const crate::array::ArrayHeader)
 
     for i in 0..count {
         let promise_f64 = js_array_get_f64(promises_arr, i);
-        let promise_ptr = js_nanbox_get_pointer(promise_f64) as *mut Promise;
-
-        if promise_ptr.is_null() {
+        // Discriminate via GC-header obj_type — string/bigint NaN-boxed
+        // values would otherwise pass through pointer extraction and crash
+        // js_promise_then.
+        if js_value_is_promise(promise_f64) == 0 {
             // Non-promise value — treat as fulfilled, settle immediately if not yet settled
             let already_settled = js_array_get_f64(state_arr, 1);
             if already_settled == 0.0 {
@@ -1165,6 +1171,7 @@ pub extern "C" fn js_promise_any(promises_arr: *const crate::array::ArrayHeader)
             }
             return result_promise;
         }
+        let promise_ptr = js_nanbox_get_pointer(promise_f64) as *mut Promise;
 
         let fulfill_closure = js_closure_alloc(promise_any_fulfill_handler as *const u8, 2);
         js_closure_set_capture_ptr(fulfill_closure, 0, result_promise as i64);

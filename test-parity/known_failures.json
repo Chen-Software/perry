@@ -1,24 +1,4 @@
 {
-  "test_edge_class_advanced": {
-    "status": "known_limitation",
-    "reason": "Advanced class features: private methods, static blocks not fully implemented"
-  },
-  "test_edge_classes": {
-    "status": "bug",
-    "reason": "Class edge cases: getter/setter or inheritance dispatch issues"
-  },
-  "test_edge_complex_patterns": {
-    "status": "bug",
-    "reason": "Complex pattern matching edge cases in destructuring/spread"
-  },
-  "test_edge_generics": {
-    "status": "bug",
-    "reason": "Generic type instantiation edge cases"
-  },
-  "test_edge_interfaces": {
-    "status": "bug",
-    "reason": "Interface implementation edge cases"
-  },
   "test_cli_simulation": {
     "status": "bug",
     "reason": "fs.readFileSync return-type divergence: Node returns Buffer (`<Buffer 6c 69 6e 65 ...>`), Perry returns string (`line1\\nline2\\n...`). Pre-existing — appeared between parity runs 2026-04-24 and 2026-04-25, predates v0.5.250's known_failures cleanup (HIR-only commit). Likely surfaces from a recent codegen commit (c4739341 cross-module getters/setters, or 3ba1188e FFI manifest); root-cause separately."
@@ -39,22 +19,6 @@
     "status": "known_limitation",
     "reason": "console.trace stack frame format differs (Node JS call frames vs native C frames); timer values normalized by parity script"
   },
-  "test_gap_global_apis": {
-    "status": "known_limitation",
-    "reason": "Missing global APIs: URL/Blob/AbortController extensions"
-  },
-  "test_gap_string_methods": {
-    "status": "known_limitation",
-    "reason": "Lone surrogate handling (isWellFormed/toWellFormed needs WTF-8)"
-  },
-  "test_getters_setters": {
-    "status": "bug",
-    "reason": "Getter/setter dispatch issues in some patterns"
-  },
-  "test_method_inherit": {
-    "status": "bug",
-    "reason": "Method inheritance dispatch edge cases"
-  },
   "test_net_min": {
     "status": "skip",
     "reason": "Requires live network socket"
@@ -66,14 +30,6 @@
   "test_net_upgrade_tls": {
     "status": "skip",
     "reason": "Requires TLS/network infrastructure"
-  },
-  "test_perf_paths": {
-    "status": "bug",
-    "reason": "Performance path optimization edge case"
-  },
-  "test_super_calls": {
-    "status": "bug",
-    "reason": "Super call dispatch in deep inheritance chains"
   },
   "test_tls_connect": {
     "status": "skip",
@@ -98,10 +54,6 @@
   "test_gap_buffer_ops": {
     "status": "ci-env",
     "reason": "Compile-fails on macOS-14 CI runner, passes locally on macOS 15.x. Likely SDK/linker version interaction; perry CLI itself is fine"
-  },
-  "test_gap_map_set_extended": {
-    "status": "known_limitation",
-    "reason": "Map keying does not distinguish -0 from +0 (JS spec says they're the same key, but Map.has(0) after Map.set(-0, ...) differs from Node)"
   },
   "test_gap_node_crypto_buffer": {
     "status": "ci-env",
