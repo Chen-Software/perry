@@ -4284,9 +4284,43 @@ unsafe fn dispatch_bigint_binary_method(
             let result = crate::bigint::js_bigint_cmp(a, b);
             return result as f64;
         }
-        "fromTwos" | "toTwos" => {
-            // TODO: implement proper two's complement conversion
-            return f64::from_bits(JSValue::bigint_ptr(a as *mut crate::bigint::BigIntHeader).bits());
+        "fromTwos" => {
+            // bn.js: interpret `a` as the unsigned encoding of a signed
+            // `width`-bit integer in two's complement. If bit (width-1) of
+            // `a` is set the result is `a - 2^width`; otherwise return `a`.
+            // `width` arrives in `b` (already a BigInt — see top of fn).
+            let width = if b.is_null() { 0u64 } else { (*b).limbs[0] };
+            let max_bits = (crate::bigint::BIGINT_LIMBS * 64) as u64;
+            if width == 0 || width > max_bits {
+                return f64::from_bits(JSValue::bigint_ptr(a as *mut crate::bigint::BigIntHeader).bits());
+            }
+            let bit = (width - 1) as usize;
+            let high_bit_set = ((*a).limbs[bit / 64] >> (bit % 64)) & 1 == 1;
+            if !high_bit_set {
+                return f64::from_bits(JSValue::bigint_ptr(a as *mut crate::bigint::BigIntHeader).bits());
+            }
+            let one = crate::bigint::js_bigint_from_u64(1);
+            let two_pow = crate::bigint::js_bigint_shl(one, b);
+            let result = crate::bigint::js_bigint_sub(a, two_pow);
+            return f64::from_bits(JSValue::bigint_ptr(result).bits());
+        }
+        "toTwos" => {
+            // bn.js: convert to `width`-bit two's complement encoding. If `a`
+            // is negative the result is `a + 2^width` (mod 2^width);
+            // otherwise return `a` unchanged. bn.js does not mask
+            // non-negative inputs to `width` bits, so neither do we.
+            let width = if b.is_null() { 0u64 } else { (*b).limbs[0] };
+            let max_bits = (crate::bigint::BIGINT_LIMBS * 64) as u64;
+            if width == 0 || width > max_bits {
+                return f64::from_bits(JSValue::bigint_ptr(a as *mut crate::bigint::BigIntHeader).bits());
+            }
+            if crate::bigint::js_bigint_is_negative(a) == 0 {
+                return f64::from_bits(JSValue::bigint_ptr(a as *mut crate::bigint::BigIntHeader).bits());
+            }
+            let one = crate::bigint::js_bigint_from_u64(1);
+            let two_pow = crate::bigint::js_bigint_shl(one, b);
+            let result = crate::bigint::js_bigint_add(a, two_pow);
+            return f64::from_bits(JSValue::bigint_ptr(result).bits());
         }
         _ => {
             return f64::from_bits(crate::value::TAG_UNDEFINED);
