@@ -29,6 +29,8 @@ tests/test_*
 tests/test-*
 !tests/test_*.ts
 !tests/test-*.ts
+!tests/test_*.sh
+!tests/test-*.sh
 !tests/*/
 bench_*
 !bench_*.ts
