@@ -2,6 +2,64 @@
 
 Detailed changelog for Perry. See CLAUDE.md for concise summaries.
 
+## v0.5.241 — Polyglot JSON benchmark suite + consolidated `benchmarks/README.md`. The repo previously had two benchmark sources — `benchmarks/polyglot/` (8 compute microbenches across 10 runtimes, last refreshed at v0.5.164) and `benchmarks/suite/` (Perry-only roundtrip / readonly / GC-pressure benches). What was missing was a JSON encoding/decoding comparison against native runtimes (Go, Rust, C++, Swift) and a single consolidated page that a skeptical reader could open, see every benchmark in context, and verify Perry's claims. This commit fixes both.
+
+**`benchmarks/json_polyglot/`** — new directory, 6 benchmark implementations of the identical 10k-record / ~1 MB blob / 50-iteration parse + stringify workload:
+
+- `bench.ts` — TypeScript (runs on Perry, Bun, Node)
+- `bench.go` — Go using `encoding/json`
+- `bench.rs` + `Cargo.toml` — Rust using `serde_json`
+- `bench.swift` — Swift using `Foundation.JSONEncoder`/`JSONDecoder`
+- `bench.cpp` — C++ using nlohmann/json (the de facto standard library for C++ JSON)
+- `run.sh` — runner that compiles each implementation under both *idiomatic* (default release-mode flags most projects use) and *optimized* (aggressive LTO + single codegen unit + fast-math where applicable) profiles, runs each best-of-5, captures wall-clock ms and peak RSS via `/usr/bin/time -l`, and writes a sorted markdown table to `RESULTS.md`.
+
+**Each language listed twice in the results.** Idiomatic and optimized profiles separately, so a reader who points out "Perry's defaults are themselves aggressive" sees both the default-build floor and the full optimization ceiling for every comparison runtime. The point: meet skeptics on their own ground.
+
+**Run on 2026-04-25 macOS arm64 M1 Max:**
+
+| Implementation | Profile | Time (ms) | Peak RSS (MB) |
+|---|---|---:|---:|
+| **perry (gen-gc + lazy tape)** | optimized | **65** | 85 |
+| rust serde_json (LTO+1cgu) | optimized | 180 | 11 |
+| rust serde_json | idiomatic | 192 | 11 |
+| bun | idiomatic | 242 | 80 |
+| perry (mark-sweep, no lazy) | idiomatic | 351 | 102 |
+| node | idiomatic | 359 | 182 |
+| node --max-old=4096 | optimized | 362 | 181 |
+| c++ -O3 -flto (nlohmann/json) | optimized | 778 | 25 |
+| go (encoding/json) | optimized | 785 | 22 |
+| go (encoding/json) | idiomatic | 785 | 24 |
+| c++ -O2 (nlohmann/json) | idiomatic | 843 | 25 |
+| swift -O -wmo (Foundation) | optimized | 3706 | 33 |
+| swift -O (Foundation) | idiomatic | 3710 | 34 |
+
+**Perry leads on time across the entire field**: 2.8× over Rust serde_json LTO, 3.7× over Bun, 5.5× over Node, 12× over Go encoding/json and C++ nlohmann/json, 57× over Swift Foundation. **Perry's RSS is mid-pack**: 85 MB beats Node's 182 MB, ties Bun (80 MB), is 8× higher than typed-struct languages (Rust 11 MB, Go 22 MB, C++ 25 MB). The 8× RSS gap to typed-struct languages is fundamental to dynamic JSON parsing — every parsed value is a heap-allocated NaN-boxed object — and is acknowledged explicitly in the consolidated readme. The fix is typed JSON parse (`JSON.parse<T>(blob)`), tracked as `docs/json-typed-parse-plan.md` (Step 1 done in v0.5.200).
+
+Honest disclaimers documented per-cell:
+
+- Perry's lazy-tape win is workload-specific (parse-then-iterate-every-element is a net loss; parse-then-`.length`-or-stringify is what this bench measures).
+- Rust's RSS lead is fundamental to typed deserialization, not an unfair advantage.
+- Go's "optimized" ≈ idiomatic — `-ldflags="-s -w" -trimpath` strips debug info, no perf delta. Go has no `-ffast-math` or `reassoc` flag; some compute deltas are unrecoverable in stock Go.
+- Swift's slow time is real, not a setup problem. Foundation JSON goes through `Mirror`-based reflection on `Codable` types and is genuinely slow on macOS. swift-json is faster; not included because Foundation is the standard.
+- nlohmann/json is the de facto popular C++ library, not the fastest. Replacing it with simdjson would beat Perry on parse-only workloads (no stringify support).
+
+**`benchmarks/README.md`** — new consolidated landing page. Single GitHub-renderable markdown page that pulls together every benchmark in the repo. Sections:
+
+1. **TL;DR** — JSON polyglot table + compute microbench table at-a-glance.
+2. **How to read this page** — methodology, hardware, fairness statement, what idiomatic vs optimized means.
+3. **JSON polyglot — full data** — workload TypeScript code, full compiler-flag table per language, library choice rationale, honest disclaimers.
+4. **Compute microbenches — full data** — links to existing `benchmarks/polyglot/RESULTS.md` + `RESULTS_OPT.md`, summary of where Perry wins (`reassoc contract` on f64 ops giving LLVM the freedom to autovectorize) and where C++ closes the gap with `-O3 -ffast-math`.
+5. **Memory + GC stability** — links to `scripts/run_memory_stability_tests.sh`, RSS-history table for `bench_json_roundtrip` direct path showing the v0.5.193 → v0.5.236 drop from 213 MB → 107 MB.
+6. **Strengths** — JSON parse+stringify roundtrip, f64 tight loops, object allocation in tight loops, generational GC defaults that adapt.
+7. **Weaknesses** — RSS on dynamic-JSON, stop-the-world GC, no old-gen compaction, shadow stack still parallel-not-replacing the conservative scanner, TypeScript parity gaps, no JIT, single-threaded by default, non-incremental compilation.
+8. **What this page does not measure** — GC tail latency, JIT warmup, async/await, I/O, realistic application workloads, contention, compile time / binary size.
+9. **Reproducing** — exact commands per benchmark suite.
+10. **Design / implementation references** — links to all 6 design plan docs.
+
+The closing line: "If you spot something that looks unfair, biased, or wrong: open an issue at https://github.com/PerryTS/perry/issues … the point of this page is to be defensible, not to win. Numbers that don't survive scrutiny don't belong here."
+
+`brew install nlohmann-json` added as a dependency for the C++ bench (v3.12.0). Build clean across all 7 languages on this M1 Max + macOS 26.4 setup.
+
 ## v0.5.240 — Gen-GC docs: academic + industry lineage appendix. Adds a defensibility section to `docs/generational-gc-plan.md` mapping each phase of Perry's GC architecture to its canonical paper and a list of shipping VMs that use the same techniques. The point of the appendix isn't to claim novelty — the opposite: every design decision traces to a paper or a real-world VM that does the same thing. The contribution Perry makes is engineering, not algorithms.
 
 **Single strongest reference: Bartlett 1988, *Mostly Copying Garbage Collection*** (DEC SRC Technical Note TN-13). This describes Perry's C4b almost verbatim — conservative scan of registers + C stack discovers candidate pointers and pins them; precise scan of heap fields finds movable objects; forwarding pointers in evacuated objects' headers; pinned objects stay in place. Perry's `CONS_PINNED` HashSet, `pin_currently_marked_as_conservative` helper, `GC_FLAG_FORWARDED` flag, and `rewrite_forwarded_references` walker collectively implement Bartlett's algorithm in Rust. The generational extension follows Ungar 1984 (*Generation Scavenging*).
