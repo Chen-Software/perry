@@ -3353,19 +3353,23 @@ pub(crate) fn lower_builtin_new(
             let handle = blk.call(I64, "js_lru_cache_new", &[(DOUBLE, &max_val)]);
             return Ok(Some(nanbox_pointer_inline(blk, &handle)));
         }
-        // ws WebSocketServer — `new WebSocketServer({ port: N })`. Runtime
-        // takes the full options object as a NaN-boxed f64 and reads `port`
-        // / `host` from it via dynamic property access.
-        "WebSocketServer" => {
-            let opts_val = if let Some(opts_arg) = args.first() {
-                lower_expr(ctx, opts_arg)?
+        // (`WebSocketServer` is handled by an earlier branch lower in this
+        // file — pre-existing from 2026-04-14. No new branch needed here.)
+        // decimal.js Decimal — `new Decimal(value)` where value is a number,
+        // string, or another Decimal. Routes through `js_decimal_coerce_to_handle`
+        // which NaN-decodes the JSValue and dispatches to `from_number` /
+        // `from_string` / passthrough for an existing Decimal handle. Without
+        // this, `new Decimal("0.1")` falls into the empty-placeholder branch
+        // and every chained method dispatches against a junk receiver.
+        "Decimal" => {
+            let val = if let Some(arg) = args.first() {
+                lower_expr(ctx, arg)?
             } else {
-                // No opts → pass TAG_UNDEFINED so the runtime defaults take
-                // over (port 8080, host 127.0.0.1).
+                // `new Decimal()` with no args — coerce undefined → 0.
                 double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED))
             };
             let blk = ctx.block();
-            let handle = blk.call(I64, "js_ws_server_new", &[(DOUBLE, &opts_val)]);
+            let handle = blk.call(I64, "js_decimal_coerce_to_handle", &[(DOUBLE, &val)]);
             return Ok(Some(nanbox_pointer_inline(blk, &handle)));
         }
         "Array" => {
@@ -5207,6 +5211,93 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
     NativeModSig { module: "commander", has_receiver: true, method: "opts",
         class_filter: None,
         runtime: "js_commander_opts", args: &[], ret: NR_PTR },
+
+    // ========== decimal.js (arbitrary-precision math) ==========
+    // `new Decimal(value)` is dispatched by `lower_builtin_new` (calls
+    // `js_decimal_coerce_to_handle` to handle string/number/Decimal args).
+    // The instance methods below all operate on a registered DecimalHandle.
+    // Binary-op wrappers (`*_value`) coerce the second arg via the same
+    // helper so `a.plus(2)` and `a.plus("0.1")` work as well as `a.plus(b)`.
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "plus",
+        class_filter: None,
+        runtime: "js_decimal_plus_value", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "minus",
+        class_filter: None,
+        runtime: "js_decimal_minus_value", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "times",
+        class_filter: None,
+        runtime: "js_decimal_times_value", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "div",
+        class_filter: None,
+        runtime: "js_decimal_div_value", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "mod",
+        class_filter: None,
+        runtime: "js_decimal_mod_value", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "pow",
+        class_filter: None,
+        runtime: "js_decimal_pow", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "sqrt",
+        class_filter: None,
+        runtime: "js_decimal_sqrt", args: &[], ret: NR_PTR },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "abs",
+        class_filter: None,
+        runtime: "js_decimal_abs", args: &[], ret: NR_PTR },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "neg",
+        class_filter: None,
+        runtime: "js_decimal_neg", args: &[], ret: NR_PTR },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "round",
+        class_filter: None,
+        runtime: "js_decimal_round", args: &[], ret: NR_PTR },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "floor",
+        class_filter: None,
+        runtime: "js_decimal_floor", args: &[], ret: NR_PTR },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "ceil",
+        class_filter: None,
+        runtime: "js_decimal_ceil", args: &[], ret: NR_PTR },
+    // Formatting — return strings (NR_STR NaN-boxes the *StringHeader).
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "toFixed",
+        class_filter: None,
+        runtime: "js_decimal_to_fixed", args: &[NA_F64], ret: NR_STR },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "toString",
+        class_filter: None,
+        runtime: "js_decimal_to_string", args: &[], ret: NR_STR },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "toNumber",
+        class_filter: None,
+        runtime: "js_decimal_to_number", args: &[], ret: NR_F64 },
+    // `valueOf()` is what JS uses for implicit number coercion (e.g. `+a`,
+    // `a < 5`); decimal.js documents it as an alias for toNumber.
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "valueOf",
+        class_filter: None,
+        runtime: "js_decimal_to_number", args: &[], ret: NR_F64 },
+    // Comparisons — `*_value` wrappers coerce rhs so a.eq(0) works.
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "eq",
+        class_filter: None,
+        runtime: "js_decimal_eq_value", args: &[NA_F64], ret: NR_F64 },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "lt",
+        class_filter: None,
+        runtime: "js_decimal_lt_value", args: &[NA_F64], ret: NR_F64 },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "lte",
+        class_filter: None,
+        runtime: "js_decimal_lte_value", args: &[NA_F64], ret: NR_F64 },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "gt",
+        class_filter: None,
+        runtime: "js_decimal_gt_value", args: &[NA_F64], ret: NR_F64 },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "gte",
+        class_filter: None,
+        runtime: "js_decimal_gte_value", args: &[NA_F64], ret: NR_F64 },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "cmp",
+        class_filter: None,
+        runtime: "js_decimal_cmp_value", args: &[NA_F64], ret: NR_F64 },
+    // Predicates — return booleans encoded as f64 (TAG_TRUE / TAG_FALSE).
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "isZero",
+        class_filter: None,
+        runtime: "js_decimal_is_zero", args: &[], ret: NR_F64 },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "isPositive",
+        class_filter: None,
+        runtime: "js_decimal_is_positive", args: &[], ret: NR_F64 },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "isNegative",
+        class_filter: None,
+        runtime: "js_decimal_is_negative", args: &[], ret: NR_F64 },
 
     // ========== uuid ==========
     NativeModSig { module: "uuid", has_receiver: false, method: "v4",

@@ -5909,8 +5909,15 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                 // Methods that return the same type (builder pattern)
                                 let is_math_lib = matches!(module.as_str(), "big.js" | "decimal.js" | "bignumber.js");
                                 let is_math_method = matches!(method_name.as_str(),
+                                    // arithmetic + chainable rounding/formatting
                                     "plus" | "minus" | "times" | "div" | "mod" |
-                                    "pow" | "sqrt" | "abs" | "neg" | "round" | "floor" | "ceil" | "toFixed"
+                                    "pow" | "sqrt" | "abs" | "neg" | "round" | "floor" | "ceil" | "toFixed" |
+                                    // decimal.js: terminal-shape methods that still need
+                                    // NativeMethodCall dispatch (so a.plus(b).eq(c) etc.
+                                    // doesn't fall back to the generic Call+PropertyGet path).
+                                    "toString" | "toNumber" | "valueOf" |
+                                    "eq" | "lt" | "lte" | "gt" | "gte" | "cmp" |
+                                    "isZero" | "isPositive" | "isNegative"
                                 );
                                 // commander Command — every fluent method either
                                 // returns the same handle (name/version/description/
