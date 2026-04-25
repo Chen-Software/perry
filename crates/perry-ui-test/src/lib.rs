@@ -256,6 +256,7 @@ pub const FEATURES: &[Feature] = &[
     Feature { name: "perry_system_notification_schedule_calendar", category: SystemApi, macos: S, ios: S, android: U, gtk4: U, windows: U, web: U, web_name: None },
     Feature { name: "perry_system_notification_schedule_location", category: SystemApi, macos: U, ios: S, android: U, gtk4: U, windows: U, web: U, web_name: None },
     Feature { name: "perry_system_notification_cancel",            category: SystemApi, macos: S, ios: S, android: U, gtk4: U, windows: U, web: U, web_name: None },
+    Feature { name: "perry_system_notification_on_tap",            category: SystemApi, macos: S, ios: S, android: U, gtk4: U, windows: U, web: U, web_name: None },
 
     // ── Web-Only Functions ───────────────────────────────────────────────
     // These exist only in the web runtime and have no native equivalent.

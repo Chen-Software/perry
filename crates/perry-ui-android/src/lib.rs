@@ -999,6 +999,11 @@ pub extern "C" fn perry_system_notification_schedule_location(
 #[no_mangle]
 pub extern "C" fn perry_system_notification_cancel(_id_ptr: i64) {}
 
+/// Stub: PendingIntent + broadcast receiver wiring is a separate PR (#97
+/// follow-up). Symbol exists so TS calling `notificationOnTap` links + runs.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_tap(_callback: f64) {}
+
 #[no_mangle]
 pub extern "C" fn perry_system_request_location(callback: f64) {
     location::request_location(callback);

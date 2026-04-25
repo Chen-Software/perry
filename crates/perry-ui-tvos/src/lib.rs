@@ -1528,6 +1528,9 @@ pub extern "C" fn perry_system_notification_schedule_location(
 pub extern "C" fn perry_system_notification_cancel(_id_ptr: i64) {}
 
 #[no_mangle]
+pub extern "C" fn perry_system_notification_on_tap(_callback: f64) {}
+
+#[no_mangle]
 pub extern "C" fn perry_system_get_locale() -> i64 {
     extern "C" {
         fn js_string_from_bytes(ptr: *const u8, len: i64) -> *const u8;

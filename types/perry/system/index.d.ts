@@ -120,6 +120,23 @@ export function notificationSchedule(opts: {
  */
 export function notificationCancel(id: string): void;
 
+/**
+ * Register a handler for notification taps. Fires when the user taps the
+ * notification banner (or selects an action button on platforms that wire
+ * action support). The first arg is the notification id (the same string
+ * passed to `notificationSchedule({id, …})` or — for `notificationSend` —
+ * the per-platform default id).
+ *
+ * `action` is the action-button identifier when the user tapped a button,
+ * or `undefined` for the default banner tap. Action-button registration
+ * isn't wired yet; until it is, `action` is always `undefined`.
+ *
+ * Backed by `UNUserNotificationCenterDelegate.didReceiveNotificationResponse`
+ * on Apple. No-op on tvOS/visionOS/watchOS/Android/GTK4/Windows/Web until
+ * the equivalent native pipeline is wired.
+ */
+export function notificationOnTap(cb: (id: string, action?: string) => void): void;
+
 // ---------------------------------------------------------------------------
 // Audio input
 // ---------------------------------------------------------------------------

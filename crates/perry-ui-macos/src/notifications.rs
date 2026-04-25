@@ -1,7 +1,7 @@
-use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject};
-use objc2_foundation::NSString;
+use objc2::{define_class, msg_send, AnyThread};
+use objc2_foundation::{NSObject, NSString};
 use std::cell::RefCell;
 
 thread_local! {
@@ -11,6 +11,13 @@ thread_local! {
     /// Closure passed to `notificationOnReceive(cb)`. Fires for each remote
     /// payload while the app is foregrounded.
     static ON_REMOTE_RECEIVE_CALLBACK: RefCell<Option<f64>> = const { RefCell::new(None) };
+    /// Closure passed to `notificationOnTap(cb)`. Fires when the user taps a
+    /// delivered notification. Receives `(id, action?)` — `action` is the
+    /// action-button identifier or `undefined` for the default banner tap.
+    static ON_TAP_CALLBACK: RefCell<Option<f64>> = const { RefCell::new(None) };
+    /// Retained `PerryNotificationDelegate` instance. Lazily created when
+    /// `set_on_tap` is called and reused for the lifetime of the app.
+    static TAP_DELEGATE: RefCell<Option<Retained<PerryNotificationDelegate>>> = const { RefCell::new(None) };
 }
 
 extern "C" {
@@ -18,10 +25,117 @@ extern "C" {
     fn js_nanbox_string(ptr: i64) -> f64;
     fn js_string_from_bytes(data: *const u8, len: u32) -> *mut crate::string_header::StringHeader;
     fn js_closure_call1(closure: *const u8, arg0: f64) -> f64;
+    fn js_closure_call2(closure: *const u8, arg0: f64, arg1: f64) -> f64;
     fn js_json_parse(text_ptr: *const crate::string_header::StringHeader) -> u64;
     fn js_stdlib_process_pending();
     fn js_promise_run_microtasks() -> i32;
     fn js_is_truthy(value: f64) -> i32;
+}
+
+/// `f64::from_bits(TAG_UNDEFINED)` — used as the `action` argument when the
+/// user tapped the notification banner (no action button).
+const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+
+pub struct PerryNotificationDelegateIvars;
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "PerryNotificationDelegate"]
+    #[ivars = PerryNotificationDelegateIvars]
+    pub struct PerryNotificationDelegate;
+
+    impl PerryNotificationDelegate {
+        /// `userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:`
+        /// — fires when the user taps a delivered notification (#97). Extracts
+        /// the notification id and action id from the response and dispatches
+        /// the registered tap callback with them, then calls the completion
+        /// handler so UN can finalize the response.
+        #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
+        fn did_receive_response(
+            &self,
+            _center: &AnyObject,
+            response: &AnyObject,
+            completion: *mut AnyObject,
+        ) {
+            unsafe {
+                dispatch_tap(response);
+                if !completion.is_null() {
+                    let block: *const block2::Block<dyn Fn()> = completion as *const _;
+                    (*block).call(());
+                }
+            }
+        }
+    }
+);
+
+impl PerryNotificationDelegate {
+    fn new() -> Retained<Self> {
+        let this = Self::alloc().set_ivars(PerryNotificationDelegateIvars);
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// Pull notification id + action id off a `UNNotificationResponse` and
+/// invoke the stored tap callback with them. `action` is `undefined` for the
+/// default banner tap (when the action identifier equals
+/// `UNNotificationDefaultActionIdentifier`); otherwise it's the custom
+/// action id passed to `UNNotificationAction.actionWithIdentifier:`.
+unsafe fn dispatch_tap(response: &AnyObject) {
+    let cb = ON_TAP_CALLBACK.with(|c| *c.borrow());
+    let Some(callback) = cb else { return; };
+
+    // response.notification.request.identifier — UTF8String onto the Perry heap.
+    let notification: *mut AnyObject = msg_send![response, notification];
+    if notification.is_null() { return; }
+    let request: *mut AnyObject = msg_send![notification, request];
+    if request.is_null() { return; }
+    let id_str: *mut AnyObject = msg_send![request, identifier];
+    let id_value = nsstring_to_perry(id_str);
+
+    // response.actionIdentifier — string. If it equals
+    // `UNNotificationDefaultActionIdentifier` (`com.apple.UNNotificationDefaultActionIdentifier`),
+    // pass `undefined` to JS; if it equals `UNNotificationDismissActionIdentifier`,
+    // also `undefined` for now (action-button registration isn't wired yet).
+    let action_id_str: *mut AnyObject = msg_send![response, actionIdentifier];
+    let action_value = if action_id_str.is_null() {
+        f64::from_bits(TAG_UNDEFINED)
+    } else {
+        let utf8: *const u8 = msg_send![action_id_str, UTF8String];
+        if utf8.is_null() {
+            f64::from_bits(TAG_UNDEFINED)
+        } else {
+            let len = libc::strlen(utf8 as *const i8);
+            let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(utf8, len));
+            // Apple's default identifier — the user just tapped the banner.
+            if s == "com.apple.UNNotificationDefaultActionIdentifier"
+                || s == "com.apple.UNNotificationDismissActionIdentifier"
+            {
+                f64::from_bits(TAG_UNDEFINED)
+            } else {
+                nsstring_to_perry(action_id_str)
+            }
+        }
+    };
+
+    js_stdlib_process_pending();
+    js_promise_run_microtasks();
+
+    let ptr = js_nanbox_get_pointer(callback) as *const u8;
+    if !ptr.is_null() {
+        js_closure_call2(ptr, id_value, action_value);
+    }
+}
+
+/// Copy an `NSString *` onto Perry's heap and return a NaN-boxed string
+/// JSValue (`f64::from_bits` of the boxed bits). Returns `undefined` if the
+/// argument is null.
+unsafe fn nsstring_to_perry(s: *mut AnyObject) -> f64 {
+    if s.is_null() { return f64::from_bits(TAG_UNDEFINED); }
+    let utf8: *const u8 = msg_send![s, UTF8String];
+    if utf8.is_null() { return f64::from_bits(TAG_UNDEFINED); }
+    let len = libc::strlen(utf8 as *const i8);
+    let str_ptr = js_string_from_bytes(utf8, len as u32);
+    js_nanbox_string(str_ptr as i64)
 }
 
 /// Build a `UNMutableNotificationContent` with title + body. Caller is
@@ -306,6 +420,27 @@ pub fn schedule_location(
         "[perry] notificationSchedule: trigger.type=\"location\" is iOS-only; \
          macOS has no UNLocationNotificationTrigger equivalent."
     );
+}
+
+/// Register the JS closure that fires on notification tap (#97). Lazily
+/// creates a `PerryNotificationDelegate` instance, retains it in a thread-
+/// local, and assigns it as the `UNUserNotificationCenter.delegate`. Calling
+/// `set_on_tap` twice replaces the callback but keeps the delegate.
+pub fn set_on_tap(callback: f64) {
+    ON_TAP_CALLBACK.with(|c| *c.borrow_mut() = Some(callback));
+    unsafe {
+        TAP_DELEGATE.with(|d| {
+            let mut d = d.borrow_mut();
+            if d.is_none() {
+                *d = Some(PerryNotificationDelegate::new());
+            }
+            let Some(delegate) = d.as_ref() else { return; };
+            let Some(center_cls) = AnyClass::get(c"UNUserNotificationCenter") else { return; };
+            let center: Retained<AnyObject> = msg_send![center_cls, currentNotificationCenter];
+            let delegate_ref: *const AnyObject = &**delegate as *const _ as *const AnyObject;
+            let _: () = msg_send![&*center, setDelegate: delegate_ref];
+        });
+    }
 }
 
 /// Cancel a previously scheduled notification by id (#96).

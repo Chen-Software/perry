@@ -1368,6 +1368,11 @@ pub extern "C" fn perry_system_notification_cancel(id_ptr: i64) {
     crate::notifications::cancel(id_ptr as *const u8);
 }
 
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_tap(callback: f64) {
+    crate::notifications::set_on_tap(callback);
+}
+
 // =============================================================================
 // Location (perry/system) — stub on macOS, iOS only
 // =============================================================================
