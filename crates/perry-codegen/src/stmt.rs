@@ -50,6 +50,14 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
             } else {
                 v
             };
+            // Pop any currently-open try frames before returning so the
+            // runtime's TRY_DEPTH counter stays balanced. Otherwise an
+            // early `return` inside `try { ... }` leaks one frame per
+            // call — at 128 the runtime panics with "Try block nesting
+            // too deep".
+            for _ in 0..ctx.try_depth {
+                ctx.block().call_void("js_try_end", &[]);
+            }
             ctx.block().ret(DOUBLE, &final_v);
             Ok(())
         }
@@ -61,8 +69,16 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
                 let blk = ctx.block();
                 let handle = blk.call(crate::types::I64, "js_promise_resolved", &[(DOUBLE, &zero)]);
                 let boxed = crate::expr::nanbox_pointer_inline_pub(blk, &handle);
+                // Pop open try frames first (see above).
+                for _ in 0..ctx.try_depth {
+                    ctx.block().call_void("js_try_end", &[]);
+                }
                 ctx.block().ret(DOUBLE, &boxed);
             } else {
+                // Pop open try frames first (see above).
+                for _ in 0..ctx.try_depth {
+                    ctx.block().call_void("js_try_end", &[]);
+                }
                 ctx.block().ret(DOUBLE, "0.0");
             }
             Ok(())
@@ -752,7 +768,12 @@ fn lower_try(
 
     // --- try body ---
     ctx.current_block = try_body_idx;
+    // Track that this try frame is open so any `return` inside the body
+    // pops it via `js_try_end` before falling through to the function's
+    // ret. Decremented after the body finishes lowering.
+    ctx.try_depth += 1;
     lower_stmts(ctx, body)?;
+    ctx.try_depth -= 1;
     if !ctx.block().is_terminated() {
         ctx.block().call_void("js_try_end", &[]);
         ctx.block().br(&finally_label);

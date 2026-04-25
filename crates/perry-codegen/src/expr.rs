@@ -300,6 +300,15 @@ pub(crate) struct FnCtx<'a> {
     /// reads the C ABI's `x0` register. Without it, the call defaults to
     /// `double` (reads `d0`) and observes 0 instead of the real handle.
     pub ffi_signatures: &'a std::collections::HashMap<String, (Vec<String>, String)>,
+    /// Number of currently-open `try { ... }` blocks at the current
+    /// lowering position. Incremented before lowering a try body,
+    /// decremented after. `Stmt::Return` emits `js_try_end()` this many
+    /// times before the actual `ret` so the runtime's TRY_DEPTH counter
+    /// stays balanced — without this, an early `return` inside a try
+    /// body leaks one slot in the runtime's setjmp jump-buffer table
+    /// per call. Once 128 leaks accumulate the runtime panics with
+    /// "Try block nesting too deep".
+    pub try_depth: usize,
 
     /// Cross-module function declarations to add to `LlModule` after
     /// lowering finishes. Each entry is `(llvm_name, return_type, param_types)`.
