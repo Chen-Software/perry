@@ -269,7 +269,7 @@ pub const MATRIX: &[MatrixRow] = &[
     MatrixRow {
         widget: "*", prop: "on_click",
         ffi: "perry_ui_widget_set_on_click",
-        statuses: [Wired, Wired, Wired, Wired, Wired, Wired, Missing, Wired, Wired],
+        statuses: [Wired, Wired, Wired, Wired, Wired, Wired, Wired, Wired, Wired],
     },
     MatrixRow {
         widget: "*", prop: "on_double_click",
@@ -360,8 +360,7 @@ pub const MATRIX: &[MatrixRow] = &[
     MatrixRow {
         widget: "button", prop: "content_tint_color",
         ffi: "perry_ui_button_set_content_tint_color",
-        // GTK4 lacks tint-on-icon-content per audit.
-        statuses: [Wired, Wired, Wired, Wired, Wired, Wired, Missing, Wired, Wired],
+        statuses: [Wired, Wired, Wired, Wired, Wired, Wired, Wired, Wired, Wired],
     },
     MatrixRow {
         widget: "button", prop: "bordered",
@@ -371,7 +370,7 @@ pub const MATRIX: &[MatrixRow] = &[
     MatrixRow {
         widget: "button", prop: "image_position",
         ffi: "perry_ui_button_set_image_position",
-        statuses: [Wired, Wired, Wired, Wired, Wired, Wired, Missing, Wired, Wired],
+        statuses: [Wired, Wired, Wired, Wired, Wired, Wired, Wired, Wired, Wired],
     },
 
     // ---- image widget styling -----------------------------------------
@@ -400,7 +399,7 @@ pub const MATRIX: &[MatrixRow] = &[
     MatrixRow {
         widget: "stack", prop: "detaches_hidden",
         ffi: "perry_ui_stack_set_detaches_hidden",
-        statuses: [Wired, Wired, Wired, Wired, Wired, Wired, Missing, Wired, Wired],
+        statuses: [Wired, Wired, Wired, Wired, Wired, Wired, Wired, Wired, Wired],
     },
 
     // ---- Aspirational (Phase B targets) -------------------------------

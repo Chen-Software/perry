@@ -24,7 +24,7 @@ Legend: `✓` Wired (real native impl), `~` Stub (symbol exists, no-op), `✗` M
 | `height` | `perry_ui_widget_set_height` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `match_parent_width` | `perry_ui_widget_match_parent_width` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `match_parent_height` | `perry_ui_widget_match_parent_height` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `on_click` | `perry_ui_widget_set_on_click` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ | ✓ | ✓ |
+| `on_click` | `perry_ui_widget_set_on_click` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `on_double_click` | `perry_ui_widget_set_on_double_click` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `on_hover` | `perry_ui_widget_set_on_hover` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `animate_opacity` | `perry_ui_widget_animate_opacity` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -37,9 +37,9 @@ Legend: `✓` Wired (real native impl), `~` Stub (symbol exists, no-op), `✗` M
 | Prop | FFI symbol | macOS | iOS | tvOS | visionOS | watchOS | Android | GTK4 | Windows | Web |
 |---|---|---|---|---|---|---|---|---|---|---|
 | `text_color` | `perry_ui_button_set_text_color` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `content_tint_color` | `perry_ui_button_set_content_tint_color` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ | ✓ | ✓ |
+| `content_tint_color` | `perry_ui_button_set_content_tint_color` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `bordered` | `perry_ui_button_set_bordered` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `image_position` | `perry_ui_button_set_image_position` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ | ✓ | ✓ |
+| `image_position` | `perry_ui_button_set_image_position` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 ## `image` widget
 
@@ -54,7 +54,7 @@ Legend: `✓` Wired (real native impl), `~` Stub (symbol exists, no-op), `✗` M
 |---|---|---|---|---|---|---|---|---|---|---|
 | `alignment` | `perry_ui_stack_set_alignment` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `distribution` | `perry_ui_stack_set_distribution` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `detaches_hidden` | `perry_ui_stack_set_detaches_hidden` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ | ✓ | ✓ |
+| `detaches_hidden` | `perry_ui_stack_set_detaches_hidden` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 ## `text` widget
 
@@ -87,7 +87,7 @@ Legend: `✓` Wired (real native impl), `~` Stub (symbol exists, no-op), `✗` M
 | visionOS | 43 | 0 | 0 | 0 |
 | watchOS | 43 | 0 | 0 | 0 |
 | Android | 43 | 0 | 0 | 0 |
-| GTK4 | 39 | 0 | 4 | 0 |
+| GTK4 | 43 | 0 | 0 | 0 |
 | Windows | 38 | 5 | 0 | 0 |
 | Web | 43 | 0 | 0 | 0 |
 
