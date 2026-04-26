@@ -2,11 +2,14 @@
 
 Perry's i18n system lets you write natural English strings and have them automatically translated at compile time. Zero ceremony, near-zero runtime cost.
 
-```typescript,no-test
-import { Button, Text } from "perry/ui";
+```typescript
+{{#include ../../examples/i18n/snippets.ts:overview-ui-strings}}
+```
 
-Button("Next")                              // Automatically localized
-Text("Hello, {name}!", { name: user.name }) // With interpolation
+The same key-resolution and interpolation runs through the explicit `t()` API for non-UI strings:
+
+```typescript
+{{#include ../../examples/i18n/snippets.ts:overview-imports}}
 ```
 
 ## Design Principles

@@ -2,8 +2,8 @@
 
 Perry provides format wrapper functions that automatically format values according to the current locale. Import them from `perry/i18n`:
 
-```typescript,no-test
-import { Currency, Percent, ShortDate, LongDate, FormatNumber, FormatTime, Raw } from "perry/i18n";
+```typescript
+{{#include ../../examples/i18n/snippets.ts:format-imports}}
 ```
 
 ## Format Wrappers
@@ -12,73 +12,88 @@ import { Currency, Percent, ShortDate, LongDate, FormatNumber, FormatTime, Raw }
 
 Formats a number as currency with the locale's symbol, decimal separator, and symbol placement:
 
-```typescript,no-test
-Text("Total: {price}", { price: Currency(23.10) })
-// en: "Total: $23.10"
-// de: "Total: 23,10 €"
-// fr: "Total: 23,10 €"
-// ja: "Total: ¥23.10"
+```typescript
+{{#include ../../examples/i18n/snippets.ts:format-currency}}
+```
+
+```text
+en: "Total: $23.10"
+de: "Total: 23,10 €"
+fr: "Total: 23,10 €"
+ja: "Total: ¥23.10"
 ```
 
 ### Percent
 
 Formats a decimal as a percentage (value is multiplied by 100):
 
-```typescript,no-test
-Text("Discount: {rate}", { rate: Percent(0.15) })
-// en: "Discount: 15%"
-// de: "Discount: 15 %"
-// fr: "Discount: 15 %"
+```typescript
+{{#include ../../examples/i18n/snippets.ts:format-percent}}
+```
+
+```text
+en: "Discount: 15%"
+de: "Discount: 15 %"
+fr: "Discount: 15 %"
 ```
 
 ### FormatNumber
 
 Formats a number with locale-appropriate grouping and decimal separators:
 
-```typescript,no-test
-Text("Population: {n}", { n: FormatNumber(1234567.89) })
-// en: "Population: 1,234,567.89"
-// de: "Population: 1.234.567,89"
-// fr: "Population: 1 234 567,89"
+```typescript
+{{#include ../../examples/i18n/snippets.ts:format-number}}
+```
+
+```text
+en: "Population: 1,234,567.89"
+de: "Population: 1.234.567,89"
+fr: "Population: 1 234 567,89"
 ```
 
 ### ShortDate / LongDate / FormatDate
 
 Formats a timestamp (milliseconds since epoch) as a date:
 
-```typescript,no-test
-const now = Date.now();
+```typescript
+{{#include ../../examples/i18n/snippets.ts:format-date}}
+```
 
-Text("Due: {d}", { d: ShortDate(now) })
-// en: "Due: 3/22/2026"
-// de: "Due: 22.03.2026"
-// ja: "Due: 2026/03/22"
+```text
+ShortDate
+  en: "Due: 3/22/2026"
+  de: "Due: 22.03.2026"
+  ja: "Due: 2026/03/22"
 
-Text("Event: {d}", { d: LongDate(now) })
-// en: "Event: March 22, 2026"
-// de: "Event: 22. März 2026"
-// fr: "Event: 22 mars 2026"
+LongDate
+  en: "Event: March 22, 2026"
+  de: "Event: 22. März 2026"
+  fr: "Event: 22 mars 2026"
 ```
 
 ### FormatTime
 
 Formats a timestamp as time (12h vs 24h based on locale):
 
-```typescript,no-test
-Text("At: {t}", { t: FormatTime(timestamp) })
-// en: "At: 3:45 PM"
-// de: "At: 15:45"
-// fr: "At: 15:45"
+```typescript
+{{#include ../../examples/i18n/snippets.ts:format-time}}
+```
+
+```text
+en: "At: 3:45 PM"
+de: "At: 15:45"
+fr: "At: 15:45"
 ```
 
 ### Raw
 
 Pass-through — prevents any automatic formatting. Use when a parameter name might trigger auto-formatting but you want the raw value:
 
-```typescript,no-test
-Text("Code: {amount}", { amount: Raw(12345) })
-// All locales: "Code: 12345" (no currency formatting despite the name)
+```typescript
+{{#include ../../examples/i18n/snippets.ts:format-raw}}
 ```
+
+All locales: `"Code: 12345"` (no currency formatting despite the name).
 
 ## Locale-Specific Formatting Rules
 

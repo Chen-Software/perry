@@ -2,6 +2,16 @@
 
 Perry widgets can compile to watchOS WidgetKit complications using `--target watchos-widget`. The same `Widget({...})` source produces both iOS and watchOS widgets — the supported families determine the rendering.
 
+> **Status:** the snippet on this page compile-links cleanly on the host LLVM
+> target via [`docs/examples/widgets/snippets.ts`](https://github.com/PerryTS/perry/blob/main/docs/examples/widgets/snippets.ts), so the
+> `Widget({...})` shape is verified against the codegen. The actual
+> `--target watchos-widget` / `--target watchos-widget-simulator` cross-compile
+> is wired in `crates/perry/src/commands/compile.rs` (emits through the
+> WidgetKit Swift emitter) but the doc-tests harness can't drive it yet —
+> each cross-target requires `--app-bundle-id` not yet surfaced through the
+> harness ([#194](https://github.com/PerryTS/perry/issues/194)) plus a
+> watchOS SDK from Xcode. Build with the `perry` CLI to validate end-to-end.
+
 ## Accessory Families
 
 watchOS complications use accessory families instead of system families:
@@ -16,26 +26,8 @@ watchOS complications use accessory families instead of system families:
 
 The `Gauge` component is designed for watchOS circular complications:
 
-```typescript,no-test
-import { Widget, Text, VStack, Gauge } from "perry/widget";
-
-Widget({
-  kind: "QuickStats",
-  displayName: "Quick Stats",
-  supportedFamilies: ["accessoryCircular", "accessoryRectangular"],
-
-  render(entry: { progress: number; label: string }, family) {
-    if (family === "accessoryCircular") {
-      return Gauge(entry.progress, {
-        label: "Done", style: "circular"
-      })
-    }
-    return VStack([
-      Text(entry.label, { font: "headline" }),
-      Gauge(entry.progress, { label: "Progress", style: "linear" }),
-    ])
-  },
-})
+```typescript
+{{#include ../../examples/widgets/snippets.ts:watchos-complication}}
 ```
 
 ### Gauge Styles

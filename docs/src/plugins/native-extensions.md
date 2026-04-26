@@ -1,5 +1,7 @@
 # Native Extensions
 
+> **Status: partially wired.** The `--bundle-extensions` flag, the `perry.nativeLibrary` `package.json` manifest, and `declare function` FFI imports are all wired into the compiler — see `crates/perry/src/commands/compile.rs` (the `bundle_extensions` argument, the `parse_native_library_manifest`/`build_external_native_libraries` helpers) and `crates/perry-codegen/src/codegen.rs` (the `nativeLibrary.functions` signature parser). The TypeScript snippets below assume a fully-populated extension directory exists on disk (e.g. `perry-appstore-review` cloned under `./extensions/`). They are kept as `,no-test` because the doc-tests harness doesn't have those external extensions checked in — a real project that does have them will compile cleanly. Drift protection for the parts that *don't* depend on external extensions (the FFI declare-function shape, etc.) lives in `docs/examples/platforms/wasm_snippets.ts`.
+
 Perry supports native extensions — packages that bundle platform-specific code (Rust, Swift, JNI) alongside a TypeScript API. Unlike [dynamic plugins](overview.md) loaded at runtime, native extensions are compiled directly into your binary.
 
 Native extensions are how you access platform APIs that aren't part of Perry's built-in [System APIs](../system/overview.md) or [Standard Library](../stdlib/overview.md). Examples include [App Store Review](appstore-review.md) and StoreKit for in-app purchases.
@@ -37,7 +39,7 @@ Perry discovers every subdirectory with a `package.json`, compiles its native cr
 
 ### 3. Import and use
 
-```typescript,no-test
+```text
 import { requestReview } from "perry-appstore-review";
 
 await requestReview();
@@ -133,7 +135,7 @@ perry-appstore-review/
 
 The `src/index.ts` declares native functions and optionally wraps them in a friendlier API:
 
-```typescript,no-test
+```text
 // Declare the native function (name must match package.json)
 declare function sb_appreview_request(): number;
 

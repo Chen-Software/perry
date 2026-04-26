@@ -2,6 +2,15 @@
 
 Perry widgets can compile to Wear OS Tiles using `--target wearos-tile`. Tiles are glanceable surfaces in the Wear OS tile carousel and watch face complications.
 
+> **Status:** the snippet on this page compile-links cleanly on the host LLVM
+> target via [`docs/examples/widgets/snippets.ts`](https://github.com/PerryTS/perry/blob/main/docs/examples/widgets/snippets.ts), so the
+> `Widget({...})` shape is verified against the codegen.
+> `--target wearos-tile` itself is wired through `crates/perry-codegen-wear-tiles`
+> but the doc-tests harness can't drive that cross-target yet —
+> `--app-bundle-id` plumbing is still pending ([#194](https://github.com/PerryTS/perry/issues/194))
+> and you'll need an Android NDK + Wear OS Gradle deps. Build with
+> the `perry` CLI to validate end-to-end.
+
 ## Concepts
 
 - **Tiles** are full-screen cards users swipe through on their watch
@@ -23,31 +32,8 @@ Perry widgets can compile to Wear OS Tiles using `--target wearos-tile`. Tiles a
 
 ## Example
 
-```typescript,no-test
-import { Widget, Text, VStack, Gauge } from "perry/widget";
-
-Widget({
-  kind: "StepsTile",
-  displayName: "Steps",
-  description: "Daily step count",
-  supportedFamilies: ["accessoryCircular"],
-
-  provider: async () => {
-    return {
-      entries: [{ steps: 7500, goal: 10000 }],
-      reloadPolicy: { after: { minutes: 60 } }
-    }
-  },
-
-  render(entry: { steps: number; goal: number }) {
-    return VStack([
-      Gauge(entry.steps / entry.goal, {
-        label: "Steps", style: "circular"
-      }),
-      Text(`${entry.steps}`, { font: "caption2" }),
-    ])
-  },
-})
+```typescript
+{{#include ../../examples/widgets/snippets.ts:wearos-tile}}
 ```
 
 ## Compilation

@@ -1,5 +1,7 @@
 # App Store Review
 
+> **Status: extension-dependent.** The compiler-side wiring (`--bundle-extensions`, `perry.nativeLibrary`, `declare function`) is in place — see [Native Extensions — Status](native-extensions.md) — but the snippets below assume the `perry-appstore-review` extension repo has been cloned into `./extensions/`. The doc-tests harness doesn't ship that repo, so these snippets are kept as `,no-test`. Once the extension is on disk, they compile and run on iOS / iOS Simulator / macOS / Android.
+
 Prompt users to rate your app using the native app store review dialog on iOS and Android.
 
 The `perry-appstore-review` extension exposes a single function — `requestReview()` — that opens the platform's native review prompt. It does nothing else: when and how often to ask is entirely up to you.
@@ -32,7 +34,7 @@ my-app/
 
 ### 2. Use in your app
 
-```typescript,no-test
+```text
 import { requestReview } from "perry-appstore-review";
 
 // Show the review prompt when the user completes a meaningful action
@@ -55,7 +57,7 @@ The `--bundle-extensions` flag tells Perry to discover, compile, and link all na
 
 Opens the native app store review prompt. Returns a promise that resolves when the prompt has been presented (or skipped by the OS).
 
-```typescript,no-test
+```text
 import { requestReview } from "perry-appstore-review";
 
 await requestReview();
@@ -129,7 +131,7 @@ On unsupported platforms (Linux, Windows, Web), `requestReview()` resolves immed
 
 **Don't ask too often.** Even though iOS throttles automatically, Android does not have the same strict limits. Implement your own logic to track when you last asked:
 
-```typescript,no-test
+```text
 import { requestReview } from "perry-appstore-review";
 import { preferencesGet, preferencesSet } from "perry/system";
 

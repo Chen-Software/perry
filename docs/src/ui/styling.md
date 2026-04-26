@@ -14,105 +14,102 @@ Perry's layout model is closer to SwiftUI or Flutter than CSS. If you're coming 
 | `align-items` | `stackSetAlignment(stack, value)` |
 | `position: absolute` | `widgetAddOverlay` + `widgetSetOverlayFrame` |
 | `width: 100%` | `widgetMatchParentWidth(widget)` |
-| `padding: 10px 20px` | `setEdgeInsets(10, 20, 10, 20)` |
+| `padding: 10px 20px` | `widgetSetEdgeInsets(w, 10, 20, 10, 20)` |
 | `gap: 16px` | `VStack(16, [...])` — first argument is the gap |
 | CSS variables / design tokens | `perry-styling` package ([Theming](theming.md)) |
-| `opacity` | `setOpacity(value)` |
-| `border-radius` | `setCornerRadius(value)` |
+| `opacity` | `widgetSetOpacity(w, value)` |
+| `border-radius` | `setCornerRadius(w, value)` |
 
 See [Layout](layout.md) for full details on alignment, distribution, overlays, and split views.
 
-## Colors
+Perry's styling API is a flat set of free functions: `widgetSet*`, `textSet*`,
+`buttonSet*`. They take the widget handle as the first argument. Colors are
+RGBA floats in `[0.0, 1.0]` (divide each hex byte by 255 — `0xFF3B30` →
+`(1.0, 0.231, 0.188, 1.0)`).
 
-```typescript,no-test
-import { Text, Button } from "perry/ui";
+Every snippet below is excerpted from
+[`docs/examples/ui/styling/snippets.ts`](../../examples/ui/styling/snippets.ts),
+which CI compiles and runs on every PR — so the API drawn here is always the
+API the compiler accepts.
 
-const label = Text("Colored text");
-label.setColor("#FF0000");              // Text color (hex)
-label.setBackgroundColor("#F0F0F0");    // Background color
+```typescript
+{{#include ../../examples/ui/styling/snippets.ts:imports}}
 ```
 
-Colors are specified as hex strings (`#RRGGBB`).
+## Colors
+
+```typescript
+{{#include ../../examples/ui/styling/snippets.ts:colors}}
+```
 
 ## Fonts
 
-```typescript,no-test
-const label = Text("Styled text");
-label.setFontSize(24);                // Font size in points
-label.setFontFamily("Menlo");         // Font family name
+```typescript
+{{#include ../../examples/ui/styling/snippets.ts:fonts}}
 ```
 
 Use `"monospaced"` for the system monospaced font.
 
 ## Corner Radius
 
-```typescript,no-test
-const btn = Button("Rounded", () => {});
-btn.setCornerRadius(12);
+```typescript
+{{#include ../../examples/ui/styling/snippets.ts:corner-radius}}
 ```
 
 ## Borders
 
-```typescript,no-test
-const widget = VStack(0, []);
-widget.setBorderColor("#CCCCCC");
-widget.setBorderWidth(1);
+```typescript
+{{#include ../../examples/ui/styling/snippets.ts:borders}}
 ```
+
+> **GTK4 note:** `widgetSetBorderColor` / `widgetSetBorderWidth` are macOS, iOS,
+> and Windows only — GTK4 styles borders through CSS rather than per-widget
+> properties.
 
 ## Padding and Insets
 
-```typescript,no-test
-const stack = VStack(8, [Text("Padded content")]);
-stack.setPadding(16);
-stack.setEdgeInsets(10, 20, 10, 20); // top, right, bottom, left
+```typescript
+{{#include ../../examples/ui/styling/snippets.ts:padding}}
 ```
 
 ## Sizing
 
-```typescript,no-test
-const widget = VStack(0, []);
-widget.setWidth(300);
-widget.setHeight(200);
-widget.setFrame(0, 0, 300, 200);  // x, y, width, height
+```typescript
+{{#include ../../examples/ui/styling/snippets.ts:sizing}}
 ```
 
 ## Opacity
 
-```typescript,no-test
-const widget = Text("Semi-transparent");
-widget.setOpacity(0.5); // 0.0 to 1.0
+```typescript
+{{#include ../../examples/ui/styling/snippets.ts:opacity}}
 ```
 
 ## Background Gradient
 
-```typescript,no-test
-const widget = VStack(0, []);
-widget.setBackgroundGradient("#FF0000", "#0000FF"); // Start color, end color
+```typescript
+{{#include ../../examples/ui/styling/snippets.ts:gradient}}
 ```
 
 ## Control Size
 
-```typescript,no-test
-const btn = Button("Small", () => {});
-btn.setControlSize(0); // 0=mini, 1=small, 2=regular, 3=large
+```typescript
+{{#include ../../examples/ui/styling/snippets.ts:control-size}}
 ```
 
 > **macOS**: Maps to `NSControl.ControlSize`. Other platforms may interpret differently.
 
 ## Tooltips
 
-```typescript,no-test
-const btn = Button("Hover me", () => {});
-btn.setTooltip("Click to perform action");
+```typescript
+{{#include ../../examples/ui/styling/snippets.ts:tooltip}}
 ```
 
 > **macOS/Windows/Linux**: Native tooltips. **iOS/Android**: No tooltip support. **Web**: HTML `title` attribute.
 
 ## Enabled/Disabled
 
-```typescript,no-test
-const btn = Button("Submit", () => {});
-btn.setEnabled(false);  // Greys out and disables interaction
+```typescript
+{{#include ../../examples/ui/styling/snippets.ts:enabled}}
 ```
 
 ## Complete Styling Example
@@ -121,30 +118,12 @@ btn.setEnabled(false);  // Greys out and disables interaction
 {{#include ../../examples/ui/styling/counter_card.ts}}
 ```
 
-Colors are RGBA floats in `[0.0, 1.0]`. Divide each hex byte by 255 to
-convert — `0xFF3B30` becomes `(1.0, 0.231, 0.188, 1.0)`. Padding is four
-explicit sides (`widgetSetEdgeInsets(w, top, left, bottom, right)`), not a
-single value.
-
 ## Composing Styles
 
 Reduce repetition by creating helper functions:
 
-```typescript,no-test
-import { VStackWithInsets, Text, widgetAddChild } from "perry/ui";
-
-function card(children: any[]) {
-  const c = VStackWithInsets(12, 16, 16, 16, 16);
-  c.setCornerRadius(12);
-  c.setBackgroundColor("#FFFFFF");
-  c.setBorderColor("#E5E5E5");
-  c.setBorderWidth(1);
-  for (const child of children) widgetAddChild(c, child);
-  return c;
-}
-
-// Usage
-card([Text("Title"), Text("Body text")]);
+```typescript
+{{#include ../../examples/ui/styling/snippets.ts:card-helper}}
 ```
 
 For larger apps, use the `perry-styling` package to define design tokens in JSON and generate a typed theme file. See [Theming](theming.md) for the full workflow.

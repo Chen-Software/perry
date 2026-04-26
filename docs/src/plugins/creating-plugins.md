@@ -1,10 +1,12 @@
 # Creating Plugins
 
+> **Status: not yet wired into any codegen path.** See [Plugin System Overview — Status](overview.md) for the full caveat. The `perry/plugin` runtime FFI exists, but the TypeScript-level static and `PluginApi`-instance dispatchers are missing, so the snippets below compile but no-op at runtime. Left as `,no-test`.
+
 Build Perry plugins as shared libraries that extend host applications.
 
 ## Step 1: Write the Plugin
 
-```typescript,no-test
+```text
 // counter-plugin.ts
 let count = 0;
 
@@ -43,7 +45,7 @@ Perry automatically:
 
 ## Step 3: Load from Host
 
-```typescript,no-test
+```text
 // host-app.ts
 import { loadPlugin, emitHook, invokeTool, discoverPlugins } from "perry/plugin";
 
@@ -65,13 +67,13 @@ The `api` object passed to `activate()` provides:
 
 ### Metadata
 
-```typescript,no-test
+```text
 api.setMetadata(name: string, version: string, description: string)
 ```
 
 ### Hooks
 
-```typescript,no-test
+```text
 api.registerHook(name: string, callback: (data: any) => any, priority?: number)
 ```
 
@@ -79,7 +81,7 @@ Hooks are called in priority order (lower number = called first).
 
 ### Tools
 
-```typescript,no-test
+```text
 api.registerTool(name: string, callback: (args: any) => any)
 ```
 
@@ -87,13 +89,13 @@ Tools are invoked by name from the host.
 
 ### Configuration
 
-```typescript,no-test
+```text
 const value = api.getConfig(key: string)  // Read host-provided config
 ```
 
 ### Events
 
-```typescript,no-test
+```text
 api.on(event: string, handler: (data: any) => void)  // Listen for events
 api.emit(event: string, data: any)                     // Emit to other plugins
 ```

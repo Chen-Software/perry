@@ -4,11 +4,8 @@
 
 Use `{param}` placeholders in your strings and pass values as a second argument:
 
-```typescript,no-test
-import { Text } from "perry/ui";
-
-Text("Hello, {name}!", { name: user.name })
-Text("Total: {price}", { price: order.total })
+```typescript
+{{#include ../../examples/i18n/snippets.ts:interp-params}}
 ```
 
 Translation files use the same `{param}` syntax:
@@ -71,8 +68,8 @@ Plural forms use dot-suffix keys based on CLDR plural categories: `.zero`, `.one
 
 Reference the base key without any suffix. Perry detects the plural variants automatically:
 
-```typescript,no-test
-Text("You have {count} items", { count: cart.items.length })
+```typescript
+{{#include ../../examples/i18n/snippets.ts:interp-plural}}
 ```
 
 Perry determines which plural form to use based on the `count` parameter value and the current locale's CLDR rules.
@@ -104,11 +101,8 @@ Perry includes hand-rolled CLDR plural rules for 30+ locales:
 
 For strings outside UI components (API responses, notifications, etc.), use `t()`:
 
-```typescript,no-test
-import { t } from "perry/i18n";
-
-const message = t("Your order has been shipped.");
-const welcome = t("Welcome back, {name}!", { name: user.name });
+```typescript
+{{#include ../../examples/i18n/snippets.ts:interp-explicit-t}}
 ```
 
 This uses the same key lookup, validation, and interpolation as UI strings.

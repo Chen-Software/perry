@@ -1,24 +1,22 @@
 # State Management
 
 Perry uses reactive state to automatically update the UI when data changes.
+Every snippet below is excerpted from
+[`docs/examples/ui/state/snippets.ts`](../../examples/ui/state/snippets.ts) —
+CI compiles and runs it on every PR.
 
 ## Creating State
 
-```typescript,no-test
-import { State } from "perry/ui";
-
-const count = State(0);           // number state
-const name = State("Perry");      // string state
-const items = State<string[]>([]); // array state
+```typescript
+{{#include ../../examples/ui/state/snippets.ts:creating}}
 ```
 
 `State(initialValue)` creates a reactive state container.
 
 ## Reading and Writing
 
-```typescript,no-test
-const value = count.value;  // Read current value
-count.set(42);              // Set new value → triggers UI update
+```typescript
+{{#include ../../examples/ui/state/snippets.ts:read-write}}
 ```
 
 Every `.set()` call re-renders the widget tree with the new value.
@@ -27,29 +25,20 @@ Every `.set()` call re-renders the widget tree with the new value.
 
 Template literals with `state.value` update automatically:
 
-```typescript,no-test
-import { Text, State } from "perry/ui";
-
-const count = State(0);
-Text(`Count: ${count.value}`);
-// The text updates whenever count changes
+```typescript
+{{#include ../../examples/ui/state/snippets.ts:reactive-text}}
 ```
 
-This works because Perry detects `state.value` reads inside template literals and creates reactive bindings.
+This works because Perry detects `state.value` reads inside template literals
+and creates reactive bindings.
 
 ## Binding Inputs to State
 
 Input widgets expose an `onChange` callback. Forward that into a state's
 `.set(...)` to keep the state in sync as the user types/toggles/drags:
 
-```typescript,no-test
-import { TextField, State, stateBindTextfield } from "perry/ui";
-
-const input = State("");
-const field = TextField("Type here...", (value: string) => input.set(value));
-
-// Optional: also let input.set("hello") update the field on screen.
-stateBindTextfield(input, field);
+```typescript
+{{#include ../../examples/ui/state/snippets.ts:bind-textfield}}
 ```
 
 Input control signatures:
@@ -67,93 +56,53 @@ For programmatic-to-UI sync (state-drives-widget) use the dedicated binders:
 
 Listen for state changes with the free-function `stateOnChange`:
 
-```typescript,no-test
-import { State, stateOnChange } from "perry/ui";
-
-const count = State(0);
-stateOnChange(count, (newValue: number) => {
-  console.log(`Count changed to ${newValue}`);
-});
+```typescript
+{{#include ../../examples/ui/state/snippets.ts:on-change}}
 ```
 
 ## ForEach
 
 Render a list from numeric state (the index count):
 
-```typescript,no-test
-import { VStack, Text, ForEach, State } from "perry/ui";
-
-const items = State(["Apple", "Banana", "Cherry"]);
-const itemCount = State(3);
-
-VStack(16, [
-  ForEach(itemCount, (i: number) =>
-    Text(`${i + 1}. ${items.value[i]}`)
-  ),
-]);
+```typescript
+{{#include ../../examples/ui/state/snippets.ts:foreach}}
 ```
 
-> **Note:** `ForEach` iterates by index over a numeric state. Keep a count state in sync with your array, then read the items via `array.value[i]` inside the closure.
+> **Note:** `ForEach` iterates by index over a numeric state. Keep a count
+> state in sync with your array, then read the items via `array.value[i]`
+> inside the closure.
 
 `ForEach` re-renders the list when the count state changes:
 
-```typescript,no-test
-// Add an item
-items.set([...items.value, "Date"]);
-itemCount.set(itemCount.value + 1);
-
-// Remove an item
-items.set(items.value.filter((_, i) => i !== 1));
-itemCount.set(itemCount.value - 1);
+```typescript
+{{#include ../../examples/ui/state/snippets.ts:foreach-mutate}}
 ```
 
 ## Conditional Rendering
 
 Use state to conditionally show widgets:
 
-```typescript,no-test
-import { VStack, Text, Button, State } from "perry/ui";
-
-const showDetails = State(false);
-
-VStack(16, [
-  Button("Toggle", () => showDetails.set(!showDetails.value)),
-  showDetails.value ? Text("Details are visible!") : Spacer(),
-]);
+```typescript
+{{#include ../../examples/ui/state/snippets.ts:conditional}}
 ```
 
 ## Multi-State Text
 
 Text can depend on multiple state values:
 
-```typescript,no-test
-const firstName = State("John");
-const lastName = State("Doe");
-
-Text(`Hello, ${firstName.value} ${lastName.value}!`);
-// Updates when either firstName or lastName changes
+```typescript
+{{#include ../../examples/ui/state/snippets.ts:multi-state}}
 ```
 
 ## State with Objects and Arrays
 
-```typescript,no-test
-const user = State({ name: "Perry", age: 0 });
-
-// Update by replacing the whole object
-user.set({ ...user.value, age: 1 });
-
-const todos = State<{ text: string; done: boolean }[]>([]);
-
-// Add a todo
-todos.set([...todos.value, { text: "New task", done: false }]);
-
-// Toggle a todo
-const items = todos.value;
-items[0].done = !items[0].done;
-todos.set([...items]);
+```typescript
+{{#include ../../examples/ui/state/snippets.ts:object-state}}
 ```
 
-> **Note**: State uses identity comparison. You must create a new array/object reference for changes to be detected. Mutating in-place without calling `.set()` with a new reference won't trigger updates.
+> **Note**: State uses identity comparison. You must create a new array/object
+> reference for changes to be detected. Mutating in-place without calling
+> `.set()` with a new reference won't trigger updates.
 
 ## Complete Example
 

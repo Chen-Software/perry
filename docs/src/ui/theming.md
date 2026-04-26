@@ -57,7 +57,7 @@ Colors with a `-dark` suffix are used as the dark mode variant. If no dark varia
 
 The codegen produces typed interfaces:
 
-```typescript,no-test
+```text
 interface PerryColor {
   r: number; g: number; b: number; a: number; // floats in [0, 1]
 }
@@ -84,7 +84,7 @@ interface ResolvedTheme {
 
 Resolve a theme at runtime based on the system's dark mode setting:
 
-```typescript,no-test
+```text
 import { getTheme } from "perry-styling";
 import { theme } from "./theme"; // generated file
 
@@ -96,47 +96,62 @@ const resolved = getTheme(theme);
 
 ## Styling Helpers
 
-Ergonomic functions for applying styles to widget handles:
+Ergonomic functions for applying styles to widget handles. Perry's compiler
+doesn't yet support passing `PerryColor` objects as parameters into user
+functions, so the helpers take **flat primitives**: extract the channels at
+the call site:
 
-```typescript,no-test
-import { applyBg, applyRadius, applyTextColor, applyFontSize, applyGradient } from "perry-styling";
+```text
+import {
+  applyBg, applyRadius, applyTextColor, applyFontSize, applyGradient,
+} from "perry-styling";
+
+const t = resolved;                    // your ResolvedTheme
+const c = t.colors.text;               // a PerryColor
+const bg = t.colors.background;
+const start = t.colors.primary;
+const end = t.colors["primary-dark"];
 
 const label = Text("Hello");
-applyTextColor(label, resolved.colors.text);
-applyFontSize(label, resolved.fontSize.heading);
+applyTextColor(label, c.r, c.g, c.b, c.a);
+applyFontSize(label, t.fontSize.heading);
 
-const card = VStack(16, [/* ... */]);
-applyBg(card, resolved.colors.background);
-applyRadius(card, resolved.radius.md);
-applyGradient(card, startColor, endColor, 0); // 0=vertical, 1=horizontal
+const card = VStack(16, []);
+applyBg(card, bg.r, bg.g, bg.b, bg.a);
+applyRadius(card, t.radius.md);
+applyGradient(card,
+  start.r, start.g, start.b, start.a,
+  end.r,   end.g,   end.b,   end.a,
+  0,                                   // 0 = vertical, 1 = horizontal
+);
 ```
 
 ### Available Helpers
 
-| Function | Description |
-|----------|-------------|
-| `applyBg(widget, color)` | Set background color |
-| `applyRadius(widget, radius)` | Set corner radius |
-| `applyTextColor(widget, color)` | Set text color |
-| `applyFontSize(widget, size)` | Set font size |
-| `applyFontBold(widget)` | Set bold font weight |
-| `applyFontFamily(widget, family)` | Set font family |
-| `applyWidth(widget, width)` | Set width |
-| `applyTooltip(widget, text)` | Set tooltip text |
-| `applyBorderColor(widget, color)` | Set border color |
-| `applyBorderWidth(widget, width)` | Set border width |
-| `applyEdgeInsets(widget, t, r, b, l)` | Set edge insets (padding) |
-| `applyOpacity(widget, alpha)` | Set opacity |
-| `applyGradient(widget, start, end, dir)` | Set gradient (0=vertical, 1=horizontal) |
-| `applyButtonBg(btn, color)` | Set button background |
-| `applyButtonTextColor(btn, color)` | Set button text color |
-| `applyButtonBordered(btn)` | Set bordered button style |
+| Function | Signature |
+|----------|-----------|
+| `applyBg(handle, r, g, b, a)` | Background color |
+| `applyRadius(handle, radius)` | Corner radius |
+| `applyTextColor(handle, r, g, b, a)` | Text color |
+| `applyFontSize(handle, size)` | Font size (regular weight) |
+| `applyFontBold(handle, size)` | Font size with bold weight |
+| `applyFontFamily(handle, family)` | Font family |
+| `applyWidth(handle, width)` | Fixed width |
+| `applyTooltip(handle, text)` | Tooltip (no-op on iOS/Android) |
+| `applyBorderColor(handle, r, g, b, a)` | Border color |
+| `applyBorderWidth(handle, width)` | Border width |
+| `applyEdgeInsets(handle, top, left, bottom, right)` | Edge insets (padding) |
+| `applyOpacity(handle, alpha)` | Opacity |
+| `applyGradient(handle, r1, g1, b1, a1, r2, g2, b2, a2, direction)` | Background gradient |
+| `applyButtonBg(btn, r, g, b, a)` | Button background |
+| `applyButtonTextColor(btn, r, g, b, a)` | Button text color |
+| `applyButtonBordered(btn, bordered)` | Bordered button style (`true`/`false`) |
 
 ## Platform Constants
 
 `perry-styling` exports compile-time platform constants based on the `__platform__` built-in:
 
-```typescript,no-test
+```text
 import { isMac, isIOS, isAndroid, isWindows, isLinux, isDesktop, isMobile } from "perry-styling";
 
 if (isMobile) {

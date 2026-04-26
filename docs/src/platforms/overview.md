@@ -37,27 +37,8 @@ perry app.ts -o app --target android
 
 Use the `__platform__` compile-time constant to branch by platform:
 
-```typescript,no-test
-declare const __platform__: number;
-
-// Platform constants:
-// 0 = macOS
-// 1 = iOS
-// 2 = Android
-// 3 = Windows
-// 4 = Linux
-// 5 = Web (browser, --target web / --target wasm)
-// 6 = tvOS
-// 7 = watchOS
-// 8 = visionOS
-
-if (__platform__ === 0) {
-  console.log("Running on macOS");
-} else if (__platform__ === 1) {
-  console.log("Running on iOS");
-} else if (__platform__ === 3) {
-  console.log("Running on Windows");
-}
+```typescript
+{{#include ../../examples/platforms/platform_detect.ts:overview-detect}}
 ```
 
 `__platform__` is resolved at compile time. The compiler constant-folds comparisons and eliminates dead branches, so platform-specific code has zero runtime cost.

@@ -55,7 +55,7 @@ Perry's [full limitations list](../language/limitations.md) is the canonical ref
 
 Perry uses Rust's `regex` crate, which doesn't support lookbehind (`(?<=…)` / `(?<!…)`).
 
-```typescript,no-test
+```text
 // Not supported
 str.match(/(?<=prefix)\w+/);
 
@@ -68,7 +68,7 @@ const rest = m ? m[1] : null;
 
 Not supported as a primitive. When a package uses `Symbol` as a sentinel (the common case — e.g., for unique keys in a registry), swap for a string:
 
-```typescript,no-test
+```text
 // Before
 const REGISTRY_KEY = Symbol("registry");
 
@@ -88,7 +88,7 @@ Not implemented. Swap `WeakMap` for a regular `Map` if the GC semantics aren't c
 
 ### Decorators
 
-```typescript,no-test
+```text
 // Not supported
 @Component
 class Foo {}
@@ -103,7 +103,7 @@ Perry only supports static imports. If a package branches on `typeof require !==
 
 ### Prototype manipulation
 
-```typescript,no-test
+```text
 // Not supported
 Object.setPrototypeOf(obj, proto);
 MyClass.prototype.newMethod = function() {};
@@ -113,7 +113,7 @@ Usually appears in fallback shims for older runtimes. Often dead code in the Per
 
 ### Computed property keys in object literals
 
-```typescript,no-test
+```text
 // Not supported
 const obj = { [key]: value };
 

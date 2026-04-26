@@ -4,7 +4,12 @@ Perry natively implements common utility packages.
 
 ## lodash
 
-```typescript,no-test
+The `lodash` runtime functions are partially implemented (see
+`crates/perry-stdlib/src/lodash.rs`) but the user-facing dispatch from
+`import _ from "lodash"; _.chunk(...)` is not wired into the LLVM backend
+yet. Track the follow-up at issue #200.
+
+```text
 import _ from "lodash";
 
 _.chunk([1, 2, 3, 4, 5], 2);     // [[1,2], [3,4], [5]]
@@ -19,7 +24,12 @@ _.throttle(fn, 100);
 
 ## dayjs
 
-```typescript,no-test
+`dayjs` runtime functions are declared (`js_dayjs_now`, `js_dayjs_format`,
+`js_dayjs_add`, etc.) but the user-facing dispatch from
+`import dayjs from "dayjs"; dayjs()` chained methods is not wired into the
+LLVM backend yet. Track the follow-up at issue #200.
+
+```text
 import dayjs from "dayjs";
 
 const now = dayjs();
@@ -33,7 +43,10 @@ console.log(`${diff} days until end of year`);
 
 ## moment
 
-```typescript,no-test
+Same status as `dayjs` — the runtime functions exist but the dispatch path
+is not wired yet.
+
+```text
 import moment from "moment";
 
 const now = moment();
@@ -44,41 +57,34 @@ console.log(moment("2025-01-01").isBefore(now));
 
 ## uuid
 
-```typescript,no-test
-import { v4 as uuidv4 } from "uuid";
-
-const id = uuidv4();
-console.log(id); // e.g., "550e8400-e29b-41d4-a716-446655440000"
+```typescript
+{{#include ../../examples/stdlib/utilities/snippets.ts:uuid}}
 ```
 
 ## nanoid
 
-```typescript,no-test
-import { nanoid } from "nanoid";
+The default-length `nanoid()` call is wired. The custom-length form
+`nanoid(10)` has a runtime function (`js_nanoid_sized`) but no dispatch
+yet — track at issue #200.
 
-const id = nanoid();       // Default 21 chars
-const short = nanoid(10);  // Custom length
-console.log(id);
+```typescript
+{{#include ../../examples/stdlib/utilities/snippets.ts:nanoid}}
 ```
 
 ## slugify
 
-```typescript,no-test
-import slugify from "slugify";
+The single-arg form is wired. The options-object form
+`slugify("Hello World!", { lower: true })` has a runtime function
+(`js_slugify_with_options`) but no dispatch yet — track at issue #200.
 
-const slug = slugify("Hello World!", { lower: true });
-console.log(slug); // "hello-world"
+```typescript
+{{#include ../../examples/stdlib/utilities/snippets.ts:slugify}}
 ```
 
 ## validator
 
-```typescript,no-test
-import validator from "validator";
-
-validator.isEmail("test@example.com");  // true
-validator.isURL("https://example.com"); // true
-validator.isUUID(id);                   // true
-validator.isEmpty("");                  // true
+```typescript
+{{#include ../../examples/stdlib/utilities/snippets.ts:validator}}
 ```
 
 ## Next Steps

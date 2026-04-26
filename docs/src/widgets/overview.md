@@ -2,23 +2,24 @@
 
 Perry can compile TypeScript widget declarations to native widget extensions across 4 platforms: iOS (WidgetKit), Android (App Widgets), watchOS (Complications), and Wear OS (Tiles).
 
+> **Status:** the `perry/widget` API is wired in the HIR
+> (`crates/perry-hir/src/lower.rs:try_lower_widget_decl`) and emits via
+> dedicated codegen crates (`perry-codegen-glance`, `perry-codegen-wear-tiles`,
+> the WidgetKit emitter). The snippets on the widget docs pages compile-link
+> cleanly on the host LLVM target — `Widget({...})` lowers to a no-op there —
+> and CI verifies that via [`docs/examples/widgets/snippets.ts`](https://github.com/PerryTS/perry/blob/main/docs/examples/widgets/snippets.ts).
+> What CI **cannot** do today is drive the actual cross-compile targets
+> (`--target ios-widget`, `--target android-widget`, etc.) because each
+> requires an `--app-bundle-id` not yet surfaced through the doc-tests
+> harness — tracked in [#194](https://github.com/PerryTS/perry/issues/194).
+> For a working end-to-end reference see [`examples/widget_demo.ts`](https://github.com/PerryTS/perry/blob/main/examples/widget_demo.ts).
+
 ## What Are Widgets?
 
 Home screen widgets display glanceable information outside your app. Perry's `perry/widget` module lets you define widgets in TypeScript that compile to each platform's native widget system.
 
-```typescript,no-test
-import { Widget, Text, VStack } from "perry/widget";
-
-Widget({
-  kind: "MyWidget",
-  displayName: "My Widget",
-  description: "Shows a greeting",
-  entryFields: { name: "string" },
-  render: (entry) =>
-    VStack([
-      Text(`Hello, ${entry.name}!`),
-    ]),
-});
+```typescript
+{{#include ../../examples/widgets/snippets.ts:minimal}}
 ```
 
 ## How It Works

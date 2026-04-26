@@ -1,9 +1,13 @@
 # System APIs Overview
 
-The `perry/system` module provides access to platform-native system features: preferences, secure storage, notifications, URL opening, dark mode detection, and app introspection.
+The `perry/system` module provides access to platform-native system features:
+preferences, secure storage, notifications, dark-mode detection, audio
+capture, and app introspection. Every snippet below is excerpted from
+[`docs/examples/system/snippets.ts`](../../examples/system/snippets.ts) — CI
+links the file on every PR.
 
-```typescript,no-test
-import { openURL, isDarkMode, preferencesSet, preferencesGet, getAppIcon } from "perry/system";
+```typescript
+{{#include ../../examples/system/snippets.ts:imports}}
 ```
 
 ## Available APIs
@@ -12,38 +16,36 @@ import { openURL, isDarkMode, preferencesSet, preferencesGet, getAppIcon } from 
 |----------|------------|-----------|
 | `openURL(url)` | Open URL in default browser/app | All |
 | `isDarkMode()` | Check system dark mode | All |
-| `preferencesSet(key, value)` | Store a preference | All |
-| `preferencesGet(key)` | Read a preference | All |
-| `keychainSet(key, value)` | Secure storage write | All |
+| `getDeviceIdiom()` | `"phone"`, `"pad"`, `"mac"`, `"tv"`, … | All |
+| `getDeviceModel()` | Device model identifier (e.g. `"iPhone13,4"`) | All |
+| `preferencesSet(key, value)` | Store a preference (string or number) | All |
+| `preferencesGet(key)` | Read a preference (returns `string | number | undefined`) | All |
+| `keychainSave(key, value)` | Secure storage write | All |
 | `keychainGet(key)` | Secure storage read | All |
-| `sendNotification(title, body)` | Local notification | All |
-| `clipboardGet()` | Read clipboard | All |
-| `clipboardSet(text)` | Write clipboard | All |
-| `audioStart()` | Start microphone capture | All |
-| `audioStop()` | Stop microphone capture | All |
-| `audioGetLevel()` | Current dB(A) sound level | All |
-| `audioGetPeak()` | Current peak amplitude (0–1) | All |
-| `audioGetWaveformSamples(n)` | Recent dB samples for visualization | All |
-| `getLocale()` | Device language code (e.g. `"de"`, `"en"`) | All |
-| `getDeviceModel()` | Device model identifier | All |
-| `getAppIcon(path)` | Get app/file icon as Image widget | macOS, Linux |
+| `keychainDelete(key)` | Secure storage remove | All |
+| `notificationSend(title, body)` | Local notification | All |
+| `notificationCancel(id)` | Cancel a scheduled notification | Apple |
+| `notificationOnTap(cb)` | Handle banner taps | Apple |
+| `notificationRegisterRemote(cb)` / `notificationOnReceive(cb)` | Push (APNs) | iOS, macOS |
+| `audioStart()` / `audioStop()` | Microphone capture | All |
+| `audioGetLevel()` / `audioGetPeak()` | RMS / peak amplitude (`0..1`) | All |
+| `audioGetWaveform(n)` | Recent waveform samples for visualization | All |
+
+> **Clipboard** lives in `perry/ui` (not `perry/system`): import `clipboardRead`
+> and `clipboardWrite` from there.
 
 ## Quick Example
 
-```typescript,no-test
-import { isDarkMode, preferencesGet, preferencesSet, openURL } from "perry/system";
+```typescript
+{{#include ../../examples/system/snippets.ts:dark-mode}}
+```
 
-// Detect dark mode
-if (isDarkMode()) {
-  console.log("Dark mode is active");
-}
+```typescript
+{{#include ../../examples/system/snippets.ts:preferences}}
+```
 
-// Store user preferences
-preferencesSet("theme", "dark");
-const theme = preferencesGet("theme");
-
-// Open a URL
-openURL("https://example.com");
+```typescript
+{{#include ../../examples/system/snippets.ts:open-url}}
 ```
 
 ## Next Steps

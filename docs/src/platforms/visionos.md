@@ -50,12 +50,8 @@ Custom `Info.plist` keys can be merged through `[visionos.info_plist]`.
 
 Use `__platform__ === 8` to detect visionOS at compile time:
 
-```typescript,no-test
-declare const __platform__: number;
-
-if (__platform__ === 8) {
-  console.log("Running on visionOS");
-}
+```typescript
+{{#include ../../examples/platforms/platform_detect.ts:visionos-detect}}
 ```
 
 ## Current Scope

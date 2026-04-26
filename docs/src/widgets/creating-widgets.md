@@ -2,31 +2,23 @@
 
 Define home screen widgets using the `Widget()` function.
 
+> **Status:** the full `Widget({...})` snippets on this page compile-link
+> cleanly on the host LLVM target via
+> [`docs/examples/widgets/snippets.ts`](https://github.com/PerryTS/perry/blob/main/docs/examples/widgets/snippets.ts),
+> so the API shapes are verified against the codegen. The actual cross-compile
+> targets (`--target ios-widget`/`android-widget`/`watchos-widget`/`wearos-tile`)
+> still aren't driven by the doc-tests harness — each requires `--app-bundle-id`
+> and a platform SDK ([#194](https://github.com/PerryTS/perry/issues/194)).
+> For the canonical end-to-end shape see
+> [`examples/widget_demo.ts`](https://github.com/PerryTS/perry/blob/main/examples/widget_demo.ts).
+> Fragments below that show partial syntax (just the `entryFields` object,
+> just a `render:` body, etc.) are rendered as plain text — the full
+> declarations they appear inside are covered by the verified anchors.
+
 ## Widget Declaration
 
-```typescript,no-test
-import { Widget, Text, VStack, HStack, Image, Spacer } from "perry/widget";
-
-Widget({
-  kind: "WeatherWidget",
-  displayName: "Weather",
-  description: "Shows current weather",
-  entryFields: {
-    temperature: "number",
-    condition: "string",
-    location: "string",
-  },
-  render: (entry) =>
-    VStack([
-      HStack([
-        Text(entry.location),
-        Spacer(),
-        Image("cloud.sun.fill"),
-      ]),
-      Text(`${entry.temperature}°`),
-      Text(entry.condition),
-    ]),
-});
+```typescript
+{{#include ../../examples/widgets/snippets.ts:weather-widget}}
 ```
 
 ## Widget Options
@@ -46,7 +38,7 @@ Widget({
 
 Entry fields define the data your widget displays. Each field has a name and type:
 
-```typescript,no-test
+```text
 entryFields: {
   title: "string",
   count: "number",
@@ -58,7 +50,7 @@ entryFields: {
 
 Entry fields support richer types beyond primitives:
 
-```typescript,no-test
+```text
 entryFields: {
   items: [{ name: "string", value: "number" }],  // Array of objects
   subtitle: "string?",                             // Optional string
@@ -81,70 +73,45 @@ struct WeatherEntry: TimelineEntry {
 
 Use ternary expressions for conditional rendering:
 
-```typescript,no-test
-render: (entry) =>
-  VStack([
-    Text(entry.isActive ? "Active" : "Inactive"),
-    entry.count > 0 ? Text(`${entry.count} items`) : Spacer(),
-  ]),
+```typescript
+{{#include ../../examples/widgets/snippets.ts:conditional-render}}
 ```
 
 ## Template Literals
 
 Template literals in widget text are compiled to Swift string interpolation:
 
-```typescript,no-test
-Text(`${entry.name}: ${entry.score} points`)
-// Compiles to: Text("\(entry.name): \(entry.score) points")
+```typescript
+{{#include ../../examples/widgets/snippets.ts:template-literal}}
 ```
 
 ## Configuration Parameters
 
 The `config` field defines user-editable parameters that appear in the widget's edit UI:
 
-```typescript,no-test
-Widget({
-  kind: "CityWeather",
-  displayName: "City Weather",
-  description: "Weather for a chosen city",
-  config: {
-    city: { type: "string", displayName: "City", default: "New York" },
-    units: { type: "enum", displayName: "Units", values: ["Celsius", "Fahrenheit"], default: "Celsius" },
-  },
-  entryFields: { temperature: "number", condition: "string" },
-  render: (entry) => Text(`${entry.temperature}° ${entry.condition}`),
-});
+```typescript
+{{#include ../../examples/widgets/snippets.ts:city-weather-config}}
 ```
 
 ## Provider Function
 
 The `provider` field defines a timeline provider that fetches data for the widget:
 
-```typescript,no-test
-Widget({
-  kind: "StockWidget",
-  displayName: "Stock Price",
-  description: "Shows current stock price",
-  config: { symbol: { type: "string", displayName: "Symbol", default: "AAPL" } },
-  entryFields: { price: "number", change: "string" },
-  provider: async (config) => {
-    const res = await fetch(`https://api.example.com/stock/${config.symbol}`);
-    const data = await res.json();
-    return { price: data.price, change: data.change };
-  },
-  render: (entry) =>
-    VStack([
-      Text(`$${entry.price}`).font("title"),
-      Text(entry.change).color("green"),
-    ]),
-});
+```typescript
+{{#include ../../examples/widgets/snippets.ts:stock-widget}}
 ```
+
+> Note: the chain-style modifiers (`.font("title").color("green")`) parse but
+> are dropped at HIR-lowering time — see
+> [#195](https://github.com/PerryTS/perry/issues/195). The verified extract
+> above uses the inline-options form `Text("...", { font: "title" })`, which is
+> what actually round-trips through the widget codegen.
 
 ### Placeholder Data
 
 When the widget has no data yet (e.g., first load), the provider can return placeholder data by providing a `placeholder` field:
 
-```typescript,no-test
+```text
 Widget({
   kind: "NewsWidget",
   entryFields: { headline: "string", source: "string" },
@@ -157,7 +124,7 @@ Widget({
 
 The render function accepts an optional second parameter for the widget family, allowing different layouts per size:
 
-```typescript,no-test
+```text
 render: (entry, family) =>
   family === "systemLarge"
     ? VStack([
@@ -176,7 +143,7 @@ Supported families: `"systemSmall"`, `"systemMedium"`, `"systemLarge"`, `"access
 
 The `appGroup` field specifies a shared container for data exchange between the host app and the widget:
 
-```typescript,no-test
+```text
 Widget({
   kind: "AppDataWidget",
   appGroup: "group.com.example.myapp",
@@ -188,7 +155,7 @@ Widget({
 
 Define multiple widgets in a single file. They're bundled into a `WidgetBundle`:
 
-```typescript,no-test
+```text
 Widget({
   kind: "SmallWidget",
   // ...

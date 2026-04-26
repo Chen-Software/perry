@@ -1,16 +1,22 @@
 # Camera
 
-The `perry/ui` module provides a live camera preview widget with color sampling capabilities.
+The `perry/ui` module provides a live camera preview widget with color
+sampling capabilities.
 
-```typescript,no-test
+```text
 import { CameraView, cameraStart, cameraStop, cameraFreeze, cameraUnfreeze, cameraSampleColor, cameraSetOnTap } from "perry/ui";
 ```
 
-> **Platform support:** iOS only. Other platforms are planned.
+> **Status:** the underlying FFI is implemented in `perry-ui-ios` and
+> `perry-ui-android`, but the `CameraView` / `camera*` functions are **not
+> yet wired into any codegen path** (LLVM, JS, or WASM). The snippets below
+> describe the planned shape of the API; calling them from TS today produces
+> "unknown function" errors at compile time. Track progress under the
+> camera-widget issue.
 
 ## Quick Example
 
-```typescript,no-test
+```text
 import { App, VStack, Text, State } from "perry/ui";
 import { CameraView, cameraStart, cameraStop, cameraSampleColor, cameraSetOnTap } from "perry/ui";
 
@@ -46,7 +52,7 @@ App({
 
 Create a live camera preview widget.
 
-```typescript,no-test
+```text
 const cam = CameraView();
 ```
 
@@ -56,7 +62,7 @@ Returns a widget handle. The camera does not start automatically — call `camer
 
 Start the live camera feed.
 
-```typescript,no-test
+```text
 cameraStart(cam);
 ```
 
@@ -66,7 +72,7 @@ On iOS, the camera permission dialog is shown automatically on first use.
 
 Stop the camera feed and release the capture session.
 
-```typescript,no-test
+```text
 cameraStop(cam);
 ```
 
@@ -74,7 +80,7 @@ cameraStop(cam);
 
 Pause the live preview (freeze the current frame).
 
-```typescript,no-test
+```text
 cameraFreeze(cam);
 ```
 
@@ -84,7 +90,7 @@ The camera session remains active but the preview stops updating. Useful for "ca
 
 Resume the live preview after a freeze.
 
-```typescript,no-test
+```text
 cameraUnfreeze(cam);
 ```
 
@@ -92,7 +98,7 @@ cameraUnfreeze(cam);
 
 Sample the pixel color at normalized coordinates.
 
-```typescript,no-test
+```text
 const rgb = cameraSampleColor(0.5, 0.5); // center of frame
 ```
 
@@ -102,7 +108,7 @@ const rgb = cameraSampleColor(0.5, 0.5); // center of frame
 
 To extract individual channels:
 
-```typescript,no-test
+```text
 const r = Math.floor(rgb / 65536);
 const g = Math.floor((rgb % 65536) / 256);
 const b = Math.floor(rgb % 256);
@@ -114,7 +120,7 @@ The color is averaged over a 5x5 pixel region around the sample point for noise 
 
 Register a tap handler on the camera view.
 
-```typescript,no-test
+```text
 cameraSetOnTap(cam, (x, y) => {
   // x, y are normalized coordinates (0.0-1.0)
   const rgb = cameraSampleColor(x, y);

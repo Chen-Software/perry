@@ -2,6 +2,21 @@
 
 The `provider` function is the heart of a dynamic widget. It fetches data, transforms it, and returns timeline entries that the system renders on schedule.
 
+> **Status:** the basic `WeatherWidget` provider below compile-links cleanly on
+> the host LLVM target via
+> [`docs/examples/widgets/snippets.ts`](https://github.com/PerryTS/perry/blob/main/docs/examples/widgets/snippets.ts),
+> so the `provider`/`reloadPolicy`/`entryFields` shapes are verified against
+> the codegen. The shorter fragments lower on the page (a bare
+> `reloadPolicy:`, a `provider:` body without surrounding `Widget({...})`,
+> etc.) are rendered as plain text. The `sharedStorage()` and
+> `preferencesSet()` examples are also rendered as plain text — those symbols
+> are provided by the platform-specific glue (`AppGroupBridge.swift`,
+> `Bridge.kt`) for `--target ios-widget`/`android-widget`/`watchos-widget`/
+> `wearos-tile` and don't link on the host LLVM target. The cross-compile
+> targets themselves still aren't driven by the doc-tests harness — each
+> needs `--app-bundle-id` and a platform SDK
+> ([#194](https://github.com/PerryTS/perry/issues/194)).
+
 ## Provider Lifecycle
 
 1. The system calls your provider when the widget is first added, when a snapshot is needed, and when the reload policy expires.
@@ -11,37 +26,8 @@ The `provider` function is the heart of a dynamic widget. It fetches data, trans
 
 ## Basic Provider
 
-```typescript,no-test
-import { Widget, Text, VStack } from "perry/widget";
-
-Widget({
-  kind: "WeatherWidget",
-  displayName: "Weather",
-  description: "Current conditions",
-  supportedFamilies: ["systemSmall"],
-
-  entryFields: {
-    temperature: "number",
-    condition: "string",
-  },
-
-  provider: async () => {
-    const res = await fetch("https://api.weather.example.com/current");
-    const data = await res.json();
-    return {
-      entries: [
-        { temperature: data.temp, condition: data.description },
-      ],
-      reloadPolicy: { after: { minutes: 15 } },
-    };
-  },
-
-  render: (entry) =>
-    VStack([
-      Text(`${entry.temperature}°`, { font: "title" }),
-      Text(entry.condition, { font: "caption" }),
-    ]),
-});
+```typescript
+{{#include ../../examples/widgets/snippets.ts:weather-provider}}
 ```
 
 ## Authenticated Requests with Shared Storage
@@ -52,7 +38,7 @@ Widgets run in a separate process and cannot access your app's memory. Use `shar
 
 On Apple platforms, shared storage maps to `UserDefaults(suiteName:)` backed by an App Group container. Set the `appGroup` field in your widget declaration:
 
-```typescript,no-test
+```text
 Widget({
   kind: "DashboardWidget",
   displayName: "Dashboard",
@@ -86,7 +72,7 @@ Widget({
 
 Your main app writes the token to the shared container:
 
-```typescript,no-test
+```text
 import { preferencesSet } from "perry/system";
 // In your app's login flow:
 preferencesSet("auth_token", token);
@@ -102,7 +88,7 @@ On Android, shared storage maps to `SharedPreferences` with the name `perry_shar
 
 The `reloadPolicy` field controls when the system next calls your provider:
 
-```typescript,no-test
+```text
 return {
   entries: [{ ... }],
   reloadPolicy: { after: { minutes: 30 } },
@@ -120,7 +106,7 @@ return {
 
 The provider function receives the parsed JSON directly. Entry field types must match your `entryFields` declaration:
 
-```typescript,no-test
+```text
 entryFields: {
   items: { type: "array", items: { type: "object", fields: { name: "string", count: "number" } } },
   total: "number",
@@ -142,7 +128,7 @@ provider: async () => {
 
 If the fetch fails or JSON parsing throws, the widget extension falls back to the placeholder data:
 
-```typescript,no-test
+```text
 Widget({
   // ...
   placeholder: { temperature: 0, condition: "Loading..." },
@@ -171,7 +157,7 @@ The `placeholder` field provides data shown in the widget gallery and during loa
 
 Return multiple entries to schedule future content without re-fetching:
 
-```typescript,no-test
+```text
 provider: async () => {
   const res = await fetch("https://api.example.com/hourly");
   const hours = await res.json();

@@ -1,18 +1,19 @@
 # Keychain
 
-Securely store sensitive data like tokens, passwords, and API keys using the platform's secure storage.
+Securely store sensitive data like tokens, passwords, and API keys using the
+platform's secure storage. Every snippet below is excerpted from
+[`docs/examples/system/snippets.ts`](../../examples/system/snippets.ts) — CI
+links it on every PR.
 
 ## Usage
 
-```typescript,no-test
-import { keychainSet, keychainGet } from "perry/system";
-
-// Store a secret
-keychainSet("api-token", "sk-abc123...");
-
-// Retrieve a secret
-const token = keychainGet("api-token");
+```typescript
+{{#include ../../examples/system/snippets.ts:keychain}}
 ```
+
+The free-function API is `keychainSave(key, value)`, `keychainGet(key)` (returns
+the stored string, or an empty string if the key isn't present), and
+`keychainDelete(key)`.
 
 ## Platform Storage
 
@@ -25,7 +26,8 @@ const token = keychainGet("api-token");
 | Linux | libsecret |
 | Web | localStorage (not truly secure) |
 
-> **Web**: The web platform uses `localStorage`, which is not encrypted. For web apps handling sensitive data, consider server-side storage instead.
+> **Web**: The web platform uses `localStorage`, which is not encrypted. For
+> web apps handling sensitive data, consider server-side storage instead.
 
 ## Next Steps
 

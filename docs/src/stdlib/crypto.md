@@ -4,59 +4,36 @@ Perry natively implements password hashing, JWT tokens, and Ethereum cryptograph
 
 ## bcrypt
 
-```typescript,no-test
-import bcrypt from "bcrypt";
-
-const hash = await bcrypt.hash("mypassword", 10);
-const match = await bcrypt.compare("mypassword", hash);
-console.log(match); // true
+```typescript
+{{#include ../../examples/stdlib/crypto/snippets.ts:bcrypt}}
 ```
 
 ## Argon2
 
-```typescript,no-test
-import argon2 from "argon2";
-
-const hash = await argon2.hash("mypassword");
-const valid = await argon2.verify(hash, "mypassword");
-console.log(valid); // true
+```typescript
+{{#include ../../examples/stdlib/crypto/snippets.ts:argon2}}
 ```
 
 ## JSON Web Tokens
 
-```typescript,no-test
-import jwt from "jsonwebtoken";
-
-const secret = "my-secret-key";
-
-// Sign a token
-const token = jwt.sign({ userId: 123, role: "admin" }, secret, {
-  expiresIn: "1h",
-});
-
-// Verify a token
-const decoded = jwt.verify(token, secret);
-console.log(decoded.userId); // 123
+```typescript
+{{#include ../../examples/stdlib/crypto/snippets.ts:jwt}}
 ```
 
 ## Node.js Crypto
 
-```typescript,no-test
-import crypto from "crypto";
-
-// Hash
-const hash = crypto.createHash("sha256").update("data").digest("hex");
-
-// HMAC
-const hmac = crypto.createHmac("sha256", "secret").update("data").digest("hex");
-
-// Random bytes
-const bytes = crypto.randomBytes(32);
+```typescript
+{{#include ../../examples/stdlib/crypto/snippets.ts:crypto-node}}
 ```
 
 ## Ethers
 
-```typescript,no-test
+The `ethers` runtime exposes utility functions (`formatEther`, `formatUnits`,
+`parseEther`, `parseUnits`, `getAddress`) but the higher-level
+`Wallet.createRandom()` constructor flow shown below is not yet wired into
+the LLVM backend. Track the follow-up at issue #199.
+
+```text
 import { ethers } from "ethers";
 
 // Create a wallet
