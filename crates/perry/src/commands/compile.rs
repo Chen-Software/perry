@@ -970,9 +970,25 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
         if m.ends_with(".dll") { return false; }
         if m.contains("compiler_builtins") { excluded_by_pattern += 1; return false; }
         // Don't exclude by name-match against runtime/stdlib member lists —
-        // same-named objects (alloc, core, std, windows crate) can contain
-        // different monomorphizations needed by the UI code. /FORCE:MULTIPLE
-        // handles the actual duplicate symbols at link time.
+        // same-named objects (alloc, core, std, windows crate, AND
+        // perry_runtime / perry_stdlib themselves) can contain different
+        // generic monomorphizations needed by the UI code. The
+        // perry-ui-gtk4 staticlib bundles perry_runtime CGUs that include
+        // hashbrown::raw::RawTable<T,A>::reserve_rehash monomorphized for
+        // GTK4-specific types (e.g. HashMap<i64, gtk4::Widget>) — those
+        // monomorphizations don't exist in the standalone libperry_runtime.a
+        // because the standalone build never sees those type
+        // instantiations. Pre-fix, a name-pattern drop on `perry_runtime-`
+        // / `perry_stdlib-` was added to placate lld-link's
+        // duplicate-symbol rejection on Windows cross-compile (commit
+        // 7a2e27ca), but this strip-dedup pass now skips Windows entirely
+        // (see is_windows guard at the call site). The pattern drop is
+        // dead-weight on Linux/macOS: --allow-multiple-definition (ELF) /
+        // ld64 first-wins (Mach-O) handle the actual duplicates safely,
+        // and dropping by pattern silently strips unique
+        // monomorphizations, causing
+        // `undefined reference to hashbrown::raw::RawTable::reserve_rehash`
+        // and similar (#181 Arch Linux comment).
         if exclude_members.contains(m.as_str()) { excluded_by_set += 1; }
         if has_rlib {
             if let Some(prefix) = rlib_objects.first()
@@ -982,8 +998,6 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
                 if m.starts_with(&format!("{}-", prefix)) { excluded_by_pattern += 1; return false; }
             }
         }
-        if m.contains("perry_runtime-") { excluded_by_pattern += 1; return false; }
-        if m.contains("perry_stdlib-") { excluded_by_pattern += 1; return false; }
         true
     }).collect();
 
