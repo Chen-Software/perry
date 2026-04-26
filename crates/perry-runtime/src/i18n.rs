@@ -840,3 +840,52 @@ pub extern "C" fn perry_i18n_format_time(timestamp: f64, locale_idx: i32) -> *mu
     let bytes = result.as_bytes();
     crate::string::js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
 }
+
+// =============================================================================
+// Default-locale single-arg wrappers
+// =============================================================================
+//
+// The TS façade in `types/perry/i18n/index.d.ts` declares each format function
+// as `(value: number) => string` — no locale arg. The two-arg runtime entries
+// above keep the explicit-locale form available for callers that want it
+// (mainly internal use), and these wrappers fold in the active locale via
+// `LOCALE_INDEX` so the codegen dispatch table in `lower_call.rs` can map
+// each TS name to one runtime symbol with a single `f64` arg.
+
+#[no_mangle]
+pub extern "C" fn perry_i18n_format_number_default(value: f64) -> *mut crate::StringHeader {
+    perry_i18n_format_number(value, LOCALE_INDEX.load(Ordering::Relaxed))
+}
+
+#[no_mangle]
+pub extern "C" fn perry_i18n_format_currency_default(value: f64) -> *mut crate::StringHeader {
+    perry_i18n_format_currency(value, LOCALE_INDEX.load(Ordering::Relaxed))
+}
+
+#[no_mangle]
+pub extern "C" fn perry_i18n_format_percent_default(value: f64) -> *mut crate::StringHeader {
+    perry_i18n_format_percent(value, LOCALE_INDEX.load(Ordering::Relaxed))
+}
+
+#[no_mangle]
+pub extern "C" fn perry_i18n_format_date_short(timestamp: f64) -> *mut crate::StringHeader {
+    perry_i18n_format_date(timestamp, 1, LOCALE_INDEX.load(Ordering::Relaxed))
+}
+
+#[no_mangle]
+pub extern "C" fn perry_i18n_format_date_long(timestamp: f64) -> *mut crate::StringHeader {
+    perry_i18n_format_date(timestamp, 2, LOCALE_INDEX.load(Ordering::Relaxed))
+}
+
+#[no_mangle]
+pub extern "C" fn perry_i18n_format_time_default(timestamp: f64) -> *mut crate::StringHeader {
+    perry_i18n_format_time(timestamp, LOCALE_INDEX.load(Ordering::Relaxed))
+}
+
+/// `Raw(value)` — pass-through for `Text("...{x}", { x: Raw(v) })` patterns
+/// where the parameter name might otherwise trigger automatic formatting.
+/// Always returns the value's plain string form, regardless of locale.
+#[no_mangle]
+pub extern "C" fn perry_i18n_format_raw(value: f64) -> *mut crate::StringHeader {
+    crate::value::js_jsvalue_to_string(value)
+}

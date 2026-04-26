@@ -2594,6 +2594,16 @@ pub(crate) fn lower_native_method_call(
         }
     }
 
+    // perry/i18n format wrappers: Currency, Percent, FormatNumber, ShortDate,
+    // LongDate, FormatTime, Raw. Without this, the call falls through to the
+    // receiver-less early-out and returns NaN-boxed `undefined` (issue #188).
+    // `t()` is dispatched separately near the top of this function.
+    if module == "perry/i18n" && object.is_none() {
+        if let Some(sig) = perry_i18n_table_lookup(method) {
+            return lower_perry_ui_table_call(ctx, sig, args);
+        }
+    }
+
     if module == "perry/ui"
         && object.is_none()
         && method != "App"
@@ -2904,6 +2914,7 @@ pub(crate) fn lower_native_method_call(
                 UiReturnKind::Widget => I64,
                 UiReturnKind::F64 => DOUBLE,
                 UiReturnKind::Void => crate::types::VOID,
+                UiReturnKind::Str => I64,
             };
             ctx.pending_declares.push((sig.runtime.to_string(), return_type, runtime_param_types));
             let ref_args: Vec<(crate::types::LlvmType, &str)> =
@@ -2920,6 +2931,10 @@ pub(crate) fn lower_native_method_call(
                 }
                 UiReturnKind::F64 => {
                     Ok(blk.call(DOUBLE, sig.runtime, &ref_args))
+                }
+                UiReturnKind::Str => {
+                    let raw = blk.call(I64, sig.runtime, &ref_args);
+                    Ok(crate::expr::nanbox_string_inline(blk, &raw))
                 }
             };
         }
@@ -4124,6 +4139,11 @@ enum UiReturnKind {
     F64,
     /// Void return: emit `call void` and return the `0.0` sentinel f64.
     Void,
+    /// `*mut StringHeader` (i64 ptr) → NaN-box with `STRING_TAG`. Used by
+    /// the `perry/i18n` format wrappers (`Currency`, `Percent`, …) so the
+    /// returned value reads back as a real string in `console.log`,
+    /// template interpolation, and `typeof === "string"` checks.
+    Str,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -4651,6 +4671,41 @@ fn perry_system_table_lookup(method: &str) -> Option<&'static UiSig> {
     PERRY_SYSTEM_TABLE.iter().find(|s| s.method == method)
 }
 
+// =============================================================================
+// perry/i18n format-wrapper dispatch table
+// =============================================================================
+
+/// Maps the TS exports from `types/perry/i18n/index.d.ts` (Currency, Percent,
+/// FormatNumber, ShortDate, LongDate, FormatTime, Raw) to their `perry_i18n_*`
+/// runtime symbols. Each runtime entry is a default-locale single-arg wrapper
+/// over the lower-level `perry_i18n_format_*(value, locale_idx)` exports —
+/// the wrapper folds in `LOCALE_INDEX` so the dispatch table here can stay
+/// consistent with the other UiSig tables (one TS arg → one runtime arg).
+///
+/// `t()` is handled separately at the top of `lower_native_method_call`
+/// because the perry-transform i18n pass replaces its first arg with an
+/// `Expr::I18nString` — there's no runtime call involved.
+static PERRY_I18N_TABLE: &[UiSig] = &[
+    UiSig { method: "Currency",     runtime: "perry_i18n_format_currency_default",
+            args: &[UiArgKind::F64], ret: UiReturnKind::Str },
+    UiSig { method: "Percent",      runtime: "perry_i18n_format_percent_default",
+            args: &[UiArgKind::F64], ret: UiReturnKind::Str },
+    UiSig { method: "FormatNumber", runtime: "perry_i18n_format_number_default",
+            args: &[UiArgKind::F64], ret: UiReturnKind::Str },
+    UiSig { method: "ShortDate",    runtime: "perry_i18n_format_date_short",
+            args: &[UiArgKind::F64], ret: UiReturnKind::Str },
+    UiSig { method: "LongDate",     runtime: "perry_i18n_format_date_long",
+            args: &[UiArgKind::F64], ret: UiReturnKind::Str },
+    UiSig { method: "FormatTime",   runtime: "perry_i18n_format_time_default",
+            args: &[UiArgKind::F64], ret: UiReturnKind::Str },
+    UiSig { method: "Raw",          runtime: "perry_i18n_format_raw",
+            args: &[UiArgKind::F64], ret: UiReturnKind::Str },
+];
+
+fn perry_i18n_table_lookup(method: &str) -> Option<&'static UiSig> {
+    PERRY_I18N_TABLE.iter().find(|s| s.method == method)
+}
+
 /// Lower a perry/ui call described by `sig`. Walks each arg, applies
 /// the per-kind coercion to produce an LLVM SSA value of the right type,
 /// lazy-declares the runtime function, emits the call, and boxes the
@@ -4731,6 +4786,7 @@ fn lower_perry_ui_table_call(
         UiReturnKind::Widget => I64,
         UiReturnKind::F64 => DOUBLE,
         UiReturnKind::Void => crate::types::VOID,
+        UiReturnKind::Str => I64,
     };
     ctx.pending_declares.push((
         sig.runtime.to_string(),
@@ -4754,6 +4810,11 @@ fn lower_perry_ui_table_call(
         UiReturnKind::Void => {
             ctx.block().call_void(sig.runtime, &arg_slices);
             Ok(double_literal(0.0))
+        }
+        UiReturnKind::Str => {
+            let blk = ctx.block();
+            let raw = blk.call(I64, sig.runtime, &arg_slices);
+            Ok(crate::expr::nanbox_string_inline(blk, &raw))
         }
     }
 }
