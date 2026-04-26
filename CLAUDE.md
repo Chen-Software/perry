@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.297
+**Current Version:** 0.5.298
 
 ## TypeScript Parity Status
 
@@ -149,6 +149,7 @@ First-resolved directory cached in `compile_package_dirs`; subsequent imports re
 
 Keep entries to 1-2 lines max. Full details in CHANGELOG.md.
 
+- **v0.5.298** — Linux bench fix (#197): `benchmarks/json_polyglot/run.sh` was reporting `FAILED (no successful runs)` for every cell on Linux because it hardcoded BSD `/usr/bin/time -l` for RSS capture — Linux ships GNU time which only accepts `-v`. Every workload invocation died on `time: invalid option -- 'l'` before the bench even started. Fix: detect `uname` once, pick `-l`/`-v` accordingly, route the platform-specific RSS-line through a `rss_extract` shim that normalizes Linux's KB to bytes (so the `worst_rss` arithmetic and `rss_mb` printout downstream don't care). Also handles distros where `/usr/bin/time` isn't installed (workload runs directly, RSS=0). Sibling compute bench `benchmarks/polyglot/run_all.sh` was already Linux-clean and didn't need touching.
 - **v0.5.297** — Linux test fix (#196): drop the redundant `tests::test_runtime_init` from `crates/perry-jsruntime/src/lib.rs` — `cargo test -p perry-jsruntime --lib` segfaulted on Linux because deno_core/V8 don't tolerate a second `JsRuntime::new()` in the same process across cargo's per-test worker threads, and this test ran *after* `interop::tests::test_runtime_init` had already initialized V8 once. The "double-init tolerance" the test claimed to verify is trivially provided by the `if opt.is_none()` guard in `ensure_runtime_initialized`. macOS-only CI didn't catch it.
 - **v0.5.296** — Add `.github/FUNDING.yml` with `ko_fi: perryts` so the repo's Sponsor button routes to Ko-fi while the GitHub Sponsors application is in review.
 - **v0.5.295** — Linux build fix: `find_clang()` / `find_llvm_tool()` (`crates/perry-codegen/src/linker.rs`) now search common Linux LLVM install prefixes (`/usr/lib64/rocm/llvm/bin`, `/usr/lib/llvm-{17,18,19}/bin`) alongside the existing Homebrew/Windows paths, so `.ll` → `.o` works without `PERRY_LLVM_CLANG`. Removed 3 AOT stubs (`js_sqlite_transaction`, `_commit`, `_rollback`) from `perry-runtime/src/closure.rs` — they collided with the real implementations in `perry-stdlib/src/sqlite.rs` and broke `cargo test --workspace` with duplicate-symbol linker errors under GNU ld (origin's macos-only main test job didn't catch it).

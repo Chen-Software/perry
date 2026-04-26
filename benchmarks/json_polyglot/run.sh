@@ -12,9 +12,10 @@
 #   RUNS=11 (default; configurable via $RUNS env var). For each cell
 #   we collect every per-run wall-clock ms and emit median, p95,
 #   stddev (σ), min, and max — not "best-of-N" — so noise and outlier
-#   sensitivity are visible. RSS is captured per-run via
-#   /usr/bin/time -l (peak RSS, not average); we report the max
-#   observed peak across runs.
+#   sensitivity are visible. RSS is captured per-run via /usr/bin/time
+#   (peak RSS, not average): macOS BSD `time -l` reports bytes, Linux
+#   GNU `time -v` reports kilobytes. We normalize both to bytes and
+#   report the max observed peak across runs.
 #
 # CPU pinning:
 #   macOS: taskpolicy -t 0 -l 0 (sets throughput-tier 0 + latency-tier 0
@@ -127,6 +128,37 @@ case "$(uname)" in
         ;;
 esac
 
+# ---------------------------------------------------------------------------
+# /usr/bin/time selection. macOS ships BSD time (`-l`, RSS in bytes,
+# "maximum resident set size" lowercase, value in column 1). Linux ships
+# GNU time from coreutils (`-v`, RSS in KB, "Maximum resident set size
+# (kbytes): N" with the value after the colon). We normalize both to
+# bytes so the rest of run_bench() doesn't care which platform produced
+# the line. If /usr/bin/time isn't usable (rare on Linux distros that
+# don't install the `time` package — bash's builtin doesn't accept
+# -l/-v), we run the workload directly and report 0 RSS.
+# ---------------------------------------------------------------------------
+TIME_BIN="/usr/bin/time"
+TIME_FLAG=""
+case "$(uname)" in
+    Darwin)
+        TIME_FLAG="-l"
+        rss_extract() { grep "maximum resident set size" "$1" 2>/dev/null | awk '{print $1}'; }
+        ;;
+    Linux)
+        TIME_FLAG="-v"
+        rss_extract() { grep "Maximum resident set size" "$1" 2>/dev/null | awk -F': ' '{print $2 * 1024}'; }
+        ;;
+    *)
+        rss_extract() { echo 0; }
+        ;;
+esac
+if [[ -z "$TIME_FLAG" ]] || [[ ! -x "$TIME_BIN" ]]; then
+    TIME_BIN=""
+    TIME_FLAG=""
+    rss_extract() { echo 0; }
+fi
+
 echo "==============================================================="
 echo "JSON polyglot benchmark — Perry v$(grep '^version' ../../Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
 echo "Hardware: $(uname -srm) on $(hostname -s)"
@@ -194,18 +226,22 @@ run_bench() {
     : > "$samples_file"
     local worst_rss=0
     local i
+    # Build the time-wrapper prefix once per call. Empty when /usr/bin/time
+    # isn't available on this platform (workload runs directly, RSS = 0).
+    local time_prefix=()
+    [[ -n "$TIME_BIN" ]] && time_prefix=("$TIME_BIN" "$TIME_FLAG")
     for i in $(seq 1 "$RUNS"); do
         local stderr_file="$TMPDIR/stderr.$$.$i"
         local out
         if [[ -n "$env_str" ]]; then
-            out=$(env $env_str "${PIN_CMD[@]}" /usr/bin/time -l "$@" 2>"$stderr_file" || true)
+            out=$(env $env_str "${PIN_CMD[@]}" "${time_prefix[@]}" "$@" 2>"$stderr_file" || true)
         else
-            out=$("${PIN_CMD[@]}" /usr/bin/time -l "$@" 2>"$stderr_file" || true)
+            out=$("${PIN_CMD[@]}" "${time_prefix[@]}" "$@" 2>"$stderr_file" || true)
         fi
         local ms
         ms=$(printf '%s\n' "$out" | sed -n 's/^ms:\([0-9]*\)$/\1/p' | head -1)
         local rss_bytes
-        rss_bytes=$(grep "maximum resident set size" "$stderr_file" 2>/dev/null | awk '{print $1}')
+        rss_bytes=$(rss_extract "$stderr_file")
         rm -f "$stderr_file"
         [[ -z "$ms" ]] && continue
         [[ -z "$rss_bytes" ]] && rss_bytes=0
