@@ -46,7 +46,7 @@ for the full file.
 
 Color props accept four interchangeable shapes:
 
-```typescript
+```typescript,no-test
 backgroundColor: "#3B82F6"                                   // hex 6/8
 backgroundColor: "#3B82F6FF"                                 // hex with alpha
 backgroundColor: "blue"                                      // named color
@@ -67,7 +67,7 @@ so `backgroundColor: someStringVar` works the same as the literal form.
 
 A single number applies to all four sides; an object picks per-side:
 
-```typescript
+```typescript,no-test
 padding: 12                                       // all four sides 12
 padding: { top: 8, right: 16, bottom: 8, left: 16 }  // per-side
 ```

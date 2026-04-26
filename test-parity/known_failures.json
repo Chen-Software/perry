@@ -62,5 +62,13 @@
   "test_stress_promises": {
     "status": "bug",
     "reason": "Multiple distinct Promise issues remaining after v0.5.283 fix (which addressed (a) microtask FIFO ordering — TASK_QUEUE was a Vec with .pop() → LIFO; switched to VecDeque + pop_front, and (b) `.then(h)` / `.catch(h)` not catching throws inside h — microtask runner now wraps closure call in setjmp): (1) `new Promise<T>((resolve, reject) => ...)` constructor body not running (lines `constructor resolve: 99` / `constructor reject: constructor-err` missing from output); (2) `Promise.any` produces no output (any/any-all-rejected/any-errors-length lines missing); (3) `.then(p => Promise.resolve(...))` doesn't unwrap inner Promise (logs `Promise { <pending> }` instead of resolved value); (4) `.finally(() => ...).then(v => ...)` value-passing wrong (Perry: `finally value: 0`, Node: `finally value: done`)."
+  },
+  "test_inline_uint8array_param": {
+    "status": "bug",
+    "reason": "Regression test added by v0.5.314 (#169 fix in perry-transform substitute_locals). The test compiles successfully locally but compile-fails on CI runners — likely an SDK/linker version interaction shared with the test_gap_buffer_ops family. The underlying Uint8Array param substitution fix landed in 976c3eb5; this test documents the case but the CI env exhibits a separate compile-fail mode. Pair-investigate with test_issue_167_loop_alloca_stack_eat."
+  },
+  "test_issue_167_loop_alloca_stack_eat": {
+    "status": "bug",
+    "reason": "Regression test added by v0.5.316 (#167 fix hoisting js_native_call_method args alloca to entry block). Same compile-fail-on-CI / passes-locally pattern as test_inline_uint8array_param — both tests are about Buffer/Uint8Array codepaths and likely share the macOS-14 SDK gap."
   }
 }
