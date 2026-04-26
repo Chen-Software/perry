@@ -1201,6 +1201,15 @@ impl JsEmitter {
                 }
                 self.output.push_str(") : undefined)");
             }
+            Expr::ProcessExit(code) => {
+                self.output.push_str("(typeof process !== 'undefined' ? process.exit(");
+                if let Some(c) = code {
+                    self.emit_expr(c);
+                } else {
+                    self.output.push('0');
+                }
+                self.output.push_str(") : undefined)");
+            }
             Expr::ProcessStdin => {
                 self.output.push_str("(typeof process !== 'undefined' ? process.stdin : { write: () => true })");
             }
@@ -1414,6 +1423,7 @@ impl JsEmitter {
             Expr::MathAsinh(x) => { self.emit_math_unary("Math.asinh", x); }
             Expr::MathAcosh(x) => { self.emit_math_unary("Math.acosh", x); }
             Expr::MathAtanh(x) => { self.emit_math_unary("Math.atanh", x); }
+            Expr::MathExp(x) => { self.emit_math_unary("Math.exp", x); }
             Expr::MathHypot(args) => { self.emit_math_variadic("Math.hypot", args); }
             Expr::MathPow(base, exp) => {
                 self.output.push_str("Math.pow(");
@@ -3076,6 +3086,9 @@ impl JsEmitter {
             // Animations
             "animateOpacity" | "animate_opacity" => "perry_ui_animate_opacity",
             "animatePosition" | "animate_position" => "perry_ui_animate_position",
+            // widget-prefixed free-function forms (used by HIR reactive desugar)
+            "widgetAnimateOpacity" => "perry_ui_animate_opacity",
+            "widgetAnimatePosition" => "perry_ui_animate_position",
             // Events
             "setOnClick" | "set_on_click" => "perry_ui_set_on_click",
             "setOnHover" | "set_on_hover" => "perry_ui_set_on_hover",

@@ -80,6 +80,12 @@ pub unsafe extern "C" fn js_fastify_listen(app_handle: Handle, opts: f64, callba
     };
     let routes_arc = Arc::new(app_for_server);
 
+    // Fastify dispatches request callbacks on tokio worker threads whose
+    // stacks the main-thread GC can't scan. Mark GC-unsafe so user-level
+    // `gc()` calls from setInterval don't collect objects still
+    // referenced from worker stacks (issue #31).
+    perry_runtime::gc::js_gc_enter_unsafe_zone();
+
     // Spawn the server
     let routes_for_spawn = routes_arc.clone();
     RUNTIME.spawn(async move {
@@ -444,7 +450,7 @@ fn build_response_body(value: f64) -> Vec<u8> {
             let ptr = perry_runtime::js_get_string_pointer_unified(value);
             if ptr != 0 {
                 let header = ptr as *const StringHeader;
-                let len = (*header).length as usize;
+                let len = (*header).byte_len as usize;
                 let data_ptr = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                 let bytes = std::slice::from_raw_parts(data_ptr, len);
                 return bytes.to_vec();
@@ -460,7 +466,7 @@ fn build_response_body(value: f64) -> Vec<u8> {
         unsafe {
             let str_ptr = js_json_stringify(value, 0);
             if !str_ptr.is_null() {
-                let len = (*str_ptr).length as usize;
+                let len = (*str_ptr).byte_len as usize;
                 let data_ptr = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                 let bytes = std::slice::from_raw_parts(data_ptr, len);
                 return bytes.to_vec();
@@ -472,7 +478,7 @@ fn build_response_body(value: f64) -> Vec<u8> {
     unsafe {
         let json_ptr = perry_runtime::js_jsvalue_to_string(value);
         if !json_ptr.is_null() {
-            let len = (*json_ptr).length as usize;
+            let len = (*json_ptr).byte_len as usize;
             let data_ptr = (json_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
             let bytes = std::slice::from_raw_parts(data_ptr, len);
             return bytes.to_vec();

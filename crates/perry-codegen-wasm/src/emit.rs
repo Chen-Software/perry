@@ -350,6 +350,9 @@ fn map_ui_method(method: &str, class_name: Option<&str>) -> &'static str {
         // Animations
         "animateOpacity" | "animate_opacity" => "perry_ui_animate_opacity",
         "animatePosition" | "animate_position" => "perry_ui_animate_position",
+        // widget-prefixed free-function forms (used by HIR reactive desugar)
+        "widgetAnimateOpacity" => "perry_ui_animate_opacity",
+        "widgetAnimatePosition" => "perry_ui_animate_position",
         // Events
         "setOnClick" | "set_on_click" => "perry_ui_set_on_click",
         "setOnHover" | "set_on_hover" => "perry_ui_set_on_hover",
@@ -359,7 +362,7 @@ fn map_ui_method(method: &str, class_name: Option<&str>) -> &'static str {
         "get" if class_name.map_or(false, |c| c == "State") => "perry_ui_state_get",
         "set" if class_name.map_or(false, |c| c == "State") => "perry_ui_state_set",
         "value" => "perry_ui_state_get",
-        "onChange" | "state_on_change" => "perry_ui_state_on_change",
+        "onChange" | "state_on_change" | "stateOnChange" => "perry_ui_state_on_change",
         // State bindings
         "bindText" | "state_bind_text" => "perry_ui_state_bind_text",
         "bindTextNumeric" | "state_bind_text_numeric" => "perry_ui_state_bind_text_numeric",
@@ -2563,6 +2566,12 @@ impl WasmModuleEmitter {
             "string_replace", "string_split", "string_fromCharCode",
             "string_padStart", "string_padEnd", "string_repeat", "string_match",
             "math_log2", "math_log10",
+            // Issue #133 item 4: trig / exp / sign / trunc / cbrt / hypot etc.
+            "math_sin", "math_cos", "math_tan", "math_asin", "math_acos", "math_atan",
+            "math_atan2", "math_sinh", "math_cosh", "math_tanh",
+            "math_asinh", "math_acosh", "math_atanh",
+            "math_exp", "math_expm1", "math_log1p", "math_sign", "math_trunc",
+            "math_cbrt", "math_hypot", "math_fround", "math_clz32",
             "closure_new", "closure_set_capture",
             "closure_call_0", "closure_call_1", "closure_call_2", "closure_call_3",
             "closure_call_spread",
@@ -2821,7 +2830,10 @@ impl WasmModuleEmitter {
             Expr::New { args, .. } => {
                 for a in args { self.collect_strings_in_expr(a); }
             }
-            Expr::Update { .. } | Expr::Sequence(_) => {}
+            Expr::Update { .. } => {}
+            Expr::Sequence(exprs) => {
+                for e in exprs { self.collect_strings_in_expr(e); }
+            }
             Expr::EnumMember { enum_name, member_name } => {
                 self.intern_string(enum_name);
                 self.intern_string(member_name);
@@ -3174,6 +3186,21 @@ impl<'a> FuncEmitCtx<'a> {
         self.emit_slot_addr(func, slot);
         func.instruction(&Instruction::I64Const(bits as i64));
         func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+    }
+
+    /// Emit a load of a HIR local by id. Top-level `let`s are stored in WASM globals
+    /// (not locals), so we must check `module_let_globals` before `local_map`. Falls
+    /// back to `TAG_UNDEFINED`. Without this, Array* HIR nodes that reference a
+    /// top-level `const xs = []` were pushing `I64Const(0)` into the temp — see
+    /// Issue #133 item 3.
+    fn emit_local_or_global_get(&self, func: &mut Function, id: &LocalId) {
+        if let Some(&gidx) = self.emitter.module_let_globals.get(&(self.emitter.current_mod_idx, *id)) {
+            func.instruction(&Instruction::GlobalGet(gidx));
+        } else if let Some(&idx) = self.local_map.get(id) {
+            func.instruction(&Instruction::LocalGet(idx));
+        } else {
+            func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
+        }
     }
 
     /// Emit a bridge function call via WASM memory (Firefox NaN-safe, reentrant-safe).
@@ -3715,14 +3742,20 @@ impl<'a> FuncEmitCtx<'a> {
             Stmt::For { init, condition, update, body } => {
                 // <init>
                 // block $break
-                //   loop $continue
+                //   loop $loop_top
                 //     <condition>
-                //     is_truthy ; i32.eqz ; br_if $break
-                //     <body>
+                //     is_truthy ; i32.eqz ; br_if $break   (rel=1, loop is directly inside block)
+                //     block $body_end                       ← continue targets this block's exit
+                //       <body>                             ← continue: br(rel) exits $body_end
+                //     end                                  ← fall through to update
                 //     <update> ; drop
-                //     br $continue
+                //     br 0                                 ← restart $loop_top (rel=0)
                 //   end
                 // end
+                //
+                // Wrapping the body in $body_end ensures `continue` falls through to
+                // the update expression before restarting, fixing the iterator-stuck
+                // bug when `continue` fires inside an if/else chain (issue #137).
                 if let Some(init_stmt) = init {
                     self.emit_stmt(func, init_stmt, in_returning_func);
                 }
@@ -3734,6 +3767,20 @@ impl<'a> FuncEmitCtx<'a> {
 
                 func.instruction(&Instruction::Loop(wasm_encoder::BlockType::Empty));
                 self.block_depth += 1;
+                // block_depth is now the loop's depth; Br(0) here restarts the loop.
+
+                if let Some(cond) = condition {
+                    self.emit_frame_begin(func, 1);
+                    self.emit_store_arg(func, 0, cond);
+                    self.emit_memcall_i32(func, "is_truthy", 1);
+                    func.instruction(&Instruction::I32Eqz);
+                    // loop is directly inside block, so break is always 1 level up
+                    func.instruction(&Instruction::BrIf(1));
+                }
+
+                // Inner block: continue targets this block's exit, then update runs.
+                func.instruction(&Instruction::Block(wasm_encoder::BlockType::Empty));
+                self.block_depth += 1;
                 let continue_d = self.block_depth;
                 self.loop_depth.push(continue_d);
 
@@ -3742,17 +3789,15 @@ impl<'a> FuncEmitCtx<'a> {
                     true
                 } else { false };
 
-                if let Some(cond) = condition {
-                    self.emit_frame_begin(func, 1);
-                    self.emit_store_arg(func, 0, cond);
-                    self.emit_memcall_i32(func, "is_truthy", 1);
-                    func.instruction(&Instruction::I32Eqz);
-                    func.instruction(&Instruction::BrIf(1));
-                }
-
                 for s in body {
                     self.emit_stmt(func, s, in_returning_func);
                 }
+
+                // Close inner body block; continue lands here, then falls to update.
+                if label_pushed { self.label_stack.pop(); }
+                self.loop_depth.pop();
+                self.block_depth -= 1;
+                func.instruction(&Instruction::End);
 
                 if let Some(upd) = update {
                     self.emit_expr(func, upd);
@@ -3761,24 +3806,35 @@ impl<'a> FuncEmitCtx<'a> {
                     }
                 }
 
+                // Restart loop (block_depth == loop's depth, so rel=0).
                 func.instruction(&Instruction::Br(0));
                 self.block_depth -= 1;
                 func.instruction(&Instruction::End);
 
-                if label_pushed { self.label_stack.pop(); }
-                self.loop_depth.pop();
                 self.break_depth.pop();
                 self.block_depth -= 1;
                 func.instruction(&Instruction::End);
             }
             Stmt::Break => {
-                // Branch to the enclosing block (break target)
-                // The break target is 1 level up from the loop
-                func.instruction(&Instruction::Br(1));
+                // Branch out to the enclosing loop's break block. Must compute
+                // relative depth from break_depth/block_depth — a hardcoded Br(1)
+                // miscounts when the break is nested inside an if/switch/try
+                // (each pushes block_depth without a matching break_depth), which
+                // in the worst case turns `break` into `continue` and hangs.
+                if let Some(&target) = self.break_depth.last() {
+                    let rel = self.block_depth.saturating_sub(target);
+                    func.instruction(&Instruction::Br(rel));
+                } else {
+                    func.instruction(&Instruction::Br(1));
+                }
             }
             Stmt::Continue => {
-                // Branch to the enclosing loop (continue target)
-                func.instruction(&Instruction::Br(0));
+                if let Some(&target) = self.loop_depth.last() {
+                    let rel = self.block_depth.saturating_sub(target);
+                    func.instruction(&Instruction::Br(rel));
+                } else {
+                    func.instruction(&Instruction::Br(0));
+                }
             }
             Stmt::LabeledBreak(label) => {
                 // Find the label in the stack and compute the relative depth.
@@ -4245,10 +4301,19 @@ impl<'a> FuncEmitCtx<'a> {
                 match callee.as_ref() {
                     Expr::FuncRef(id) => {
                         if let Some(&idx) = self.emitter.func_map.get(id) {
-                            // Pad missing arguments with TAG_UNDEFINED (for optional params)
+                            // Reconcile source arg count with callee arity. JS semantics
+                            // allow a call to pass any number of args, but WASM `call`
+                            // consumes exactly the declared param count. Pad up with
+                            // `undefined` for missing optional args and drop excess
+                            // evaluated args from the top of the operand stack, which
+                            // would otherwise accumulate past the call and trip the
+                            // validator at the enclosing `end` (#183).
                             if let Some(&expected) = self.emitter.func_param_counts.get(&idx) {
                                 for _ in args.len()..expected {
                                     func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
+                                }
+                                for _ in expected..args.len() {
+                                    func.instruction(&Instruction::Drop);
                                 }
                             }
                             func.instruction(&Instruction::Call(idx));
@@ -4266,12 +4331,16 @@ impl<'a> FuncEmitCtx<'a> {
                         }
                     }
                     Expr::ExternFuncRef { name, return_type, .. } => {
-                        // Cross-module or FFI function call — look up by name
+                        // Cross-module or FFI function call — look up by name.
+                        // See FuncRef arm above for why both pad-up and drop-excess
+                        // are required (#183).
                         if let Some(&idx) = self.emitter.func_name_map.get(name) {
-                            // Pad missing arguments with TAG_UNDEFINED (for optional params)
                             if let Some(&expected) = self.emitter.func_param_counts.get(&idx) {
                                 for _ in args.len()..expected {
                                     func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
+                                }
+                                for _ in expected..args.len() {
+                                    func.instruction(&Instruction::Drop);
                                 }
                             }
                             func.instruction(&Instruction::Call(idx));
@@ -4414,6 +4483,84 @@ impl<'a> FuncEmitCtx<'a> {
                                 self.emit_frame_begin(func, 1);
                                 self.emit_store_arg(func, 0, &args[0]);
                                 self.emit_memcall(func, "math_log10", 1);
+                            }
+                            // Trig / exp / sign / trunc / cbrt / hypot (Issue #133 item 4)
+                            "sin" if !args.is_empty() => {
+                                self.emit_frame_begin(func, 1);
+                                self.emit_store_arg(func, 0, &args[0]);
+                                self.emit_memcall(func, "math_sin", 1);
+                            }
+                            "cos" if !args.is_empty() => {
+                                self.emit_frame_begin(func, 1);
+                                self.emit_store_arg(func, 0, &args[0]);
+                                self.emit_memcall(func, "math_cos", 1);
+                            }
+                            "tan" if !args.is_empty() => {
+                                self.emit_frame_begin(func, 1);
+                                self.emit_store_arg(func, 0, &args[0]);
+                                self.emit_memcall(func, "math_tan", 1);
+                            }
+                            "asin" if !args.is_empty() => {
+                                self.emit_frame_begin(func, 1);
+                                self.emit_store_arg(func, 0, &args[0]);
+                                self.emit_memcall(func, "math_asin", 1);
+                            }
+                            "acos" if !args.is_empty() => {
+                                self.emit_frame_begin(func, 1);
+                                self.emit_store_arg(func, 0, &args[0]);
+                                self.emit_memcall(func, "math_acos", 1);
+                            }
+                            "atan" if !args.is_empty() => {
+                                self.emit_frame_begin(func, 1);
+                                self.emit_store_arg(func, 0, &args[0]);
+                                self.emit_memcall(func, "math_atan", 1);
+                            }
+                            "atan2" if args.len() >= 2 => {
+                                self.emit_frame_begin(func, 2);
+                                self.emit_store_arg(func, 0, &args[0]);
+                                self.emit_store_arg(func, 1, &args[1]);
+                                self.emit_memcall(func, "math_atan2", 2);
+                            }
+                            "sinh" if !args.is_empty() => {
+                                self.emit_frame_begin(func, 1);
+                                self.emit_store_arg(func, 0, &args[0]);
+                                self.emit_memcall(func, "math_sinh", 1);
+                            }
+                            "cosh" if !args.is_empty() => {
+                                self.emit_frame_begin(func, 1);
+                                self.emit_store_arg(func, 0, &args[0]);
+                                self.emit_memcall(func, "math_cosh", 1);
+                            }
+                            "tanh" if !args.is_empty() => {
+                                self.emit_frame_begin(func, 1);
+                                self.emit_store_arg(func, 0, &args[0]);
+                                self.emit_memcall(func, "math_tanh", 1);
+                            }
+                            "exp" if !args.is_empty() => {
+                                self.emit_frame_begin(func, 1);
+                                self.emit_store_arg(func, 0, &args[0]);
+                                self.emit_memcall(func, "math_exp", 1);
+                            }
+                            "sign" if !args.is_empty() => {
+                                self.emit_frame_begin(func, 1);
+                                self.emit_store_arg(func, 0, &args[0]);
+                                self.emit_memcall(func, "math_sign", 1);
+                            }
+                            "trunc" if !args.is_empty() => {
+                                self.emit_frame_begin(func, 1);
+                                self.emit_store_arg(func, 0, &args[0]);
+                                self.emit_memcall(func, "math_trunc", 1);
+                            }
+                            "cbrt" if !args.is_empty() => {
+                                self.emit_frame_begin(func, 1);
+                                self.emit_store_arg(func, 0, &args[0]);
+                                self.emit_memcall(func, "math_cbrt", 1);
+                            }
+                            "hypot" if args.len() >= 2 => {
+                                self.emit_frame_begin(func, 2);
+                                self.emit_store_arg(func, 0, &args[0]);
+                                self.emit_store_arg(func, 1, &args[1]);
+                                self.emit_memcall(func, "math_hypot", 2);
                             }
                             _ => { func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64)); }
                         }
@@ -5229,11 +5376,7 @@ impl<'a> FuncEmitCtx<'a> {
 
             // --- Array methods (HIR-level) ---
             Expr::ArrayPush { array_id, value } => {
-                if let Some(&idx) = self.local_map.get(array_id) {
-                    func.instruction(&Instruction::LocalGet(idx));
-                } else {
-                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
-                }
+                self.emit_local_or_global_get(func, array_id);
                 self.emit_frame_begin(func, 2);
                 func.instruction(&Instruction::LocalSet(self.temp_local));
                 self.emit_slot_addr(func, 0);
@@ -5253,11 +5396,7 @@ impl<'a> FuncEmitCtx<'a> {
                 self.emit_memcall(func, "array_length", 1);
             }
             Expr::ArrayPushSpread { array_id, source } => {
-                if let Some(&idx) = self.local_map.get(array_id) {
-                    func.instruction(&Instruction::LocalGet(idx));
-                } else {
-                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
-                }
+                self.emit_local_or_global_get(func, array_id);
                 self.emit_frame_begin(func, 2);
                 func.instruction(&Instruction::LocalSet(self.temp_local));
                 self.emit_slot_addr(func, 0);
@@ -5268,11 +5407,7 @@ impl<'a> FuncEmitCtx<'a> {
                 // Returns handle
             }
             Expr::ArrayPop(array_id) => {
-                if let Some(&idx) = self.local_map.get(array_id) {
-                    func.instruction(&Instruction::LocalGet(idx));
-                } else {
-                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
-                }
+                self.emit_local_or_global_get(func, array_id);
                 self.emit_frame_begin(func, 1);
                 func.instruction(&Instruction::LocalSet(self.temp_local));
                 self.emit_slot_addr(func, 0);
@@ -5281,11 +5416,7 @@ impl<'a> FuncEmitCtx<'a> {
                 self.emit_memcall(func, "array_pop", 1);
             }
             Expr::ArrayShift(array_id) => {
-                if let Some(&idx) = self.local_map.get(array_id) {
-                    func.instruction(&Instruction::LocalGet(idx));
-                } else {
-                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
-                }
+                self.emit_local_or_global_get(func, array_id);
                 self.emit_frame_begin(func, 1);
                 func.instruction(&Instruction::LocalSet(self.temp_local));
                 self.emit_slot_addr(func, 0);
@@ -5294,11 +5425,7 @@ impl<'a> FuncEmitCtx<'a> {
                 self.emit_memcall(func, "array_shift", 1);
             }
             Expr::ArrayUnshift { array_id, value } => {
-                if let Some(&idx) = self.local_map.get(array_id) {
-                    func.instruction(&Instruction::LocalGet(idx));
-                } else {
-                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
-                }
+                self.emit_local_or_global_get(func, array_id);
                 self.emit_frame_begin(func, 2);
                 func.instruction(&Instruction::LocalSet(self.temp_local));
                 self.emit_slot_addr(func, 0);
@@ -5307,11 +5434,7 @@ impl<'a> FuncEmitCtx<'a> {
                 self.emit_store_arg(func, 1, value);
                 self.emit_memcall_void(func, "array_unshift", 2);
                 // void return, push length
-                if let Some(&idx) = self.local_map.get(array_id) {
-                    func.instruction(&Instruction::LocalGet(idx));
-                } else {
-                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
-                }
+                self.emit_local_or_global_get(func, array_id);
                 self.emit_frame_begin(func, 1);
                 func.instruction(&Instruction::LocalSet(self.temp_local));
                 self.emit_slot_addr(func, 0);
@@ -5343,11 +5466,7 @@ impl<'a> FuncEmitCtx<'a> {
                 self.emit_memcall(func, "array_slice", 3);
             }
             Expr::ArraySplice { array_id, start, delete_count, items } => {
-                if let Some(&idx) = self.local_map.get(array_id) {
-                    func.instruction(&Instruction::LocalGet(idx));
-                } else {
-                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
-                }
+                self.emit_local_or_global_get(func, array_id);
                 self.emit_expr(func, start);
                 if let Some(dc) = delete_count {
                     self.emit_expr(func, dc);
@@ -5727,11 +5846,17 @@ impl<'a> FuncEmitCtx<'a> {
                     for arg in args {
                         self.emit_expr(func, arg);
                     }
-                    // Pad missing arguments with TAG_UNDEFINED
+                    // Keep the operand stack aligned with the ctor's arity: pad
+                    // missing optional args with `undefined`, and drop excess
+                    // evaluated args so they don't outlive the `call` and
+                    // accumulate on the enclosing block's stack (#183).
                     if let Some(&expected) = self.emitter.func_param_counts.get(&ctor_idx) {
                         let provided = args.len() + 1;
                         for _ in provided..expected {
                             func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
+                        }
+                        for _ in expected..provided {
+                            func.instruction(&Instruction::Drop);
                         }
                     }
                     func.instruction(&Instruction::Call(ctor_idx));
@@ -5776,6 +5901,9 @@ impl<'a> FuncEmitCtx<'a> {
                                 let provided = args.len() + 1;
                                 for _ in provided..expected {
                                     func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
+                                }
+                                for _ in expected..provided {
+                                    func.instruction(&Instruction::Drop);
                                 }
                             }
                             func.instruction(&Instruction::Call(ctor_idx));
@@ -5850,9 +5978,19 @@ impl<'a> FuncEmitCtx<'a> {
                 // Try to call compiled static method directly
                 if let Some(statics) = self.emitter.class_static_map.get(class_name.as_str()) {
                     if let Some(&static_idx) = statics.get(method_name.as_str()) {
-                        // Direct call to compiled static method (no this param)
+                        // Direct call to compiled static method (no this param).
+                        // Same arity reconciliation as FuncRef/ExternFuncRef arms
+                        // (#183): pad-up for missing args, drop-excess for extras.
                         for arg in args {
                             self.emit_expr(func, arg);
+                        }
+                        if let Some(&expected) = self.emitter.func_param_counts.get(&static_idx) {
+                            for _ in args.len()..expected {
+                                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
+                            }
+                            for _ in expected..args.len() {
+                                func.instruction(&Instruction::Drop);
+                            }
                         }
                         func.instruction(&Instruction::Call(static_idx));
                         return;
@@ -6459,6 +6597,50 @@ impl<'a> FuncEmitCtx<'a> {
                 self.emit_store_arg(func, 0, x);
                 self.emit_memcall(func, "math_log10", 1);
             }
+            // Issue #133 item 4: trig / exp / etc. are lowered to Expr::Math* at the HIR level
+            // (see perry-hir/src/lower.rs). Route them through the Firefox-safe mem_call bridge.
+            Expr::MathSin(x) => { self.emit_frame_begin(func, 1); self.emit_store_arg(func, 0, x); self.emit_memcall(func, "math_sin", 1); }
+            Expr::MathCos(x) => { self.emit_frame_begin(func, 1); self.emit_store_arg(func, 0, x); self.emit_memcall(func, "math_cos", 1); }
+            Expr::MathTan(x) => { self.emit_frame_begin(func, 1); self.emit_store_arg(func, 0, x); self.emit_memcall(func, "math_tan", 1); }
+            Expr::MathAsin(x) => { self.emit_frame_begin(func, 1); self.emit_store_arg(func, 0, x); self.emit_memcall(func, "math_asin", 1); }
+            Expr::MathAcos(x) => { self.emit_frame_begin(func, 1); self.emit_store_arg(func, 0, x); self.emit_memcall(func, "math_acos", 1); }
+            Expr::MathAtan(x) => { self.emit_frame_begin(func, 1); self.emit_store_arg(func, 0, x); self.emit_memcall(func, "math_atan", 1); }
+            Expr::MathAtan2(y, x) => {
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, y);
+                self.emit_store_arg(func, 1, x);
+                self.emit_memcall(func, "math_atan2", 2);
+            }
+            Expr::MathSinh(x) => { self.emit_frame_begin(func, 1); self.emit_store_arg(func, 0, x); self.emit_memcall(func, "math_sinh", 1); }
+            Expr::MathCosh(x) => { self.emit_frame_begin(func, 1); self.emit_store_arg(func, 0, x); self.emit_memcall(func, "math_cosh", 1); }
+            Expr::MathTanh(x) => { self.emit_frame_begin(func, 1); self.emit_store_arg(func, 0, x); self.emit_memcall(func, "math_tanh", 1); }
+            Expr::MathAsinh(x) => { self.emit_frame_begin(func, 1); self.emit_store_arg(func, 0, x); self.emit_memcall(func, "math_asinh", 1); }
+            Expr::MathAcosh(x) => { self.emit_frame_begin(func, 1); self.emit_store_arg(func, 0, x); self.emit_memcall(func, "math_acosh", 1); }
+            Expr::MathAtanh(x) => { self.emit_frame_begin(func, 1); self.emit_store_arg(func, 0, x); self.emit_memcall(func, "math_atanh", 1); }
+            Expr::MathCbrt(x) => { self.emit_frame_begin(func, 1); self.emit_store_arg(func, 0, x); self.emit_memcall(func, "math_cbrt", 1); }
+            Expr::MathExp(x) => { self.emit_frame_begin(func, 1); self.emit_store_arg(func, 0, x); self.emit_memcall(func, "math_exp", 1); }
+            Expr::MathExpm1(x) => { self.emit_frame_begin(func, 1); self.emit_store_arg(func, 0, x); self.emit_memcall(func, "math_expm1", 1); }
+            Expr::MathLog1p(x) => { self.emit_frame_begin(func, 1); self.emit_store_arg(func, 0, x); self.emit_memcall(func, "math_log1p", 1); }
+            Expr::MathFround(x) => { self.emit_frame_begin(func, 1); self.emit_store_arg(func, 0, x); self.emit_memcall(func, "math_fround", 1); }
+            Expr::MathClz32(x) => { self.emit_frame_begin(func, 1); self.emit_store_arg(func, 0, x); self.emit_memcall(func, "math_clz32", 1); }
+            Expr::MathHypot(args) => {
+                // Variadic: iteratively fold via math_hypot(acc, x)
+                if let Some(first) = args.first() {
+                    self.emit_expr(func, first);
+                    for arg in &args[1..] {
+                        self.emit_frame_begin(func, 2);
+                        func.instruction(&Instruction::LocalSet(self.temp_local));
+                        self.emit_slot_addr(func, 0);
+                        func.instruction(&Instruction::LocalGet(self.temp_local));
+                        func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                        self.emit_store_arg(func, 1, arg);
+                        self.emit_memcall(func, "math_hypot", 2);
+                    }
+                } else {
+                    func.instruction(&f64_const(0.0));
+                    func.instruction(&Instruction::I64ReinterpretF64);
+                }
+            }
             Expr::MathImul(a, b) => {
                 self.emit_expr(func, a);
                 func.instruction(&Instruction::F64ReinterpretI64);
@@ -6590,7 +6772,8 @@ impl<'a> FuncEmitCtx<'a> {
                 func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
             Expr::ProcessNextTick(_) | Expr::ProcessChdir(_) |
-            Expr::ProcessOn { .. } | Expr::ProcessKill { .. } => {
+            Expr::ProcessOn { .. } | Expr::ProcessKill { .. } |
+            Expr::ProcessExit(_) => {
                 func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
             }
             Expr::EnvGet(_) | Expr::EnvGetDynamic(_) => {

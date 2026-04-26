@@ -14,7 +14,7 @@ fn str_from_header(ptr: *const u8) -> &'static str {
     }
     unsafe {
         let header = ptr as *const perry_runtime::string::StringHeader;
-        let len = (*header).length as usize;
+        let len = (*header).byte_len as usize;
         let data = ptr.add(std::mem::size_of::<perry_runtime::string::StringHeader>());
         std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
     }
@@ -60,6 +60,23 @@ pub fn save_file_dialog(callback: f64, default_name_ptr: *const u8, _allowed_typ
         dialog.close();
     });
 
+    dialog.show();
+}
+
+/// Show a simple alert dialog with an OK button. Called from `alert(title, message)`.
+pub fn alert_simple(title_ptr: *const u8, message_ptr: *const u8) {
+    let title = str_from_header(title_ptr);
+    let message = str_from_header(message_ptr);
+    let window: Option<Window> = None;
+    let dialog = gtk4::MessageDialog::new(
+        window.as_ref(),
+        gtk4::DialogFlags::MODAL,
+        gtk4::MessageType::Info,
+        gtk4::ButtonsType::Ok,
+        title,
+    );
+    dialog.set_secondary_text(Some(message));
+    dialog.connect_response(|dialog, _| dialog.close());
     dialog.show();
 }
 

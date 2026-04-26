@@ -8,10 +8,10 @@ use crate::common::{register_handle, get_handle, spawn_for_promise, Handle};
 
 /// Helper to extract string from StringHeader pointer
 unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
-    if ptr.is_null() {
+    if ptr.is_null() || (ptr as usize) < 0x1000 {
         return None;
     }
-    let len = (*ptr).length as usize;
+    let len = (*ptr).byte_len as usize;
     let data_ptr = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data_ptr, len);
     Some(String::from_utf8_lossy(bytes).to_string())
@@ -39,7 +39,6 @@ pub unsafe extern "C" fn js_axios_get(url_ptr: *const StringHeader) -> *mut Prom
             return promise;
         }
     };
-
     spawn_for_promise(promise as *mut u8, async move {
         let client = reqwest::Client::new();
         match client.get(&url).send().await {

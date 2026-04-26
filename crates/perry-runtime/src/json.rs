@@ -15,6 +15,205 @@ use std::fmt::Write as FmtWrite;
 thread_local! {
     /// Stack of object pointers currently being stringified (for circular detection).
     static STRINGIFY_STACK: RefCell<Vec<usize>> = RefCell::new(Vec::new());
+
+    /// Reusable scratch buffer for JSON.stringify (issue #64). Avoids the
+    /// per-call `String::with_capacity` allocate+free that dominated the
+    /// small-stringify path. Wrapped in `Cell<Option<_>>` so reentrant calls
+    /// (via `toJSON` callbacks etc.) get a fresh buffer instead of panicking
+    /// on a `RefCell` borrow conflict; the larger of the two is restored.
+    static STRINGIFY_BUF: std::cell::Cell<Option<String>> =
+        std::cell::Cell::new(Some(String::with_capacity(4096)));
+
+    /// Per-call shape-template cache (#64 follow-up). Keys on `keys_array`
+    /// raw pointer — within one top-level stringify call no GC runs over
+    /// the user object graph (the buffer/result allocations don't move
+    /// keys arrays), so pointer identity is a stable shape ID. Cleared
+    /// (saved+restored) at the entry of each `js_json_stringify` /
+    /// `js_json_stringify_full` / `..with_replacer` call so reentrant
+    /// `toJSON` callbacks don't return stale templates.
+    ///
+    /// `Box<ShapeTemplate>` lives on the heap so its address is stable
+    /// even when the cache `Vec` reallocates — we hand out raw pointers
+    /// to the templates and they must outlive the borrow.
+    static SHAPE_CACHE: RefCell<Vec<(*mut crate::ArrayHeader, Box<ShapeTemplate>)>> =
+        RefCell::new(Vec::new());
+
+    /// Key string intern cache for JSON.parse (issue #51 follow-up).
+    /// Maps key bytes → already-allocated StringHeader pointer.
+    /// Avoids re-allocating "id", "name", etc. for every record in a
+    /// homogeneous JSON array. Cleared at the end of each top-level parse.
+    /// `pub(crate)` so `json_tape`'s materializer can share the cache —
+    /// without this, each tape-path force-materialize re-allocates every
+    /// key and burns 3× the time + RSS vs the direct parser.
+    pub(crate) static PARSE_KEY_CACHE: RefCell<std::collections::HashMap<Vec<u8>, *const StringHeader>> =
+        RefCell::new(std::collections::HashMap::new());
+
+    /// Reentrancy depth counter for JSON.stringify (issue #67). 0 means
+    /// no call in progress; ≥1 means a reentrant (toJSON callback) path.
+    /// Used to skip the shape_cache save/restore dance for the common
+    /// non-reentrant case — a plain `clear_shape_cache` at the outermost
+    /// call's exit handles correctness without a Vec alloc/swap.
+    static STRINGIFY_DEPTH: std::cell::Cell<u32> = std::cell::Cell::new(0);
+
+    /// GC roots for in-progress JSON.parse. Each entry is a JSValue bit pattern
+    /// (stored as f64 so the scanner can hand it to the NaN-boxed mark path).
+    ///
+    /// Why this exists (issue #46): parse_array/parse_object build their result
+    /// incrementally over thousands of iterations. Mid-parse heap allocations
+    /// (`js_string_from_bytes` → gc_malloc → adaptive count trigger, or an arena
+    /// block overflow) run GC while the in-progress array/object lives only on
+    /// the Rust call stack. The conservative stack scan only captures callee-
+    /// saved registers via setjmp; values held in caller-saved regs (or on
+    /// the Rust-heap backing of `Vec<(Vec<u8>, JSValue)>` inside parse_object)
+    /// are invisible and get swept. Symptom was `JSON.parse(big_array)` silently
+    /// truncating at ~1666 records (= when the second adaptive malloc GC fires).
+    static PARSE_ROOTS: RefCell<Vec<f64>> = RefCell::new(Vec::new());
+}
+
+#[inline]
+fn parse_root_push(v: JSValue) -> usize {
+    PARSE_ROOTS.with(|r| {
+        let mut r = r.borrow_mut();
+        let idx = r.len();
+        r.push(f64::from_bits(v.bits()));
+        idx
+    })
+}
+
+#[inline]
+fn parse_root_set(idx: usize, v: JSValue) {
+    PARSE_ROOTS.with(|r| {
+        if let Some(slot) = r.borrow_mut().get_mut(idx) {
+            *slot = f64::from_bits(v.bits());
+        }
+    });
+}
+
+#[inline]
+fn parse_root_save_len() -> usize {
+    PARSE_ROOTS.with(|r| r.borrow().len())
+}
+
+#[inline]
+fn parse_root_restore(len: usize) {
+    PARSE_ROOTS.with(|r| r.borrow_mut().truncate(len));
+}
+
+/// Take the shared scratch buffer (or allocate a fresh one on reentrancy).
+#[inline]
+fn take_stringify_buf() -> String {
+    STRINGIFY_BUF.with(|b| b.take()).unwrap_or_default()
+}
+
+/// Restore the scratch buffer after use. In a reentrant call the inner
+/// restore runs first with a (typically smaller) buffer, but the outer
+/// restore runs last and overwrites with its larger buffer — so the
+/// final TLS state always holds the largest recently-used buffer without
+/// needing a per-call capacity comparison.
+#[inline]
+fn restore_stringify_buf(mut buf: String) {
+    buf.clear();
+    STRINGIFY_BUF.with(|b| b.set(Some(buf)));
+}
+
+/// Save & clear the shape cache for the duration of a top-level stringify
+/// call. Reentrant `toJSON` callbacks would otherwise inherit the outer
+/// call's templates and (worse) clear them on exit, dangling pointers we
+/// already handed out. Mirrors `take_stringify_buf` in spirit.
+#[inline]
+fn take_shape_cache() -> Vec<(*mut crate::ArrayHeader, Box<ShapeTemplate>)> {
+    SHAPE_CACHE.with(|c| std::mem::take(&mut *c.borrow_mut()))
+}
+
+#[inline]
+fn restore_shape_cache(saved: Vec<(*mut crate::ArrayHeader, Box<ShapeTemplate>)>) {
+    SHAPE_CACHE.with(|c| *c.borrow_mut() = saved);
+}
+
+/// Clear cache without allocating a fresh Vec (keeps capacity, drops entries).
+/// Used in place of restore when we know the cache was empty at call entry —
+/// the outermost stringify call in a tight loop skips the save entirely.
+#[inline]
+fn clear_shape_cache() {
+    SHAPE_CACHE.with(|c| c.borrow_mut().clear());
+}
+
+/// Maximum cache entries per call. Workloads with more distinct shapes
+/// fall back to per-object building. We never evict — the raw pointers we
+/// hand out must outlive cache mutations, and `swap_remove` would drop a
+/// `Box` whose heap address might be in active use up the call stack.
+/// 32 entries × ~40 bytes ≈ 1.3 KB; a stringify graph that exceeds this
+/// gets the pre-cache slow path on overflow shapes only.
+const SHAPE_CACHE_CAP: usize = 32;
+
+/// Look up (or build & insert) the shape template for an object. Returns
+/// `None` if the object isn't templatable (no keys array, too many fields,
+/// malformed key strings) or if the cache is full and missed.
+///
+/// Returns a raw pointer because lifetimes can't survive the TLS borrow.
+/// The pointer stays valid until the next `take_shape_cache` (top-level
+/// entry/exit) — within one stringify traversal we only `push`, and
+/// `Box`'s heap address is stable across `Vec` growth.
+#[inline]
+unsafe fn shape_template_for(obj_ptr: *const u8) -> Option<*const ShapeTemplate> {
+    let obj = obj_ptr as *const crate::ObjectHeader;
+    let keys_arr = (*obj).keys_array;
+    if keys_arr.is_null() {
+        return None;
+    }
+
+    SHAPE_CACHE.with(|c| {
+        // Fast path: linear scan from the back — recently-used entries
+        // cluster there for typical traversal orders (shape A's elements
+        // recurse into shape B repeatedly).
+        {
+            let cache = c.borrow();
+            for entry in cache.iter().rev() {
+                if entry.0 == keys_arr {
+                    return Some(&*entry.1 as *const ShapeTemplate);
+                }
+            }
+            if cache.len() >= SHAPE_CACHE_CAP {
+                return None;
+            }
+        }
+
+        // Miss — build, insert, return raw pointer to the boxed template.
+        let elem_bits = make_pointer_bits(obj_ptr);
+        let template = build_shape_prefix_template(elem_bits)?;
+        let mut cache = c.borrow_mut();
+        // Re-check cap after the borrow round-trip (a recursive call
+        // during template build could have filled the cache).
+        if cache.len() >= SHAPE_CACHE_CAP {
+            return None;
+        }
+        cache.push((keys_arr, Box::new(template)));
+        Some(&*cache.last().unwrap().1 as *const ShapeTemplate)
+    })
+}
+
+#[inline]
+fn make_pointer_bits(ptr: *const u8) -> u64 {
+    POINTER_TAG | (ptr as u64 & POINTER_MASK)
+}
+
+/// Root scanner called by GC — marks every value in PARSE_ROOTS as live.
+pub fn scan_parse_roots(mark: &mut dyn FnMut(f64)) {
+    PARSE_ROOTS.with(|r| {
+        for &v in r.borrow().iter() {
+            mark(v);
+        }
+    });
+    // Also mark interned key strings so GC doesn't sweep them mid-parse.
+    PARSE_KEY_CACHE.with(|c| {
+        for &ptr in c.borrow().values() {
+            if !ptr.is_null() {
+                mark(f64::from_bits(
+                    crate::value::STRING_TAG | (ptr as u64 & 0x0000_FFFF_FFFF_FFFF),
+                ));
+            }
+        }
+    });
 }
 
 // ─── Zero-copy string access ──────────────────────────────────────────────────
@@ -24,22 +223,182 @@ unsafe fn str_from_header<'a>(ptr: *const StringHeader) -> Option<&'a str> {
     if ptr.is_null() || (ptr as usize) < 0x1000 {
         return None;
     }
-    let len = (*ptr).length as usize;
+    let len = (*ptr).byte_len as usize;
     let data_ptr = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data_ptr, len);
     Some(std::str::from_utf8_unchecked(bytes))
 }
 
+// ─── SIMD string-terminator scan ──────────────────────────────────────────────
+
+/// Find the offset of the first `"` or `\` in `bytes`. Returns `None`
+/// if neither is found before end-of-input (which is a JSON error — the
+/// caller handles that by failing the parse).
+///
+/// Issue #179 tier 1 #3: SIMD-accelerated on aarch64 (NEON) and x86_64
+/// (SSE2); scalar on other targets. The hot path on
+/// `bench_json_roundtrip` — per-record string scanning — previously
+/// ran one byte at a time in the tight zero-copy fast-path loop. 16-byte
+/// SIMD chunks cut the per-iteration overhead substantially on long
+/// records, and the scalar tail handles the trailing <16 bytes.
+#[inline(always)]
+fn find_string_terminator(bytes: &[u8]) -> Option<usize> {
+    #[cfg(target_arch = "aarch64")]
+    {
+        return find_string_terminator_neon(bytes);
+    }
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+    {
+        return find_string_terminator_sse2(bytes);
+    }
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        all(target_arch = "x86_64", target_feature = "sse2")
+    )))]
+    {
+        find_string_terminator_scalar(bytes)
+    }
+}
+
+/// Scalar fallback used on non-SIMD targets and as the tail handler
+/// for the SIMD variants. Always inlined so the caller's tight loop
+/// doesn't pay a call-site cost for the <16-byte tail.
+#[inline(always)]
+fn find_string_terminator_scalar(bytes: &[u8]) -> Option<usize> {
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'"' || b == b'\\' {
+            return Some(i);
+        }
+    }
+    None
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn find_string_terminator_neon(bytes: &[u8]) -> Option<usize> {
+    use std::arch::aarch64::*;
+    unsafe {
+        let quote = vdupq_n_u8(b'"');
+        let bslash = vdupq_n_u8(b'\\');
+        let mut i: usize = 0;
+        while i + 16 <= bytes.len() {
+            let chunk = vld1q_u8(bytes.as_ptr().add(i));
+            let eq_q = vceqq_u8(chunk, quote);
+            let eq_b = vceqq_u8(chunk, bslash);
+            let mask = vorrq_u8(eq_q, eq_b);
+            // Fast rejection: reduce the 16-byte mask to a single byte
+            // (max across all lanes). Zero => no match in this chunk.
+            if vmaxvq_u8(mask) == 0 {
+                i += 16;
+                continue;
+            }
+            // Hit somewhere in this chunk — scan the 16 bytes to find
+            // the exact offset. Branchless via per-lane comparison.
+            // `mask` has 0xFF at matching lane positions and 0x00
+            // elsewhere; store-and-scan is portable and fast enough
+            // for a 16-byte region.
+            let mut lanes = [0u8; 16];
+            vst1q_u8(lanes.as_mut_ptr(), mask);
+            for (j, &lane) in lanes.iter().enumerate() {
+                if lane != 0 {
+                    return Some(i + j);
+                }
+            }
+            // Unreachable — vmaxvq_u8 said there's a match.
+            unreachable!();
+        }
+        // Tail: <16 bytes left, scalar scan.
+        find_string_terminator_scalar(&bytes[i..]).map(|off| i + off)
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+#[inline(always)]
+fn find_string_terminator_sse2(bytes: &[u8]) -> Option<usize> {
+    use std::arch::x86_64::*;
+    unsafe {
+        let quote = _mm_set1_epi8(b'"' as i8);
+        let bslash = _mm_set1_epi8(b'\\' as i8);
+        let mut i: usize = 0;
+        while i + 16 <= bytes.len() {
+            let chunk = _mm_loadu_si128(bytes.as_ptr().add(i) as *const _);
+            let eq_q = _mm_cmpeq_epi8(chunk, quote);
+            let eq_b = _mm_cmpeq_epi8(chunk, bslash);
+            let mask = _mm_or_si128(eq_q, eq_b);
+            let bitmask = _mm_movemask_epi8(mask) as u32;
+            if bitmask != 0 {
+                return Some(i + bitmask.trailing_zeros() as usize);
+            }
+            i += 16;
+        }
+        // Tail.
+        find_string_terminator_scalar(&bytes[i..]).map(|off| i + off)
+    }
+}
+
 // ─── Direct JSON parser ────────────────────────────────────────────────────────
+
+/// Result of parsing a JSON string: either a zero-copy borrow from the
+/// input buffer (no escapes) or an owned allocation (had escape sequences).
+enum ParsedStr<'a> {
+    Borrowed(&'a [u8]),
+    Owned(Vec<u8>),
+}
+
+impl<'a> ParsedStr<'a> {
+    fn as_bytes(&self) -> &[u8] {
+        match self {
+            ParsedStr::Borrowed(s) => s,
+            ParsedStr::Owned(v) => v,
+        }
+    }
+}
+
+/// Issue #179 typed-parse plan, Step 1b. Pre-computed shape for
+/// `JSON.parse<T[]>(blob)` where T is an object type with a known
+/// field list. Built once per typed-parse call from the codegen-
+/// emitted packed-keys bytes; reused for every record in the array.
+///
+/// The key contract: `expected_keys[i].bytes == <field name at index i>`.
+/// When JSON fields arrive in declared order (the common case for
+/// machine-generated JSON, including stringify output), the hot loop
+/// just memcmp's `key_bytes` against `expected_keys[idx]` and writes
+/// directly to `fields[idx]`, skipping the `PARSE_KEY_CACHE` hash
+/// lookup AND the transition-cache dance inside
+/// `js_object_set_field_by_name`.
+///
+/// Out-of-order fields and fields not in the shape fall through to
+/// the generic path (same semantics as untyped parse).
+struct ObjectShapeHint {
+    /// Pre-interned key pointers in declared field order. Pointers
+    /// are held alive by PARSE_KEY_CACHE + scan_parse_roots.
+    expected_keys: Vec<*const StringHeader>,
+    /// Pre-built keys_array that each parsed record's ObjectHeader
+    /// points to. Built via `js_build_class_keys_array`, so the
+    /// shape cache + scan_shape_cache_roots keeps it alive.
+    keys_array: *mut crate::array::ArrayHeader,
+    /// Number of fields in the declared shape — used as the object's
+    /// pre-allocated field count.
+    field_count: u32,
+}
 
 struct DirectParser<'a> {
     input: &'a [u8],
     pos: usize,
+    /// Issue #179 typed-parse: if Some, the top-level value is
+    /// expected to be `Array<Object>` matching this shape. Each
+    /// record uses the fast path; mismatches silently fall through
+    /// to the generic field-setting logic.
+    shape: Option<ObjectShapeHint>,
 }
 
 impl<'a> DirectParser<'a> {
     fn new(input: &'a [u8]) -> Self {
-        Self { input, pos: 0 }
+        Self { input, pos: 0, shape: None }
+    }
+
+    fn with_shape(input: &'a [u8], shape: ObjectShapeHint) -> Self {
+        Self { input, pos: 0, shape: Some(shape) }
     }
 
     #[inline]
@@ -89,20 +448,70 @@ impl<'a> DirectParser<'a> {
 
     unsafe fn parse_string_value(&mut self) -> JSValue {
         if let Some(s) = self.parse_string_bytes() {
-            let ptr = js_string_from_bytes(s.as_ptr(), s.len() as u32);
+            let b = s.as_bytes();
+            // v0.5.216 SSO Step 2: emit inline SSO for values of
+            // length ≤ SHORT_STRING_MAX_LEN (5 bytes). Zero heap
+            // allocation on the short-string hot path. Consumer
+            // arms for this representation landed in v0.5.213-215
+            // (equality, comparison, typeof, length, stringify,
+            // PropertyGet codegen, Array.join).
+            //
+            // Measured at flip (bench_sso_strings: 20k records × 4
+            // short strings, 30 iters): direct-only 290 ms / 123 MB
+            // → direct+SSO 150 ms / 76 MB (1.9× faster, 38% less
+            // RSS). Main JSON benches also improve modestly on the
+            // direct-forced path (7-12% time, 2-5% RSS).
+            //
+            // `PERRY_SSO_FORCE` env var retained as a no-op kept
+            // alive for release-note compatibility — any value
+            // still falls through to the unconditional SSO emit.
+            if let Some(sso) = JSValue::try_short_string(b) {
+                return sso;
+            }
+            let ptr = js_string_from_bytes(b.as_ptr(), b.len() as u32);
             JSValue::string_ptr(ptr)
         } else {
             JSValue::null()
         }
     }
 
-    fn parse_string_bytes(&mut self) -> Option<Vec<u8>> {
+    /// Zero-copy fast path: if the string has no escape sequences,
+    /// return a direct slice into the input buffer. Falls back to
+    /// `parse_string_bytes_slow` for strings containing `\`.
+    ///
+    /// Issue #179 tier 1 #3: scans for `"` or `\` 16 bytes at a time
+    /// using NEON (aarch64) or SSE2 (x86_64) when available, scalar
+    /// fallback otherwise. On `bench_json_roundtrip` the per-record
+    /// strings are 5-16 bytes so most iterations hit the SIMD path
+    /// exactly once before the scalar tail handles the boundary.
+    fn parse_string_bytes(&mut self) -> Option<ParsedStr<'a>> {
         if self.peek() != Some(b'"') {
             return None;
         }
         self.advance();
+        let start = self.pos;
 
-        let mut result = Vec::new();
+        // SIMD-accelerated scan for `"` or `\`. On match, fall through
+        // to the scalar loop which positions `self.pos` exactly.
+        if let Some(hit) = find_string_terminator(&self.input[self.pos..]) {
+            // `hit` is the offset within the remaining slice of the
+            // first `"` or `\`. If it's `"`, we're done; if `\`, slow
+            // path picks up from the current position.
+            self.pos += hit;
+            let ch = self.input[self.pos];
+            if ch == b'"' {
+                let slice = &self.input[start..self.pos];
+                self.pos += 1;
+                return Some(ParsedStr::Borrowed(slice));
+            }
+            // ch == b'\\' — slow path from here.
+            return self.parse_string_bytes_slow(start);
+        }
+        None
+    }
+
+    fn parse_string_bytes_slow(&mut self, start: usize) -> Option<ParsedStr<'a>> {
+        let mut result = Vec::from(&self.input[start..self.pos]);
         loop {
             if self.pos >= self.input.len() {
                 return None;
@@ -110,7 +519,7 @@ impl<'a> DirectParser<'a> {
             let ch = self.input[self.pos];
             self.pos += 1;
             match ch {
-                b'"' => return Some(result),
+                b'"' => return Some(ParsedStr::Owned(result)),
                 b'\\' => {
                     if self.pos >= self.input.len() {
                         return None;
@@ -164,11 +573,223 @@ impl<'a> DirectParser<'a> {
         }
     }
 
-    unsafe fn parse_object(&mut self) -> JSValue {
+    /// Issue #179 typed-parse fast path. Called when parsing a record
+    /// inside a typed-array parse — object shape is known, fields are
+    /// expected (but not required) to arrive in declared order.
+    #[inline]
+    unsafe fn parse_object_shaped(&mut self, shape: &ObjectShapeHint) -> JSValue {
+        self.advance(); // past `{`
+        self.skip_whitespace();
+
+        let saved_roots = parse_root_save_len();
+
+        // Pre-allocate with the known keys_array + field count. No
+        // shape cache lookup — the shape is already in the cache from
+        // the one-time build at parse entry.
+        let js_obj = crate::object::js_object_alloc_class_inline_keys(
+            0, // class_id 0 = plain object (not a class instance)
+            0, // parent_class_id
+            shape.field_count,
+            shape.keys_array,
+        );
+        // Initialize all fields to undefined so JSON with missing
+        // fields returns `undefined` for absent properties (matches
+        // spec: access to absent own property returns undefined).
+        let fields_ptr = (js_obj as *mut u8)
+            .add(std::mem::size_of::<crate::ObjectHeader>()) as *mut JSValue;
+        let alloc_field_count = std::cmp::max(shape.field_count as usize, 8);
+        for i in 0..alloc_field_count {
+            std::ptr::write(fields_ptr.add(i), JSValue::undefined());
+        }
+        let _obj_slot = parse_root_push(JSValue::object_ptr(js_obj as *mut u8));
+
+        // Fast path: track the expected next-field index. Each
+        // iteration: if the incoming key matches `expected_keys[idx]`,
+        // write to fields[idx] directly and bump. Otherwise fall
+        // through to the generic named-setter (which handles
+        // out-of-order, extra, or renamed fields).
+        let mut fast_idx: usize = 0;
+        let field_count = shape.expected_keys.len();
+
+        if self.peek() == Some(b'}') {
+            self.advance();
+            parse_root_restore(saved_roots);
+            return JSValue::object_ptr(js_obj as *mut u8);
+        }
+
+        loop {
+            self.skip_whitespace();
+            let key = match self.parse_string_bytes() {
+                Some(k) => k,
+                None => break,
+            };
+            if !self.expect(b':') { break; }
+            // Use `parse_value_generic` — nested values inside a
+            // shaped record are NOT themselves expected to match the
+            // shape (shape is one-level deep by design in Step 1b).
+            let value = self.parse_value_generic();
+            parse_root_push(value);
+
+            let key_bytes = key.as_bytes();
+
+            // Fast path: matches expected next field?
+            let mut took_fast = false;
+            if fast_idx < field_count {
+                let expected = shape.expected_keys[fast_idx];
+                if !expected.is_null() {
+                    let expected_len = (*expected).byte_len as usize;
+                    if expected_len == key_bytes.len() {
+                        let expected_data = (expected as *const u8)
+                            .add(std::mem::size_of::<StringHeader>());
+                        let expected_slice = std::slice::from_raw_parts(
+                            expected_data, expected_len);
+                        if expected_slice == key_bytes {
+                            // Match — direct field write.
+                            let alloc_limit = alloc_field_count;
+                            if fast_idx < alloc_limit {
+                                std::ptr::write(
+                                    fields_ptr.add(fast_idx),
+                                    JSValue::from_bits(value.bits()),
+                                );
+                                fast_idx += 1;
+                                took_fast = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !took_fast {
+                // Slow path: might be an out-of-order field, an extra
+                // field not in the declared shape, or a shape mismatch.
+                // Use the generic named setter which handles all three
+                // via transition cache + overflow map. This also
+                // pins `fast_idx` — once we slow-path, we stay slow
+                // for the rest of the object because the field-index
+                // assumption is broken.
+                //
+                // Key interning: check PARSE_KEY_CACHE first (same
+                // path as generic parse_object).
+                let cached = PARSE_KEY_CACHE.with(|c| {
+                    c.borrow().get(key_bytes).copied()
+                });
+                let key_ptr = if let Some(p) = cached {
+                    p
+                } else {
+                    let ptr = crate::string::js_string_from_bytes_longlived(
+                        key_bytes.as_ptr(),
+                        key_bytes.len() as u32,
+                    );
+                    PARSE_KEY_CACHE.with(|c| {
+                        c.borrow_mut().insert(key_bytes.to_vec(), ptr);
+                    });
+                    ptr
+                };
+                crate::object::js_object_set_field_by_name(
+                    js_obj, key_ptr as *mut StringHeader, f64::from_bits(value.bits()),
+                );
+                // Force slow path for the rest of this object.
+                fast_idx = field_count;
+            }
+
+            self.skip_whitespace();
+            if self.peek() == Some(b',') {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.expect(b'}');
+        parse_root_restore(saved_roots);
+        JSValue::object_ptr(js_obj as *mut u8)
+    }
+
+    /// Issue #179 typed-parse entry: expects `[{…}, {…}, …]` where
+    /// each element matches `shape`. Top-level array only; nested
+    /// objects inside a record use the generic path.
+    #[inline]
+    unsafe fn parse_array_typed(&mut self) -> JSValue {
+        self.skip_whitespace();
+        if self.peek() != Some(b'[') {
+            // Shape mismatch — fall through to generic value parse
+            // (e.g. Typed<Record> on a `{…}` input still works, just
+            // without the array-outer shape).
+            return self.parse_value_generic();
+        }
         self.advance();
         self.skip_whitespace();
 
-        let mut pairs: Vec<(Vec<u8>, JSValue)> = Vec::new();
+        let saved_roots = parse_root_save_len();
+        let mut js_arr = js_array_alloc(16);
+        let arr_slot = parse_root_push(JSValue::object_ptr(js_arr as *mut u8));
+
+        if self.peek() == Some(b']') {
+            self.advance();
+            parse_root_restore(saved_roots);
+            return JSValue::object_ptr(js_arr as *mut u8);
+        }
+
+        // Take shape pointer once; parse_object_shaped borrows via raw.
+        let shape_ptr: *const ObjectShapeHint = self.shape.as_ref().unwrap();
+
+        loop {
+            self.skip_whitespace();
+            // Per-element: shaped object or generic value (if element
+            // isn't an object, fall back).
+            let value = if self.peek() == Some(b'{') {
+                self.parse_object_shaped(&*shape_ptr)
+            } else {
+                self.parse_value_generic()
+            };
+            parse_root_push(value);
+            js_arr = js_array_push(js_arr, value);
+            parse_root_set(arr_slot, JSValue::object_ptr(js_arr as *mut u8));
+
+            self.skip_whitespace();
+            if self.peek() == Some(b',') {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.expect(b']');
+        parse_root_restore(saved_roots);
+        JSValue::object_ptr(js_arr as *mut u8)
+    }
+
+    /// Generic `parse_value` — identical to `parse_value` but without
+    /// the shape-specialization dispatch. Called from the typed-parse
+    /// path for non-object element values and nested values inside a
+    /// shaped record.
+    #[inline]
+    unsafe fn parse_value_generic(&mut self) -> JSValue {
+        self.skip_whitespace();
+        match self.peek() {
+            Some(b'"') => self.parse_string_value(),
+            Some(b'{') => self.parse_object_untyped(),
+            Some(b'[') => self.parse_array(),
+            Some(b't') => self.parse_true(),
+            Some(b'f') => self.parse_false(),
+            Some(b'n') => self.parse_null(),
+            Some(c) if c == b'-' || c.is_ascii_digit() => self.parse_number(),
+            _ => JSValue::null(),
+        }
+    }
+
+    unsafe fn parse_object(&mut self) -> JSValue {
+        // The top-level entry `parse_value` routes typed-array parses
+        // to `parse_array_typed` directly, so by the time we reach
+        // `parse_object` here the only callers are (a) untyped parses
+        // and (b) nested objects inside a shaped record — both want
+        // generic behavior. Delegate to `parse_object_untyped`.
+        self.parse_object_untyped()
+    }
+
+    unsafe fn parse_object_untyped(&mut self) -> JSValue {
+        self.advance();
+        self.skip_whitespace();
+
+        let saved_roots = parse_root_save_len();
 
         if self.peek() == Some(b'}') {
             self.advance();
@@ -177,6 +798,16 @@ impl<'a> DirectParser<'a> {
             js_object_set_keys(js_obj, keys_arr);
             return JSValue::object_ptr(js_obj as *mut u8);
         }
+
+        // Incremental build: allocate the object upfront and set fields
+        // as we parse them (no intermediate Vec). Combined with key
+        // interning (PARSE_KEY_CACHE) and transition-cache shape sharing
+        // (js_object_set_field_by_name), this gives:
+        //  - First record of each schema: N key allocs + N transitions.
+        //  - Subsequent records: 0 key allocs + N transition hits.
+        //  - Zero Rust-heap Vec allocations per record.
+        let js_obj = js_object_alloc(0, 0);
+        let _obj_slot = parse_root_push(JSValue::object_ptr(js_obj as *mut u8));
 
         loop {
             self.skip_whitespace();
@@ -190,7 +821,37 @@ impl<'a> DirectParser<'a> {
             }
 
             let value = self.parse_value();
-            pairs.push((key, value));
+            // Root the value before the key-intern + set_field path
+            // (which may allocate and trigger GC).
+            parse_root_push(value);
+
+            let key_bytes = key.as_bytes();
+            // Two-phase lookup: check cache with immutable borrow first,
+            // then allocate OUTSIDE the borrow (js_string_from_bytes can
+            // trigger GC → scan_parse_roots → borrow() on same RefCell).
+            let cached = PARSE_KEY_CACHE.with(|c| {
+                c.borrow().get(key_bytes).copied()
+            });
+            let key_ptr = if let Some(p) = cached {
+                p
+            } else {
+                // Issue #179: allocate cached key strings in the longlived
+                // arena. They're held by PARSE_KEY_CACHE (+ scan_parse_roots)
+                // for the program's lifetime and must not co-locate with
+                // per-iteration parse output or the block-persistence pass
+                // pins all adjacent dead objects live.
+                let ptr = crate::string::js_string_from_bytes_longlived(
+                    key_bytes.as_ptr(),
+                    key_bytes.len() as u32,
+                );
+                PARSE_KEY_CACHE.with(|c| {
+                    c.borrow_mut().insert(key_bytes.to_vec(), ptr);
+                });
+                ptr
+            };
+            crate::object::js_object_set_field_by_name(
+                js_obj, key_ptr as *mut StringHeader, f64::from_bits(value.bits()),
+            );
 
             self.skip_whitespace();
             if self.peek() == Some(b',') {
@@ -200,17 +861,7 @@ impl<'a> DirectParser<'a> {
             }
         }
         self.expect(b'}');
-
-        let count = pairs.len();
-        let js_obj = js_object_alloc(0, count as u32);
-        let keys_arr = js_array_alloc(count as u32);
-
-        for (idx, (key, value)) in pairs.into_iter().enumerate() {
-            let key_ptr = js_string_from_bytes(key.as_ptr(), key.len() as u32);
-            js_array_push(keys_arr, JSValue::string_ptr(key_ptr));
-            js_object_set_field(js_obj, idx as u32, value);
-        }
-        js_object_set_keys(js_obj, keys_arr);
+        parse_root_restore(saved_roots);
         JSValue::object_ptr(js_obj as *mut u8)
     }
 
@@ -218,16 +869,25 @@ impl<'a> DirectParser<'a> {
         self.advance();
         self.skip_whitespace();
 
+        let saved_roots = parse_root_save_len();
         let mut js_arr = js_array_alloc(16);
+        let arr_slot = parse_root_push(JSValue::object_ptr(js_arr as *mut u8));
 
         if self.peek() == Some(b']') {
             self.advance();
+            parse_root_restore(saved_roots);
             return JSValue::object_ptr(js_arr as *mut u8);
         }
 
         loop {
             let value = self.parse_value();
+            // Root value before push — js_array_push may grow (arena alloc → GC)
+            // and value's heap ptr lives only in a caller-saved register here.
+            parse_root_push(value);
             js_arr = js_array_push(js_arr, value);
+            // js_array_push may have returned a new ArrayHeader* after grow;
+            // update the root slot so GC sees the new pointer, not the stale one.
+            parse_root_set(arr_slot, JSValue::object_ptr(js_arr as *mut u8));
 
             self.skip_whitespace();
             if self.peek() == Some(b',') {
@@ -237,6 +897,7 @@ impl<'a> DirectParser<'a> {
             }
         }
         self.expect(b']');
+        parse_root_restore(saved_roots);
         JSValue::object_ptr(js_arr as *mut u8)
     }
 
@@ -309,9 +970,41 @@ pub unsafe extern "C" fn js_json_parse(text_ptr: *const StringHeader) -> JSValue
         let err_val = JSValue::string_ptr(msg_ptr);
         crate::exception::js_throw(f64::from_bits(err_val.bits()));
     }
-    let len = (*text_ptr).length as usize;
+    let len = (*text_ptr).byte_len as usize;
     let data_ptr = (text_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data_ptr, len);
+
+    // Issue #179 Step 2 Phase 1 → default-on: tape-based lazy parse
+    // is now the default for top-level arrays on blobs larger than
+    // the size threshold. v0.5.209 runtime adaptive handling (walk
+    // cursor + cumulative-walk threshold + sparse cache + force-
+    // materialize-on-mutate) means lazy no longer loses on any
+    // measured access pattern for non-trivial blobs. The blob-size
+    // threshold avoids tape-build overhead on tiny parses where
+    // direct is measurably faster (small-array bench: lazy 35 ms vs
+    // direct 32 ms → below threshold, lazy fires only on
+    // genuine-size payloads).
+    //
+    // Escape hatches: `PERRY_JSON_TAPE=0` forces the direct parser
+    // for every parse (correctness fallback if a workload hits an
+    // unaudited code path on the lazy side). `PERRY_JSON_TAPE=1`
+    // forces tape for every parse including small ones (useful for
+    // testing). Any other value is treated as "auto" (the default).
+    const LAZY_MIN_BLOB_BYTES: usize = 1024;
+    let tape_mode = tape_mode_from_env();
+    let use_tape = match tape_mode {
+        TapeMode::ForceOn => true,
+        TapeMode::ForceOff => false,
+        TapeMode::Auto => len >= LAZY_MIN_BLOB_BYTES,
+    };
+    if use_tape {
+        if let Some(result) = try_parse_via_tape(text_ptr, bytes) {
+            return result;
+        }
+        // Malformed input or non-array top-level — fall through to
+        // direct parser, which has the full error-reporting path
+        // and handles non-array roots.
+    }
 
     if len == 0 {
         let msg = "Unexpected end of JSON input";
@@ -320,8 +1013,50 @@ pub unsafe extern "C" fn js_json_parse(text_ptr: *const StringHeader) -> JSValue
         crate::exception::js_throw(f64::from_bits(err_val.bits()));
     }
 
+    // #64 follow-up: opportunistic pre-parse cleanup. When parse runs in a
+    // tight loop (e.g. `for (let i=0; i<N; i++) JSON.parse(blob);`), each
+    // call suppresses GC for its duration, and the post-parse malloc-trigger
+    // bump defers collection of the PREVIOUS iteration's now-dead tree.
+    // Garbage accumulates until the arena trigger fires — typically during
+    // the next stringify, producing one 100ms+ pause that walks every dead
+    // block from every iteration. Calling `gc_check_trigger` here (before
+    // suppression) lets the trigger fire normally between iterations so
+    // garbage is shed incrementally. The new <10%-freed-doubles-step rule
+    // in `gc_check_trigger` protects adversarial cases (previous stringify
+    // result strings sharing blocks with interned keys) from retrigger
+    // thrash when block-persistence keeps everything alive.
+    crate::gc::gc_check_trigger();
+
+    // Suppress GC for the duration of the parse. Parse is synchronous and
+    // roots all intermediates in PARSE_ROOTS, so no collection is needed
+    // until we're done. This eliminates O(n*m) overhead from mid-parse GC
+    // cycles walking an ever-growing live set (issue #59).
+    crate::gc::gc_suppress();
+
+    let text_root = parse_root_push(JSValue::string_ptr(text_ptr as *mut StringHeader));
+
     let mut parser = DirectParser::new(bytes);
     let result = parser.parse_value();
+    parse_root_push(result);
+
+    // Re-enable GC. Bump the malloc trigger so the freshly-created parse
+    // tree (which is still live) doesn't cause an immediate expensive GC
+    // on the next allocation.
+    parse_root_restore(text_root);
+    crate::gc::gc_unsuppress();
+    crate::gc::gc_bump_malloc_trigger();
+
+    // Keep key intern cache across parses — scan_parse_roots marks cached
+    // strings as GC roots so they survive collection. This saves ~10k
+    // gc_malloc calls per repeated parse of homogeneous JSON (same keys).
+    // Cap at 4096 entries to bound memory for varied-schema workloads.
+    PARSE_KEY_CACHE.with(|c| {
+        let cache = c.borrow();
+        if cache.len() > 4096 {
+            drop(cache);
+            c.borrow_mut().clear();
+        }
+    });
 
     // If parser didn't consume meaningful input (result is null and input wasn't "null"),
     // the input was invalid JSON — throw SyntaxError
@@ -338,6 +1073,256 @@ pub unsafe extern "C" fn js_json_parse(text_ptr: *const StringHeader) -> JSValue
     }
 
     result
+}
+
+/// v0.5.210: tape-mode selector. Cached at first JSON.parse so we
+/// pay the env-var lookup once per process, not once per parse.
+#[derive(Copy, Clone)]
+enum TapeMode {
+    Auto,
+    ForceOn,
+    ForceOff,
+}
+
+/// SSO Step 1 test gate. `PERRY_SSO_FORCE=1` (or `on`/`true`) flips
+/// `DirectParser::parse_string_value` to emit inline SSO values for
+/// strings of length ≤ 5. Used by the migration test suite to
+/// exercise every stringify / equality / compare consumer arm
+/// across both representations. Cached so the per-parse-call cost
+/// is one relaxed atomic load.
+fn sso_emit_enabled() -> bool {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| matches!(
+        std::env::var("PERRY_SSO_FORCE").as_deref(),
+        Ok("1") | Ok("on") | Ok("true")
+    ))
+}
+
+fn tape_mode_from_env() -> TapeMode {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<TapeMode> = OnceLock::new();
+    *CACHED.get_or_init(|| match std::env::var("PERRY_JSON_TAPE").as_deref() {
+        Ok("0") | Ok("off") | Ok("false") => TapeMode::ForceOff,
+        Ok("1") | Ok("on") | Ok("true") => TapeMode::ForceOn,
+        _ => TapeMode::Auto,
+    })
+}
+
+/// Issue #179 Step 2 Phase 1: tape-path entry. Builds a tape from
+/// the input bytes, then materializes the full JSValue tree via
+/// `json_tape::materialize`. Returns `None` on malformed input so
+/// the caller can fall through to the direct parser.
+///
+/// Wraps the tape path in the same GC-safety contract as the direct
+/// parser (gc_check_trigger → suppress → parse → unsuppress → bump
+/// malloc trigger + cache trim) so it's a drop-in replacement behind
+/// the feature flag.
+unsafe fn try_parse_via_tape(
+    text_ptr: *const StringHeader,
+    bytes: &[u8],
+) -> Option<JSValue> {
+    let tape = crate::json_tape::build_tape(bytes)?;
+
+    crate::gc::gc_check_trigger();
+    crate::gc::gc_suppress();
+    let text_root = parse_root_push(JSValue::string_ptr(text_ptr as *mut StringHeader));
+
+    // Phase 2: if the top-level value is an array, return a lazy
+    // array header instead of materializing the tree. Every other
+    // shape (objects, scalars) still materializes eagerly — this
+    // commit's scope is top-level arrays only (the shape that
+    // dominates `bench_json_roundtrip` and most realistic JSON.parse
+    // workloads). Extending to top-level objects in a follow-up is a
+    // straightforward mirror of the same construction.
+    let result = if !tape.entries.is_empty()
+        && tape.entries[0].kind == crate::json_tape::KIND_ARR_START
+    {
+        let len = crate::json_tape::count_array_length(&tape.entries, 0);
+        let hdr = crate::json_tape::alloc_lazy_array(
+            &tape.entries,
+            0,
+            len,
+            text_ptr,
+        );
+        JSValue::object_ptr(hdr as *mut u8)
+    } else {
+        crate::json_tape::materialize(&tape, bytes)
+    };
+    parse_root_push(result);
+
+    parse_root_restore(text_root);
+    crate::gc::gc_unsuppress();
+    crate::gc::gc_bump_malloc_trigger();
+
+    PARSE_KEY_CACHE.with(|c| {
+        let cache = c.borrow();
+        if cache.len() > 4096 {
+            drop(cache);
+            c.borrow_mut().clear();
+        }
+    });
+
+    Some(result)
+}
+
+// ─── JSON.parse<T[]>: schema-directed typed parse ─────────────────────────────
+
+/// Issue #179 typed-parse plan, Step 1b. Entry point for
+/// `JSON.parse<T[]>(blob)` where T is an object type whose field names
+/// are known at codegen time.
+///
+/// `packed_keys` is null-separated UTF-8 field names in declared order:
+/// `b"id\0name\0value\0"`. `field_count` is the number of fields
+/// (== number of `\0` separators).
+///
+/// Runtime behavior is identical to `js_json_parse(text_ptr)` —
+/// semantically the same JSON, same JSValue tree, same Node parity.
+/// The specialization just skips:
+/// - Per-record shape-cache lookup (shape built once per call)
+/// - Per-field `PARSE_KEY_CACHE` hash when fields arrive in declared
+///   order (the common case for stringify output and most machine-
+///   generated JSON)
+/// - Per-field transition-cache dance inside `js_object_set_field_by_name`
+///   for in-order fields (direct field-index write)
+///
+/// Out-of-order, extra, or missing fields all fall through to the
+/// generic named-setter path — correctness-preserving.
+///
+/// On input shape mismatch (top-level isn't an array, records aren't
+/// objects), also falls through to the generic parser. No user-
+/// visible difference from `JSON.parse(blob) as T[]`.
+#[no_mangle]
+pub unsafe extern "C" fn js_json_parse_typed_array(
+    text_ptr: *const StringHeader,
+    packed_keys: *const u8,
+    packed_keys_len: u32,
+    field_count: u32,
+) -> JSValue {
+    if text_ptr.is_null() {
+        // Fall through to generic (which will throw the standard error).
+        return js_json_parse(text_ptr);
+    }
+    let len = (*text_ptr).byte_len as usize;
+    if len == 0 {
+        return js_json_parse(text_ptr);
+    }
+    let data_ptr = (text_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+    let bytes = std::slice::from_raw_parts(data_ptr, len);
+
+    // Build the shape hint once. The keys_array + pre-interned key
+    // pointers are owned by longlived arena + shape-cache structures,
+    // so they outlive the parse and survive any intervening GC.
+    let shape = match build_shape_hint(packed_keys, packed_keys_len, field_count) {
+        Some(s) => s,
+        None => return js_json_parse(text_ptr),
+    };
+
+    // Same pre-parse cleanup + GC suppression as `js_json_parse` —
+    // keeps the typed path on the same GC-safety contract.
+    crate::gc::gc_check_trigger();
+    crate::gc::gc_suppress();
+    let text_root = parse_root_push(JSValue::string_ptr(text_ptr as *mut StringHeader));
+
+    let mut parser = DirectParser::with_shape(bytes, shape);
+    let result = parser.parse_array_typed();
+    parse_root_push(result);
+
+    parse_root_restore(text_root);
+    crate::gc::gc_unsuppress();
+    crate::gc::gc_bump_malloc_trigger();
+
+    PARSE_KEY_CACHE.with(|c| {
+        let cache = c.borrow();
+        if cache.len() > 4096 {
+            drop(cache);
+            c.borrow_mut().clear();
+        }
+    });
+
+    if result.is_null() {
+        let is_literal_null = len >= 4 && bytes.starts_with(b"null");
+        if !is_literal_null {
+            let preview_len = len.min(50);
+            let preview = std::str::from_utf8(&bytes[..preview_len]).unwrap_or("???");
+            let msg = format!("JSON parse error: Unexpected token: {}", preview);
+            let msg_ptr = js_string_from_bytes(msg.as_ptr(), msg.len() as u32);
+            let err_val = JSValue::string_ptr(msg_ptr);
+            crate::exception::js_throw(f64::from_bits(err_val.bits()));
+        }
+    }
+
+    result
+}
+
+/// Build the one-per-call shape hint: intern key strings into
+/// `PARSE_KEY_CACHE` (longlived arena) and build a shared
+/// `keys_array` via the existing `js_build_class_keys_array` path so
+/// `scan_shape_cache_roots` keeps it marked. Returns `None` if
+/// `packed_keys` is malformed (no separators, unexpected count).
+unsafe fn build_shape_hint(
+    packed_keys: *const u8,
+    packed_keys_len: u32,
+    field_count: u32,
+) -> Option<ObjectShapeHint> {
+    if packed_keys.is_null() || field_count == 0 {
+        return None;
+    }
+    let packed = std::slice::from_raw_parts(packed_keys, packed_keys_len as usize);
+    // Same parsing as `js_build_class_keys_array`: split on `\0`,
+    // drop empties.
+    let keys: Vec<&[u8]> = packed.split(|&b| b == 0).filter(|s| !s.is_empty()).collect();
+    if keys.len() != field_count as usize {
+        return None;
+    }
+    // Intern each key via PARSE_KEY_CACHE so the pointers are shared
+    // with the generic-parse path — critical for the transition cache
+    // to treat them as identical during slow-path field sets.
+    let mut expected_keys: Vec<*const StringHeader> = Vec::with_capacity(keys.len());
+    for key_bytes in &keys {
+        let cached = PARSE_KEY_CACHE.with(|c| c.borrow().get(*key_bytes).copied());
+        let ptr = if let Some(p) = cached {
+            p
+        } else {
+            let p = crate::string::js_string_from_bytes_longlived(
+                key_bytes.as_ptr(),
+                key_bytes.len() as u32,
+            );
+            PARSE_KEY_CACHE.with(|c| {
+                c.borrow_mut().insert(key_bytes.to_vec(), p);
+            });
+            p
+        };
+        expected_keys.push(ptr);
+    }
+
+    // Build the keys_array via the existing class-shape path. We
+    // derive a class_id by hashing packed_keys so repeated typed-parse
+    // calls with the same shape reuse the same keys_array (cache hit).
+    let class_id = shape_hash(packed) as u32;
+    let keys_array = crate::object::js_build_class_keys_array(
+        class_id,
+        field_count,
+        packed_keys,
+        packed_keys_len,
+    );
+
+    Some(ObjectShapeHint { expected_keys, keys_array, field_count })
+}
+
+#[inline]
+fn shape_hash(bytes: &[u8]) -> u64 {
+    // FNV-1a, matching the style Perry uses elsewhere for shape
+    // identity. A collision just means two distinct shapes share a
+    // class_id in the shape cache — the cache is content-compared on
+    // miss so no correctness issue, just a modest re-build cost.
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    // Nonzero class_id (0 is reserved for plain objects).
+    h | 0x8000_0000_0000_0000
 }
 
 // ─── JSON.stringify ───────────────────────────────────────────────────────────
@@ -374,6 +1359,18 @@ unsafe fn extract_pointer(bits: u64) -> Option<*const u8> {
     }
 }
 
+/// Read the GC header's object type tag for a user-space heap pointer.
+/// The GcHeader sits 8 bytes before `ptr`; its first byte is `obj_type`.
+/// Returns 0 when `ptr` is null or in the low-memory guard range.
+#[inline]
+unsafe fn gc_obj_type(ptr: *const u8) -> u8 {
+    if ptr.is_null() || (ptr as usize) < 0x1000 {
+        return 0;
+    }
+    // GcHeader.obj_type is at offset 0 (see crate::gc::GcHeader layout).
+    *(ptr.sub(crate::gc::GC_HEADER_SIZE))
+}
+
 #[inline]
 unsafe fn is_object_pointer(ptr: *const u8) -> bool {
     let obj = ptr as *const crate::ObjectHeader;
@@ -402,18 +1399,34 @@ unsafe fn write_number(buf: &mut String, value: f64) {
     if value.is_nan() || value.is_infinite() {
         buf.push_str("null");
     } else if value.fract() == 0.0 && value.abs() < (i64::MAX as f64) {
-        use std::fmt::Write;
-        let _ = write!(buf, "{}", value as i64);
+        let mut itoa_buf = itoa::Buffer::new();
+        buf.push_str(itoa_buf.format(value as i64));
     } else {
-        let s = format!("{}", value);
-        buf.push_str(&s);
+        let mut ryu_buf = ryu::Buffer::new();
+        buf.push_str(ryu_buf.format(value));
     }
 }
 
 #[inline]
 unsafe fn write_escaped_string(buf: &mut String, s: &str) {
-    buf.push('"');
     let bytes = s.as_bytes();
+    // Fast path: scan for any escape-triggering byte. JSON output is
+    // overwhelmingly escape-free (ASCII identifiers, simple values), so
+    // a straight-line SIMD-friendly scan + one `push_str` beats the
+    // scalar per-byte escape loop. Needs_escape fires for `"`, `\`, or
+    // any control byte (< 0x20).
+    let needs_escape = bytes
+        .iter()
+        .any(|&b| b < 0x20 || b == b'"' || b == b'\\');
+    if !needs_escape {
+        buf.reserve(bytes.len() + 2);
+        buf.push('"');
+        buf.push_str(s);
+        buf.push('"');
+        return;
+    }
+
+    buf.push('"');
     let mut start = 0;
     for (i, &b) in bytes.iter().enumerate() {
         let escape = match b {
@@ -503,6 +1516,7 @@ unsafe fn object_get_to_json(ptr: *const u8) -> Option<f64> {
     None
 }
 
+#[inline]
 unsafe fn stringify_value(value: f64, type_hint: u32, buf: &mut String) {
     let bits: u64 = value.to_bits();
 
@@ -523,6 +1537,18 @@ unsafe fn stringify_value(value: f64, type_hint: u32, buf: &mut String) {
     if tag == STRING_TAG {
         let str_ptr = (bits & POINTER_MASK) as *const StringHeader;
         if let Some(s) = str_from_header(str_ptr) {
+            write_escaped_string(buf, s);
+        } else {
+            buf.push_str("null");
+        }
+        return;
+    }
+    // SSO (v0.5.213): decode inline 5-byte string, emit escaped.
+    if tag == crate::value::SHORT_STRING_TAG {
+        let jsval = JSValue::from_bits(bits);
+        let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+        let n = jsval.short_string_to_buf(&mut scratch);
+        if let Ok(s) = std::str::from_utf8(&scratch[..n]) {
             write_escaped_string(buf, s);
         } else {
             buf.push_str("null");
@@ -552,23 +1578,52 @@ unsafe fn stringify_value(value: f64, type_hint: u32, buf: &mut String) {
             return;
         }
 
-        if is_object_pointer(ptr) {
-            stringify_object(ptr, buf);
-        } else {
-            let arr = ptr as *const crate::ArrayHeader;
-            if !arr.is_null() {
-                let len = (*arr).length;
-                let cap = (*arr).capacity;
-                if len <= cap && cap > 0 && cap < 10000 {
-                    stringify_array(ptr, buf);
-                    return;
+        // Prefer the GC header's obj_type tag for dispatch — the old
+        // capacity heuristic (`cap < 10000`) misidentified legitimate
+        // arrays that had grown past 10k as strings, panicking on
+        // `JSON.stringify(arr)` where `arr.length >= 10000` (issue #43).
+        match gc_obj_type(ptr) {
+            crate::gc::GC_TYPE_ARRAY => stringify_array(ptr, buf),
+            crate::gc::GC_TYPE_OBJECT => {
+                if is_object_pointer(ptr) {
+                    stringify_object(ptr, buf);
+                } else {
+                    buf.push_str("null");
                 }
             }
-            let str_ptr = ptr as *const StringHeader;
-            if let Some(s) = str_from_header(str_ptr) {
-                write_escaped_string(buf, s);
-            } else {
-                buf.push_str("null");
+            crate::gc::GC_TYPE_STRING => {
+                let str_ptr = ptr as *const StringHeader;
+                if let Some(s) = str_from_header(str_ptr) {
+                    write_escaped_string(buf, s);
+                } else {
+                    buf.push_str("null");
+                }
+            }
+            _ => {
+                // Unknown/untagged pointer: fall back to the structural
+                // heuristics for safety (e.g. pointers to non-GC-tracked
+                // memory). Arrays up to 10k cap are dispatched here;
+                // above that we defensively emit "null" rather than
+                // trying to treat them as strings.
+                if is_object_pointer(ptr) {
+                    stringify_object(ptr, buf);
+                } else {
+                    let arr = ptr as *const crate::ArrayHeader;
+                    if !arr.is_null() {
+                        let len = (*arr).length;
+                        let cap = (*arr).capacity;
+                        if len <= cap && cap > 0 && cap < 10000 {
+                            stringify_array(ptr, buf);
+                            return;
+                        }
+                    }
+                    let str_ptr = ptr as *const StringHeader;
+                    if let Some(s) = str_from_header(str_ptr) {
+                        write_escaped_string(buf, s);
+                    } else {
+                        buf.push_str("null");
+                    }
+                }
             }
         }
         return;
@@ -577,47 +1632,214 @@ unsafe fn stringify_value(value: f64, type_hint: u32, buf: &mut String) {
     write_number(buf, value);
 }
 
-unsafe fn stringify_object(ptr: *const u8, buf: &mut String) {
-    // Circular reference check
-    if STRINGIFY_STACK.with(|s| s.borrow().contains(&(ptr as usize))) {
-        let msg = "Converting circular structure to JSON";
-        let msg_ptr = js_string_from_bytes(msg.as_ptr(), msg.len() as u32);
-        // Use js_typeerror_new so error_kind == ERROR_KIND_TYPE_ERROR and
-        // `e instanceof TypeError` returns true (matching Node).
-        let err_ptr = crate::error::js_typeerror_new(msg_ptr);
-        crate::exception::js_throw(f64::from_bits(POINTER_TAG | (err_ptr as u64 & POINTER_MASK)));
-    }
-    STRINGIFY_STACK.with(|s| s.borrow_mut().push(ptr as usize));
+/// Depth-aware stringify for recursive calls from stringify_object_inner.
+/// For non-pointer values this is identical to stringify_value; for
+/// objects/arrays it threads the depth counter through.
+#[inline]
+unsafe fn stringify_value_depth(value: f64, type_hint: u32, buf: &mut String, depth: u32) {
+    let bits: u64 = value.to_bits();
 
-    // Check for toJSON method
-    if let Some(to_json_val) = object_get_to_json(ptr) {
-        STRINGIFY_STACK.with(|s| s.borrow_mut().pop());
-        stringify_value(to_json_val, TYPE_UNKNOWN, buf);
+    // Fast path: non-pointer values don't recurse
+    if bits == TAG_NULL { buf.push_str("null"); return; }
+    if bits == TAG_TRUE { buf.push_str("true"); return; }
+    if bits == TAG_FALSE { buf.push_str("false"); return; }
+
+    let tag = bits & 0xFFFF_0000_0000_0000;
+    if tag == STRING_TAG {
+        let str_ptr = (bits & POINTER_MASK) as *const StringHeader;
+        if let Some(s) = str_from_header(str_ptr) {
+            write_escaped_string(buf, s);
+        } else {
+            buf.push_str("null");
+        }
         return;
+    }
+    // SSO (v0.5.213): decode inline 5-byte string, emit escaped.
+    if tag == crate::value::SHORT_STRING_TAG {
+        let jsval = JSValue::from_bits(bits);
+        let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+        let n = jsval.short_string_to_buf(&mut scratch);
+        if let Ok(s) = std::str::from_utf8(&scratch[..n]) {
+            write_escaped_string(buf, s);
+        } else {
+            buf.push_str("null");
+        }
+        return;
+    }
+
+    if tag == BIGINT_TAG {
+        let bigint_ptr = (bits & POINTER_MASK) as *const crate::BigIntHeader;
+        let str_ptr = crate::bigint::js_bigint_to_string(bigint_ptr);
+        if let Some(s) = str_from_header(str_ptr) {
+            write_escaped_string(buf, s);
+        } else {
+            buf.push_str("null");
+        }
+        return;
+    }
+
+    if let Some(ptr) = extract_pointer(bits) {
+        if type_hint == TYPE_OBJECT {
+            stringify_object_inner(ptr, buf, depth);
+            return;
+        }
+        if type_hint == TYPE_ARRAY {
+            stringify_array_depth(ptr, buf, depth);
+            return;
+        }
+        match gc_obj_type(ptr) {
+            crate::gc::GC_TYPE_OBJECT => stringify_object_inner(ptr, buf, depth),
+            crate::gc::GC_TYPE_ARRAY => stringify_array_depth(ptr, buf, depth),
+            crate::gc::GC_TYPE_STRING => {
+                let str_ptr = ptr as *const StringHeader;
+                if let Some(s) = str_from_header(str_ptr) {
+                    write_escaped_string(buf, s);
+                } else {
+                    buf.push_str("null");
+                }
+            }
+            _ => {
+                if is_object_pointer(ptr) {
+                    stringify_object_inner(ptr, buf, depth);
+                } else {
+                    let arr = ptr as *const crate::ArrayHeader;
+                    if !arr.is_null() {
+                        let len = (*arr).length;
+                        let cap = (*arr).capacity;
+                        if len <= cap && cap > 0 && cap < 10000 {
+                            stringify_array_depth(ptr, buf, depth);
+                            return;
+                        }
+                    }
+                    let str_ptr = ptr as *const StringHeader;
+                    if let Some(s) = str_from_header(str_ptr) {
+                        write_escaped_string(buf, s);
+                    } else {
+                        buf.push_str("null");
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    write_number(buf, value);
+}
+
+/// Stringify depth counter — avoids TLS `STRINGIFY_STACK` access for
+/// shallow (non-circular) object graphs. Only activates full tracking
+/// at depth > MAX_FAST_DEPTH to catch genuine circular refs.
+const MAX_FAST_DEPTH: u32 = 128;
+
+#[inline]
+unsafe fn stringify_object(ptr: *const u8, buf: &mut String) {
+    stringify_object_inner(ptr, buf, 0)
+}
+
+unsafe fn stringify_object_inner(ptr: *const u8, buf: &mut String, depth: u32) {
+    if depth > MAX_FAST_DEPTH {
+        // Deep nesting — switch to full circular detection
+        if STRINGIFY_STACK.with(|s| s.borrow().contains(&(ptr as usize))) {
+            let msg = "Converting circular structure to JSON";
+            let msg_ptr = js_string_from_bytes(msg.as_ptr(), msg.len() as u32);
+            let err_ptr = crate::error::js_typeerror_new(msg_ptr);
+            crate::exception::js_throw(f64::from_bits(POINTER_TAG | (err_ptr as u64 & POINTER_MASK)));
+        }
+        STRINGIFY_STACK.with(|s| s.borrow_mut().push(ptr as usize));
     }
 
     let obj = ptr as *const crate::ObjectHeader;
     let num_fields = (*obj).field_count;
-    buf.push('{');
 
+    // Templated fast path (#64 follow-up): if this object's shape has been
+    // seen before in this stringify call, emit via the cached prefix table
+    // and skip per-object `has_pointer_fields` / `object_get_to_json` /
+    // key-lookup work. `try_emit_shape_element` rolls back the buffer and
+    // returns false on any element-specific mismatch (different shape,
+    // stray UNDEFINED, closure), at which point we fall through to the
+    // slow path below.
+    //
+    // Guard (issue #67): skip the template machinery for small objects.
+    // `shape_template_for` allocates a Box<ShapeTemplate> + Vec<String>
+    // + one String per field on miss (~4-5 heap allocs), and the cache
+    // is wiped at every top-level call exit — so for a one-shot small
+    // top-level stringify the build is pure overhead vs. the inline slow
+    // path below. The arrayof-objects fast path (stringify_array_depth)
+    // uses a separate build_shape_prefix_template that's unaffected.
+    if num_fields >= 5 {
+        if let Some(tmpl_ptr) = shape_template_for(ptr) {
+            if try_emit_shape_element(make_pointer_bits(ptr), &*tmpl_ptr, buf, depth) {
+                if depth > MAX_FAST_DEPTH {
+                    STRINGIFY_STACK.with(|s| s.borrow_mut().pop());
+                }
+                return;
+            }
+        }
+    }
     let keys_arr = (*obj).keys_array;
     let keys_len = (*keys_arr).length;
     let keys_elements = (keys_arr as *const u8).add(std::mem::size_of::<crate::ArrayHeader>()) as *const f64;
     let fields_ptr = (ptr as *const u8)
         .add(std::mem::size_of::<crate::ObjectHeader>()) as *const f64;
-
-    // Use keys_len as the iteration count since field_count may include pre-allocated slots.
-    // Only the first keys_len fields have corresponding key names.
     let actual_fields = std::cmp::min(num_fields, keys_len);
+
+    // Deferred toJSON + closure checks (issue #67 tightening): scan fields
+    // once to detect if any field is actually a closure. For data-only
+    // objects with nested arrays/objects (e.g. `{a:1, b:"", c:[...]}`) the
+    // earlier has_pointer_fields heuristic false-positived because any
+    // POINTER_TAG field triggered the `object_get_to_json` key walk — even
+    // though a toJSON method requires the *value* at the "toJSON" key to
+    // be a closure. Reading offset 12 (CLOSURE_MAGIC) per pointer field is
+    // cheaper (~3ns/field) than walking the keys array looking for a
+    // "toJSON" string that almost never exists (~15ns).
+    let has_closure_field = {
+        let mut found = false;
+        for f in 0..actual_fields {
+            let bits = (*fields_ptr.add(f as usize)).to_bits();
+            let tag = bits & 0xFFFF_0000_0000_0000;
+            let ptr_candidate = if tag == POINTER_TAG {
+                (bits & POINTER_MASK) as *const u8
+            } else if is_raw_pointer(bits) {
+                bits as *const u8
+            } else {
+                std::ptr::null()
+            };
+            if !ptr_candidate.is_null() {
+                let type_tag = *(ptr_candidate.add(12) as *const u32);
+                if type_tag == crate::closure::CLOSURE_MAGIC {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        found
+    };
+
+    if has_closure_field {
+        // Only objects with closure-typed fields can have a toJSON method.
+        // Check toJSON first, then filter closures in the loop below.
+        if let Some(to_json_val) = object_get_to_json(ptr) {
+            if depth > MAX_FAST_DEPTH {
+                STRINGIFY_STACK.with(|s| s.borrow_mut().pop());
+            }
+            stringify_value(to_json_val, TYPE_UNKNOWN, buf);
+            return;
+        }
+    }
+
+    buf.push('{');
     let mut first = true;
     for f in 0..actual_fields {
         let field_val = *fields_ptr.add(f as usize);
         let field_bits = field_val.to_bits();
-        // Skip undefined and function/closure values per JSON spec
+        // Skip undefined per JSON spec
         if field_bits == TAG_UNDEFINED {
             continue;
         }
-        if is_closure_value(field_bits) {
+        // Skip closures per JSON spec (only possible for pointer-tagged values).
+        // Guarded by has_closure_field: if no field is a closure, the in-loop
+        // check is skipped entirely for every field.
+        if has_closure_field && is_closure_value(field_bits) {
             continue;
         }
 
@@ -626,36 +1848,347 @@ unsafe fn stringify_object(ptr: *const u8, buf: &mut String) {
         }
         first = false;
 
-        if (f as u32) < keys_len {
-            let key_f64 = *keys_elements.add(f as usize);
-            let key_bits = key_f64.to_bits();
-            let key_tag = key_bits & 0xFFFF_0000_0000_0000;
-            let key_ptr = if key_tag == STRING_TAG || key_tag == POINTER_TAG {
-                (key_bits & POINTER_MASK) as *const StringHeader
-            } else {
-                key_bits as *const StringHeader
-            };
-            if let Some(key_str) = str_from_header(key_ptr) {
-                buf.push('"');
-                buf.push_str(key_str);
-                buf.push_str("\":");
-            } else {
-                let _ = write!(buf, "\"field{}\":", f);
-            }
+        let key_f64 = *keys_elements.add(f as usize);
+        let key_bits = key_f64.to_bits();
+        let key_tag = key_bits & 0xFFFF_0000_0000_0000;
+        let key_ptr = if key_tag == STRING_TAG || key_tag == POINTER_TAG {
+            (key_bits & POINTER_MASK) as *const StringHeader
+        } else {
+            key_bits as *const StringHeader
+        };
+        if let Some(key_str) = str_from_header(key_ptr) {
+            buf.push('"');
+            buf.push_str(key_str);
+            buf.push_str("\":");
         } else {
             let _ = write!(buf, "\"field{}\":", f);
         }
 
-        stringify_value(field_val, TYPE_UNKNOWN, buf);
+        // Inline value dispatch for common types to avoid function call overhead
+        let val_tag = field_bits & 0xFFFF_0000_0000_0000;
+        if field_bits == TAG_NULL {
+            buf.push_str("null");
+        } else if field_bits == TAG_TRUE {
+            buf.push_str("true");
+        } else if field_bits == TAG_FALSE {
+            buf.push_str("false");
+        } else if val_tag == STRING_TAG {
+            let str_ptr = (field_bits & POINTER_MASK) as *const StringHeader;
+            if let Some(s) = str_from_header(str_ptr) {
+                write_escaped_string(buf, s);
+            } else {
+                buf.push_str("null");
+            }
+        } else if val_tag == crate::value::SHORT_STRING_TAG {
+            // v0.5.213 SSO — decode inline 5-byte string and emit.
+            let jsval = JSValue::from_bits(field_bits);
+            let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+            let n = jsval.short_string_to_buf(&mut scratch);
+            if let Ok(s) = std::str::from_utf8(&scratch[..n]) {
+                write_escaped_string(buf, s);
+            } else {
+                buf.push_str("null");
+            }
+        } else if val_tag == POINTER_TAG || is_raw_pointer(field_bits) {
+            // Nested object/array — recurse with depth
+            stringify_value_depth(field_val, TYPE_UNKNOWN, buf, depth + 1);
+        } else {
+            // Number (most common for data objects)
+            write_number(buf, field_val);
+        }
     }
     buf.push('}');
-    STRINGIFY_STACK.with(|s| s.borrow_mut().pop());
+    if depth > MAX_FAST_DEPTH {
+        STRINGIFY_STACK.with(|s| s.borrow_mut().pop());
+    }
 }
 
 unsafe fn stringify_array(ptr: *const u8, buf: &mut String) {
+    stringify_array_depth(ptr, buf, 0)
+}
+
+/// Cached shape template for a homogeneous array of objects.
+struct ShapeTemplate {
+    keys_arr: *mut crate::ArrayHeader,
+    prefixes: Vec<String>,
+    shape_fields: u32,
+    /// True when element 0's fields are all primitives (no POINTER_TAG /
+    /// UNDEFINED). Lets the emit path skip its per-element pre-scan.
+    primitive_only: bool,
+}
+
+/// Build a per-shape key-prefix template for a homogeneous array of objects.
+///
+/// When every element of an array shares the same `keys_array` pointer (same
+/// shape), we can pre-format the key portion of each field once and reuse it
+/// across every element — turning the per-field key lookup (load key f64,
+/// extract pointer, `str_from_header`, 3 `push`/`push_str` calls) into a
+/// single `push_str` of a cached prefix.
+///
+/// Prefix layout for N fields with keys k0..kN-1:
+///   `prefixes[0]   = "{\"k0\":"`        (opening brace fused with first key)
+///   `prefixes[f>0] = ",\"kf\":"`        (comma fused with key)
+/// Close with `}`. This compresses ~7 per-field write ops down to ~2.
+///
+/// Returns `None` when the first element isn't a regular object, the keys
+/// array is invalid, or any key string is malformed — callers fall back to
+/// the generic slow path in that case.
+unsafe fn build_shape_prefix_template(first_elem_bits: u64) -> Option<ShapeTemplate> {
+    let tag = first_elem_bits & 0xFFFF_0000_0000_0000;
+    let first_ptr = if tag == POINTER_TAG {
+        (first_elem_bits & POINTER_MASK) as *const u8
+    } else if is_raw_pointer(first_elem_bits) {
+        first_elem_bits as *const u8
+    } else {
+        return None;
+    };
+    if gc_obj_type(first_ptr) != crate::gc::GC_TYPE_OBJECT {
+        return None;
+    }
+    let obj = first_ptr as *const crate::ObjectHeader;
+    let keys_arr = (*obj).keys_array;
+    if keys_arr.is_null() {
+        return None;
+    }
+    let keys_len = (*keys_arr).length;
+    let field_count = (*obj).field_count;
+    let shape_fields = std::cmp::min(keys_len, field_count);
+    if shape_fields == 0 || shape_fields > 32 {
+        return None;
+    }
+
+    let keys_elements =
+        (keys_arr as *const u8).add(std::mem::size_of::<crate::ArrayHeader>()) as *const f64;
+    let mut prefixes: Vec<String> = Vec::with_capacity(shape_fields as usize);
+    for f in 0..shape_fields {
+        let key_bits = (*keys_elements.add(f as usize)).to_bits();
+        let key_tag = key_bits & 0xFFFF_0000_0000_0000;
+        let key_ptr = if key_tag == STRING_TAG || key_tag == POINTER_TAG {
+            (key_bits & POINTER_MASK) as *const StringHeader
+        } else {
+            key_bits as *const StringHeader
+        };
+        let key_str = str_from_header(key_ptr)?;
+        let needs_escape = key_str
+            .bytes()
+            .any(|b| b == b'"' || b == b'\\' || b < 0x20);
+        let mut prefix = String::with_capacity(key_str.len() + 4);
+        prefix.push(if f == 0 { '{' } else { ',' });
+        if needs_escape {
+            write_escaped_string(&mut prefix, key_str);
+        } else {
+            prefix.push('"');
+            prefix.push_str(key_str);
+            prefix.push('"');
+        }
+        prefix.push(':');
+        prefixes.push(prefix);
+    }
+
+    // Sample first element to decide whether every field slot is already
+    // a primitive (number/bool/null/string). When true, per-element emit
+    // can skip the undefined/closure pre-scan.
+    let fields_ptr =
+        (first_ptr as *const u8).add(std::mem::size_of::<crate::ObjectHeader>()) as *const f64;
+    let mut primitive_only = true;
+    for f in 0..shape_fields {
+        let fb = (*fields_ptr.add(f as usize)).to_bits();
+        if fb == TAG_UNDEFINED || (fb & 0xFFFF_0000_0000_0000) == POINTER_TAG {
+            primitive_only = false;
+            break;
+        }
+    }
+
+    Some(ShapeTemplate {
+        keys_arr,
+        prefixes,
+        shape_fields,
+        primitive_only,
+    })
+}
+
+/// Fast emission path for an object element that matches the cached shape
+/// template. Returns `true` when the element was emitted via the template;
+/// `false` when the element diverges (different shape, skippable field, or
+/// has a `toJSON` that must produce the replacement value). On `false` the
+/// buffer is unchanged — the caller is responsible for falling back.
+unsafe fn try_emit_shape_element(
+    elem_bits: u64,
+    template: &ShapeTemplate,
+    buf: &mut String,
+    depth: u32,
+) -> bool {
+    let tag = elem_bits & 0xFFFF_0000_0000_0000;
+    let elem_ptr = if tag == POINTER_TAG {
+        (elem_bits & POINTER_MASK) as *const u8
+    } else if is_raw_pointer(elem_bits) {
+        elem_bits as *const u8
+    } else {
+        return false;
+    };
+    if gc_obj_type(elem_ptr) != crate::gc::GC_TYPE_OBJECT {
+        return false;
+    }
+    let obj = elem_ptr as *const crate::ObjectHeader;
+    if (*obj).keys_array != template.keys_arr {
+        return false;
+    }
+
+    let fields_ptr =
+        (elem_ptr as *const u8).add(std::mem::size_of::<crate::ObjectHeader>()) as *const f64;
+    let shape_fields = template.shape_fields;
+    let prefixes = template.prefixes.as_slice();
+
+    // Primitive-only fast path (common case for JSON.parse output): skip
+    // the undefined/closure pre-scan and trust that the sampled element 0
+    // was representative. The emit loop handles stray POINTER_TAG values
+    // via `stringify_value_depth`; a stray UNDEFINED is rare enough that
+    // we save `buf.len()` pre-emit and roll back on detection.
+    if template.primitive_only {
+        let save_pos = buf.len();
+        for f in 0..shape_fields as usize {
+            let field_val = *fields_ptr.add(f);
+            let fb = field_val.to_bits();
+            // UNDEFINED desyncs comma placement → roll back and let the
+            // slow object path emit this element correctly.
+            if fb == TAG_UNDEFINED {
+                buf.truncate(save_pos);
+                return false;
+            }
+            buf.push_str(&prefixes[f]);
+            let vtag = fb & 0xFFFF_0000_0000_0000;
+            if fb == TAG_NULL {
+                buf.push_str("null");
+            } else if fb == TAG_TRUE {
+                buf.push_str("true");
+            } else if fb == TAG_FALSE {
+                buf.push_str("false");
+            } else if vtag == STRING_TAG {
+                let str_ptr = (fb & POINTER_MASK) as *const StringHeader;
+                if let Some(s) = str_from_header(str_ptr) {
+                    write_escaped_string(buf, s);
+                } else {
+                    buf.push_str("null");
+                }
+            } else if vtag == crate::value::SHORT_STRING_TAG {
+                let jsval = JSValue::from_bits(fb);
+                let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+                let n = jsval.short_string_to_buf(&mut scratch);
+                if let Ok(s) = std::str::from_utf8(&scratch[..n]) {
+                    write_escaped_string(buf, s);
+                } else {
+                    buf.push_str("null");
+                }
+            } else if vtag == POINTER_TAG || is_raw_pointer(fb) {
+                stringify_value_depth(field_val, TYPE_UNKNOWN, buf, depth + 1);
+            } else {
+                write_number(buf, field_val);
+            }
+        }
+        buf.push('}');
+        return true;
+    }
+
+    // General path: template contains (or may contain) pointer/undefined
+    // fields. Pre-scan to honor JSON spec (skip undefined, skip closures,
+    // respect toJSON).
+    let mut has_pointer_fields = false;
+    for f in 0..shape_fields as usize {
+        let fb = (*fields_ptr.add(f)).to_bits();
+        if fb == TAG_UNDEFINED {
+            return false;
+        }
+        if (fb & 0xFFFF_0000_0000_0000) == POINTER_TAG {
+            has_pointer_fields = true;
+            if is_closure_value(fb) {
+                return false;
+            }
+        }
+    }
+    if has_pointer_fields {
+        if let Some(to_json_val) = object_get_to_json(elem_ptr) {
+            stringify_value_depth(to_json_val, TYPE_UNKNOWN, buf, depth + 1);
+            return true;
+        }
+    }
+    for f in 0..shape_fields as usize {
+        buf.push_str(&prefixes[f]);
+        let field_val = *fields_ptr.add(f);
+        let fb = field_val.to_bits();
+        let vtag = fb & 0xFFFF_0000_0000_0000;
+        if fb == TAG_NULL {
+            buf.push_str("null");
+        } else if fb == TAG_TRUE {
+            buf.push_str("true");
+        } else if fb == TAG_FALSE {
+            buf.push_str("false");
+        } else if vtag == STRING_TAG {
+            let str_ptr = (fb & POINTER_MASK) as *const StringHeader;
+            if let Some(s) = str_from_header(str_ptr) {
+                write_escaped_string(buf, s);
+            } else {
+                buf.push_str("null");
+            }
+        } else if vtag == crate::value::SHORT_STRING_TAG {
+            let jsval = JSValue::from_bits(fb);
+            let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+            let n = jsval.short_string_to_buf(&mut scratch);
+            if let Ok(s) = std::str::from_utf8(&scratch[..n]) {
+                write_escaped_string(buf, s);
+            } else {
+                buf.push_str("null");
+            }
+        } else if vtag == POINTER_TAG || is_raw_pointer(fb) {
+            stringify_value_depth(field_val, TYPE_UNKNOWN, buf, depth + 1);
+        } else {
+            write_number(buf, field_val);
+        }
+    }
+    buf.push('}');
+    true
+}
+
+/// Depth-aware variant of stringify_array for recursive calls.
+unsafe fn stringify_array_depth(ptr: *const u8, buf: &mut String, depth: u32) {
     let arr = ptr as *const crate::ArrayHeader;
     let len = (*arr).length;
     let elements = (arr as *const u8).add(std::mem::size_of::<crate::ArrayHeader>()) as *const f64;
+
+    // Homogeneous-shape fast path for arrays of objects sharing one
+    // `keys_array` (issue #59). The template is built from element 0 and
+    // reused for every subsequent element whose shape matches; mismatches
+    // fall back per-element via `stringify_value_depth`, so mixed arrays
+    // still produce correct output. Pre-check the tag inline to skip the
+    // function call entirely for arrays of primitives (issue #64) — common
+    // for nested fields like `tags: ["x","y"]` that fired per-element.
+    let template = if len >= 2 {
+        let first_bits = (*elements).to_bits();
+        let tag = first_bits & 0xFFFF_0000_0000_0000;
+        if tag == POINTER_TAG || is_raw_pointer(first_bits) {
+            build_shape_prefix_template(first_bits)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if let Some(ref tmpl) = template {
+        buf.push('[');
+        for i in 0..len {
+            if i > 0 {
+                buf.push(',');
+            }
+            let elem = *elements.add(i as usize);
+            let elem_bits = elem.to_bits();
+            if !try_emit_shape_element(elem_bits, tmpl, buf, depth) {
+                // Match the slow path: array descent does not bump depth.
+                stringify_value_depth(elem, TYPE_UNKNOWN, buf, depth);
+            }
+        }
+        buf.push(']');
+        return;
+    }
 
     buf.push('[');
     for i in 0..len {
@@ -667,10 +2200,19 @@ unsafe fn stringify_array(ptr: *const u8, buf: &mut String) {
         let elem_tag = elem_bits & 0xFFFF_0000_0000_0000;
 
         if elem_bits == TAG_UNDEFINED {
-            buf.push_str("null"); // undefined in arrays becomes null per JSON spec
+            buf.push_str("null");
         } else if elem_tag == STRING_TAG {
             let str_ptr = (elem_bits & POINTER_MASK) as *const StringHeader;
             if let Some(s) = str_from_header(str_ptr) {
+                write_escaped_string(buf, s);
+            } else {
+                buf.push_str("null");
+            }
+        } else if elem_tag == crate::value::SHORT_STRING_TAG {
+            let jsval = JSValue::from_bits(elem_bits);
+            let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+            let n = jsval.short_string_to_buf(&mut scratch);
+            if let Ok(s) = std::str::from_utf8(&scratch[..n]) {
                 write_escaped_string(buf, s);
             } else {
                 buf.push_str("null");
@@ -695,20 +2237,34 @@ unsafe fn stringify_array(ptr: *const u8, buf: &mut String) {
             } else {
                 elem_bits as *const u8
             };
-            if is_object_pointer(elem_ptr) {
-                stringify_object(elem_ptr, buf);
-            } else {
-                let arr_elem = elem_ptr as *const crate::ArrayHeader;
-                let arr_len = (*arr_elem).length;
-                let arr_cap = (*arr_elem).capacity;
-                if arr_len <= arr_cap && arr_cap > 0 && arr_cap < 10000 {
-                    stringify_array(elem_ptr, buf);
-                } else {
+            match gc_obj_type(elem_ptr) {
+                crate::gc::GC_TYPE_OBJECT => stringify_object_inner(elem_ptr, buf, depth),
+                crate::gc::GC_TYPE_ARRAY => stringify_array_depth(elem_ptr, buf, depth),
+                crate::gc::GC_TYPE_STRING => {
                     let str_ptr = elem_ptr as *const StringHeader;
                     if let Some(s) = str_from_header(str_ptr) {
                         write_escaped_string(buf, s);
                     } else {
                         buf.push_str("null");
+                    }
+                }
+                _ => {
+                    if is_object_pointer(elem_ptr) {
+                        stringify_object_inner(elem_ptr, buf, depth);
+                    } else {
+                        let arr_elem = elem_ptr as *const crate::ArrayHeader;
+                        let arr_len = (*arr_elem).length;
+                        let arr_cap = (*arr_elem).capacity;
+                        if arr_len <= arr_cap && arr_cap > 0 && arr_cap < 10000 {
+                            stringify_array_depth(elem_ptr, buf, depth);
+                        } else {
+                            let str_ptr = elem_ptr as *const StringHeader;
+                            if let Some(s) = str_from_header(str_ptr) {
+                                write_escaped_string(buf, s);
+                            } else {
+                                buf.push_str("null");
+                            }
+                        }
                     }
                 }
             }
@@ -741,11 +2297,198 @@ unsafe fn estimate_json_size(value: f64, type_hint: u32) -> usize {
 /// Takes a f64 (NaN-boxed JSValue) and a type_hint (0=unknown, 1=object, 2=array)
 /// Returns a string pointer
 #[no_mangle]
+/// Issue #179 Step 2 Phase 3: if `value` is a lazy array that's
+/// already been materialized (indexed access forced
+/// `force_materialize_lazy`), return a JSValue pointing at the
+/// materialized `ArrayHeader` tree instead of the `LazyArrayHeader`.
+/// The generic tree-walk stringifier would otherwise read lazy-
+/// header fields (magic, root_idx, blob_str, ...) as if they were
+/// element f64s and crash on the first bogus pointer deref. No-op
+/// for non-lazy values and for lazy values whose `materialized` is
+/// still null (the lazy-stringify fast path handles those).
+#[inline]
+unsafe fn redirect_lazy_to_materialized(value: f64) -> f64 {
+    let bits = value.to_bits();
+    let top16 = bits >> 48;
+    let ptr = if top16 == 0x7FFD {
+        (bits & 0x0000_FFFF_FFFF_FFFF) as *const u8
+    } else {
+        return value;
+    };
+    if ptr.is_null() || (ptr as usize) < crate::gc::GC_HEADER_SIZE + 0x1000 {
+        return value;
+    }
+    let gc_header = ptr.sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+    if (*gc_header).obj_type != crate::gc::GC_TYPE_LAZY_ARRAY {
+        return value;
+    }
+    let lazy = ptr as *const crate::json_tape::LazyArrayHeader;
+    if (*lazy).magic != crate::json_tape::LAZY_ARRAY_MAGIC {
+        return value;
+    }
+    if (*lazy).materialized.is_null() {
+        return value;
+    }
+    f64::from_bits(JSValue::object_ptr((*lazy).materialized as *mut u8).bits())
+}
+
+/// Issue #179 Phase 4: lazy-stringify fast path. If `value` is a
+/// lazy-parse top-level array whose `materialized` is still null (no
+/// indexed access or mutation has forced tree build), memcpy the
+/// original blob bytes into a fresh string — no tree walk, no
+/// escape handling. Returns `None` if `value` is not a
+/// tape-backed-and-unmutated lazy array, in which case the caller
+/// falls through to the generic stringify path.
+///
+/// Correctness invariant: if the lazy value is unmutated, the bytes
+/// spanning `[root.offset .. root_end.offset+1]` in the original
+/// blob are exactly what `JSON.stringify` would produce for that
+/// value (modulo whitespace the user's original blob may contain —
+/// `JSON.stringify` never emits whitespace for the 2-arg form, so
+/// this is only correct when the blob came from `JSON.stringify` or
+/// is otherwise whitespace-free in the array span).
+unsafe fn try_stringify_lazy_array(value: f64) -> Option<*mut StringHeader> {
+    let bits = value.to_bits();
+    let top16 = bits >> 48;
+    let maybe_ptr = if top16 == 0x7FFD {
+        // POINTER_TAG NaN-box: lower 48 bits are the user pointer.
+        (bits & 0x0000_FFFF_FFFF_FFFF) as *const u8
+    } else if top16 == 0 {
+        // Raw heap pointer (no NaN-box tag). User-space addresses on
+        // 64-bit systems fit in the lower 48 bits, so a real raw
+        // pointer has top16 == 0. The previous `top16 < 0x7FF8` check
+        // also accepted regular f64 numbers (e.g. 42.0 has top16
+        // 0x4045) and `gc_header = bits - 8` then dereferenced random
+        // memory, segfaulting `JSON.stringify(42)` at
+        // `0x4044_FFFF_FFFF_FFF8`.
+        bits as *const u8
+    } else {
+        return None;
+    };
+    if maybe_ptr.is_null() || (maybe_ptr as usize) < crate::gc::GC_HEADER_SIZE + 0x1000 {
+        return None;
+    }
+    let gc_header = maybe_ptr.sub(crate::gc::GC_HEADER_SIZE)
+        as *const crate::gc::GcHeader;
+    if (*gc_header).obj_type != crate::gc::GC_TYPE_LAZY_ARRAY {
+        return None;
+    }
+    let lazy = maybe_ptr as *const crate::json_tape::LazyArrayHeader;
+    if (*lazy).magic != crate::json_tape::LAZY_ARRAY_MAGIC
+        || !(*lazy).materialized.is_null()
+    {
+        return None;
+    }
+    // Phase 5: if the sparse per-element cache has ANY bit set,
+    // stringify might miss mutations made through a cached element
+    // (e.g. `parsed[0].name = "x"` modifies the materialized object
+    // but leaves the blob bytes untouched). Force-materialize the
+    // full tree (which consults the sparse cache and preserves
+    // cached mutations), then bail out so `redirect_lazy_to_materialized`
+    // forwards to the materialized ArrayHeader on the next stringify
+    // dispatch. No bits set means we haven't handed any pointers to
+    // user code yet, so the blob bytes are authoritative.
+    if !(*lazy).materialized_bitmap.is_null() && (*lazy).cached_length > 0 {
+        let bitmap = (*lazy).materialized_bitmap;
+        let bitmap_words = ((*lazy).cached_length as usize + 63) / 64;
+        let mut has_bits = false;
+        for w in 0..bitmap_words {
+            if *bitmap.add(w) != 0 { has_bits = true; break; }
+        }
+        if has_bits {
+            crate::json_tape::force_materialize_lazy(
+                lazy as *mut crate::json_tape::LazyArrayHeader,
+            );
+            return None;
+        }
+    }
+    let tape = crate::json_tape::LazyArrayHeader::tape_slice(lazy);
+    let blob_bytes = crate::json_tape::LazyArrayHeader::blob_bytes(lazy);
+    if tape.is_empty() {
+        return None;
+    }
+    let root = (*lazy).root_idx as usize;
+    let start = tape[root].offset as usize;
+    let end_idx = tape[root].link as usize;
+    let end = tape[end_idx].offset as usize + 1; // +1 includes `]`
+    if end > blob_bytes.len() || start > end {
+        return None;
+    }
+    let slice = &blob_bytes[start..end];
+    let len = slice.len() as u32;
+    let total = std::mem::size_of::<StringHeader>() + slice.len();
+    let raw = crate::arena::arena_alloc_gc(total, 8, crate::gc::GC_TYPE_STRING);
+    let ptr = raw as *mut StringHeader;
+    (*ptr).utf16_len = len;
+    (*ptr).byte_len = len;
+    (*ptr).capacity = len;
+    (*ptr).refcount = 0;
+    if !slice.is_empty() {
+        std::ptr::copy_nonoverlapping(
+            slice.as_ptr(),
+            raw.add(std::mem::size_of::<StringHeader>()),
+            slice.len(),
+        );
+    }
+    Some(ptr)
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn js_json_stringify(value: f64, type_hint: u32) -> *mut StringHeader {
-    let estimated = estimate_json_size(value, type_hint);
-    let mut buf = String::with_capacity(estimated);
+    if let Some(ptr) = try_stringify_lazy_array(value) {
+        return ptr;
+    }
+    // If the value is a lazy array that's already been materialized
+    // (indexed access forced it into a real tree), stringify the
+    // tree directly — the generic walker would otherwise read the
+    // LazyArrayHeader's fields as if they were array elements and
+    // crash on the first deref of a bogus pointer.
+    let value = redirect_lazy_to_materialized(value);
+
+    // Non-reentrant fast path (issue #67): skip the shape_cache save/restore
+    // round-trip (two RefCell.borrow_mut's + a Vec mem::take/assign) for the
+    // common outermost call. A simple Cell-based depth counter identifies
+    // reentrant calls (toJSON callbacks); only those pay for the save.
+    let prior_depth = STRINGIFY_DEPTH.with(|d| {
+        let c = d.get();
+        d.set(c + 1);
+        c
+    });
+    let saved_cache = if prior_depth > 0 {
+        Some(take_shape_cache())
+    } else {
+        None
+    };
+    let mut buf = take_stringify_buf();
+    // Scratch buffer is pre-sized to 4096 on first thread-local init and
+    // retained across calls, so most small stringifies never hit a
+    // String::reserve. `push_str` grows on overflow for the rare
+    // single-call output that exceeds that, so skip the estimate call
+    // (issue #67: it was ~10ns of wasted work per call for small values).
     stringify_value(value, type_hint, &mut buf);
-    js_string_from_bytes(buf.as_ptr(), buf.len() as u32)
+    // JSON output is always ASCII (non-ASCII is \uXXXX escaped), so
+    // utf16_len == byte_len. Arena-allocate (issue #67): saves ~60ns vs
+    // gc_malloc on the per-call result (bump pointer + GcHeader init vs
+    // mimalloc + MALLOC_STATE push + set insert). Arena walker already
+    // tracks GC_TYPE_STRING (v0.5.68), so collection works unchanged.
+    let len = buf.len() as u32;
+    let total = std::mem::size_of::<StringHeader>() + len as usize;
+    let raw = crate::arena::arena_alloc_gc(total, 8, crate::gc::GC_TYPE_STRING);
+    let ptr = raw as *mut StringHeader;
+    (*ptr).utf16_len = len;
+    (*ptr).byte_len = len;
+    (*ptr).capacity = len;
+    (*ptr).refcount = 0;
+    if len > 0 {
+        std::ptr::copy_nonoverlapping(buf.as_ptr(), raw.add(std::mem::size_of::<StringHeader>()), len as usize);
+    }
+    restore_stringify_buf(buf);
+    match saved_cache {
+        Some(s) => restore_shape_cache(s),
+        None => clear_shape_cache(),
+    }
+    STRINGIFY_DEPTH.with(|d| d.set(d.get() - 1));
+    ptr
 }
 
 // ─── Specialized stringify functions ──────────────────────────────────────────
@@ -800,7 +2543,7 @@ pub unsafe extern "C" fn js_json_is_valid(text_ptr: *const StringHeader) -> f64 
     if text_ptr.is_null() {
         return f64::from_bits(TAG_FALSE);
     }
-    let len = (*text_ptr).length as usize;
+    let len = (*text_ptr).byte_len as usize;
     let data_ptr = (text_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data_ptr, len);
     if serde_json::from_slice::<serde_json::Value>(bytes).is_ok() {
@@ -951,6 +2694,17 @@ unsafe fn stringify_value_with_replacer(
         }
         return;
     }
+    if replaced_tag == crate::value::SHORT_STRING_TAG {
+        let jsval = JSValue::from_bits(replaced_bits);
+        let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+        let n = jsval.short_string_to_buf(&mut scratch);
+        if let Ok(s) = std::str::from_utf8(&scratch[..n]) {
+            write_escaped_string(buf, s);
+        } else {
+            buf.push_str("null");
+        }
+        return;
+    }
 
     // If it's null/bool/number, serialize directly
     if replaced_bits == TAG_NULL {
@@ -1090,6 +2844,15 @@ unsafe fn stringify_object_with_replacer(
             } else {
                 buf.push_str("null");
             }
+        } else if replaced_tag == crate::value::SHORT_STRING_TAG {
+            let jsval = JSValue::from_bits(replaced_bits);
+            let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+            let n = jsval.short_string_to_buf(&mut scratch);
+            if let Ok(s) = std::str::from_utf8(&scratch[..n]) {
+                write_escaped_string(buf, s);
+            } else {
+                buf.push_str("null");
+            }
         } else if replaced_bits == TAG_NULL {
             buf.push_str("null");
         } else if replaced_bits == TAG_TRUE {
@@ -1167,6 +2930,15 @@ unsafe fn stringify_array_with_replacer(
             } else {
                 buf.push_str("null");
             }
+        } else if replaced_tag == crate::value::SHORT_STRING_TAG {
+            let jsval = JSValue::from_bits(replaced_bits);
+            let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+            let n = jsval.short_string_to_buf(&mut scratch);
+            if let Ok(s) = std::str::from_utf8(&scratch[..n]) {
+                write_escaped_string(buf, s);
+            } else {
+                buf.push_str("null");
+            }
         } else if replaced_bits == TAG_NULL {
             buf.push_str("null");
         } else if replaced_bits == TAG_TRUE {
@@ -1234,14 +3006,38 @@ pub unsafe extern "C" fn js_json_stringify_with_replacer(
         return std::ptr::null_mut();
     }
 
+    // Non-reentrant fast path (issue #67): same depth-counter trick as
+    // js_json_stringify — skip shape_cache save for the outermost call.
+    let prior_depth = STRINGIFY_DEPTH.with(|d| {
+        let c = d.get();
+        d.set(c + 1);
+        c
+    });
+    let saved_cache = if prior_depth > 0 {
+        Some(take_shape_cache())
+    } else {
+        None
+    };
     let estimated = estimate_json_size(value, type_hint);
-    let mut buf = String::with_capacity(estimated);
+    let mut buf = take_stringify_buf();
+    if buf.capacity() < estimated {
+        buf.reserve(estimated - buf.capacity());
+    }
 
     // Check what the replacer returned
     let replaced_tag = replaced_bits & 0xFFFF_0000_0000_0000;
     if replaced_tag == STRING_TAG {
         let str_ptr = (replaced_bits & POINTER_MASK) as *const StringHeader;
         if let Some(s) = str_from_header(str_ptr) {
+            write_escaped_string(&mut buf, s);
+        } else {
+            buf.push_str("null");
+        }
+    } else if replaced_tag == crate::value::SHORT_STRING_TAG {
+        let jsval = JSValue::from_bits(replaced_bits);
+        let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+        let n = jsval.short_string_to_buf(&mut scratch);
+        if let Ok(s) = std::str::from_utf8(&scratch[..n]) {
             write_escaped_string(&mut buf, s);
         } else {
             buf.push_str("null");
@@ -1289,7 +3085,14 @@ pub unsafe extern "C" fn js_json_stringify_with_replacer(
         write_number(&mut buf, replaced_root);
     }
 
-    js_string_from_bytes(buf.as_ptr(), buf.len() as u32)
+    let result = js_string_from_bytes(buf.as_ptr(), buf.len() as u32);
+    restore_stringify_buf(buf);
+    match saved_cache {
+        Some(s) => restore_shape_cache(s),
+        None => clear_shape_cache(),
+    }
+    STRINGIFY_DEPTH.with(|d| d.set(d.get() - 1));
+    result
 }
 
 // ─── Pretty-print stringify ─────────────────────────────────────────────────
@@ -1314,6 +3117,18 @@ unsafe fn stringify_value_pretty(value: f64, type_hint: u32, buf: &mut String, i
     if tag == STRING_TAG {
         let str_ptr = (bits & POINTER_MASK) as *const StringHeader;
         if let Some(s) = str_from_header(str_ptr) {
+            write_escaped_string(buf, s);
+        } else {
+            buf.push_str("null");
+        }
+        return;
+    }
+    // SSO (v0.5.213): decode inline 5-byte string, emit escaped.
+    if tag == crate::value::SHORT_STRING_TAG {
+        let jsval = JSValue::from_bits(bits);
+        let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+        let n = jsval.short_string_to_buf(&mut scratch);
+        if let Ok(s) = std::str::from_utf8(&scratch[..n]) {
             write_escaped_string(buf, s);
         } else {
             buf.push_str("null");
@@ -1582,6 +3397,13 @@ unsafe fn extract_string_array(ptr: *const u8) -> Vec<String> {
             if let Some(s) = str_from_header(str_ptr) {
                 result.push(s.to_string());
             }
+        } else if elem_tag == crate::value::SHORT_STRING_TAG {
+            let jsval = JSValue::from_bits(elem_bits);
+            let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+            let n = jsval.short_string_to_buf(&mut scratch);
+            if let Ok(s) = std::str::from_utf8(&scratch[..n]) {
+                result.push(s.to_string());
+            }
         } else if is_raw_pointer(elem_bits) {
             let str_ptr = elem_bits as *const StringHeader;
             if let Some(s) = str_from_header(str_ptr) {
@@ -1636,6 +3458,30 @@ pub unsafe extern "C" fn js_json_stringify_full(
         return TAG_UNDEFINED as i64;
     }
 
+    // Issue #179 Phase 4: lazy-stringify fast path for unmutated
+    // lazy arrays — only when no replacer / no indent (matches the
+    // output `JSON.stringify(value)` produces; replacer/indent
+    // require a real tree walk). The bench's 2-arg form (and most
+    // real usage) hits this path.
+    let replacer_bits = replacer_f64.to_bits();
+    let spacer_bits = spacer_f64.to_bits();
+    let no_replacer = replacer_bits == TAG_NULL
+        || replacer_bits == TAG_UNDEFINED;
+    let no_spacer = spacer_bits == TAG_NULL
+        || spacer_bits == TAG_UNDEFINED
+        || spacer_bits == TAG_FALSE;
+    if no_replacer && no_spacer {
+        if let Some(ptr) = try_stringify_lazy_array(value) {
+            return JSValue::string_ptr(ptr).bits() as i64;
+        }
+    }
+    // Lazy-but-materialized: the fast path's `materialized.is_null()`
+    // check above returns None; fall back to the tree walk, but
+    // point it at the materialized tree (not the lazy header
+    // whose fields aren't element f64s).
+    let value = redirect_lazy_to_materialized(value);
+    let value_bits = value.to_bits();
+
     // Determine spacer/indent
     let indent_str: String;
     let spacer_bits = spacer_f64.to_bits();
@@ -1645,6 +3491,17 @@ pub unsafe extern "C" fn js_json_stringify_full(
     } else if spacer_tag == STRING_TAG {
         let sp_ptr = (spacer_bits & POINTER_MASK) as *const StringHeader;
         indent_str = str_from_header(sp_ptr).unwrap_or("").to_string();
+    } else if spacer_tag == crate::value::SHORT_STRING_TAG {
+        // v0.5.213 SSO: spacer passed as inline short string
+        // (e.g. `JSON.stringify(obj, null, "  ")` where "  " is 2
+        // bytes — fits SSO). Decode into scratch, copy into the
+        // indent_str buffer for the formatter.
+        let jsval = JSValue::from_bits(spacer_bits);
+        let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+        let n = jsval.short_string_to_buf(&mut scratch);
+        indent_str = std::str::from_utf8(&scratch[..n])
+            .unwrap_or("")
+            .to_string();
     } else if spacer_bits == TAG_TRUE {
         indent_str = String::new();
     } else {
@@ -1683,10 +3540,24 @@ pub unsafe extern "C" fn js_json_stringify_full(
         None
     };
 
-    // Clear the circular detection stack
-    STRINGIFY_STACK.with(|s| s.borrow_mut().clear());
-
-    let mut buf = String::with_capacity(4096);
+    // Non-reentrant fast path (issue #67): same depth-counter trick as
+    // js_json_stringify — skip shape_cache save for the outermost call.
+    // Skip the pre-call STRINGIFY_STACK clear: the exit path below always
+    // clears it on normal return, and the deep-recursion check at depth
+    // > MAX_FAST_DEPTH is robust to leftover entries from a prior panic
+    // (a stale ptr that happens to match is a false-positive TypeError,
+    // which is a defensible degradation for pathological reentrant cases).
+    let prior_depth = STRINGIFY_DEPTH.with(|d| {
+        let c = d.get();
+        d.set(c + 1);
+        c
+    });
+    let saved_cache = if prior_depth > 0 {
+        Some(take_shape_cache())
+    } else {
+        None
+    };
+    let mut buf = take_stringify_buf();
 
     if let Some(ref allowed_keys) = array_replacer {
         // Array replacer: only applies to objects at the top level
@@ -1712,6 +3583,14 @@ pub unsafe extern "C" fn js_json_stringify_full(
         let replaced_bits = replaced_root.to_bits();
         if replaced_bits == TAG_UNDEFINED {
             STRINGIFY_STACK.with(|s| s.borrow_mut().clear());
+            // Restore shape cache and decrement depth before early return
+            // (we already incremented STRINGIFY_DEPTH and took the cache).
+            restore_stringify_buf(buf);
+            match saved_cache {
+                Some(s) => restore_shape_cache(s),
+                None => clear_shape_cache(),
+            }
+            STRINGIFY_DEPTH.with(|d| d.set(d.get() - 1));
             return TAG_UNDEFINED as i64;
         }
         // For simplicity: when function replacer is used with pretty, we don't
@@ -1739,9 +3618,45 @@ pub unsafe extern "C" fn js_json_stringify_full(
         stringify_value(value, TYPE_UNKNOWN, &mut buf);
     }
 
-    STRINGIFY_STACK.with(|s| s.borrow_mut().clear());
+    // Only touch STRINGIFY_STACK if we actually pushed to it (depth >
+    // MAX_FAST_DEPTH was hit). The `borrow` path avoids the borrow_mut
+    // cost on the common empty-stack case. Unpopped entries only exist
+    // after a panic mid-traversal; see the entry-side comment for the
+    // correctness argument.
+    STRINGIFY_STACK.with(|s| {
+        let stack = s.borrow();
+        if !stack.is_empty() {
+            drop(stack);
+            s.borrow_mut().clear();
+        }
+    });
 
-    let result_ptr = js_string_from_bytes(buf.as_ptr(), buf.len() as u32);
+    // JSON output is always ASCII (high bytes are \uXXXX-escaped), so
+    // utf16_len == byte_len. Allocate the StringHeader directly via
+    // gc_malloc/arena and skip the compute_utf16_len byte scan that
+    // js_string_from_bytes performs (issue #64). For 1MB stringify output
+    // that's a 1MB pass per call.
+    let len = buf.len() as u32;
+    let total = std::mem::size_of::<StringHeader>() + len as usize;
+    let raw = crate::arena::arena_alloc_gc(total, 8, crate::gc::GC_TYPE_STRING);
+    let result_ptr = raw as *mut StringHeader;
+    (*result_ptr).utf16_len = len;
+    (*result_ptr).byte_len = len;
+    (*result_ptr).capacity = len;
+    (*result_ptr).refcount = 0;
+    if len > 0 {
+        std::ptr::copy_nonoverlapping(
+            buf.as_ptr(),
+            raw.add(std::mem::size_of::<StringHeader>()),
+            len as usize,
+        );
+    }
+    restore_stringify_buf(buf);
+    match saved_cache {
+        Some(s) => restore_shape_cache(s),
+        None => clear_shape_cache(),
+    }
+    STRINGIFY_DEPTH.with(|d| d.set(d.get() - 1));
     // Return as NaN-boxed string
     (STRING_TAG | (result_ptr as u64 & POINTER_MASK)) as i64
 }

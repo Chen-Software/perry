@@ -23,6 +23,22 @@ pub struct LlModule {
     globals: Vec<String>,
     string_constants: Vec<String>,
     string_counter: u32,
+    /// Extra numbered metadata nodes emitted after `!0 = !{}`. Used by
+    /// the buffer alias-scope system to declare per-buffer scopes and
+    /// noalias sets so LLVM's LoopVectorizer can prove different buffers
+    /// don't alias.
+    metadata_lines: Vec<String>,
+    /// Module-wide counter for inline cache globals (`perry_ic_N`).
+    /// Must be unique across all functions in the module.
+    pub ic_counter: u32,
+    /// Module-wide counter for buffer alias-scope ids. Each function's
+    /// `FnCtx` reads this as its `buffer_alias_base` at creation, then
+    /// after the function lowers its body the counter is bumped by the
+    /// number of scopes that function allocated. Must be unique across
+    /// every function in the module so `!alias.scope !201` references
+    /// emitted on loads/stores match the metadata nodes emitted once
+    /// at the end of `compile_module` (closes #71).
+    pub buffer_alias_counter: u32,
 }
 
 impl LlModule {
@@ -35,7 +51,16 @@ impl LlModule {
             globals: Vec::new(),
             string_constants: Vec::new(),
             string_counter: 0,
+            metadata_lines: Vec::new(),
+            ic_counter: 0,
+            buffer_alias_counter: 0,
         }
+    }
+
+    /// Append a raw metadata definition line (e.g. `!1 = distinct !{!1}`).
+    /// Emitted after `!0 = !{}` in the module IR.
+    pub fn add_metadata_line(&mut self, line: String) {
+        self.metadata_lines.push(line);
     }
 
     /// Declare an external function (FFI import). Deduped by name — later
@@ -53,7 +78,7 @@ impl LlModule {
         // the setjmp boundary. Without it, local variables modified
         // between setjmp and longjmp are clobbered when the second
         // return (via longjmp) happens.
-        let attrs = if name == "setjmp" { " #0" } else { "" };
+        let attrs = if name == "setjmp" || name == "_setjmp" { " #0" } else { "" };
         self.declarations.push((
             name.to_string(),
             format!("declare {} @{}({}){}", return_type, name, param_str, attrs),
@@ -102,6 +127,14 @@ impl LlModule {
     pub fn add_internal_constant(&mut self, name: &str, ty: LlvmType, init: &str) {
         self.globals
             .push(format!("@{} = internal constant {} {}", name, ty, init));
+    }
+
+    /// Push a fully-formed `@<name> = ...` line into the module's globals
+    /// list. Used for constants whose type is not in the `LlvmType` enum
+    /// (e.g. `[N x i32]` flat constant arrays for issue #50's folded
+    /// module-level 2D int arrays).
+    pub fn add_raw_global(&mut self, line: String) {
+        self.globals.push(line);
     }
 
     /// Add a string constant with a caller-controlled name. Used by the
@@ -203,6 +236,19 @@ impl LlModule {
             // the catch block after longjmp. Pairs with `noinline` so the
             // constraint isn't lost via inlining into a caller.
             ir.push_str("attributes #1 = { noinline optnone }\n");
+        }
+
+        // Issue #52: `!0 = !{}` metadata node referenced by
+        // `load_invariant` (via `!invariant.load !0`). LLVM's GVN + LICM
+        // hoist loads tagged with `!invariant.load` out of their
+        // enclosing loops when the loop body can't write to the same
+        // address; without this, the per-access Buffer / Array length
+        // reload stays pinned inside every bounds check even when the
+        // buffer is loop-invariant.
+        ir.push_str("\n!0 = !{}\n");
+        for ml in &self.metadata_lines {
+            ir.push_str(ml);
+            ir.push('\n');
         }
 
         ir

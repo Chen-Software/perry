@@ -4,7 +4,7 @@
 
 Perry is a native TypeScript compiler written in Rust. It takes your TypeScript and compiles it straight to native executables — no Node.js, no Electron, no browser engine. Just fast, small binaries that run anywhere.
 
-**Current Version:** 0.5.12 | [Website](https://perryts.com) | [Documentation](https://perryts.github.io/perry/) | [Showcase](https://perryts.com/showcase)
+**Current Version:** 0.5.152 | [Website](https://perryts.com) | [Documentation](https://perryts.github.io/perry/) | [Showcase](https://perryts.com/showcase)
 
 ```bash
 perry compile src/main.ts -o myapp
@@ -50,44 +50,47 @@ People are building real apps with Perry today. Here are some highlights:
 
 ## Performance
 
-Perry beats Node.js on every benchmark. Median of 3 runs, macOS ARM64 (Apple Silicon), Node.js v25.
+Perry beats Node.js and Bun on every benchmark below. Best of 5 runs (best of 3 for cheap cells), macOS ARM64 (Apple Silicon), Node.js v25, Bun 1.3, rerun 2026-04-23 on v0.5.173.
 
-| Benchmark | Perry | Node.js | vs Node | What it tests |
-|-----------|-------|---------|---------|---------------|
-| factorial | 24ms | 591ms | **24.6x faster** | Modular accumulation (integer fast path) |
-| method_calls | 1ms | 11ms | **11x faster** | Class method dispatch (10M calls) |
-| loop_overhead | 12ms | 53ms | **4.4x faster** | Tight numeric loop (100M iterations) |
-| math_intensive | 14ms | 49ms | **3.5x faster** | Harmonic series with sqrt/sin/cos |
-| array_read | 4ms | 13ms | **3.2x faster** | Sequential read (10M elements) |
-| closure | 97ms | 303ms | **3.1x faster** | Closure creation + invocation (10M calls) |
-| array_write | 3ms | 8ms | **2.6x faster** | Sequential write (10M elements) |
-| fibonacci(40) | 309ms | 991ms | **3.2x faster** | Recursive function calls (i64 specialization) |
-| string_concat | 1ms | 2ms | **2x faster** | 100K string appends |
-| nested_loops | 9ms | 16ms | **1.7x faster** | Nested array access (3000x3000) |
-| prime_sieve | 4ms | 7ms | **1.7x faster** | Sieve of Eratosthenes |
-| matrix_multiply | 21ms | 34ms | **1.6x faster** | 500x500 matrix multiply |
-| binary_trees | 9ms | 9ms | **tied** | Tree allocation + traversal (1.5M nodes) |
-| mandelbrot | 24ms | 24ms | **tied** | Complex f64 iteration (1000x1000) |
-| object_create | 9ms | 8ms | 0.9x | Object allocation (1M objects) |
+| Benchmark | Perry | Node.js | Bun | vs Node | What it tests |
+|-----------|-------|---------|-----|---------|---------------|
+| factorial | 31ms | 596ms | 98ms | **19x faster** | Modular accumulation (integer fast path) |
+| method_calls | 1ms | 11ms | 9ms | **11x faster** | Class method dispatch (10M calls) |
+| loop_overhead | 15ms | 61ms | 50ms | **4x faster** | Tight numeric loop (100M iterations) |
+| math_intensive | 14ms | 52ms | 52ms | **3.7x faster** | Harmonic series (50M iterations) |
+| fibonacci(40) | 320ms | 1033ms | 521ms | **3.2x faster** | Recursive function calls (i64 specialization) |
+| array_read | 5ms | 13ms | 15ms | **2.6x faster** | Sequential read (10M elements) |
+| closure | 10ms | 309ms | 51ms | **31x faster** | Closure creation + invocation (10M calls) |
+| array_write | 4ms | 9ms | 7ms | **2.3x faster** | Sequential write (10M elements) |
+| object_create | 3ms | 9ms | 8ms | **3x faster** | Object allocation (1M objects, scalar replacement) |
+| binary_trees | 3ms | 10ms | 7ms | **3.3x faster** | Tree allocation + traversal (1M nodes, scalar replacement) |
+| string_concat | 0ms | 3ms | 2ms | **fast** | 100K string appends |
+| nested_loops | 9ms | 20ms | 20ms | **2.2x faster** | Nested array access (3000x3000) |
+| prime_sieve | 5ms | 8ms | 7ms | **1.6x faster** | Sieve of Eratosthenes |
+| mandelbrot | 23ms | 25ms | 30ms | **1.1x faster** | Complex f64 iteration (800x800) |
+| matrix_multiply | 24ms | 34ms | 35ms | **1.4x faster** | 256x256 matrix multiply |
+| json_roundtrip | 314ms | 377ms | 250ms | **1.2x faster** | 50× `JSON.parse` + `JSON.stringify` on a ~1MB, 10K-item blob |
 
-Perry compiles to native machine code via LLVM — no JIT warmup, no interpreter overhead. Key optimizations: inline bump allocator for object allocation, i32 loop counters for bounded array access, `reassoc contract` fast-math flags for f64 vectorization, integer-modulo fast path (`fptosi → srem → sitofp` instead of `fmod`), elimination of redundant `js_number_coerce` calls on numeric function returns, and i64 specialization for pure numeric recursive functions.
+Perry compiles to native machine code via LLVM — no JIT warmup, no interpreter overhead. Key optimizations: **scalar replacement** of non-escaping objects (escape analysis eliminates heap allocation entirely — object fields become registers), inline bump allocator for objects that do escape, i32 loop counters for bounded array access, `reassoc contract` fast-math flags, integer-modulo fast path (`fptosi → srem → sitofp` instead of `fmod`), elimination of redundant `js_number_coerce` calls on numeric function returns, i64 specialization for pure numeric recursive functions, and `<2 x double>` parallel-accumulator vectorization on pure-fadd reduction loops (restored in v0.5.164 via [#140](https://github.com/PerryTS/perry/issues/140)).
 
 ### Perry vs compiled languages
 
 Perry also competes with systems languages. All implementations use `f64`/`double` to match TypeScript's `number` type — no SIMD intrinsics, no unsafe code. See [`benchmarks/polyglot/`](benchmarks/polyglot/) for source and methodology.
 
-| Benchmark | Perry | Rust | C++ | Go | Swift | Java | Node | Python |
-|-----------|-------|------|-----|----|-------|------|------|--------|
-| fibonacci | **309** | 316 | **309** | 446 | 399 | 279 | 991 | 15935 |
-| loop_overhead | **12** | 95 | 96 | 96 | 95 | 97 | 53 | 2979 |
-| array_write | **2** | 6 | **2** | 8 | **2** | 6 | 8 | 392 |
-| array_read | **4** | 9 | 9 | 10 | 9 | 11 | 13 | 330 |
-| math_intensive | **14** | 48 | 50 | 48 | 48 | 50 | 49 | 2212 |
-| object_create | 8 | 0 | 0 | 0 | 0 | 4 | 8 | 161 |
-| nested_loops | **8** | **8** | **8** | 9 | **8** | 10 | 17 | 470 |
-| accumulate | **25** | 98 | 96 | 96 | 96 | 100 | 592 | 4919 |
+| Benchmark | Perry | Rust | C++ | Go | Swift | Java | Node | Bun | Python |
+|-----------|-------|------|-----|----|-------|------|------|-----|--------|
+| fibonacci | 309 | 321 | **308** | 445 | 410 | **280** | 1001 | 516 | 16055 |
+| loop_overhead | **12** | 96 | 96 | 96 | 96 | 98 | 58 | 40 | 3011 |
+| array_write | 3 | 7 | **2** | 8 | **2** | 6 | 9 | 6 | 396 |
+| array_read | **3** | 9 | 9 | 10 | 9 | 11 | 13 | 16 | 344 |
+| math_intensive | **14** | 48 | 50 | 49 | 48 | 50 | 49 | 50 | 2245 |
+| object_create | 2 | **0** | **0** | **0** | **0** | 5 | 8 | 6 | 160 |
+| nested_loops | 10 | **8** | **8** | 9 | **8** | 10 | 17 | 20 | 476 |
+| accumulate | **25** | 95 | 97 | 97 | 97 | 97 | 594 | 99 | 4991 |
 
-Perry beats or ties Rust and C++ on 7 of 8 benchmarks. The polyglot benchmarks all use `f64`/`double` to match TypeScript's `number` type. Perry's advantage comes from domain-specific optimizations — `reassoc` fast-math flags, integer-modulo fast path, and i64 specialization for recursive numeric functions — that exploit properties of TypeScript's `number` type which strict-IEEE compilers can't assume by default. Perry beats Rust on fibonacci because it detects the integer pattern and specializes to `i64` registers, while Rust faithfully compiles the `f64` version. See [`benchmarks/polyglot/RESULTS.md`](benchmarks/polyglot/RESULTS.md) for full analysis.
+Perry leads on 5 of 8 cells (`loop_overhead`, `array_read`, `math_intensive`, `accumulate`, and tied on `fibonacci` within noise), trails by 1-2 ms on three (`object_create`, `nested_loops`, `array_write`) where Rust/C++/Go/Swift benefit from stack-allocated struct layout. Perry's biggest wins — 8× on `loop_overhead`, 3-4× on `math_intensive` / `accumulate` — come from `<2 x double>` parallel-accumulator autovectorization of pure-fadd reduction loops, restored in v0.5.164 after the regression tracked as [#140](https://github.com/PerryTS/perry/issues/140).
+
+**The `loop_overhead` / `math_intensive` / `accumulate` gaps vs Rust/C++ come from two stacked optimizations, not a codegen-backend advantage.** (1) Perry emits `reassoc contract` on f64 ops because TS `number` semantics can't observe the difference; Rust/C++/Go/Swift default to strict-IEEE fadd (3-cycle latency wall, unreassociable). (2) On top of `reassoc`, LLVM autovectorizes the body into a `<2 x double>` parallel-accumulator reduction with interleave count 4. Same `bench.cpp` with `g++ -O3 -ffast-math` hits 11 ms on `loop_overhead` — same LLVM, same pipeline, one flag flip. Go has no fast-math flag at all, which is why it matches Rust/C++ despite using a different backend. [`benchmarks/polyglot/RESULTS_OPT.md`](benchmarks/polyglot/RESULTS_OPT.md) documents the per-language opt sweep: with fast-math enabled, C++ matches Perry to the millisecond. `object_create` stays at 0ms thanks to scalar replacement — non-escaping objects are decomposed into register-allocated fields, matching the 0ms floor Rust/C++ get from stack allocation. See [`benchmarks/polyglot/RESULTS.md`](benchmarks/polyglot/RESULTS.md) for the full writeup.
 
 ### LLVM backend progress
 
@@ -96,23 +99,27 @@ Perry switched from Cranelift to LLVM as its sole code generation backend in v0.
 | Benchmark | Cranelift | LLVM v0.5.0 | LLVM now | Node.js |
 |-----------|-----------|-------------|----------|---------|
 | method_calls | 16ms | 1,084ms | **1ms** | 11ms |
-| math_intensive | 370ms | 131ms | **14ms** | 49ms |
-| object_create | 5ms | 318ms | **9ms** | 8ms |
-| matrix_multiply | 61ms | 184ms | **21ms** | 34ms |
-| nested_loops | 32ms | 57ms | **9ms** | 16ms |
-| array_read | 4ms | 26ms | **4ms** | 13ms |
-| mandelbrot | 71ms | 47ms | **24ms** | 24ms |
-| string_concat | 7ms | 0–1ms | **1ms** | 2ms |
-| prime_sieve | 11ms | 11ms | **4ms** | 7ms |
-| fibonacci(40) | 505ms | 1,156ms | **309ms** | 991ms |
+| math_intensive | 370ms | 131ms | **14ms** | 52ms |
+| object_create | 5ms | 318ms | **3ms** | 9ms |
+| binary_trees | — | — | **3ms** | 10ms |
+| matrix_multiply | 61ms | 184ms | **24ms** | 34ms |
+| nested_loops | 32ms | 57ms | **9ms** | 20ms |
+| array_read | 4ms | 26ms | **5ms** | 13ms |
+| mandelbrot | 71ms | 47ms | **23ms** | 25ms |
+| string_concat | 7ms | 0–1ms | **0ms** | 3ms |
+| prime_sieve | 11ms | 11ms | **5ms** | 8ms |
+| fibonacci(40) | 505ms | 1,156ms | **320ms** | 1033ms |
+| closure | — | — | **10ms** | 309ms |
+| factorial | — | — | **31ms** | 596ms |
+| json_roundtrip | — | — | **314ms** | 377ms |
 
-The Cranelift column is from the pre-v0.5.0 era (the old README on `main`). LLVM v0.5.0 was the initial cutover — it regressed badly because the new backend routed most operations through runtime helpers instead of inlining them. The current LLVM column shows the state after inline bump allocators, i32 loop counters, fast-math flags, integer-mod fast paths, loop-invariant length hoisting, and redundant number-coerce elimination. LLVM now beats both Cranelift and Node on every workload.
+The Cranelift column is from the pre-v0.5.0 era (the old README on `main`). LLVM v0.5.0 was the initial cutover — it regressed badly because the new backend routed most operations through runtime helpers instead of inlining them. The current LLVM column shows the state after scalar replacement of non-escaping objects, inline bump allocators, i32 loop counters, fast-math flags, integer-mod fast paths, loop-invariant length hoisting, and redundant number-coerce elimination. LLVM now beats both Cranelift and Node on every workload.
 
 ### A note on compile times
 
 Cranelift is often praised for fast compilation, and it is — but the difference is smaller than you'd expect. Perry previously used Cranelift and switched to LLVM in v0.5.0. Compile times increased by only ~20-50ms (8-19%), because the bulk of Perry's compile time is SWC parsing, HIR lowering, and linking — not the codegen backend. On a typical file LLVM adds about 25ms over Cranelift while producing code that runs up to 24x faster. A worthwhile trade.
 
-Run benchmarks yourself: `cd benchmarks/suite && ./run_benchmarks.sh` (requires node, cargo).
+Run benchmarks yourself: `cd benchmarks/suite && ./run_benchmarks.sh` (requires node, cargo; optional: bun, shermes).
 
 ## Binary Size
 
@@ -130,6 +137,25 @@ Perry automatically detects which parts of the runtime your program uses and onl
 ---
 
 ## Installation
+
+### npm / npx (any platform)
+
+Perry ships as a prebuilt-binary npm package — the fastest way to try it, and the only install path that works on all seven supported platforms (macOS arm64/x64, Linux x64/arm64 glibc + musl, Windows x64) with one command:
+
+```bash
+# Project-local (recommended — pins Perry's version alongside your deps)
+npm install @perryts/perry
+npx perry compile src/main.ts -o myapp && ./myapp
+
+# Global
+npm install -g @perryts/perry
+perry compile src/main.ts -o myapp
+
+# Zero-install, one-shot
+npx -y @perryts/perry compile src/main.ts -o myapp
+```
+
+[`@perryts/perry`](https://www.npmjs.com/package/@perryts/perry) is a thin launcher; npm automatically picks the matching prebuilt via `optionalDependencies` (`@perryts/perry-darwin-arm64`, `@perryts/perry-linux-x64-musl`, etc.) based on your `os` / `cpu` / `libc`. Requires Node.js ≥ 16 and a system C toolchain for linking (same as any Perry install — see [Requirements](#requirements)).
 
 ### macOS (Homebrew)
 
@@ -297,33 +323,41 @@ perry compile src/index.ts -o server && ./server
 
 ## Native UI
 
-Perry includes a declarative UI system (`perry/ui`) that compiles directly to native platform widgets — no WebView, no Electron:
+Perry includes a declarative UI system (`perry/ui`) that compiles directly to native platform widgets — no WebView, no Electron. The programming model is SwiftUI-like: compose native widgets with stack-based layout, alignment, and distribution — not CSS/HTML.
 
 ```typescript
-import { App, VStack, HStack, Text, Button, State } from 'perry/ui';
+import {
+  App, VStack, HStack, Text, Button, Spacer, SplitView, splitViewAddChild,
+  stackSetAlignment, stackSetDistribution, widgetAddChild, widgetMatchParentWidth,
+} from 'perry/ui';
 
-const count = State(0);
+// Sidebar + content layout with a split view
+const sidebar = VStack(8, [Text("Projects"), Text("Settings"), Spacer()]);
+sidebar.setEdgeInsets(12, 12, 12, 12);
+sidebar.setBackgroundColor("#F5F5F5");
 
-App({
-  title: 'My App',
-  width: 400,
-  height: 300,
-  body: VStack(16, [
-    Text(`Count: ${count.value}`),
-    HStack(8, [
-      Button('Decrement', () => count.set(count.value - 1)),
-      Button('Increment', () => count.set(count.value + 1)),
-    ]),
-  ]),
-});
+const header = HStack(8, [Text("Dashboard"), Spacer(), Button("New", () => {})]);
+const actions = HStack(8, [Button("Cancel", () => {}), Button("Save", () => {})]);
+stackSetDistribution(actions, 1); // FillEqually — both buttons get equal width
+
+const content = VStack(16, [header, Text("Welcome back!"), Spacer(), actions]);
+content.setEdgeInsets(20, 20, 20, 20);
+stackSetAlignment(content, 5); // Leading — children align left
+
+const split = SplitView();
+splitViewAddChild(split, sidebar);
+splitViewAddChild(split, content);
+
+App({ title: 'My App', width: 800, height: 500, body: split });
 ```
 
-**9 platforms from one codebase:**
+**10 target outputs from one codebase:**
 
 | Platform | Backend | Target Flag |
 |----------|---------|-------------|
 | macOS | AppKit (NSView) | *(default on macOS)* |
 | iOS / iPadOS | UIKit | `--target ios` / `--target ios-simulator` |
+| visionOS | UIKit (2D windows) | `--target visionos` / `--target visionos-simulator` |
 | tvOS | UIKit | `--target tvos` / `--target tvos-simulator` |
 | watchOS | WatchKit | `--target watchos` / `--target watchos-simulator` |
 | Android | Android Views (JNI) | `--target android` |
@@ -332,7 +366,7 @@ App({
 | Web | DOM (JS codegen) | `--target web` |
 | WebAssembly | DOM (WASM) | `--target wasm` |
 
-**127+ UI functions** — widgets (Button, Text, TextField, Toggle, Slider, Picker, Table, Canvas, Image, ProgressView, SecureField, NavigationStack, ZStack, LazyVStack, Form/Section, CameraView), layouts (VStack, HStack), and system APIs (keychain, notifications, file dialogs, clipboard, dark mode, openURL, audio capture).
+**127+ UI functions** — widgets (Button, Text, TextField, Toggle, Slider, Picker, Table, Canvas, Image, ProgressView, SecureField, NavigationStack, ZStack, LazyVStack, Form/Section, CameraView, SplitView), layout control (alignment, distribution, match-parent, content hugging, overlay positioning, edge insets), and system APIs (keychain, notifications, file dialogs, clipboard, dark mode, openURL, audio capture).
 
 ---
 
@@ -404,6 +438,8 @@ perry compile src/main.ts -o myapp
 # Mobile
 perry compile src/main.ts --target ios -o MyApp
 perry compile src/main.ts --target ios-simulator -o MyApp
+perry compile src/main.ts --target visionos -o MyApp
+perry compile src/main.ts --target visionos-simulator -o MyApp
 perry compile src/main.ts --target android -o MyApp
 
 # TV / Watch
@@ -454,7 +490,7 @@ perry publish macos   # or: ios / android / linux
 | Spread operator in calls and literals | ✅ |
 | RegExp (test, match, replace) | ✅ |
 | BigInt (256-bit) | ✅ |
-| Decorators | ✅ |
+| Decorators | ❌ ([not supported](docs/src/language/limitations.md#no-decorators)) |
 
 ### Standard Library
 
@@ -515,13 +551,18 @@ Then compile with `--enable-js-runtime` as usual. Packages in the list are compi
 
 ## Compiler Optimizations
 
+- **Scalar Replacement** — escape analysis identifies non-escaping objects (`let p = new Point(x, y); sum += p.x + p.y`); fields are decomposed into stack allocas that LLVM promotes to registers — zero heap allocation
 - **NaN-Boxing** — all values are 64-bit words (f64/u64); no boxing overhead for numbers
 - **Mark-Sweep GC** — conservative stack scan, arena block walking, 8-byte GcHeader per alloc
+- **Inline Bump Allocator** — objects that do escape use a 13-cycle inline arena bump (no function call on hot path)
 - **Parallel Compilation** — rayon-based module codegen, transform passes, and symbol scanning across CPU cores
 - **FMA / CSE / Loop Unrolling** — fused multiply-add, common subexpression elimination, 8x loop unroll
+- **Fast-Math Flags** — `reassoc contract` on all f64 ops enables LLVM to break serial accumulator chains into parallel accumulators + NEON vectorization
+- **Integer-Modulo Fast Path** — `fptosi → srem → sitofp` instead of `fmod` for provably-integer locals (64x speedup on factorial)
+- **i64 Specialization** — pure numeric recursive functions compile to native `i64` registers (no f64 round-trips)
 - **i32 Loop Counters** — integer registers for loop variables (no f64 round-trips)
 - **LICM** — loop-invariant code motion for nested loops
-- **Shape-Cached Objects** — 5-6x faster object allocation
+- **Shape-Cached Objects** — 5-6x faster object allocation for escaping objects
 - **TimSort** — O(n log n) hybrid sort for `Array.sort()`
 - **`__platform__` Constant** — compile-time platform elimination (dead code removal per target)
 
@@ -570,7 +611,7 @@ Supports screenshot capture on all native platforms. See the [Geisterhand docs](
 | [perry-postgres](https://github.com/PerryTS/postgres) | PostgreSQL with the same Prisma-compatible API |
 | [perry-prisma](https://github.com/PerryTS/prisma) | MySQL with the same Prisma-compatible API |
 | [perry-apn](https://github.com/PerryTS/push) | Apple Push Notifications (APNs) native library |
-| [@perry/threads](https://github.com/PerryTS/perry/tree/main/packages/perry-threads) | Web Worker parallelism (`parallelMap`, `parallelFilter`, `spawn`) for browser/Node.js |
+| [@perryts/threads](https://github.com/PerryTS/perry/tree/main/packages/perry-threads) | Web Worker parallelism (`parallelMap`, `parallelFilter`, `spawn`) for browser/Node.js |
 | [perry-starter](https://github.com/PerryTS/starter) | Minimal starter project — get up and running in 30 seconds |
 | [perry-demo](https://demo.perryts.com) | Live benchmark dashboard comparing Perry vs Node.js vs Bun |
 | [perry-react-dom](https://github.com/PerryTS/react-dom) | Perry React DOM bridge |
@@ -633,8 +674,8 @@ await prisma.$disconnect();
 
 ```
 -o, --output <name>      Output file name
---target <target>        ios | ios-simulator | tvos | tvos-simulator |
-                         watchos | watchos-simulator | android |
+--target <target>        ios | ios-simulator | visionos | visionos-simulator |
+                         tvos | tvos-simulator | watchos | watchos-simulator | android |
                          web | wasm | ios-widget | android-widget |
                          wearos-tile | watchos-widget
 --output-type <type>     executable | dylib
@@ -670,7 +711,7 @@ perry/
 ├── docs/                       # Documentation site (mdBook)
 ├── example-code/               # 8 example applications
 ├── benchmarks/                 # Benchmark suite (Perry vs Node.js vs Bun)
-├── packages/                   # npm packages (@perry/threads)
+├── packages/                   # npm packages (@perryts/threads)
 └── test-files/                 # Test suite
 ```
 
@@ -702,6 +743,138 @@ cargo run --release -- compile file.ts --print-hir       # Debug HIR
 3. **Codegen** — generate LLVM IR in `crates/perry-codegen/src/codegen.rs`
 4. **Runtime** — add runtime functions in `crates/perry-runtime/` if needed
 5. **Test** — add `test-files/test_feature.ts`
+
+---
+
+## Releasing Perry
+
+Release cadence: patch releases (`0.5.118 → 0.5.119`) ship weekly-ish behind the
+macOS CI gate. **Major releases** — any bump of the major or minor number
+(e.g. `0.5.x → 0.6.0`, and the upcoming `1.0.0`) — **must be verified on every
+supported platform** before the tag is pushed. Patch releases only require the
+default CI gate.
+
+### 1. Pre-release checklist (every release)
+
+Run on macOS (the canonical dev host):
+
+```bash
+# Full rebuild — runtime/stdlib/UI libs must match the compiler version.
+cargo build --release
+
+# Core gates.
+cargo test --workspace --exclude perry-ui-ios --exclude perry-ui-tvos \
+  --exclude perry-ui-watchos --exclude perry-ui-gtk4 \
+  --exclude perry-ui-android --exclude perry-ui-windows
+./run_parity_tests.sh                       # Perry vs node stdout parity
+./scripts/run_doc_tests.sh                  # Compile + run every docs/examples/*.ts
+```
+
+Then bump and tag:
+
+```bash
+# Edit Cargo.toml workspace.package.version + CLAUDE.md "Current Version".
+# Add a "Recent Changes" entry in CLAUDE.md.
+git commit -am "release: v0.x.y"
+git tag v0.x.y && git push --tags
+```
+
+The `release-packages.yml` workflow fires on the pushed tag and builds the
+cross-platform matrix (see §3).
+
+### 2. Major-release verification (all platforms)
+
+Before tagging a major/minor bump, these must all pass:
+
+| Platform | What to run | Runs in CI? |
+|---|---|---|
+| **macOS** (arm64 + x86_64) | `cargo test` + `run_parity_tests.sh` + `scripts/run_doc_tests.sh` | Yes, `test.yml` (arm64 only) |
+| **Linux glibc** (x86_64 + aarch64) | Same, under `xvfb-run -a` for UI; `apt install libgtk-4-dev libadwaita-1-dev xvfb` first | Partial — release build only |
+| **Linux musl** (x86_64 + aarch64) | Release build via `release-packages.yml`; spot-check a compiled `hello.ts` runs on Alpine | Build only |
+| **Windows** (x86_64 MSVC) | `scripts/run_doc_tests.ps1`; smoke-test `perry compile hello.ts -o hello.exe && .\hello.exe` | Build only |
+| **iOS Simulator** | `perry compile --target ios-simulator examples/widget_demo.ts && xcrun simctl install booted out.app` | No (Xcode required) |
+| **visionOS Simulator** | `perry compile --target visionos-simulator ...`, launch in Apple Vision Pro Simulator | No (Xcode required) |
+| **tvOS Simulator** | `perry compile --target tvos-simulator ...`, launch in Simulator | No (Xcode required) |
+| **watchOS Simulator** | `perry compile --target watchos-simulator ...` — requires `rustup toolchain install nightly` + `cargo +nightly -Zbuild-std` | No (Xcode + nightly required) |
+| **Android** | `perry compile --target android examples/widget_demo.ts`; install APK on emulator | No (NDK required) |
+| **Web / WASM** | `perry compile --target web examples/wasm_ui_demo.ts`, open `out.html` in a browser | No |
+| **Home-screen widgets** | `perry compile --target widgetkit ... && perry publish ios` | No |
+
+For v1.0, expect to spend half a day spinning through the four OS VMs locally.
+Linux + Windows doc-tests are automated in `test.yml`; the mobile/watch/web
+lanes remain manual pending tier-2 simulator orchestration.
+
+### 2a. Simulator-run recipe (iOS / tvOS)
+
+`perry-ui-ios` and `perry-ui-tvos` honor `PERRY_UI_TEST_MODE=1` — when set,
+the app renders one frame, optionally writes a screenshot to
+`$PERRY_UI_SCREENSHOT_PATH`, and exits cleanly. Combine with
+`xcrun simctl` to verify a doc-example runs without a human:
+
+```bash
+# Compile for the simulator
+perry compile --target ios-simulator docs/examples/ui/counter.ts -o counter.app
+
+# Boot a device (one-time; reuse the UDID across runs)
+xcrun simctl boot "iPhone 15"
+open -a Simulator
+
+# Install + launch with test mode
+xcrun simctl install booted counter.app
+PERRY_UI_TEST_MODE=1 \
+  PERRY_UI_TEST_EXIT_AFTER_MS=500 \
+  PERRY_UI_SCREENSHOT_PATH="$PWD/counter-ios.png" \
+  xcrun simctl launch --console booted com.example.counter
+
+# App exits 0 after rendering; screenshot lands at counter-ios.png
+```
+
+Same recipe works for `tvos-simulator` + `"Apple TV"` device. On watchOS the
+Rust Tier-3 toolchain requires `+nightly -Zbuild-std` — see the
+`watchos-simulator` row in the matrix above.
+
+### 3. What CI does on the tag
+
+The `Release Packages` workflow (`.github/workflows/release-packages.yml`)
+triggers on a published GitHub Release or manual `workflow_dispatch`. Matrix
+runners build:
+
+- `macos-14` / `macos-15` — arm64 + x86_64 Darwin binaries
+- `ubuntu-22.04` / `ubuntu-24.04-arm` — glibc x86_64 + aarch64
+- `ubuntu-22.04` / `ubuntu-24.04-arm` — musl x86_64 + aarch64
+- `windows-latest` — x86_64 MSVC
+
+Artifacts are published to:
+
+1. **npm** (`@perryts/perry` + seven per-platform optional-deps) — via OIDC
+   Trusted Publisher
+2. **Homebrew** — formula auto-update
+3. **APT** (Debian/Ubuntu) — GPG-signed repository
+4. **winget** — manifest auto-update
+5. **hub.perryts.com** — worker notification so cloud build workers refresh
+
+A tag push with a failing platform build aborts the publish step for that
+platform only; fix-forward with a new patch tag (e.g. `v0.6.1`) rather than
+amending the existing one.
+
+### 4. Release gates (what blocks a release)
+
+- Parity tests must clear the threshold in `test-parity/threshold.json`
+- `cargo test --workspace` (macOS excluded list as above) must be green
+- `compile-smoke` must compile every file under `test-files/`
+- `doc-tests` must compile + run every example under `docs/examples/`
+- Benchmark regressions in `benchmark.yml` hard-fail on release tags (warn only
+  on main-branch pushes)
+
+### 5. If a release goes wrong
+
+- **Wrong artifact published**: tag a new patch release with the fix; npm
+  rejects re-publishes of the same version anyway.
+- **Broken binary on one platform**: the `release-packages.yml` matrix is not
+  `fail-fast: true`, so other platforms still publish. Ship a follow-up patch
+  for the broken one.
+- **CI hook failed after tag**: run `workflow_dispatch` with
+  `publish_npm: true` to retry the npm step.
 
 ---
 

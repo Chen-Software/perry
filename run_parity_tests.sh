@@ -77,6 +77,22 @@ SKIP_TESTS=(
     "test_fs"               # fs module needs import
     "test_path"             # path module needs import
     "test_integration_app"  # uses fs module
+    # Network tests — require a live TCP/TLS server on the host. CI runners
+    # don't host one, so these consistently fail with `Connection refused`
+    # against any hard-coded address. Skip in environments where the
+    # server isn't available; both Perry and Node hit the same error so
+    # the diff is just network-noise.
+    "test_net_min"
+    "test_net_socket"
+    "test_net_upgrade_tls"
+    "test_tls_connect"
+    # Timing benchmarks — print Date.now() deltas which differ
+    # run-to-run. Both perry and node produce correct output;
+    # the parity diff is just measurement noise.
+    "test_issue58_object_string"
+    "test_issue63_arr"
+    "test_issue63_escape"
+    # `test_issue63_asm` prints sink.length (deterministic), keep it.
 )
 
 # Function to check if test should be skipped
@@ -128,6 +144,11 @@ normalize_output() {
         sed -E 's/^false$/0/' | \
         # Normalize floating point precision (keep 10 decimal places)
         sed -E 's/([0-9]+\.[0-9]{10})[0-9]+/\1/g' | \
+        # Normalize console.time/timeLog/timeEnd output: the elapsed value
+        # will always differ between Node.js (JIT) and Perry (native LLVM).
+        # Strip the numeric portion, keeping only label and unit so both
+        # sides compare as "label: <timer>".
+        sed -E 's/^([^:]+): [0-9]+(\.[0-9]+)?(ms|s)$/\1: <timer>/g' | \
         # Remove trailing empty lines
         sed -e :a -e '/^\n*$/{$d;N;ba' -e '}'
 }

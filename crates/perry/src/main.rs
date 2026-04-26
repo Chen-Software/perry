@@ -47,6 +47,7 @@ pub enum OutputFormat {
 pub enum Platform {
     Macos,
     Ios,
+    Visionos,
     Watchos,
     Tvos,
     Android,
@@ -90,6 +91,9 @@ enum Commands {
     /// Compile and run a TypeScript file in one step
     Run(commands::run::RunArgs),
 
+    /// Watch TypeScript source and auto-recompile on changes
+    Dev(commands::dev::DevArgs),
+
     /// Internationalization tools (extract strings, manage locales)
     I18n(commands::i18n::I18nArgs),
 
@@ -98,6 +102,12 @@ enum Commands {
 
     /// App Store management (release notes, metadata)
     Appstore(commands::appstore::AppStoreArgs),
+
+    /// Generate TypeScript type stubs for Perry built-in modules
+    Types(commands::types::TypesArgs),
+
+    /// Manage the per-module object cache at `.perry-cache/`
+    Cache(commands::cache::CacheArgs),
 }
 
 /// Check if the first non-flag argument looks like a TypeScript file
@@ -114,7 +124,7 @@ fn is_legacy_invocation(args: &[String]) -> bool {
         // If it's a known subcommand, not legacy
         if matches!(
             arg.as_str(),
-            "compile" | "check" | "init" | "doctor" | "explain" | "publish" | "update" | "setup" | "audit" | "verify" | "run" | "appstore" | "help"
+            "compile" | "check" | "init" | "doctor" | "explain" | "publish" | "update" | "setup" | "audit" | "verify" | "run" | "dev" | "appstore" | "types" | "cache" | "help"
         ) {
             return false;
         }
@@ -213,6 +223,9 @@ fn main_inner() -> Result<()> {
         Commands::Run(args) => {
             commands::run::run(args, cli.format, use_color, cli.verbose)
         }
+        Commands::Dev(args) => {
+            commands::dev::run(args, cli.format, use_color, cli.verbose)
+        }
         Commands::Check(args) => {
             commands::check::run(args, cli.format, use_color, cli.verbose)
         }
@@ -248,6 +261,12 @@ fn main_inner() -> Result<()> {
         }
         Commands::Appstore(args) => {
             commands::appstore::run(args)
+        }
+        Commands::Types(args) => {
+            commands::types::run(args, cli.format, use_color)
+        }
+        Commands::Cache(args) => {
+            commands::cache::run(args, cli.format)
         }
     };
 

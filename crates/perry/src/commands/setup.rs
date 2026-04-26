@@ -1,9 +1,11 @@
 //! `perry setup` — guided credential setup wizard for App Store / Google Play distribution
+//! (and toolchain setup for the "lightweight" Windows target — LLVM + xwin'd SDK)
 
 use anyhow::{bail, Context, Result};
 use clap::Args;
 use console::style;
 use dialoguer::{Confirm, Input, Password, Select};
+use std::path::PathBuf;
 use std::process::Command;
 
 use super::publish::{
@@ -13,13 +15,23 @@ use super::publish::{
 
 #[derive(Args, Debug)]
 pub struct SetupArgs {
-    /// Platform to configure: android, ios, macos, tvos, watchos
+    /// Platform to configure: android, ios, visionos, macos, tvos, watchos, windows
     pub platform: Option<String>,
+
+    /// (windows only) Accept the Microsoft Visual Studio Build Tools redistributable
+    /// license required to download CRT + Windows SDK via xwin. Equivalent to
+    /// answering "yes" at the interactive prompt; enables non-interactive / CI use.
+    #[arg(long)]
+    pub accept_license: bool,
 }
 
 pub fn run(args: SetupArgs) -> Result<()> {
-    if !is_interactive() {
-        bail!("`perry setup` requires an interactive terminal.");
+    // Credential wizards always need interactive (secret prompts); the windows
+    // toolchain wizard accepts --accept-license for CI.
+    let is_windows_platform = args.platform.as_deref() == Some("windows");
+    let needs_interactive = !(is_windows_platform && args.accept_license);
+    if needs_interactive && !is_interactive() {
+        bail!("`perry setup` requires an interactive terminal (pass --accept-license for `windows` to skip)");
     }
 
     println!();
@@ -29,7 +41,7 @@ pub fn run(args: SetupArgs) -> Result<()> {
     let platform = match args.platform.as_deref() {
         Some(p) => p.to_string(),
         None => {
-            let options = &["Android", "iOS", "macOS", "tvOS", "watchOS"];
+            let options = &["Android", "iOS", "visionOS", "macOS", "tvOS", "watchOS", "Windows (toolchain)"];
             let selection = Select::new()
                 .with_prompt("  Which platform to configure?")
                 .items(options)
@@ -38,25 +50,174 @@ pub fn run(args: SetupArgs) -> Result<()> {
             match selection {
                 0 => "android".to_string(),
                 1 => "ios".to_string(),
-                2 => "macos".to_string(),
-                3 => "tvos".to_string(),
-                _ => "watchos".to_string(),
+                2 => "visionos".to_string(),
+                3 => "macos".to_string(),
+                4 => "tvos".to_string(),
+                5 => "watchos".to_string(),
+                _ => "windows".to_string(),
             }
         }
     };
+
+    // Windows is a toolchain setup (not a credential wizard) — doesn't touch PerryConfig.
+    if platform == "windows" {
+        return windows_wizard(args.accept_license);
+    }
 
     let mut saved = load_config();
 
     match platform.as_str() {
         "android" => android_wizard(&mut saved)?,
         "ios" => ios_wizard(&mut saved)?,
+        "visionos" => visionos_wizard(&mut saved)?,
         "macos" => macos_wizard(&mut saved)?,
         "tvos" => tvos_wizard(&mut saved)?,
         "watchos" => watchos_wizard(&mut saved)?,
-        other => bail!("Unknown platform '{other}'. Use: android, ios, macos, tvos, watchos"),
+        other => bail!("Unknown platform '{other}'. Use: android, ios, visionos, macos, tvos, watchos, windows"),
     }
 
     save_config(&saved)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Windows toolchain wizard (lightweight path — LLVM + xwin'd SDK, no MSVC)
+// ---------------------------------------------------------------------------
+
+/// Locate `xwin.exe`:
+///   1. Bundled next to `perry.exe` (the release zip ships it there)
+///   2. `~/.cargo/bin/xwin.exe` (for dev installs via `cargo install xwin`)
+///   3. PATH lookup
+fn find_xwin_exe() -> Option<PathBuf> {
+    if let Ok(perry) = std::env::current_exe() {
+        if let Some(dir) = perry.parent() {
+            let bundled = dir.join(if cfg!(windows) { "xwin.exe" } else { "xwin" });
+            if bundled.exists() {
+                return Some(bundled);
+            }
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        let cargo_bin = home
+            .join(".cargo")
+            .join("bin")
+            .join(if cfg!(windows) { "xwin.exe" } else { "xwin" });
+        if cargo_bin.exists() {
+            return Some(cargo_bin);
+        }
+    }
+    let which_cmd = if cfg!(windows) { "where" } else { "which" };
+    if let Ok(out) = Command::new(which_cmd).arg("xwin").output() {
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if let Some(first) = s.lines().next() {
+                let p = PathBuf::from(first);
+                if p.exists() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn windows_wizard(accept_license: bool) -> Result<()> {
+    use std::time::Instant;
+
+    println!("  {}", style("Windows Toolchain Setup").bold());
+    println!();
+    println!("  This downloads the Microsoft CRT + Windows SDK libraries (via xwin)");
+    println!("  so Perry can link Windows executables without Visual Studio Build Tools.");
+    println!();
+
+    // 1. Verify LLVM is present (provides clang for codegen + lld-link for linking).
+    match perry_codegen::linker::find_clang() {
+        Some(p) => println!("  {} LLVM found: {}", style("✓").green(), p.display()),
+        None => bail!(
+            "LLVM not found. Install it first, then rerun:\n  \
+             winget install LLVM.LLVM    (or: choco install llvm / scoop install llvm)"
+        ),
+    }
+
+    // 2. Locate xwin.
+    let xwin = find_xwin_exe().ok_or_else(|| anyhow::anyhow!(
+        "xwin.exe not found. The Perry Windows release zip bundles it alongside \
+         perry.exe. If you installed Perry from source (cargo install), install xwin \
+         separately:\n  \
+         cargo install xwin --locked --version 0.9.0"
+    ))?;
+    println!("  {} xwin found: {}", style("✓").green(), xwin.display());
+    println!();
+
+    // 3. Microsoft license acceptance. xwin's own URL (src/main.rs:269 in xwin 0.9.0).
+    let license_url = "https://go.microsoft.com/fwlink/?LinkId=2086102";
+    if !accept_license {
+        println!("  {} Microsoft Visual Studio Build Tools License", style("⚠").yellow().bold());
+        println!();
+        println!("  The Microsoft CRT + Windows SDK libraries are redistributable under");
+        println!("  the Microsoft Software License Terms. By proceeding you accept:");
+        println!();
+        println!("    {}", style(license_url).underlined().blue());
+        println!();
+        let accepted = Confirm::new()
+            .with_prompt("  Do you accept the license?")
+            .default(false)
+            .interact()?;
+        if !accepted {
+            bail!("License not accepted — aborting.");
+        }
+    } else {
+        println!("  {} License accepted via --accept-license", style("ℹ").cyan());
+    }
+
+    // 4. Output directory — %LOCALAPPDATA%\perry\windows-sdk (matches what
+    //    find_perry_windows_sdk() in compile.rs probes at link time).
+    let output_dir = dirs::data_local_dir()
+        .ok_or_else(|| anyhow::anyhow!("Could not resolve %LOCALAPPDATA%"))?
+        .join("perry")
+        .join("windows-sdk");
+
+    println!();
+    println!("  Output: {}", output_dir.display());
+    println!("  Expect ~700 MB download / ~1.5 GB unpacked. Takes 2–4 minutes on a");
+    println!("  typical connection. Partial downloads are resumable — safe to re-run.");
+    println!();
+
+    std::fs::create_dir_all(&output_dir)
+        .with_context(|| format!("Failed to create {}", output_dir.display()))?;
+
+    // 5. Run xwin. --disable-symlinks avoids noisy case-sensitivity symlinks on
+    //    NTFS (xwin adds them on case-sensitive filesystems for windows.h vs
+    //    Windows.h; Windows' NTFS is case-insensitive by default so they're a
+    //    no-op). --accept-license since we already prompted.
+    // xwin arg order: top-level flags (--accept-license, --arch) come BEFORE
+    // the subcommand; splat-level flags (--output, --disable-symlinks) come AFTER.
+    let start = Instant::now();
+    let mut cmd = Command::new(&xwin);
+    cmd.arg("--accept-license")
+        .arg("--arch").arg("x86_64")
+        .arg("splat")
+        .arg("--disable-symlinks")
+        .arg("--output").arg(&output_dir);
+
+    let status = cmd.status().with_context(|| format!("Failed to invoke {}", xwin.display()))?;
+    if !status.success() {
+        bail!(
+            "xwin splat failed (status {}). The partial download at {} can be retried \
+             safely — re-run `perry setup windows`.",
+            status,
+            output_dir.display()
+        );
+    }
+
+    let elapsed = start.elapsed();
+    println!();
+    println!("  {} Windows SDK ready at {}", style("✓").green().bold(), output_dir.display());
+    println!("    ({:.1}s)", elapsed.as_secs_f64());
+    println!();
+    println!("  Try it:  {}", style("perry compile hello.ts && ./hello.exe").bold());
+    println!();
+    println!("  Run `perry doctor` to verify the full toolchain.");
     Ok(())
 }
 
@@ -1860,6 +2021,140 @@ fn update_perry_toml_macos(
     if let Some(installer_cert) = installer_certificate {
         macos.insert("installer_certificate".into(), toml::Value::String(installer_cert.into()));
     }
+
+    let new_content = toml::to_string_pretty(&doc)
+        .context("Failed to serialize perry.toml")?;
+    std::fs::write(perry_toml_path, new_content)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// visionOS wizard
+// ---------------------------------------------------------------------------
+
+pub(crate) fn visionos_wizard(saved: &mut PerryConfig) -> Result<()> {
+    println!("  {}", style("visionOS Setup").bold());
+    println!();
+
+    let existing_apple = saved.apple.clone().unwrap_or_default();
+
+    println!("  {} App Store Connect API Key", style("Step 1/2 —").cyan().bold());
+    println!();
+
+    let has_existing = existing_apple.p8_key_path.is_some()
+        && existing_apple.key_id.is_some()
+        && existing_apple.issuer_id.is_some();
+
+    let (p8_path, key_id, issuer_id, team_id) = if has_existing {
+        let p8 = existing_apple.p8_key_path.clone().unwrap();
+        let kid = existing_apple.key_id.clone().unwrap();
+        let iss = existing_apple.issuer_id.clone().unwrap();
+        let tid = existing_apple.team_id.clone().unwrap_or_default();
+        println!("  Found existing credentials (shared with iOS/macOS):");
+        println!("    Key ID:    {}", style(&kid).bold());
+        println!("    Issuer ID: {}", style(&iss).dim());
+        println!("    .p8 key:   {}", style(&p8).dim());
+        if !tid.is_empty() {
+            println!("    Team ID:   {}", style(&tid).dim());
+        }
+        println!();
+        let reuse = Confirm::new()
+            .with_prompt("  Use these existing credentials?")
+            .default(true)
+            .interact()?;
+        if reuse {
+            (p8, kid, iss, tid)
+        } else {
+            prompt_api_credentials()?
+        }
+    } else {
+        println!("  You need an App Store Connect API key.");
+        println!("  1. Go to: {}", style("https://appstoreconnect.apple.com/access/integrations/api").underlined());
+        println!("  2. Create an API key with \"App Manager\" or \"Admin\" role.");
+        println!("  3. Download the .p8 file and note the Key ID and Issuer ID.");
+        println!();
+        prompt_api_credentials()?
+    };
+
+    saved.apple = Some(AppleSavedConfig {
+        p8_key_path: Some(p8_path),
+        key_id: Some(key_id),
+        issuer_id: Some(issuer_id),
+        team_id: if team_id.is_empty() { None } else { Some(team_id) },
+        ..existing_apple
+    });
+
+    println!();
+    println!("  {} Bundle ID", style("Step 2/2 —").cyan().bold());
+    println!();
+
+    let perry_toml_path = std::env::current_dir()?.join("perry.toml");
+    let existing_bid = if perry_toml_path.exists() {
+        let content = std::fs::read_to_string(&perry_toml_path)?;
+        let parsed: toml::Table = content.parse().unwrap_or_default();
+        parsed.get("visionos").and_then(|w| w.get("bundle_id")).and_then(|v| v.as_str())
+            .or_else(|| parsed.get("app").and_then(|a| a.get("bundle_id")).and_then(|v| v.as_str()))
+            .or_else(|| parsed.get("project").and_then(|p| p.get("bundle_id")).and_then(|v| v.as_str()))
+            .or_else(|| parsed.get("ios").and_then(|p| p.get("bundle_id")).and_then(|v| v.as_str()))
+            .map(|s| s.to_string())
+    } else {
+        None
+    };
+
+    let bundle_id: String = if let Some(ref bid) = existing_bid {
+        println!("  Found existing bundle ID: {}", style(bid).bold());
+        let reuse = Confirm::new()
+            .with_prompt("  Use this bundle ID?")
+            .default(true)
+            .interact()?;
+        if reuse {
+            bid.clone()
+        } else {
+            Input::new()
+                .with_prompt("  visionOS Bundle ID (e.g. com.example.myvision)")
+                .interact_text()?
+        }
+    } else {
+        Input::new()
+            .with_prompt("  visionOS Bundle ID (e.g. com.example.myvision)")
+            .interact_text()?
+    };
+
+    if !perry_toml_path.exists() {
+        std::fs::write(&perry_toml_path, "")?;
+    }
+    save_visionos_bundle_id(&perry_toml_path, &bundle_id)?;
+
+    println!();
+    println!("  {} visionOS setup complete!", style("✓").green().bold());
+    println!();
+    println!("  Saved to:");
+    println!("    Global: {}", style(config_path().display()).dim());
+    println!("    Project: {}", style(perry_toml_path.display()).dim());
+    println!();
+    println!("  Next steps:");
+    println!("    perry compile app.ts --target visionos-simulator");
+    println!("    perry run visionos");
+    println!();
+
+    Ok(())
+}
+
+fn save_visionos_bundle_id(perry_toml_path: &std::path::Path, bundle_id: &str) -> Result<()> {
+    let content = if perry_toml_path.exists() {
+        std::fs::read_to_string(perry_toml_path)?
+    } else {
+        String::new()
+    };
+    let mut doc = content.parse::<toml::Table>()
+        .unwrap_or_else(|_| toml::Table::new());
+
+    let visionos = doc.entry("visionos")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("[visionos] in perry.toml is not a table"))?;
+
+    visionos.insert("bundle_id".into(), toml::Value::String(bundle_id.into()));
 
     let new_content = toml::to_string_pretty(&doc)
         .context("Failed to serialize perry.toml")?;

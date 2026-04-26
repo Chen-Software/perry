@@ -56,7 +56,13 @@ impl MysqlPoolConnectionHandle {
 /// # Safety
 /// The config parameter must be a valid JSValue representing a config object.
 #[no_mangle]
-pub unsafe extern "C" fn js_mysql2_create_pool(config: JSValue) -> Handle {
+pub unsafe extern "C" fn js_mysql2_create_pool(config_f: f64) -> Handle {
+    // Take f64 at the FFI boundary to avoid SysV AMD64 ABI mismatch:
+    // JSValue is `#[repr(transparent)] u64` (integer register), but the
+    // LLVM call site declares the arg as `double` (XMM register). On ARM64
+    // these aliases (d0/x0 same phys reg) so the bug is invisible, but on
+    // x86_64 they're distinct registers and the pointer bits never arrive.
+    let config = JSValue::from_bits(config_f.to_bits());
     let mysql_config = parse_mysql_config(config);
     let url = mysql_config.to_url();
 
@@ -126,7 +132,7 @@ pub unsafe extern "C" fn js_mysql2_pool_query(
         String::new()
     } else {
         let header = sql_ptr as *const perry_runtime::StringHeader;
-        let len = (*header).length as usize;
+        let len = (*header).byte_len as usize;
         let data_ptr = sql_ptr.add(std::mem::size_of::<perry_runtime::StringHeader>());
         let bytes = std::slice::from_raw_parts(data_ptr, len);
         String::from_utf8_lossy(bytes).to_string()
@@ -203,7 +209,7 @@ pub unsafe extern "C" fn js_mysql2_pool_execute(
         String::new()
     } else {
         let header = sql_ptr as *const perry_runtime::StringHeader;
-        let len = (*header).length as usize;
+        let len = (*header).byte_len as usize;
         let data_ptr = sql_ptr.add(std::mem::size_of::<perry_runtime::StringHeader>());
         let bytes = std::slice::from_raw_parts(data_ptr, len);
         String::from_utf8_lossy(bytes).to_string()
@@ -277,7 +283,7 @@ pub unsafe extern "C" fn js_mysql2_pool_execute(
 
 /// Enum to hold different parameter value types
 #[derive(Clone, Debug)]
-enum ParamValue {
+pub(crate) enum ParamValue {
     Null,
     String(String),
     Number(f64),
@@ -286,7 +292,7 @@ enum ParamValue {
 }
 
 /// Extract parameter values from a JSValue array
-unsafe fn extract_params_from_jsvalue(params: JSValue) -> Vec<ParamValue> {
+pub(crate) unsafe fn extract_params_from_jsvalue(params: JSValue) -> Vec<ParamValue> {
     let mut result = Vec::new();
 
     let bits = params.bits();
@@ -324,7 +330,7 @@ unsafe fn extract_params_from_jsvalue(params: JSValue) -> Vec<ParamValue> {
             // Extract string value
             let str_ptr = element.as_string_ptr();
             if !str_ptr.is_null() {
-                let len = (*str_ptr).length as usize;
+                let len = (*str_ptr).byte_len as usize;
                 let data_ptr = (str_ptr as *const u8).add(std::mem::size_of::<perry_runtime::StringHeader>());
                 let bytes = std::slice::from_raw_parts(data_ptr, len);
                 ParamValue::String(String::from_utf8_lossy(bytes).to_string())
@@ -337,7 +343,7 @@ unsafe fn extract_params_from_jsvalue(params: JSValue) -> Vec<ParamValue> {
             if !bigint_ptr.is_null() {
                 let str_ptr = perry_runtime::bigint::js_bigint_to_string(bigint_ptr);
                 if !str_ptr.is_null() {
-                    let len = (*str_ptr).length as usize;
+                    let len = (*str_ptr).byte_len as usize;
                     let data_ptr = (str_ptr as *const u8).add(std::mem::size_of::<perry_runtime::StringHeader>());
                     let bytes = std::slice::from_raw_parts(data_ptr, len);
                     ParamValue::String(String::from_utf8_lossy(bytes).to_string())
@@ -449,7 +455,7 @@ pub unsafe extern "C" fn js_mysql2_pool_connection_query(
         String::new()
     } else {
         let header = sql_ptr as *const perry_runtime::StringHeader;
-        let len = (*header).length as usize;
+        let len = (*header).byte_len as usize;
         let data_ptr = sql_ptr.add(std::mem::size_of::<perry_runtime::StringHeader>());
         let bytes = std::slice::from_raw_parts(data_ptr, len);
         String::from_utf8_lossy(bytes).to_string()
@@ -526,7 +532,7 @@ pub unsafe extern "C" fn js_mysql2_pool_connection_execute(
         String::new()
     } else {
         let header = sql_ptr as *const perry_runtime::StringHeader;
-        let len = (*header).length as usize;
+        let len = (*header).byte_len as usize;
         let data_ptr = sql_ptr.add(std::mem::size_of::<perry_runtime::StringHeader>());
         let bytes = std::slice::from_raw_parts(data_ptr, len);
         String::from_utf8_lossy(bytes).to_string()

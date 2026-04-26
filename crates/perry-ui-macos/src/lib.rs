@@ -11,7 +11,6 @@ pub mod state;
 pub mod string_header;
 pub mod widgets;
 
-#[cfg(feature = "geisterhand")]
 pub mod screenshot;
 
 /// Run a closure, catching any Rust panics so they don't abort across the FFI boundary.
@@ -920,7 +919,7 @@ pub extern "C" fn perry_ui_widget_set_tooltip(handle: i64, text_ptr: i64) {
         if ptr.is_null() { return ""; }
         unsafe {
             let header = ptr as *const crate::string_header::StringHeader;
-            let len = (*header).length as usize;
+            let len = (*header).byte_len as usize;
             let data = ptr.add(std::mem::size_of::<crate::string_header::StringHeader>());
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
         }
@@ -952,16 +951,16 @@ pub extern "C" fn perry_ui_widget_set_on_click(handle: i64, callback: f64) {
     widgets::set_on_click(handle, callback);
 }
 
-/// Animate the opacity of a widget.
+/// Animate the opacity of a widget. `duration_secs` is in seconds.
 #[no_mangle]
-pub extern "C" fn perry_ui_widget_animate_opacity(handle: i64, target: f64, duration_ms: f64) {
-    widgets::animate_opacity(handle, target, duration_ms);
+pub extern "C" fn perry_ui_widget_animate_opacity(handle: i64, target: f64, duration_secs: f64) {
+    widgets::animate_opacity(handle, target, duration_secs);
 }
 
-/// Animate the position of a widget by delta.
+/// Animate the position of a widget by delta. `duration_secs` is in seconds.
 #[no_mangle]
-pub extern "C" fn perry_ui_widget_animate_position(handle: i64, dx: f64, dy: f64, duration_ms: f64) {
-    widgets::animate_position(handle, dx, dy, duration_ms);
+pub extern "C" fn perry_ui_widget_animate_position(handle: i64, dx: f64, dy: f64, duration_secs: f64) {
+    widgets::animate_position(handle, dx, dy, duration_secs);
 }
 
 /// Register an onChange callback for a state cell.
@@ -981,7 +980,7 @@ pub extern "C" fn perry_system_open_url(url_ptr: i64) {
         if ptr.is_null() { return ""; }
         unsafe {
             let header = ptr as *const crate::string_header::StringHeader;
-            let len = (*header).length as usize;
+            let len = (*header).byte_len as usize;
             let data = ptr.add(std::mem::size_of::<crate::string_header::StringHeader>());
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
         }
@@ -1038,7 +1037,7 @@ pub extern "C" fn perry_system_preferences_set(key_ptr: i64, value: f64) {
         if ptr.is_null() { return ""; }
         unsafe {
             let header = ptr as *const crate::string_header::StringHeader;
-            let len = (*header).length as usize;
+            let len = (*header).byte_len as usize;
             let data = ptr.add(std::mem::size_of::<crate::string_header::StringHeader>());
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
         }
@@ -1074,7 +1073,7 @@ pub extern "C" fn perry_system_preferences_get(key_ptr: i64) -> f64 {
         if ptr.is_null() { return ""; }
         unsafe {
             let header = ptr as *const crate::string_header::StringHeader;
-            let len = (*header).length as usize;
+            let len = (*header).byte_len as usize;
             let data = ptr.add(std::mem::size_of::<crate::string_header::StringHeader>());
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
         }
@@ -1122,7 +1121,7 @@ pub extern "C" fn perry_ui_text_set_font_family(handle: i64, family_ptr: i64) {
         if ptr.is_null() { return ""; }
         unsafe {
             let header = ptr as *const crate::string_header::StringHeader;
-            let len = (*header).length as usize;
+            let len = (*header).byte_len as usize;
             let data = ptr.add(std::mem::size_of::<crate::string_header::StringHeader>());
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
         }
@@ -1187,10 +1186,22 @@ pub extern "C" fn perry_ui_state_bind_textfield(state_handle: i64, textfield_han
 // Alert Dialog
 // =============================================================================
 
-/// Show an alert dialog. Returns button index.
+/// Show an alert dialog with custom buttons.
+/// `buttons` is a NaN-boxed JS array of string labels; the callback is
+/// invoked with the 0-based index of the clicked button. Called from
+/// `alertWithButtons(title, message, buttons, cb)` in TS.
 #[no_mangle]
-pub extern "C" fn perry_ui_alert(title_ptr: i64, message_ptr: i64, buttons_ptr: i64, callback: f64) {
+pub extern "C" fn perry_ui_alert(title_ptr: i64, message_ptr: i64, buttons: f64, callback: f64) {
+    extern "C" { fn js_nanbox_get_pointer(value: f64) -> i64; }
+    let buttons_ptr = unsafe { js_nanbox_get_pointer(buttons) };
     widgets::alert::show(title_ptr as *const u8, message_ptr as *const u8, buttons_ptr, callback);
+}
+
+/// Simple 2-arg alert: shows NSAlert with the title/message and a single
+/// "OK" button. Called from `alert(title, message)` in TS.
+#[no_mangle]
+pub extern "C" fn perry_ui_alert_simple(title_ptr: i64, message_ptr: i64) {
+    widgets::alert::show_simple(title_ptr as *const u8, message_ptr as *const u8);
 }
 
 // =============================================================================
@@ -1286,6 +1297,80 @@ pub extern "C" fn perry_system_keychain_delete(key_ptr: i64) {
 #[no_mangle]
 pub extern "C" fn perry_system_notification_send(title_ptr: i64, body_ptr: i64) {
     crate::notifications::send(title_ptr as *const u8, body_ptr as *const u8);
+}
+
+/// Register for remote (APNs) notifications. `callback` is invoked once with
+/// the device token hex string when iOS/macOS negotiates one.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_register_remote(callback: f64) {
+    crate::notifications::register_remote(callback);
+}
+
+/// Register a handler for foreground remote-notification payloads.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_receive(callback: f64) {
+    crate::notifications::on_receive(callback);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_interval(
+    id_ptr: i64,
+    title_ptr: i64,
+    body_ptr: i64,
+    seconds: f64,
+    repeats: f64,
+) {
+    crate::notifications::schedule_interval(
+        id_ptr as *const u8,
+        title_ptr as *const u8,
+        body_ptr as *const u8,
+        seconds,
+        repeats,
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_calendar(
+    id_ptr: i64,
+    title_ptr: i64,
+    body_ptr: i64,
+    timestamp_ms: f64,
+) {
+    crate::notifications::schedule_calendar(
+        id_ptr as *const u8,
+        title_ptr as *const u8,
+        body_ptr as *const u8,
+        timestamp_ms,
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_location(
+    id_ptr: i64,
+    title_ptr: i64,
+    body_ptr: i64,
+    lat: f64,
+    lon: f64,
+    radius: f64,
+) {
+    crate::notifications::schedule_location(
+        id_ptr as *const u8,
+        title_ptr as *const u8,
+        body_ptr as *const u8,
+        lat,
+        lon,
+        radius,
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_cancel(id_ptr: i64) {
+    crate::notifications::cancel(id_ptr as *const u8);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_tap(callback: f64) {
+    crate::notifications::set_on_tap(callback);
 }
 
 // =============================================================================
@@ -1425,6 +1510,12 @@ pub extern "C" fn perry_ui_lazyvstack_create(count: f64, render_closure: f64) ->
 #[no_mangle]
 pub extern "C" fn perry_ui_lazyvstack_update(handle: i64, count: i64) {
     widgets::lazyvstack::update_count(handle, count);
+}
+
+/// Set the uniform row height on a virtualized LazyVStack.
+#[no_mangle]
+pub extern "C" fn perry_ui_lazyvstack_set_row_height(handle: i64, height: f64) {
+    widgets::lazyvstack::set_row_height(handle, height);
 }
 
 // =============================================================================

@@ -778,19 +778,26 @@ fn check_interface_satisfaction(
             }
         }
         Type::Object(obj_type) => {
-            // Check all required interface properties exist in object
+            // Check all required interface properties exist in object with
+            // compatible types.
             for prop in &interface.properties {
                 if prop.optional {
                     continue; // Optional properties don't need to be present
                 }
-                if !obj_type.properties.contains_key(&prop.name) {
+                let Some(actual) = obj_type.properties.get(&prop.name) else {
                     return Err(ConstraintError::MissingProperty {
                         type_param: type_param.to_string(),
                         interface: interface.name.clone(),
                         property: prop.name.clone(),
                     });
+                };
+                if !types_satisfy(&actual.ty, &prop.ty) {
+                    return Err(ConstraintError::TypeMismatch {
+                        type_param: format!("{}.{}", type_param, prop.name),
+                        expected: prop.ty.clone(),
+                        actual: actual.ty.clone(),
+                    });
                 }
-                // TODO: Check property type compatibility
             }
             return Ok(());
         }
@@ -798,17 +805,24 @@ fn check_interface_satisfaction(
             // Look up the named type (could be a class)
             if let Some(&ci) = idx.class_by_name.get(name.as_str()) {
                 let class = &module.classes[ci];
-                // Check all required interface properties exist in class fields
+                // Check all required interface properties exist in class
+                // fields with compatible types.
                 for prop in &interface.properties {
                     if prop.optional {
                         continue;
                     }
-                    let has_field = class.fields.iter().any(|f| f.name == prop.name);
-                    if !has_field {
+                    let Some(field) = class.fields.iter().find(|f| f.name == prop.name) else {
                         return Err(ConstraintError::MissingProperty {
                             type_param: type_param.to_string(),
                             interface: interface.name.clone(),
                             property: prop.name.clone(),
+                        });
+                    };
+                    if !types_satisfy(&field.ty, &prop.ty) {
+                        return Err(ConstraintError::TypeMismatch {
+                            type_param: format!("{}.{}", type_param, prop.name),
+                            expected: prop.ty.clone(),
+                            actual: field.ty.clone(),
                         });
                     }
                 }

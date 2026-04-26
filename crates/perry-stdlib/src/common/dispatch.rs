@@ -36,22 +36,72 @@ pub unsafe extern "C" fn js_handle_method_dispatch(
     let _ = args;
     let _ = handle;
 
-    // Try Fastify app dispatch
+    // Each dispatcher below is gated on TWO conditions: (a) its registry
+    // currently holds this handle id, AND (b) the method name is one this
+    // dispatcher actually handles. Both are required because handle id
+    // namespaces are not unified — `net.createConnection` uses its own
+    // `NEXT_NET_ID` counter, separate from the common HANDLES registry that
+    // backs Fastify/ioredis/HashHandle. A net.Socket at id=1 always
+    // collides with the first object created in the common registry. If we
+    // claimed a handle on registry match alone, calling `socket.write(b)` on
+    // a socket whose id collided with a HashHandle would route to
+    // `dispatch_hash` (registry says yes), find no `write` arm, and silently
+    // return undefined — the bytes never reach the wire (#91). Gating on
+    // method-name vocabulary lets the call fall through to the next
+    // dispatcher when a handle id is reused across registries with disjoint
+    // method sets. The proper long-term fix is a single unified id space;
+    // this is the surgical version.
+
+    // Fastify app: routes for HTTP verbs + lifecycle methods.
     #[cfg(feature = "http-server")]
-    if with_handle::<crate::fastify::FastifyApp, bool, _>(handle, |_| true).unwrap_or(false) {
+    if matches!(
+        method_name,
+        "get" | "post" | "put" | "delete" | "patch" | "head" | "options"
+        | "all" | "addHook" | "setErrorHandler" | "register" | "listen"
+    ) && with_handle::<crate::fastify::FastifyApp, bool, _>(handle, |_| true).unwrap_or(false)
+    {
         return dispatch_fastify_app(handle, method_name, args);
     }
 
-    // Try Fastify context dispatch (request/reply)
+    // Fastify request/reply context.
     #[cfg(feature = "http-server")]
-    if with_handle::<crate::fastify::FastifyContext, bool, _>(handle, |_| true).unwrap_or(false) {
+    if matches!(
+        method_name,
+        "send" | "status" | "code" | "header" | "method" | "url"
+        | "body" | "json" | "params" | "headers"
+    ) && with_handle::<crate::fastify::FastifyContext, bool, _>(handle, |_| true).unwrap_or(false)
+    {
         return dispatch_fastify_context(handle, method_name, args);
     }
 
-    // Try ioredis Redis client dispatch
+    // ioredis client.
     #[cfg(feature = "database-redis")]
-    if with_handle::<crate::ioredis::RedisClient, bool, _>(handle, |_| true).unwrap_or(false) {
+    if matches!(
+        method_name,
+        "connect" | "get" | "set" | "setex" | "del" | "exists"
+        | "incr" | "decr" | "expire" | "ping" | "quit" | "disconnect"
+    ) && with_handle::<crate::ioredis::RedisClient, bool, _>(handle, |_| true).unwrap_or(false)
+    {
         return dispatch_ioredis(handle, method_name, args);
+    }
+
+    // crypto Hash handle: createHash(...).update(...).digest().
+    // The order vs. net (below) does not matter once method-gated, but we
+    // keep hash before net to avoid changing the priority of in-registry
+    // matches relative to the v0.5.98/#88 ordering.
+    #[cfg(feature = "crypto")]
+    if matches!(method_name, "update" | "digest")
+        && with_handle::<crate::crypto::HashHandle, bool, _>(handle, |_| true).unwrap_or(false)
+    {
+        return crate::crypto::dispatch_hash(handle, method_name, args);
+    }
+
+    // net.Socket: covers wrapper-function, struct-field, and Map.get
+    // receivers where codegen lost the static type. Static NATIVE_MODULE_TABLE
+    // path is still preferred when types are visible.
+    #[cfg(all(feature = "net", not(target_os = "ios"), not(target_os = "android")))]
+    if crate::net::is_net_socket_handle(handle) {
+        return dispatch_net_socket(handle, method_name, args);
     }
 
     // Unknown handle type - return undefined
@@ -189,6 +239,54 @@ unsafe fn dispatch_fastify_context(handle: i64, method: &str, args: &[f64]) -> f
         _ => {
             // Unknown method - return undefined
             f64::from_bits(0x7FF8_0000_0000_0001)
+        }
+    }
+}
+
+/// Dispatch method calls on net.Socket handles when codegen couldn't tag
+/// the receiver type. Mirrors the static NATIVE_MODULE_TABLE entries for
+/// the same methods (write/end/destroy/on/upgradeToTLS).
+///
+/// Args arrive as NaN-boxed `f64`s: BufferHeader / StringHeader / Closure
+/// pointers in the low 48 bits with POINTER_TAG / STRING_TAG in the top.
+/// We strip the tag and pass the raw `i64` to the FFI — same shape the
+/// codegen path produces.
+#[cfg(all(feature = "net", not(target_os = "ios"), not(target_os = "android")))]
+unsafe fn dispatch_net_socket(handle: i64, method: &str, args: &[f64]) -> f64 {
+    /// Strip a NaN-box tag (POINTER / STRING / BIGINT) to get the raw 48-bit pointer.
+    fn unbox_to_i64(v: f64) -> i64 {
+        (v.to_bits() & 0x0000_FFFF_FFFF_FFFF) as i64
+    }
+
+    match method {
+        "write" if !args.is_empty() => {
+            crate::net::js_net_socket_write(handle, unbox_to_i64(args[0]));
+            f64::from_bits(0x7FFC_0000_0000_0001) // undefined
+        }
+        "end" => {
+            crate::net::js_net_socket_end(handle);
+            f64::from_bits(0x7FFC_0000_0000_0001)
+        }
+        "destroy" => {
+            crate::net::js_net_socket_destroy(handle);
+            f64::from_bits(0x7FFC_0000_0000_0001)
+        }
+        "on" if args.len() >= 2 => {
+            let event_ptr = unbox_to_i64(args[0]);
+            let cb_ptr = unbox_to_i64(args[1]);
+            crate::net::js_net_socket_on(handle, event_ptr, cb_ptr);
+            f64::from_bits(0x7FFC_0000_0000_0001)
+        }
+        "upgradeToTLS" if !args.is_empty() => {
+            // upgradeToTLS(servername, verify) → Promise. Default verify=1
+            // when omitted, mirroring the safer default in the static table.
+            let servername_ptr = unbox_to_i64(args[0]);
+            let verify = if args.len() >= 2 { args[1] } else { 1.0 };
+            let promise = crate::net::js_net_socket_upgrade_tls(handle, servername_ptr, verify);
+            f64::from_bits(0x7FFD_0000_0000_0000u64 | (promise as u64 & 0x0000_FFFF_FFFF_FFFF))
+        }
+        _ => {
+            f64::from_bits(0x7FFC_0000_0000_0001)
         }
     }
 }

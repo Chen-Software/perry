@@ -296,6 +296,252 @@ pub fn keychain_delete(key_ptr: *const u8) {
     unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
 }
 
+/// Tap-callback registration key (#97). Set via `notification_on_tap` and
+/// read by `Java_com_perry_app_PerryBridge_nativeNotificationTap` when the
+/// user taps a notification. `0` means "no tap callback registered".
+static NOTIFICATION_TAP_KEY: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+
+/// FCM device-token callback key (#95). Set via `notification_register_remote`
+/// and read by `Java_com_perry_app_PerryBridge_nativeNotificationToken` when
+/// FCM hands us a registration token (initial fetch + future rotations).
+static NOTIFICATION_REMOTE_TOKEN_KEY: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+
+/// FCM payload-receive callback key (#95). Set via `notification_on_receive`
+/// and read by `Java_com_perry_app_PerryBridge_nativeNotificationReceive`
+/// when a foreground push payload arrives.
+static NOTIFICATION_RECEIVE_KEY: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+
+/// Store the JS closure that fires when a notification is tapped (#97).
+/// The closure is stashed in `crate::callback::register` so the global
+/// callback table keeps it alive across GC; the returned key is saved in
+/// `NOTIFICATION_TAP_KEY` for the JNI side to look up.
+pub fn notification_on_tap(callback: f64) {
+    let key = crate::callback::register(callback);
+    NOTIFICATION_TAP_KEY.store(key, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// JNI entry point — fired from `PerryNotificationReceiver.onReceive` when
+/// the user taps a notification. Looks up the registered tap callback and
+/// invokes it with `(id, undefined)`. The `action` parameter (from the TS
+/// surface) is always `undefined` for #97 because action-button registration
+/// isn't wired yet — same shape as the Apple side.
+#[no_mangle]
+pub extern "C" fn Java_com_perry_app_PerryBridge_nativeNotificationTap(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    id: jni::objects::JString,
+) {
+    let key = NOTIFICATION_TAP_KEY.load(std::sync::atomic::Ordering::Relaxed);
+    if key == 0 {
+        return;
+    }
+
+    let rust_str: String = env.get_string(&id).map(|s| s.into()).unwrap_or_default();
+    let bytes = rust_str.as_bytes();
+    let id_value = unsafe {
+        let ptr = js_string_from_bytes(bytes.as_ptr(), bytes.len());
+        js_nanbox_string(ptr)
+    };
+    // `action` is always undefined until #97 follow-up wires action buttons.
+    const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+    let action_value = f64::from_bits(TAG_UNDEFINED);
+
+    crate::callback::invoke2(key, id_value, action_value);
+}
+
+/// Register the JS closure that fires when FCM hands us a device token
+/// (#95). Stores the closure in the global callback table, saves the key in
+/// `NOTIFICATION_REMOTE_TOKEN_KEY` for the JNI side to look up, and asks
+/// `PerryBridge.registerForRemoteNotifications` to kick off the initial
+/// `FirebaseMessaging.getInstance().token` fetch.
+pub fn notification_register_remote(callback: f64) {
+    let key = crate::callback::register(callback);
+    NOTIFICATION_REMOTE_TOKEN_KEY.store(key, std::sync::atomic::Ordering::Relaxed);
+
+    let mut env = jni_bridge::get_env();
+    let _ = env.push_local_frame(8);
+    let activity = crate::widgets::get_activity(&mut env);
+    let bridge_class = jni_bridge::with_cache(|c| {
+        env.new_local_ref(c.perry_bridge_class.as_obj()).unwrap()
+    });
+    let bridge_cls: &jni::objects::JClass = (&bridge_class).into();
+    let _ = env.call_static_method(
+        bridge_cls,
+        "registerForRemoteNotifications",
+        "(Landroid/app/Activity;)V",
+        &[JValue::Object(&activity)],
+    );
+    unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
+}
+
+/// Register the JS closure that fires for foreground FCM payloads (#95).
+/// `PerryFirebaseMessagingService.onMessageReceived` serializes the
+/// `RemoteMessage` to JSON and calls `nativeNotificationReceive`, which
+/// looks up this key and invokes the closure.
+pub fn notification_on_receive(callback: f64) {
+    let key = crate::callback::register(callback);
+    NOTIFICATION_RECEIVE_KEY.store(key, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// JNI: FCM device token (#95). Looks up the registered remote-token
+/// callback and invokes it with the token NaN-boxed string.
+#[no_mangle]
+pub extern "C" fn Java_com_perry_app_PerryBridge_nativeNotificationToken(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    token: jni::objects::JString,
+) {
+    let key = NOTIFICATION_REMOTE_TOKEN_KEY.load(std::sync::atomic::Ordering::Relaxed);
+    if key == 0 { return; }
+    let rust_str: String = env.get_string(&token).map(|s| s.into()).unwrap_or_default();
+    let bytes = rust_str.as_bytes();
+    let token_value = unsafe {
+        let ptr = js_string_from_bytes(bytes.as_ptr(), bytes.len());
+        js_nanbox_string(ptr)
+    };
+    crate::callback::invoke1(key, token_value);
+}
+
+/// JNI: FCM foreground push (#95). Parses the JSON payload via the runtime's
+/// `js_json_parse` to produce a Perry object, then invokes the registered
+/// receive callback with it.
+#[no_mangle]
+pub extern "C" fn Java_com_perry_app_PerryBridge_nativeNotificationReceive(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    payload_json: jni::objects::JString,
+) {
+    let key = NOTIFICATION_RECEIVE_KEY.load(std::sync::atomic::Ordering::Relaxed);
+    if key == 0 { return; }
+    let rust_str: String = env.get_string(&payload_json).map(|s| s.into()).unwrap_or_default();
+    let bytes = rust_str.as_bytes();
+
+    extern "C" {
+        fn js_json_parse(text_ptr: *const u8) -> u64;
+    }
+    let payload_value = unsafe {
+        let str_ptr = js_string_from_bytes(bytes.as_ptr(), bytes.len());
+        let bits = js_json_parse(str_ptr);
+        f64::from_bits(bits)
+    };
+    crate::callback::invoke1(key, payload_value);
+}
+
+/// Schedule a fire-after-N-seconds notification via PerryBridge (#96).
+/// `repeats` is JS-truthy-coerced before crossing the JNI boundary.
+pub fn notification_schedule_interval(
+    id_ptr: *const u8, title_ptr: *const u8, body_ptr: *const u8,
+    seconds: f64, repeats: f64,
+) {
+    extern "C" { fn js_is_truthy(value: f64) -> i32; }
+    let repeats_bool = unsafe { js_is_truthy(repeats) != 0 };
+    let id = str_from_header(id_ptr);
+    let title = str_from_header(title_ptr);
+    let body = str_from_header(body_ptr);
+
+    let mut env = jni_bridge::get_env();
+    let _ = env.push_local_frame(16);
+    let activity = crate::widgets::get_activity(&mut env);
+    let bridge_class = jni_bridge::with_cache(|c| {
+        env.new_local_ref(c.perry_bridge_class.as_obj()).unwrap()
+    });
+    let jid = env.new_string(id).expect("id");
+    let jtitle = env.new_string(title).expect("title");
+    let jbody = env.new_string(body).expect("body");
+    let bridge_cls: &jni::objects::JClass = (&bridge_class).into();
+    let _ = env.call_static_method(
+        bridge_cls,
+        "scheduleInterval",
+        "(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;DZ)V",
+        &[
+            JValue::Object(&activity),
+            JValue::Object(&jid),
+            JValue::Object(&jtitle),
+            JValue::Object(&jbody),
+            JValue::Double(seconds),
+            JValue::Bool(if repeats_bool { 1u8 } else { 0u8 }),
+        ],
+    );
+    unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
+}
+
+/// Schedule a fire-at-wallclock-ms notification via PerryBridge (#96).
+pub fn notification_schedule_calendar(
+    id_ptr: *const u8, title_ptr: *const u8, body_ptr: *const u8,
+    timestamp_ms: f64,
+) {
+    let id = str_from_header(id_ptr);
+    let title = str_from_header(title_ptr);
+    let body = str_from_header(body_ptr);
+
+    let mut env = jni_bridge::get_env();
+    let _ = env.push_local_frame(16);
+    let activity = crate::widgets::get_activity(&mut env);
+    let bridge_class = jni_bridge::with_cache(|c| {
+        env.new_local_ref(c.perry_bridge_class.as_obj()).unwrap()
+    });
+    let jid = env.new_string(id).expect("id");
+    let jtitle = env.new_string(title).expect("title");
+    let jbody = env.new_string(body).expect("body");
+    let bridge_cls: &jni::objects::JClass = (&bridge_class).into();
+    let _ = env.call_static_method(
+        bridge_cls,
+        "scheduleCalendar",
+        "(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;D)V",
+        &[
+            JValue::Object(&activity),
+            JValue::Object(&jid),
+            JValue::Object(&jtitle),
+            JValue::Object(&jbody),
+            JValue::Double(timestamp_ms),
+        ],
+    );
+    unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
+}
+
+/// Logged no-op — Geofencing requires `FUSED_LOCATION_PROVIDER` + a
+/// runtime `ACCESS_FINE_LOCATION` grant. That's a separate scope expansion
+/// (#96 follow-up); programs targeting Android should fall back to
+/// app-side geofence wiring or use interval/calendar triggers.
+pub fn notification_schedule_location(
+    _id_ptr: *const u8, _title_ptr: *const u8, _body_ptr: *const u8,
+    _lat: f64, _lon: f64, _radius: f64,
+) {
+    extern "C" {
+        fn __android_log_print(prio: i32, tag: *const u8, fmt: *const u8, ...) -> i32;
+    }
+    unsafe {
+        __android_log_print(
+            5, b"PerryNotification\0".as_ptr(),
+            b"schedule_location: Geofencing API not wired on Android (#96 follow-up); skipped\0".as_ptr(),
+        );
+    }
+}
+
+/// Cancel a scheduled or already-displayed notification by id (#96).
+pub fn notification_cancel(id_ptr: *const u8) {
+    let id = str_from_header(id_ptr);
+
+    let mut env = jni_bridge::get_env();
+    let _ = env.push_local_frame(8);
+    let activity = crate::widgets::get_activity(&mut env);
+    let bridge_class = jni_bridge::with_cache(|c| {
+        env.new_local_ref(c.perry_bridge_class.as_obj()).unwrap()
+    });
+    let jid = env.new_string(id).expect("id");
+    let bridge_cls: &jni::objects::JClass = (&bridge_class).into();
+    let _ = env.call_static_method(
+        bridge_cls,
+        "cancelNotification",
+        "(Landroid/app/Activity;Ljava/lang/String;)V",
+        &[JValue::Object(&activity), JValue::Object(&jid)],
+    );
+    unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
+}
+
 /// Send a notification via PerryBridge.
 pub fn notification_send(title_ptr: *const u8, body_ptr: *const u8) {
     let title = str_from_header(title_ptr);

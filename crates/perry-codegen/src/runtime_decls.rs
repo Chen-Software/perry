@@ -24,6 +24,9 @@ use crate::types::{DOUBLE, I32, I64, PTR, VOID};
 pub fn declare_phase1(module: &mut LlModule) {
     // GC / runtime bootstrap.
     module.declare_function("js_gc_init", VOID, &[]);
+    // Handle-method dispatcher wiring (issue #86). Stdlib provides the
+    // real impl; when only runtime is linked, it's a no-op stub.
+    module.declare_function("js_stdlib_init_dispatch", VOID, &[]);
 
     // Console.
     module.declare_function("js_console_log_dynamic", VOID, &[DOUBLE]);
@@ -36,6 +39,7 @@ pub fn declare_phase1(module: &mut LlModule) {
 
     // Strings (enough to produce string literals for later phases).
     module.declare_function("js_string_from_bytes", I64, &[PTR, I32]);
+    module.declare_function("js_string_from_wtf8_bytes", I64, &[PTR, I32]);
 
     // Type checks.
     module.declare_function("js_is_truthy", I32, &[DOUBLE]);
@@ -76,6 +80,13 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     // Dynamic string coercion: takes any NaN-boxed JSValue and returns a
     // raw string handle (`crates/perry-runtime/src/value.rs:813`).
     module.declare_function("js_jsvalue_to_string", I64, &[DOUBLE]);
+
+    // Fused string+value concat (issue #58): collapses js_jsvalue_to_string +
+    // js_string_concat into a single allocation for number operands.
+    // `js_string_concat_value(prefix_handle, value_f64) -> handle`
+    // `js_value_concat_string(value_f64, suffix_handle) -> handle`
+    module.declare_function("js_string_concat_value", I64, &[I64, DOUBLE]);
+    module.declare_function("js_value_concat_string", I64, &[DOUBLE, I64]);
 
     // In-place append for the `x = x + y` pattern. When `x` has
     // refcount=1 (unique owner), the runtime mutates in-place and
@@ -246,6 +257,7 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_console_warn_spread", VOID, &[I64]);
     module.declare_function("js_getenv", I64, &[I64]);
     module.declare_function("js_console_table", VOID, &[DOUBLE]);
+    module.declare_function("js_console_trace", VOID, &[DOUBLE]);
     // process.* — see `perry-runtime/src/os.rs` and `perry-runtime/src/process.rs`.
     // Most process accessors return raw pointers (I64) that the call site
     // must NaN-box. The ones that return already-boxed f64 values
@@ -259,9 +271,11 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_process_version", I64, &[]);
     module.declare_function("js_process_versions", DOUBLE, &[]);
     module.declare_function("js_process_memory_usage", DOUBLE, &[]);
+    module.declare_function("js_process_env", DOUBLE, &[]);
     module.declare_function("js_process_hrtime_bigint", DOUBLE, &[]);
     module.declare_function("js_process_chdir", VOID, &[I64]);
     module.declare_function("js_process_kill", VOID, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_process_exit", VOID, &[DOUBLE]);
     module.declare_function("js_process_on", VOID, &[I64, I64]);
     module.declare_function("js_process_next_tick", VOID, &[I64]);
     module.declare_function("js_process_stdin", DOUBLE, &[]);
@@ -397,7 +411,26 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_regexp_test", I32, &[I64, I64]);
     module.declare_function("js_get_string_pointer_unified", I64, &[DOUBLE]);
     module.declare_function("js_bigint_from_string", I64, &[PTR, I32]);
+    module.declare_function("js_bigint_from_f64", I64, &[DOUBLE]);
     module.declare_function("js_bigint_cmp", I32, &[I64, I64]);
+    // Dynamic bigint arithmetic — lowered from `Expr::Binary` when
+    // either operand is statically bigint-typed. These unbox, call
+    // the raw `js_bigint_<op>`, and re-box with BIGINT_TAG. Also
+    // tolerate mixed bigint/int32 operands.
+    module.declare_function("js_dynamic_add", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_dynamic_sub", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_dynamic_mul", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_dynamic_div", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_dynamic_mod", DOUBLE, &[DOUBLE, DOUBLE]);
+    // Dynamic bigint bitwise ops — lowered from `Expr::Binary` when
+    // either operand is statically bigint-typed. Unbox, call the raw
+    // `js_bigint_<op>`, re-box with BIGINT_TAG. Fall through to i32
+    // ToInt32 semantics for the pure-number case (closes #39).
+    module.declare_function("js_dynamic_bitand", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_dynamic_bitor", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_dynamic_bitxor", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_dynamic_shl", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_dynamic_shr", DOUBLE, &[DOUBLE, DOUBLE]);
     module.declare_function("js_instanceof", DOUBLE, &[DOUBLE, I32]);
     module.declare_function("js_register_class_extends_error", VOID, &[I32]);
     // Inline-allocator class registration: emitted once per class
@@ -453,6 +486,10 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     // JSON.parse returns JSValue (u64) via integer register on ARM64,
     // not f64. Use I64 return + bitcast to avoid ABI mismatch crash.
     module.declare_function("js_json_parse", I64, &[I64]);
+    // JSON.parse<T[]> schema-directed parse: same return semantics.
+    // Args: text_ptr (i64), packed_keys (i64), packed_keys_len (i32),
+    // field_count (i32).
+    module.declare_function("js_json_parse_typed_array", I64, &[I64, I64, I32, I32]);
     // Date string formatters
     module.declare_function("js_date_to_date_string", I64, &[DOUBLE]);
     module.declare_function("js_date_to_time_string", I64, &[DOUBLE]);
@@ -508,13 +545,19 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_text_decoder_decode_llvm", I64, &[DOUBLE]);
     // Microtask queue (queueMicrotask / process.nextTick).
     module.declare_function("js_queue_microtask", VOID, &[I64]);
+    module.declare_function("js_drain_queued_microtasks", VOID, &[]);
     // Uint8Array constructor wrapper that flags the resulting buffer so the
     // formatter prints `Uint8Array(N) [ ... ]` instead of `<Buffer ...>`.
     module.declare_function("js_uint8array_from_array", I64, &[I64]);
-    // Generic typed array runtime (Int8/16/32, Uint16/32, Float32/64).
+    // `new Uint8Array(x)` runtime dispatch — handles the non-literal case
+    // where `x` could be a number (length) or an array (source data).
+    module.declare_function("js_uint8array_new", I64, &[DOUBLE]);
+    // Generic typed array runtime (Int8/16/32, Uint16/32, Float32/64, Uint8Clamped).
     // Uint8Array piggybacks on the BufferHeader path.
     module.declare_function("js_typed_array_new_empty", I64, &[I32, I32]);
     module.declare_function("js_typed_array_new_from_array", I64, &[I32, I64]);
+    // Runtime-dispatched constructor: handles numeric length OR source-array arg.
+    module.declare_function("js_typed_array_new", I64, &[I32, DOUBLE]);
     module.declare_function("js_typed_array_length", I32, &[I64]);
     module.declare_function("js_typed_array_get", DOUBLE, &[I64, I32]);
     module.declare_function("js_typed_array_at", DOUBLE, &[I64, DOUBLE]);
@@ -598,11 +641,19 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     // Crypto stdlib — sha256/md5/hmac/randomBytes/randomUUID used by
     // the expr.rs chain collapse for createHash().update().digest().
     module.declare_function("js_crypto_sha256", I64, &[I64]);
+    module.declare_function("js_crypto_sha256_bytes", I64, &[I64]);
     module.declare_function("js_crypto_md5", I64, &[I64]);
     module.declare_function("js_crypto_hmac_sha256", I64, &[I64, I64]);
+    module.declare_function("js_crypto_hmac_sha256_bytes", I64, &[I64, I64]);
+    module.declare_function("js_crypto_pbkdf2_bytes", I64, &[I64, I64, DOUBLE, DOUBLE]);
     module.declare_function("js_crypto_random_bytes_buffer", I64, &[DOUBLE]);
     module.declare_function("js_crypto_random_uuid", I64, &[]);
+    // Hash-handle form (issue #86): `const h = crypto.createHash(alg);
+    // h.update(x); h.digest()`. Returns a NaN-boxed POINTER_TAG handle id;
+    // subsequent method dispatch flows through HANDLE_METHOD_DISPATCH.
+    module.declare_function("js_crypto_create_hash", DOUBLE, &[I64]);
     module.declare_function("js_string_from_bytes", I64, &[I64, I32]);
+    module.declare_function("js_string_from_wtf8_bytes", I64, &[I64, I32]);
     // Buffer.alloc(size, fill) — returns raw *mut BufferHeader.
     module.declare_function("js_buffer_alloc", I64, &[I32, I32]);
     // JSON full-featured stringify/parse (replacer + indent + reviver).
@@ -629,9 +680,17 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     // 1 if it points at a GC_TYPE_PROMISE allocation else 0.
     module.declare_function("js_value_is_promise", I32, &[DOUBLE]);
     module.declare_function("js_promise_run_microtasks", I32, &[]);
-    // js_stdlib_process_pending intentionally not declared — see
-    // the await-loop comment in expr.rs for the dead-strip rationale.
+    // Drain stdlib's tokio async queue (fetch, DB, etc.). Lives in
+    // perry-runtime as a thin function-pointer trampoline so it's
+    // safe to call even when perry-stdlib is not linked (no-op).
+    module.declare_function("js_run_stdlib_pump", VOID, &[]);
     module.declare_function("js_sleep_ms", VOID, &[DOUBLE]);
+    // Issue #84: condvar-backed wait for the event loop / await busy-wait.
+    // Replaces fixed-quantum `js_sleep_ms(10.0)` / `js_sleep_ms(1.0)`.
+    // Returns immediately when a tokio worker calls js_notify_main_thread()
+    // after enqueueing onto a queue the pump drains; otherwise sleeps until
+    // the next timer deadline (or 1s safety cap).
+    module.declare_function("js_wait_for_event", VOID, &[]);
     module.declare_function("js_throw", VOID, &[DOUBLE]);
 
     // Exception handling (Phase G): setjmp/longjmp-based try/catch.
@@ -643,7 +702,12 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     // js_has_exception() returns i32 (1 if exception is active, 0 otherwise).
     // js_enter_finally() / js_leave_finally() bracket finally blocks.
     module.declare_function("js_try_push", PTR, &[]);
-    module.declare_function("setjmp", I32, &[PTR]);
+    // Windows MSVC uses _setjmp(buf, frame_ptr); Unix uses setjmp(buf).
+    if cfg!(target_os = "windows") {
+        module.declare_function("_setjmp", I32, &[PTR, PTR]);
+    } else {
+        module.declare_function("setjmp", I32, &[PTR]);
+    }
     module.declare_function("js_try_end", VOID, &[]);
     module.declare_function("js_get_exception", DOUBLE, &[]);
     module.declare_function("js_clear_exception", VOID, &[]);
@@ -658,6 +722,14 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_timer_tick", I32, &[]);
     module.declare_function("js_callback_timer_tick", I32, &[]);
     module.declare_function("js_interval_timer_tick", I32, &[]);
+    // Timer has-pending checks — called from the main event loop to
+    // decide whether to keep ticking or exit.
+    module.declare_function("js_timer_has_pending", I32, &[]);
+    module.declare_function("js_callback_timer_has_pending", I32, &[]);
+    module.declare_function("js_interval_timer_has_pending", I32, &[]);
+    // Stdlib has-active-handles — returns 1 if WS servers, pending
+    // HTTP events, etc. need the loop to keep running.
+    module.declare_function("js_stdlib_has_active_handles", I32, &[]);
     module.declare_function("js_set_timeout_callback", I64, &[I64, DOUBLE]);
     module.declare_function("setInterval", I64, &[I64, DOUBLE]);
     module.declare_function("clearTimeout", VOID, &[I64]);
@@ -772,6 +844,9 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
 ///   our number ABI)
 pub fn declare_phase_b_arrays(module: &mut LlModule) {
     module.declare_function("js_array_alloc", I64, &[I32]);
+    // Exact-sized literal allocator — one call + N direct stores replaces
+    // alloc + N×push_f64. See `js_array_alloc_literal` in perry-runtime/src/array.rs.
+    module.declare_function("js_array_alloc_literal", I64, &[I32]);
     module.declare_function("js_array_push_f64", I64, &[I64, DOUBLE]);
     module.declare_function("js_array_get_f64", DOUBLE, &[I64, I32]);
     module.declare_function("js_array_set_f64", VOID, &[I64, I32, DOUBLE]);
@@ -779,6 +854,33 @@ pub fn declare_phase_b_arrays(module: &mut LlModule) {
     // caller must write back to the local slot.
     module.declare_function("js_array_set_f64_extend", I64, &[I64, I32, DOUBLE]);
     module.declare_function("js_array_length", I32, &[I64]);
+    // Array.isArray runtime dispatch for values with indeterminate
+    // static type (e.g. JSON.parse results, closure captures, any/
+    // unknown-typed locals). Returns NaN-boxed boolean.
+    module.declare_function("js_array_is_array", DOUBLE, &[DOUBLE]);
+    // Issue #73: safe `.length` dispatch by runtime type. Fallback
+    // for the inline PropertyGet length path when the GC-type check
+    // can't prove the receiver is an Array/String.
+    module.declare_function("js_value_length_f64", DOUBLE, &[DOUBLE]);
+
+    // Shadow stack for precise root tracking (gen-GC Phase A per
+    // docs/generational-gc-plan.md). Declared now so codegen can
+    // reference them; emission at function entry/exit + safepoints
+    // is the next milestone.
+    //   js_shadow_frame_push(slot_count: u32) -> u64 (frame handle)
+    //   js_shadow_frame_pop(frame_handle: u64)
+    //   js_shadow_slot_set(idx: u32, value: u64)
+    module.declare_function("js_shadow_frame_push", I64, &[I32]);
+    module.declare_function("js_shadow_frame_pop", VOID, &[I64]);
+    module.declare_function("js_shadow_slot_set", VOID, &[I32, I64]);
+
+    // Write barrier for the generational GC (Phase C per the
+    // gen-GC plan). Called by codegen-emitted heap-store sites
+    // when sub-phase C2 wires the emission. Records old→young
+    // pointer stores in the per-thread remembered set so minor
+    // GC can scan precise roots + RS instead of the full old-gen.
+    //   js_write_barrier(parent_bits: u64, child_bits: u64)
+    module.declare_function("js_write_barrier", VOID, &[I64, I64]);
 
     // Array methods (Phase B.12).
     // - js_array_pop_f64(arr) -> f64    (last element, NaN if empty)
@@ -820,6 +922,7 @@ pub fn declare_phase_b_objects(module: &mut LlModule) {
     module.declare_function("js_object_alloc", I64, &[I32, I32]);
     module.declare_function("js_object_set_field_by_name", VOID, &[I64, I64, DOUBLE]);
     module.declare_function("js_object_get_field_by_name_f64", DOUBLE, &[I64, I64]);
+    module.declare_function("js_object_get_field_ic_miss", DOUBLE, &[I64, I64, PTR]);
     // Object rest destructuring: copy all properties from src except excluded keys.
     // Takes a src object ptr and an array of NaN-boxed strings (the excluded keys),
     // returns a new object pointer.
@@ -902,12 +1005,15 @@ pub fn declare_stdlib_ffi(module: &mut LlModule) {
     module.declare_function("js_https_request", I64, &[DOUBLE, I64]);
 
     // ========== PostgreSQL (pg) ==========
+    module.declare_function("js_pg_client_connect", I64, &[I64]);
     module.declare_function("js_pg_client_end", I64, &[I64]);
+    module.declare_function("js_pg_client_new", I64, &[I64]);
     module.declare_function("js_pg_client_query", I64, &[I64, I64]);
     module.declare_function("js_pg_client_query_params", I64, &[I64, I64, I64]);
     module.declare_function("js_pg_connect", I64, &[I64]);
     module.declare_function("js_pg_create_pool", I64, &[I64]);
     module.declare_function("js_pg_pool_end", I64, &[I64]);
+    module.declare_function("js_pg_pool_new", I64, &[I64]);
     module.declare_function("js_pg_pool_query", I64, &[I64, I64]);
 
     // ========== Redis / ioredis ==========
@@ -932,8 +1038,20 @@ pub fn declare_stdlib_ffi(module: &mut LlModule) {
 
     // ========== MongoDB ==========
     module.declare_function("js_mongodb_client_close", I64, &[I64]);
+    module.declare_function("js_mongodb_client_connect", I64, &[I64]);
     module.declare_function("js_mongodb_client_db", I64, &[I64, I64]);
     module.declare_function("js_mongodb_client_list_databases", I64, &[I64]);
+    module.declare_function("js_mongodb_client_new", I64, &[I64]);
+    // _value wrappers (JSON-stringify f64 JSValue arg, forward to existing fns)
+    module.declare_function("js_mongodb_collection_count_value", I64, &[I64, DOUBLE]);
+    module.declare_function("js_mongodb_collection_delete_many_value", I64, &[I64, DOUBLE]);
+    module.declare_function("js_mongodb_collection_delete_one_value", I64, &[I64, DOUBLE]);
+    module.declare_function("js_mongodb_collection_find_one_value", I64, &[I64, DOUBLE]);
+    module.declare_function("js_mongodb_collection_find_value", I64, &[I64, DOUBLE]);
+    module.declare_function("js_mongodb_collection_insert_many_value", I64, &[I64, DOUBLE]);
+    module.declare_function("js_mongodb_collection_insert_one_value", I64, &[I64, DOUBLE]);
+    module.declare_function("js_mongodb_collection_update_many_value", I64, &[I64, DOUBLE, DOUBLE]);
+    module.declare_function("js_mongodb_collection_update_one_value", I64, &[I64, DOUBLE, DOUBLE]);
     module.declare_function("js_mongodb_collection_count", I64, &[I64, I64]);
     module.declare_function("js_mongodb_collection_delete_many", I64, &[I64, I64]);
     module.declare_function("js_mongodb_collection_delete_one", I64, &[I64, I64]);
@@ -957,6 +1075,11 @@ pub fn declare_stdlib_ffi(module: &mut LlModule) {
     module.declare_function("js_bcrypt_hash", I64, &[I64, DOUBLE]);
     module.declare_function("js_bcrypt_hash_sync", I64, &[I64, DOUBLE]);
 
+    // ========== perry/thread (parallelMap, parallelFilter, spawn) ==========
+    module.declare_function("js_thread_parallel_map", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_thread_parallel_filter", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_thread_spawn", DOUBLE, &[DOUBLE]);
+
     // ========== jsonwebtoken / JWT ==========
     module.declare_function("js_jwt_decode", I64, &[I64]);
     module.declare_function("js_jwt_sign", I64, &[I64, I64, DOUBLE, I64]);
@@ -970,7 +1093,11 @@ pub fn declare_stdlib_ffi(module: &mut LlModule) {
     module.declare_function("js_axios_get", I64, &[I64]);
     module.declare_function("js_axios_post", I64, &[I64, I64]);
     module.declare_function("js_axios_put", I64, &[I64, I64]);
+    module.declare_function("js_axios_patch", I64, &[I64, I64]);
     module.declare_function("js_axios_request", I64, &[I64]);
+    module.declare_function("js_axios_response_status", DOUBLE, &[I64]);
+    module.declare_function("js_axios_response_status_text", I64, &[I64]);
+    module.declare_function("js_axios_response_data", I64, &[I64]);
 
     // ========== sharp / image ==========
     module.declare_function("js_sharp_blur", I64, &[I64, DOUBLE]);
@@ -1064,17 +1191,33 @@ pub fn declare_stdlib_ffi(module: &mut LlModule) {
     module.declare_function("js_cheerio_selection_to_array", I64, &[I64]);
 
     // ========== URL / URLSearchParams ==========
+    // Rust runtime signatures (see crates/perry-runtime/src/url.rs):
+    //   js_url_new(*mut StringHeader)                         -> *mut ObjectHeader
+    //   js_url_new_with_base(*mut StringHeader, *mut ...)     -> *mut ObjectHeader
+    //   js_url_get_{href,pathname,protocol,host,hostname,port,search,hash,origin,search_params}
+    //     (*mut ObjectHeader)                                  -> f64 (NaN-boxed string)
+    //   js_url_search_params_new(*mut StringHeader)            -> *mut ObjectHeader
+    //   js_url_search_params_new_empty()                       -> *mut ObjectHeader
+    //   js_url_search_params_get(*mut ObjectHeader, *mut StringHeader)
+    //                                                          -> *mut StringHeader (null if missing)
+    //   js_url_search_params_has(*mut ObjectHeader, *mut StringHeader)
+    //                                                          -> f64 (0.0 or 1.0)
+    //   js_url_search_params_set/append(*mut ObjectHeader, *mut ..., *mut ...) -> void
+    //   js_url_search_params_delete(*mut ObjectHeader, *mut StringHeader)      -> void
+    //   js_url_search_params_to_string(*mut ObjectHeader)     -> *mut StringHeader
+    //   js_url_search_params_get_all(*mut ObjectHeader, *mut StringHeader)
+    //                                                          -> f64 (NaN-boxed array)
     module.declare_function("js_url_file_url_to_path", DOUBLE, &[DOUBLE]);
-    module.declare_function("js_url_get_hash", I64, &[I64]);
-    module.declare_function("js_url_get_host", I64, &[I64]);
-    module.declare_function("js_url_get_hostname", I64, &[I64]);
-    module.declare_function("js_url_get_href", I64, &[I64]);
-    module.declare_function("js_url_get_origin", I64, &[I64]);
-    module.declare_function("js_url_get_pathname", I64, &[I64]);
-    module.declare_function("js_url_get_port", I64, &[I64]);
-    module.declare_function("js_url_get_protocol", I64, &[I64]);
-    module.declare_function("js_url_get_search", I64, &[I64]);
-    module.declare_function("js_url_get_search_params", I64, &[I64]);
+    module.declare_function("js_url_get_hash", DOUBLE, &[I64]);
+    module.declare_function("js_url_get_host", DOUBLE, &[I64]);
+    module.declare_function("js_url_get_hostname", DOUBLE, &[I64]);
+    module.declare_function("js_url_get_href", DOUBLE, &[I64]);
+    module.declare_function("js_url_get_origin", DOUBLE, &[I64]);
+    module.declare_function("js_url_get_pathname", DOUBLE, &[I64]);
+    module.declare_function("js_url_get_port", DOUBLE, &[I64]);
+    module.declare_function("js_url_get_protocol", DOUBLE, &[I64]);
+    module.declare_function("js_url_get_search", DOUBLE, &[I64]);
+    module.declare_function("js_url_get_search_params", DOUBLE, &[I64]);
     module.declare_function("js_url_new", I64, &[I64]);
     module.declare_function("js_url_new_with_base", I64, &[I64, I64]);
     module.declare_function("js_url_search_params_append", VOID, &[I64, I64, I64]);
@@ -1155,7 +1298,7 @@ pub fn declare_stdlib_ffi(module: &mut LlModule) {
     module.declare_function("js_commander_new", I64, &[]);
     module.declare_function("js_commander_option", I64, &[I64, I64, I64, I64]);
     module.declare_function("js_commander_opts", I64, &[I64]);
-    module.declare_function("js_commander_parse", I64, &[I64]);
+    module.declare_function("js_commander_parse", I64, &[I64, DOUBLE]);
     module.declare_function("js_commander_required_option", I64, &[I64, I64, I64, I64]);
     module.declare_function("js_commander_version", I64, &[I64, I64]);
 
@@ -1224,17 +1367,44 @@ pub fn declare_stdlib_ffi(module: &mut LlModule) {
 
     // ========== Decimal.js ==========
     module.declare_function("js_decimal_abs", I64, &[I64]);
+    module.declare_function("js_decimal_ceil", I64, &[I64]);
+    module.declare_function("js_decimal_cmp", DOUBLE, &[I64, I64]);
+    module.declare_function("js_decimal_cmp_value", DOUBLE, &[I64, DOUBLE]);
+    module.declare_function("js_decimal_coerce_to_handle", I64, &[DOUBLE]);
     module.declare_function("js_decimal_div", I64, &[I64, I64]);
+    module.declare_function("js_decimal_div_number", I64, &[I64, DOUBLE]);
+    module.declare_function("js_decimal_div_value", I64, &[I64, DOUBLE]);
     module.declare_function("js_decimal_eq", DOUBLE, &[I64, I64]);
+    module.declare_function("js_decimal_eq_value", DOUBLE, &[I64, DOUBLE]);
+    module.declare_function("js_decimal_floor", I64, &[I64]);
     module.declare_function("js_decimal_from_number", I64, &[DOUBLE]);
     module.declare_function("js_decimal_from_string", I64, &[I64]);
     module.declare_function("js_decimal_gt", DOUBLE, &[I64, I64]);
+    module.declare_function("js_decimal_gt_value", DOUBLE, &[I64, DOUBLE]);
+    module.declare_function("js_decimal_gte", DOUBLE, &[I64, I64]);
+    module.declare_function("js_decimal_gte_value", DOUBLE, &[I64, DOUBLE]);
+    module.declare_function("js_decimal_is_negative", DOUBLE, &[I64]);
+    module.declare_function("js_decimal_is_positive", DOUBLE, &[I64]);
+    module.declare_function("js_decimal_is_zero", DOUBLE, &[I64]);
     module.declare_function("js_decimal_lt", DOUBLE, &[I64, I64]);
+    module.declare_function("js_decimal_lt_value", DOUBLE, &[I64, DOUBLE]);
+    module.declare_function("js_decimal_lte", DOUBLE, &[I64, I64]);
+    module.declare_function("js_decimal_lte_value", DOUBLE, &[I64, DOUBLE]);
     module.declare_function("js_decimal_minus", I64, &[I64, I64]);
+    module.declare_function("js_decimal_minus_number", I64, &[I64, DOUBLE]);
+    module.declare_function("js_decimal_minus_value", I64, &[I64, DOUBLE]);
+    module.declare_function("js_decimal_mod", I64, &[I64, I64]);
+    module.declare_function("js_decimal_mod_value", I64, &[I64, DOUBLE]);
+    module.declare_function("js_decimal_neg", I64, &[I64]);
     module.declare_function("js_decimal_plus", I64, &[I64, I64]);
     module.declare_function("js_decimal_plus_number", I64, &[I64, DOUBLE]);
+    module.declare_function("js_decimal_plus_value", I64, &[I64, DOUBLE]);
+    module.declare_function("js_decimal_pow", I64, &[I64, DOUBLE]);
+    module.declare_function("js_decimal_round", I64, &[I64]);
     module.declare_function("js_decimal_sqrt", I64, &[I64]);
     module.declare_function("js_decimal_times", I64, &[I64, I64]);
+    module.declare_function("js_decimal_times_number", I64, &[I64, DOUBLE]);
+    module.declare_function("js_decimal_times_value", I64, &[I64, DOUBLE]);
     module.declare_function("js_decimal_to_fixed", I64, &[I64, DOUBLE]);
     module.declare_function("js_decimal_to_number", DOUBLE, &[I64]);
     module.declare_function("js_decimal_to_string", I64, &[I64]);

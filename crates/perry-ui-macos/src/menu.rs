@@ -67,7 +67,7 @@ fn str_from_header(ptr: *const u8) -> &'static str {
     }
     unsafe {
         let header = ptr as *const crate::string_header::StringHeader;
-        let len = (*header).length as usize;
+        let len = (*header).byte_len as usize;
         let data = ptr.add(std::mem::size_of::<crate::string_header::StringHeader>());
         std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
     }

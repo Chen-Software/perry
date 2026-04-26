@@ -510,10 +510,18 @@ fn collect_closure_refs_and_writes_in_expr(
         Expr::Unary { operand, .. } => {
             collect_closure_refs_and_writes_in_expr(operand, refs, writes);
         }
-        Expr::Update { id, .. } => {
-            writes.insert(*id);
-            refs.insert(*id);
-        }
+        // Update at this level is outside any closure body — the walker only
+        // recurses INTO closures via the Closure arm below, so seeing an
+        // Update here means it's a top-level mutation, not a captured one.
+        // The previous implementation inserted unconditionally, which made
+        // every plain `for (let i = ...; ...; i++)` body's `i` look like a
+        // closure-captured-and-mutated var and forced a box allocation. The
+        // box turned the loop counter into a `bl js_box_get` / `bl js_box_set`
+        // pair per iteration even when no closure existed in the function.
+        // Drop the insertion; the captured-inside-closure case is still
+        // handled by `collect_write_ids_in_stmts` triggered from the
+        // Expr::Closure arm above.
+        Expr::Update { .. } => {}
         Expr::Call { callee, args, .. } => {
             collect_closure_refs_and_writes_in_expr(callee, refs, writes);
             for a in args {
@@ -1066,7 +1074,25 @@ fn refine_type_from_init_simple(init: &perry_hir::Expr) -> Option<perry_types::T
         | Expr::StringMatchAll { .. } => Some(Type::Array(Box::new(Type::Any))),
         Expr::String(_) | Expr::ArrayJoin { .. } | Expr::StringCoerce(_) => Some(Type::String),
         Expr::Bool(_) => Some(Type::Boolean),
+        Expr::BigInt(_) | Expr::BigIntCoerce(_) => Some(Type::BigInt),
         Expr::New { class_name, .. } => Some(Type::Named(class_name.clone())),
+        // `const ta = new Int32Array(n)` — refine to Named("Int32Array") so
+        // that `.length` and method dispatch use the typed-array fast paths.
+        Expr::TypedArrayNew { kind, .. } => {
+            let name = match *kind {
+                0 => "Int8Array",
+                1 => "Uint8Array",
+                2 => "Int16Array",
+                3 => "Uint16Array",
+                4 => "Int32Array",
+                5 => "Uint32Array",
+                6 => "Float32Array",
+                7 => "Float64Array",
+                8 => "Uint8ClampedArray",
+                _ => return None,
+            };
+            Some(Type::Named(name.to_string()))
+        }
         _ => None,
     }
 }

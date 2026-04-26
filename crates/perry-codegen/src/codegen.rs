@@ -39,7 +39,7 @@ use crate::module::LlModule;
 use crate::runtime_decls;
 use crate::stmt;
 use crate::strings::StringPool;
-use crate::types::{DOUBLE, I32, I64, LlvmType, PTR, VOID};
+use crate::types::{DOUBLE, I32, I64, I8, LlvmType, PTR, VOID};
 
 /// Options controlling code generation for a single module.
 #[derive(Debug, Clone, Default)]
@@ -167,10 +167,31 @@ pub struct ImportedClass {
     pub constructor_param_count: usize,
     /// Method names defined on this class.
     pub method_names: Vec<String>,
+    /// Getter property names. Without these, cross-module `obj.prop` for a
+    /// getter property silently falls through to `undefined` because the
+    /// dispatch site at `expr.rs::PropertyGet` looks up `(class, "__get_prop")`
+    /// in `method_names`, which previously had no cross-module entry.
+    pub getter_names: Vec<String>,
+    /// Setter property names. Symmetric to `getter_names` for `obj.prop = v`.
+    pub setter_names: Vec<String>,
     /// Parent class name, if any.
     pub parent_name: Option<String>,
     /// Field names in declaration order (for allocation sizing and field index mapping).
     pub field_names: Vec<String>,
+    /// Field types in the same order as `field_names`. Required for
+    /// `receiver_class_name` to walk through chained `obj.a.b.c` accesses
+    /// where `a` and `b` are fields whose declared type is itself an
+    /// imported class. Without this, every field access on an imported
+    /// class returns `Type::Any` and the dispatch chain breaks at the
+    /// first hop. Empty (or filled with `Type::Any`) is the legacy fallback
+    /// when the source side hasn't been updated to populate it yet.
+    pub field_types: Vec<perry_types::Type>,
+    /// Class id assigned by the source module. When present, the importing
+    /// module reuses this id in its `class_ids` map so that `instanceof`
+    /// on an imported class compares against the same id stamped onto
+    /// instances by the source module's constructor. `None` falls back
+    /// to a freshly-assigned id (legacy behavior).
+    pub source_class_id: Option<u32>,
 }
 
 /// Cross-module import context, bundled into a single struct to avoid
@@ -207,12 +228,40 @@ pub(crate) struct CrossModuleCtx {
     pub i18n: Option<crate::expr::I18nLowerCtx>,
     /// Names of imports that are exported variables (not functions).
     pub imported_vars: std::collections::HashSet<String>,
+    /// Whether perry-stdlib will be linked into the final binary. When
+    /// false, compile_module_entry skips the `js_stdlib_init_dispatch()`
+    /// call in main's prologue because only the runtime is linked and
+    /// the stub symbol isn't pulled in (runtime is built with the
+    /// `stdlib` feature on when perry-stdlib depends on it, which
+    /// excludes the cfg-gated stub in `perry-runtime/src/stdlib_stubs.rs`).
+    pub needs_stdlib: bool,
     /// Compile-time constant values for module globals. Maps LocalId → f64
     /// for variables like `__platform__` whose value is known at compile time.
     /// Used by `lower_if` to constant-fold platform checks and skip emitting
     /// dead branches (which may reference FFI functions that don't exist on
     /// the current target).
     pub compile_time_constants: std::collections::HashMap<u32, f64>,
+    /// Functions with a 3-param clamp pattern: fid → true. Call sites
+    /// emit `@llvm.smax.i32` + `@llvm.smin.i32` instead of a function call.
+    pub clamp3_functions: std::collections::HashSet<u32>,
+    /// Functions with clampU8 pattern (1 param, clamp to [0, 255]).
+    pub clamp_u8_functions: std::collections::HashSet<u32>,
+    /// Functions that always return integer (all returns end with `| 0` etc).
+    pub returns_int_functions: std::collections::HashSet<u32>,
+    /// (Issue #50) Module-level `const` 2D int arrays folded into flat
+    /// `[N x i32]` LLVM constants. Maps local_id → info. Populated by
+    /// scanning `hir.init`; threaded through every FnCtx so the IndexGet
+    /// lowering can intercept `X[i][j]` / `krow[j]` patterns.
+    pub flat_const_arrays: std::collections::HashMap<u32, crate::expr::FlatConstInfo>,
+    /// FFI manifest signatures from `package.json`'s `nativeLibrary.functions`.
+    /// Maps function name → (param_kinds, return_kind) where each kind is
+    /// `"i64"`, `"f64"`, `"void"`, `"string"`, or `"ptr"`. Without this map,
+    /// `lower_call` falls back to a heuristic that puts all numeric args/returns
+    /// into d-registers (DOUBLE) — incorrect for handle-returning C functions
+    /// like `hone_editor_create() -> *mut EditorView` whose actual ABI returns
+    /// the pointer in `x0`, not `d0`. The manifest tells us when to use
+    /// `i64`/`I64` so the LLVM declaration matches the platform C ABI.
+    pub ffi_signatures: std::collections::HashMap<String, (Vec<String>, String)>,
 }
 
 /// Compile a Perry HIR module to an object file via LLVM IR.
@@ -271,11 +320,19 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     // starting at 1 (0 is reserved for anonymous object literals).
     // Used by lower_new to tag the object header so virtual
     // dispatch and instanceof can read the actual class at runtime.
+    //
+    // We use the HIR `ClassId` (assigned by `LoweringContext::fresh_class`)
+    // rather than a per-module enumerate index, because in multi-module
+    // compilation the HIR counter is shared across modules (compile.rs
+    // threads `next_class_id` through `lower_module_with_class_id_and_types`).
+    // Importing modules look up imported classes via their HIR id (passed
+    // as `ImportedClass.source_class_id`); using the HIR id here too means
+    // the source module stamps the same id on `new C()` instances that
+    // importing modules check against in `e instanceof C`.
     let mut class_ids: HashMap<String, u32> = hir
         .classes
         .iter()
-        .enumerate()
-        .map(|(i, c)| (c.name.clone(), (i as u32) + 1))
+        .map(|c| (c.name.clone(), c.id))
         .collect();
 
     // Enum lookup table for `Expr::EnumMember`. Each (enum_name,
@@ -310,9 +367,16 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     // metadata for dispatch and the extern LLVM declarations for the
     // linker.
     let mut imported_class_stubs: Vec<perry_hir::Class> = Vec::new();
-    let next_class_id = (hir.classes.len() as u32) + 1;
+    // Fallback id range for imported classes whose source_class_id is None
+    // (legacy callers that didn't populate it). Start above the max local
+    // HIR id so we don't collide with local class ids.
+    let next_class_id = hir.classes.iter().map(|c| c.id).max().unwrap_or(0) + 1;
     for (idx, ic) in opts.imported_classes.iter().enumerate() {
-        let class_id = next_class_id + (idx as u32);
+        // Prefer the source module's class id so `instanceof` on an
+        // imported class matches the id stamped onto real instances
+        // by the source module's constructor. Fall back to a freshly
+        // assigned id when the caller didn't pass one.
+        let class_id = ic.source_class_id.unwrap_or_else(|| next_class_id + (idx as u32));
         let effective_name = ic.local_alias.as_deref().unwrap_or(&ic.name);
 
         // Skip if already defined locally (local definition takes precedence).
@@ -337,9 +401,14 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
             extends: None,
             extends_name: ic.parent_name.clone(),
             native_extends: None,
-            fields: ic.field_names.iter().map(|name| perry_hir::ClassField {
+            fields: ic.field_names.iter().enumerate().map(|(i, name)| perry_hir::ClassField {
                 name: name.clone(),
-                ty: perry_types::Type::Any,
+                // Use the real declared type when the source-side
+                // populated `field_types`; fall back to `Any` otherwise.
+                // Real types let `receiver_class_name`'s `PropertyGet`
+                // recursion identify chained imported-class field
+                // dispatch (e.g. `vm.viewport.scroll.scrollTop`).
+                ty: ic.field_types.get(i).cloned().unwrap_or(perry_types::Type::Any),
                 init: None,
                 is_private: false,
                 is_readonly: false,
@@ -445,7 +514,12 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         class_keys_globals_map.insert(c.name.clone(), global_name.clone());
         class_keys_init_data.push((global_name, packed_keys, total_field_count));
     }
-    // Same naming convention for IMPORTED class stubs.
+    // Same naming convention for IMPORTED class stubs. Pack the field
+    // names so the importing module allocates the right inline slot count
+    // and the slot index for each field matches what the source module's
+    // constructor wrote. Without this, the object is allocated 0 inline
+    // slots and `this.field = v` in the cross-module constructor writes
+    // past the object, while reads on the importing side return undefined.
     for c in imported_class_stubs.iter() {
         if hir.classes.iter().any(|local| local.name == c.name) {
             continue;
@@ -457,15 +531,23 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         );
         llmod.add_internal_global(&global_name, I64, "0");
         class_keys_globals_map.insert(c.name.clone(), global_name.clone());
-        class_keys_init_data.push((global_name, String::new(), 0));
+        let mut packed_keys = String::new();
+        for f in &c.fields {
+            packed_keys.push_str(&f.name);
+            packed_keys.push('\0');
+        }
+        class_keys_init_data.push((global_name, packed_keys, c.fields.len() as u32));
     }
 
     // Derive __platform__ number from target triple:
-    //   0 = macOS, 1 = iOS, 2 = Android, 3 = Windows, 4 = Linux, 5 = Web
+    //   0 = macOS, 1 = iOS, 2 = Android, 3 = Windows, 4 = Linux,
+    //   5 = Web, 6 = tvOS, 7 = watchOS, 8 = visionOS
     let platform_number: f64 = {
         let t = triple.to_lowercase();
-        if t.contains("ios") { 1.0 }
-        else if t.contains("tvos") { 1.0 }
+        if t.contains("visionos") || t.contains("xros") { 8.0 }
+        else if t.contains("watchos") { 7.0 }
+        else if t.contains("ios") { 1.0 }
+        else if t.contains("tvos") { 6.0 }
         else if t.contains("android") { 2.0 }
         else if t.contains("windows") || t.contains("mingw") || t.contains("msvc") { 3.0 }
         else if t.contains("linux") { 4.0 }
@@ -517,7 +599,103 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
             },
         ),
         imported_vars: opts.imported_vars,
+        needs_stdlib: opts.needs_stdlib,
         compile_time_constants,
+        clamp3_functions: hir.functions.iter()
+            .filter_map(|f| crate::collectors::detect_clamp3(f).map(|_| f.id))
+            .collect(),
+        clamp_u8_functions: hir.functions.iter()
+            .filter(|f| crate::collectors::detect_clamp_u8(f))
+            .map(|f| f.id)
+            .collect(),
+        returns_int_functions: hir.functions.iter()
+            .filter(|f| crate::collectors::returns_integer(f))
+            .map(|f| f.id)
+            .collect(),
+        flat_const_arrays: {
+            // Issue #50: fold module-level `const X: number[][] = [[int, ...], ...]`
+            // into a flat `[N x i32]` LLVM constant so `X[i][j]` / `krow[j]` can
+            // load directly from `.rodata` instead of chasing the arena array
+            // header. Qualifying locals are `Let { mutable: false }`, have a
+            // rectangular int-literal 2D init, and are never mutated anywhere
+            // in the module (LocalSet/Update/IndexSet/mutating methods).
+            let mut map: std::collections::HashMap<u32, crate::expr::FlatConstInfo> =
+                std::collections::HashMap::new();
+            for s in &hir.init {
+                if let perry_hir::Stmt::Let {
+                    id, init: Some(init), mutable: false, ..
+                } = s
+                {
+                    if let Some((rows, cols, vals)) =
+                        crate::expr::try_flat_const_2d_int(init)
+                    {
+                        let mut mutated = false;
+                        if crate::collectors::has_any_mutation(&hir.init, *id) {
+                            mutated = true;
+                        }
+                        if !mutated {
+                            for f in &hir.functions {
+                                if crate::collectors::has_any_mutation(&f.body, *id) {
+                                    mutated = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if !mutated {
+                            'outer: for c in &hir.classes {
+                                for m in &c.methods {
+                                    if crate::collectors::has_any_mutation(&m.body, *id) {
+                                        mutated = true;
+                                        break 'outer;
+                                    }
+                                }
+                                if let Some(ctor) = &c.constructor {
+                                    if crate::collectors::has_any_mutation(&ctor.body, *id) {
+                                        mutated = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if !mutated {
+                            let gname = format!("perry_flat_{}__{}", module_prefix, id);
+                            let init_str = format!(
+                                "[{}]",
+                                vals.iter()
+                                    .map(|v| format!("i32 {}", v))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            );
+                            let ty = format!("[{} x i32]", rows * cols);
+                            llmod.add_raw_global(format!(
+                                "@{} = private unnamed_addr constant {} {}",
+                                gname, ty, init_str
+                            ));
+                            map.insert(*id, crate::expr::FlatConstInfo {
+                                global_name: gname,
+                                rows,
+                                cols,
+                            });
+                        }
+                    }
+                }
+            }
+            map
+        },
+        // FFI manifest: each `native_library_functions` entry is
+        // `(function_name, param_kinds, return_kind)` from the package.json
+        // `nativeLibrary.functions` declaration. Build a name → (params, returns)
+        // map so `lower_call` can emit the correct LLVM signature for direct
+        // calls to native C/Rust functions (matters when the C ABI differs
+        // from Perry's all-double default — e.g. `*mut View` returns in `x0`,
+        // not `d0`).
+        ffi_signatures: opts
+            .native_library_functions
+            .iter()
+            .map(|(name, params, ret)| {
+                (name.clone(), (params.clone(), ret.clone()))
+            })
+            .collect(),
     };
 
     // Module-level globals registry. Pre-walk:
@@ -780,6 +958,45 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
             llmod.declare_function(&llvm_fn, DOUBLE, &param_types);
         }
 
+        // Cross-module getters. The dispatch site at
+        // `expr.rs::PropertyGet` looks up `(class, "__get_<prop>")` in
+        // `method_names`; without this loop the entry is missing for
+        // imported classes and `obj.prop` silently falls through to
+        // `undefined`. The source module mangles getters as
+        // `perry_method_<src>__<class>____get_get_<prop>` (the inner
+        // `get_<prop>` is the HIR function name from
+        // `lower_getter_method`, then codegen prepends `__get_`).
+        for prop in &ic.getter_names {
+            let inner_fn_name = format!("get_{}", prop);
+            let llvm_fn = scoped_method_name(
+                &sanitize(src),
+                &ic.name,
+                &format!("__get_{}", inner_fn_name),
+            );
+            method_names
+                .entry((effective_name.to_string(), format!("__get_{}", prop)))
+                .or_insert_with(|| llvm_fn.clone());
+            // Getters take only `this` (NaN-boxed double) and return double.
+            llmod.declare_function(&llvm_fn, DOUBLE, &[DOUBLE]);
+        }
+
+        // Cross-module setters. Symmetric to getters: source-side
+        // mangling is `perry_method_<src>__<class>____set_set_<prop>`.
+        for prop in &ic.setter_names {
+            let inner_fn_name = format!("set_{}", prop);
+            let llvm_fn = scoped_method_name(
+                &sanitize(src),
+                &ic.name,
+                &format!("__set_{}", inner_fn_name),
+            );
+            method_names
+                .entry((effective_name.to_string(), format!("__set_{}", prop)))
+                .or_insert_with(|| llvm_fn.clone());
+            // Setters take `this` plus the new value, both NaN-boxed
+            // doubles, and return double (the assigned value).
+            llmod.declare_function(&llvm_fn, DOUBLE, &[DOUBLE, DOUBLE]);
+        }
+
         // Constructor: declared as
         // `<source_prefix>__<class>_constructor(i64 this, double arg0, …) → void`
         let ctor_fn = format!(
@@ -968,9 +1185,12 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
                 let i64_name = format!("{}_i64", llvm_name);
                 crate::collectors::emit_i64_function(&mut llmod, f, &i64_name);
                 // Emit the f64 wrapper that calls the i64 version.
+                // Mark as alwaysinline so LLVM exposes the integer ops
+                // to callers — critical for vectorizing clamp patterns.
                 let params: Vec<(LlvmType, String)> = f
                     .params.iter().map(|p| (DOUBLE, format!("%arg{}", p.id))).collect();
                 let wrapper = llmod.define_function(llvm_name, DOUBLE, params);
+                wrapper.force_inline = true;
                 let _ = wrapper.create_block("entry");
                 let blk = wrapper.block_mut(0).unwrap();
                 let mut i64_args: Vec<(LlvmType, String)> = Vec::new();
@@ -1253,6 +1473,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         &module_boxed_vars,
         &closure_rest_params,
         &cross_module,
+        &opts.output_type,
     )
     .with_context(|| format!("lowering entry of module '{}'", hir.name))?;
 
@@ -1262,6 +1483,16 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     // The function name is scoped by module prefix so multiple modules
     // can each have their own string-pool init without colliding.
     emit_string_pool(&mut llmod, &strings, &module_prefix, &class_keys_init_data, &class_ids, &class_table);
+
+    // Emit the buffer alias-scope metadata once per module, covering every
+    // scope id allocated across compile_function / compile_closure /
+    // compile_method / compile_static_method / compile_module_entry. Must
+    // run AFTER all function compilation so the counter reflects the true
+    // total — otherwise functions whose scope ids exceed the init
+    // function's count emit `!alias.scope !N` references with no matching
+    // metadata definition (issue #71).
+    let total_buffer_scopes = llmod.buffer_alias_counter;
+    emit_buffer_alias_metadata(&mut llmod, total_buffer_scopes);
 
     let ll_text = llmod.to_ir();
     log::debug!(
@@ -1283,6 +1514,49 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
 }
 
 /// Compile a single user function into the module.
+/// Shadow-stack push/pop + slot-set emission for every user
+/// function. Default ON as of Phase D part 2 (v0.5.238); set
+/// `PERRY_SHADOW_STACK=0`/`off`/`false` to disable for bisection.
+/// Cached at first call so subsequent compile_* calls skip the
+/// env-var lookup.
+///
+/// Why on by default now: the shadow stack precisely covers every
+/// pointer-typed local in compiled JS frames, complementing the
+/// conservative C-stack scan. With Phase A complete and the GC
+/// tracer consuming the shadow stack as a parallel root source
+/// (v0.5.221), enabling it is a strict-improvement default —
+/// fewer over-promoted objects in generational mode, no change
+/// in observed correctness, modest per-function-entry overhead
+/// (one frame_push call + N slot stores at safepoints) that's
+/// invisible on every measured benchmark. Phase D part 2 then
+/// uses the shadow stack's authoritative JS-frame coverage to
+/// shrink the conservative scanner — which only makes sense once
+/// the shadow stack is guaranteed to be live.
+fn shadow_stack_enabled() -> bool {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| !matches!(
+        std::env::var("PERRY_SHADOW_STACK").as_deref(),
+        Ok("0") | Ok("off") | Ok("false")
+    ))
+}
+
+/// Gen-GC Phase C2 emission gate. PERRY_WRITE_BARRIERS=1 / on /
+/// true → emit `js_write_barrier(parent_bits, child_bits)` after
+/// every heap-store site. Default OFF — barriers cost a function
+/// call per store and the runtime entry's old-vs-young range scan
+/// is O(blocks). C3 will replace the range scan with a single
+/// GC_FLAG_YOUNG bit-test, at which point flipping the default
+/// becomes attractive.
+pub(crate) fn write_barriers_enabled() -> bool {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| matches!(
+        std::env::var("PERRY_WRITE_BARRIERS").as_deref(),
+        Ok("1") | Ok("on") | Ok("true")
+    ))
+}
+
 fn compile_function(
     llmod: &mut LlModule,
     f: &Function,
@@ -1315,7 +1589,32 @@ fn compile_function(
         .map(|p| (DOUBLE, format!("%arg{}", p.id)))
         .collect();
 
+    let ic_base = llmod.ic_counter;
+    let buffer_alias_base = llmod.buffer_alias_counter;
     let lf = llmod.define_function(&llvm_name, DOUBLE, params);
+
+    // Gen-GC Phase A sub-phase 3a: opt-in shadow-frame emission
+    // for user functions. Pointer-typed param + local slots are
+    // assigned pre-lowering via `collect_pointer_typed_locals`;
+    // the frame is sized to hold all of them. Sub-phase 3b emits
+    // the slot-set calls at Let/LocalSet sites to actually
+    // populate the frame with live values; today the slots stay
+    // zero (the tracer doesn't consume them yet — Phase A ship
+    // criterion is "shadow stack is built but not yet consumed").
+    let shadow_slot_map = if shadow_stack_enabled() {
+        let m = crate::collectors::collect_pointer_typed_locals(&f.params, &f.body);
+        lf.enable_shadow_frame(m.len() as u32);
+        m
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    // Small leaf functions (≤ 8 statements) get alwaysinline so LLVM
+    // exposes their operations to the caller's optimizer context — critical
+    // for vectorizing clamp helpers and similar patterns.
+    if f.body.len() <= 8 && !f.is_async && !f.is_generator {
+        lf.force_inline = true;
+    }
     let _ = lf.create_block("entry");
 
     // Store each param into an alloca slot, collecting LocalId → slot
@@ -1353,7 +1652,24 @@ fn compile_function(
 
     // Pre-walk: which locals are provably integer-valued? Used by
     // `BinaryOp::Mod` to emit integer modulo instead of libm `fmod()`.
-    let integer_locals = crate::collectors::collect_integer_locals(&f.body);
+    let clamp_fn_ids: std::collections::HashSet<u32> = cross_module.clamp3_functions
+        .union(&cross_module.clamp_u8_functions).chain(cross_module.returns_int_functions.iter()).copied().collect();
+    let integer_locals = crate::collectors::collect_integer_locals(&f.body, &cross_module.flat_const_arrays.keys().copied().collect(), &clamp_fn_ids);
+    // Issue #140 gate: locals that appear in an `arr[i]` / `uint8[i]` / `arr.at(i)`
+    // index subtree. Pure accumulators skip the Let-site i32 shadow so the body
+    // stays a single-f64-alloca chain that LLVM's autovectorizer can widen.
+    let index_used_locals = crate::collectors::collect_index_used_locals(&f.body);
+
+    // Pre-walk: which `let x = new Class(...)` locals never escape?
+    let non_escaping_news = crate::collectors::collect_non_escaping_news(
+        &f.body, &boxed_vars, module_globals, classes,
+    );
+    let non_escaping_arrays = crate::collectors::collect_non_escaping_arrays(
+        &f.body, &boxed_vars, module_globals,
+    );
+    let non_escaping_object_literals = crate::collectors::collect_non_escaping_object_literals(
+        &f.body, &boxed_vars, module_globals,
+    );
 
     let mut ctx = FnCtx {
         func: lf,
@@ -1389,19 +1705,74 @@ fn compile_function(
         type_aliases: &cross_module.type_aliases,
         imported_func_param_counts: &cross_module.imported_func_param_counts,
         imported_func_return_types: &cross_module.imported_func_return_types,
+        ffi_signatures: &cross_module.ffi_signatures,
+        try_depth: 0,
         pending_declares: Vec::new(),
         integer_locals: &integer_locals,
+        shadow_slot_map,
         arena_state_slot: None,
         class_keys_slots: HashMap::new(),
         cached_lengths: HashMap::new(),
         bounded_index_pairs: Vec::new(),
             i32_counter_slots: HashMap::new(),
+        index_used_locals: &index_used_locals,
         i18n: &cross_module.i18n,
         local_class_aliases: HashMap::new(),
         local_id_to_name: HashMap::new(),
         imported_vars: &cross_module.imported_vars,
         compile_time_constants: &cross_module.compile_time_constants,
+        scalar_replaced: std::collections::HashMap::new(),
+        scalar_replaced_arrays: std::collections::HashMap::new(),
+        scalar_ctor_target: Vec::new(),
+        non_escaping_news,
+        non_escaping_arrays,
+        non_escaping_object_literals,
+        flat_const_arrays: &cross_module.flat_const_arrays,
+        array_row_aliases: HashMap::new(),
+        clamp3_functions: &cross_module.clamp3_functions,
+        clamp_u8_functions: &cross_module.clamp_u8_functions,
+        ic_site_counter: ic_base,
+        ic_globals: Vec::new(),
+        typed_parse_rodata: Vec::new(),
+        typed_parse_counter: 0,
+        buffer_data_slots: HashMap::new(),
+        buffer_alias_base,
     };
+
+    // Issue #92 follow-up: pre-register `buffer_data_slots` entries for
+    // `Buffer`-typed function parameters so that the readInt32BE/etc.
+    // intrinsic fast path in `lower_call.rs` fires on
+    // `function decode(row: Buffer) { row.readInt32BE(off) }` — the real
+    // Postgres-driver hot-path shape, not just the `const buf = Buffer.alloc(N)`
+    // micro-benchmark. Skipped when the param is reassigned (has_any_mutation
+    // covers LocalSet/Update/ARRAY_MUTATORS — `buf = ...`, `buf.fill(...)` etc.)
+    // because a cached data_ptr would go stale, and skipped for boxed params
+    // (same reason via cross-closure mutation). Uint8Array-typed params are
+    // deliberately excluded: a pre-existing crash surfaces when the same
+    // program defines both a Buffer-param and a Uint8Array-param function and
+    // then invokes them in sequence (reproducible on main without any of
+    // this extension's changes). Tracked separately; Buffer coverage alone
+    // hits the Postgres decode path which is the target workload here.
+    for p in &f.params {
+        let is_buffer_typed = matches!(
+            &p.ty,
+            perry_types::Type::Named(n) if n == "Buffer"
+        );
+        if !is_buffer_typed { continue; }
+        if ctx.boxed_vars.contains(&p.id) { continue; }
+        if crate::collectors::has_any_mutation(&f.body, p.id) { continue; }
+        let Some(param_slot) = ctx.locals.get(&p.id).cloned() else { continue };
+        let blk = ctx.block();
+        let arg_val = blk.load(DOUBLE, &param_slot);
+        let handle = crate::expr::unbox_to_i64(blk, &arg_val);
+        let handle_ptr = blk.inttoptr(I64, &handle);
+        let data_ptr = blk.gep(I8, &handle_ptr, &[(I32, "8")]);
+        let buf_slot = ctx.func.alloca_entry(PTR);
+        ctx.block().store(PTR, &data_ptr, &buf_slot);
+        let scope_idx = ctx.buffer_alias_base + ctx.buffer_data_slots.len() as u32;
+        ctx.buffer_data_slots.insert(p.id, (buf_slot, scope_idx));
+    }
+
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of '{}'", f.name))?;
 
@@ -1420,10 +1791,22 @@ fn compile_function(
             ctx.block().ret(DOUBLE, "0.0");
         }
     }
+    let ic_globals = std::mem::take(&mut ctx.ic_globals);
+    let typed_parse_rodata = std::mem::take(&mut ctx.typed_parse_rodata);
+    let ic_end = ctx.ic_site_counter;
     let pending = std::mem::take(&mut ctx.pending_declares);
+    let buffer_alias_used = ctx.buffer_data_slots.len() as u32;
     drop(ctx); // releases &mut LlFunction borrow on llmod
+    llmod.ic_counter = ic_end;
+    llmod.buffer_alias_counter += buffer_alias_used;
     for (name, ret, params) in pending {
         llmod.declare_function(&name, ret, &params);
+    }
+    for ic_name in &ic_globals {
+        llmod.add_raw_global(format!("@{} = private global [2 x i64] zeroinitializer", ic_name));
+    }
+    for raw in &typed_parse_rodata {
+        llmod.add_raw_global(raw.clone());
     }
     Ok(())
 }
@@ -1464,15 +1847,16 @@ fn compile_closure(
 ) -> Result<()> {
     // Destructure the closure expression. We trust that the caller
     // passes only `Expr::Closure` here (from `collect_closures_*`).
-    let (params, body, captures, captures_this, enclosing_class) = match closure_expr {
+    let (params, body, captures, captures_this, enclosing_class, is_async) = match closure_expr {
         perry_hir::Expr::Closure {
             params,
             body,
             captures,
             captures_this,
             enclosing_class,
+            is_async,
             ..
-        } => (params, body, captures, *captures_this, enclosing_class.clone()),
+        } => (params, body, captures, *captures_this, enclosing_class.clone(), *is_async),
         _ => return Err(anyhow!("compile_closure: expected Expr::Closure")),
     };
 
@@ -1486,6 +1870,8 @@ fn compile_closure(
         llvm_params.push((DOUBLE, format!("%arg{}", p.id)));
     }
 
+    let ic_base = llmod.ic_counter;
+    let buffer_alias_base = llmod.buffer_alias_counter;
     let lf = llmod.define_function(&llvm_name, DOUBLE, llvm_params);
     let _ = lf.create_block("entry");
 
@@ -1586,7 +1972,20 @@ fn compile_closure(
     // the closure body just sees them via the capture mechanism.
     let closure_boxed_vars = module_boxed_vars.clone();
 
-    let integer_locals = crate::collectors::collect_integer_locals(body);
+    let clamp_fn_ids: std::collections::HashSet<u32> = cross_module.clamp3_functions
+        .union(&cross_module.clamp_u8_functions).chain(cross_module.returns_int_functions.iter()).copied().collect();
+    let integer_locals = crate::collectors::collect_integer_locals(body, &cross_module.flat_const_arrays.keys().copied().collect(), &clamp_fn_ids);
+    let index_used_locals = crate::collectors::collect_index_used_locals(body);
+
+    let non_escaping_news = crate::collectors::collect_non_escaping_news(
+        body, &closure_boxed_vars, module_globals, classes,
+    );
+    let non_escaping_arrays = crate::collectors::collect_non_escaping_arrays(
+        body, &closure_boxed_vars, module_globals,
+    );
+    let non_escaping_object_literals = crate::collectors::collect_non_escaping_object_literals(
+        body, &closure_boxed_vars, module_globals,
+    );
 
     let mut ctx = FnCtx {
         func: lf,
@@ -1607,11 +2006,14 @@ fn compile_closure(
         closure_captures,
         current_closure_ptr: Some("%this_closure".to_string()),
         enums,
-        // Closures don't surface their is_async on the body in the
-        // same way functions do. The closure-creation site emits
-        // them as plain double-returning functions; we set false
-        // here to skip the wrap-in-promise behaviour.
-        is_async_fn: false,
+        // Async closures (arrow functions declared `async () => ...`)
+        // must wrap their return values in `js_promise_resolved` so the
+        // call site sees a NaN-boxed Promise pointer — same contract as
+        // regular async functions. Consumers like the Fastify server
+        // runtime inspect the returned value with `js_is_promise` and
+        // break if a raw object pointer (or any non-Promise) is handed
+        // back. Issue #125.
+        is_async_fn: is_async,
         static_field_globals,
         class_ids,
         class_keys_globals: &cross_module.class_keys_globals,
@@ -1626,30 +2028,69 @@ fn compile_closure(
         type_aliases: &cross_module.type_aliases,
         imported_func_param_counts: &cross_module.imported_func_param_counts,
         imported_func_return_types: &cross_module.imported_func_return_types,
+        ffi_signatures: &cross_module.ffi_signatures,
+        try_depth: 0,
         pending_declares: Vec::new(),
         integer_locals: &integer_locals,
+        shadow_slot_map: std::collections::HashMap::new(),
         arena_state_slot: None,
         class_keys_slots: HashMap::new(),
         cached_lengths: HashMap::new(),
         bounded_index_pairs: Vec::new(),
             i32_counter_slots: HashMap::new(),
+        index_used_locals: &index_used_locals,
         i18n: &cross_module.i18n,
         local_class_aliases: HashMap::new(),
         local_id_to_name: HashMap::new(),
         imported_vars: &cross_module.imported_vars,
         compile_time_constants: &cross_module.compile_time_constants,
+        scalar_replaced: std::collections::HashMap::new(),
+        scalar_replaced_arrays: std::collections::HashMap::new(),
+        scalar_ctor_target: Vec::new(),
+        non_escaping_news,
+        non_escaping_arrays,
+        non_escaping_object_literals,
+        flat_const_arrays: &cross_module.flat_const_arrays,
+        array_row_aliases: HashMap::new(),
+        clamp3_functions: &cross_module.clamp3_functions,
+        clamp_u8_functions: &cross_module.clamp_u8_functions,
+        ic_site_counter: ic_base,
+        ic_globals: Vec::new(),
+        typed_parse_rodata: Vec::new(),
+        typed_parse_counter: 0,
+        buffer_data_slots: HashMap::new(),
+        buffer_alias_base,
     };
 
     stmt::lower_stmts(&mut ctx, body)
         .with_context(|| format!("lowering closure body func_id={}", func_id))?;
 
     if !ctx.block().is_terminated() {
-        ctx.block().ret(DOUBLE, "0.0");
+        if is_async {
+            let zero = "0.0".to_string();
+            let handle = ctx.block().call(I64, "js_promise_resolved", &[(DOUBLE, &zero)]);
+            let boxed = crate::expr::nanbox_pointer_inline_pub(ctx.block(), &handle);
+            ctx.block().ret(DOUBLE, &boxed);
+        } else {
+            ctx.block().ret(DOUBLE, "0.0");
+        }
     }
+    let ic_globals = std::mem::take(&mut ctx.ic_globals);
+    let typed_parse_rodata = std::mem::take(&mut ctx.typed_parse_rodata);
+    let ic_end = ctx.ic_site_counter;
     let pending = std::mem::take(&mut ctx.pending_declares);
+    let buffer_alias_used = ctx.buffer_data_slots.len() as u32;
     drop(ctx);
+    llmod.ic_counter = ic_end;
+    llmod.buffer_alias_counter += buffer_alias_used;
     for (name, ret, params) in pending {
         llmod.declare_function(&name, ret, &params);
+    }
+    for ic_name in &ic_globals {
+        llmod.add_raw_global(format!("@{} = private global [2 x i64] zeroinitializer", ic_name));
+    }
+    for raw in &typed_parse_rodata {
+        llmod.add_raw_global(raw.clone());
     }
     Ok(())
 }
@@ -1696,6 +2137,8 @@ fn compile_method(
         params.push((DOUBLE, format!("%arg{}", p.id)));
     }
 
+    let ic_base = llmod.ic_counter;
+    let buffer_alias_base = llmod.buffer_alias_counter;
     let lf = llmod.define_function(&llvm_name, DOUBLE, params);
     let _ = lf.create_block("entry");
 
@@ -1724,7 +2167,20 @@ fn compile_method(
 
     let method_boxed_vars = module_boxed_vars.clone();
 
-    let integer_locals = crate::collectors::collect_integer_locals(&method.body);
+    let clamp_fn_ids: std::collections::HashSet<u32> = cross_module.clamp3_functions
+        .union(&cross_module.clamp_u8_functions).chain(cross_module.returns_int_functions.iter()).copied().collect();
+    let integer_locals = crate::collectors::collect_integer_locals(&method.body, &cross_module.flat_const_arrays.keys().copied().collect(), &clamp_fn_ids);
+    let index_used_locals = crate::collectors::collect_index_used_locals(&method.body);
+
+    let non_escaping_news = crate::collectors::collect_non_escaping_news(
+        &method.body, &method_boxed_vars, module_globals, classes,
+    );
+    let non_escaping_arrays = crate::collectors::collect_non_escaping_arrays(
+        &method.body, &method_boxed_vars, module_globals,
+    );
+    let non_escaping_object_literals = crate::collectors::collect_non_escaping_object_literals(
+        &method.body, &method_boxed_vars, module_globals,
+    );
 
     let mut ctx = FnCtx {
         func: lf,
@@ -1760,19 +2216,51 @@ fn compile_method(
         type_aliases: &cross_module.type_aliases,
         imported_func_param_counts: &cross_module.imported_func_param_counts,
         imported_func_return_types: &cross_module.imported_func_return_types,
+        ffi_signatures: &cross_module.ffi_signatures,
+        try_depth: 0,
         pending_declares: Vec::new(),
         integer_locals: &integer_locals,
+        shadow_slot_map: std::collections::HashMap::new(),
         arena_state_slot: None,
         class_keys_slots: HashMap::new(),
         cached_lengths: HashMap::new(),
         bounded_index_pairs: Vec::new(),
             i32_counter_slots: HashMap::new(),
+        index_used_locals: &index_used_locals,
         i18n: &cross_module.i18n,
         local_class_aliases: HashMap::new(),
         local_id_to_name: HashMap::new(),
         imported_vars: &cross_module.imported_vars,
         compile_time_constants: &cross_module.compile_time_constants,
+        scalar_replaced: std::collections::HashMap::new(),
+        scalar_replaced_arrays: std::collections::HashMap::new(),
+        scalar_ctor_target: Vec::new(),
+        non_escaping_news,
+        non_escaping_arrays,
+        non_escaping_object_literals,
+        flat_const_arrays: &cross_module.flat_const_arrays,
+        array_row_aliases: HashMap::new(),
+        clamp3_functions: &cross_module.clamp3_functions,
+        clamp_u8_functions: &cross_module.clamp_u8_functions,
+        ic_site_counter: ic_base,
+        ic_globals: Vec::new(),
+        typed_parse_rodata: Vec::new(),
+        typed_parse_counter: 0,
+        buffer_data_slots: HashMap::new(),
+        buffer_alias_base,
     };
+
+    // Constructors emitted as standalone cross-module LLVM functions (named
+    // `<prefix>__<class>_constructor`) must bake the field initializers into
+    // their body. At the `new ImportedClass(...)` call site, `lower_new`
+    // applies initializers against the imported class stub — which has none
+    // — so without this, imported classes construct with all fields left
+    // as uninitialized register values (read as NaN-boxed undefined).
+    let is_constructor_method = method.name == format!("{}_constructor", class.name);
+    if is_constructor_method {
+        crate::lower_call::apply_field_initializers_recursive_pub(&mut ctx, &class.name)
+            .with_context(|| format!("applying field initializers for '{}' constructor", class.name))?;
+    }
 
     stmt::lower_stmts(&mut ctx, &method.body)
         .with_context(|| format!("lowering body of method '{}::{}'", class.name, method.name))?;
@@ -1780,10 +2268,22 @@ fn compile_method(
     if !ctx.block().is_terminated() {
         ctx.block().ret(DOUBLE, "0.0");
     }
+    let ic_globals = std::mem::take(&mut ctx.ic_globals);
+    let typed_parse_rodata = std::mem::take(&mut ctx.typed_parse_rodata);
+    let ic_end = ctx.ic_site_counter;
     let pending = std::mem::take(&mut ctx.pending_declares);
+    let buffer_alias_used = ctx.buffer_data_slots.len() as u32;
     drop(ctx);
+    llmod.ic_counter = ic_end;
+    llmod.buffer_alias_counter += buffer_alias_used;
     for (name, ret, params) in pending {
         llmod.declare_function(&name, ret, &params);
+    }
+    for ic_name in &ic_globals {
+        llmod.add_raw_global(format!("@{} = private global [2 x i64] zeroinitializer", ic_name));
+    }
+    for raw in &typed_parse_rodata {
+        llmod.add_raw_global(raw.clone());
     }
     Ok(())
 }
@@ -1823,8 +2323,11 @@ fn compile_module_entry(
     module_boxed_vars: &std::collections::HashSet<u32>,
     closure_rest_params: &HashMap<u32, usize>,
     cross_module: &CrossModuleCtx,
+    output_type: &str,
 ) -> Result<()> {
     let strings_init_name = format!("__perry_init_strings_{}", module_prefix);
+
+    let is_dylib = output_type == "dylib";
 
     if is_entry {
         // Pre-declare each non-entry module's init function as an
@@ -1835,11 +2338,35 @@ fn compile_module_entry(
             llmod.declare_function(&format!("{}__init", prefix), VOID, &[]);
         }
 
-        let main = llmod.define_function("main", I32, vec![]);
+        // For dylib output, emit `void perry_module_init()` instead of
+        // `int main()`. The host process calls this once after dlopen to
+        // initialize the GC, string pools, module globals (including GC
+        // root registration), and run top-level statements. Without this,
+        // module-level Maps/Arrays would never be registered as GC roots
+        // and the first GC cycle after connect() would free them (issue #54).
+        let ic_base = llmod.ic_counter;
+    let buffer_alias_base = llmod.buffer_alias_counter;
+        let main = if is_dylib {
+            llmod.define_function("perry_module_init", VOID, vec![])
+        } else {
+            llmod.define_function("main", I32, vec![])
+        };
         let _ = main.create_block("entry");
         {
             let blk = main.block_mut(0).unwrap();
             blk.call_void("js_gc_init", &[]);
+            // Wire up stdlib HANDLE_METHOD_DISPATCH eagerly when stdlib is
+            // linked. Previously this was only called from
+            // `ensure_pump_registered`, which fires lazily on the first
+            // deferred-promise resolution — so sync-only programs (e.g.
+            // pure crypto/hash pipelines — issue #86) never registered
+            // the dispatcher and handle-based method calls fell through
+            // to `js_native_call_method` which returned a non-Perry NaN
+            // (`typeof === 'number'`). Guarded on `needs_stdlib` because
+            // the runtime-only link doesn't pull in the stub symbol.
+            if cross_module.needs_stdlib {
+                blk.call_void("js_stdlib_init_dispatch", &[]);
+            }
             // Entry module's own string pool first.
             blk.call_void(&strings_init_name, &[]);
             // Then every non-entry module's init in order. Each
@@ -1859,11 +2386,25 @@ fn compile_module_entry(
         main.mark_entry_init_boundary();
 
         let main_boxed_vars = module_boxed_vars.clone();
-        let main_integer_locals = crate::collectors::collect_integer_locals(&hir.init);
+        let clamp_fn_ids: std::collections::HashSet<u32> = cross_module.clamp3_functions
+            .union(&cross_module.clamp_u8_functions).chain(cross_module.returns_int_functions.iter()).copied().collect();
+        let main_integer_locals = crate::collectors::collect_integer_locals(&hir.init, &cross_module.flat_const_arrays.keys().copied().collect(), &clamp_fn_ids);
+        let main_index_used_locals = crate::collectors::collect_index_used_locals(&hir.init);
+        let main_non_escaping_news = crate::collectors::collect_non_escaping_news(
+            &hir.init, &main_boxed_vars, module_globals, classes,
+        );
+        let main_non_escaping_arrays = crate::collectors::collect_non_escaping_arrays(
+            &hir.init, &main_boxed_vars, module_globals,
+        );
+        let main_non_escaping_object_literals = crate::collectors::collect_non_escaping_object_literals(
+            &hir.init, &main_boxed_vars, module_globals,
+        );
+        let mut init_local_types: HashMap<u32, perry_types::Type> = HashMap::new();
+        crate::boxed_vars::collect_let_types_in_stmts(&hir.init, &mut init_local_types);
         let mut ctx = FnCtx {
             func: main,
             locals: HashMap::new(),
-            local_types: HashMap::new(),
+            local_types: init_local_types,
             current_block: 0,
             func_names,
             strings,
@@ -1894,19 +2435,52 @@ fn compile_module_entry(
             type_aliases: &cross_module.type_aliases,
             imported_func_param_counts: &cross_module.imported_func_param_counts,
             imported_func_return_types: &cross_module.imported_func_return_types,
+        ffi_signatures: &cross_module.ffi_signatures,
+        try_depth: 0,
             pending_declares: Vec::new(),
             integer_locals: &main_integer_locals,
+            shadow_slot_map: std::collections::HashMap::new(),
             arena_state_slot: None,
             class_keys_slots: HashMap::new(),
             cached_lengths: HashMap::new(),
             bounded_index_pairs: Vec::new(),
             i32_counter_slots: HashMap::new(),
+            index_used_locals: &main_index_used_locals,
             i18n: &cross_module.i18n,
             local_class_aliases: HashMap::new(),
             local_id_to_name: HashMap::new(),
             imported_vars: &cross_module.imported_vars,
             compile_time_constants: &cross_module.compile_time_constants,
+            scalar_replaced: std::collections::HashMap::new(),
+            scalar_replaced_arrays: std::collections::HashMap::new(),
+            scalar_ctor_target: Vec::new(),
+            non_escaping_news: main_non_escaping_news,
+            non_escaping_arrays: main_non_escaping_arrays,
+            non_escaping_object_literals: main_non_escaping_object_literals,
+            flat_const_arrays: &cross_module.flat_const_arrays,
+            array_row_aliases: HashMap::new(),
+        clamp3_functions: &cross_module.clamp3_functions,
+        clamp_u8_functions: &cross_module.clamp_u8_functions,
+        ic_site_counter: ic_base,
+        ic_globals: Vec::new(),
+        typed_parse_rodata: Vec::new(),
+        typed_parse_counter: 0,
+        buffer_data_slots: HashMap::new(),
+        buffer_alias_base,
         };
+        // Register every module-level global's ADDRESS as a GC root so
+        // the mark phase can discover pointer-typed values (Maps, Arrays,
+        // user class instances) stored in them. Without this, a Map
+        // held only in a module `const CACHE = new Map<...>()` would be
+        // freed by the next GC cycle because the conservative stack
+        // scan can't see the global's address — only `js_gc_register_global_root`
+        // populates `GLOBAL_ROOTS`, which `mark_global_roots` scans.
+        // Closes issue #36 (pg driver's CONN_STATES Map crash after bulk
+        // decode crossed the malloc-count GC threshold). Safe to register
+        // number-valued globals too — `try_mark_value` + the raw-pointer
+        // fallback both validate against the known-heap-pointer set and
+        // discard non-matching bits.
+        register_module_globals_as_gc_roots(&mut ctx, module_globals);
         // Initialize static class fields with their declared init
         // expressions. Runs once at the top of main, before user code.
         init_static_fields(&mut ctx, hir)?;
@@ -1914,26 +2488,90 @@ fn compile_module_entry(
             .with_context(|| format!("lowering init statements of module '{}'", hir.name))?;
 
         if !ctx.block().is_terminated() {
-            // Final microtask drain: top-level `promise.then(cb)` calls
-            // (without an awaiting parent) need to flush before main exits,
-            // otherwise their callbacks silently never run. Drain in a
-            // bounded straight-line sequence — sufficient to flush the
-            // typical handful of tail microtasks left behind by
-            // `Array.fromAsync(...).then(...)` and similar fire-and-forget
-            // patterns.
-            for _ in 0..16 {
+            if is_dylib {
+                // Dylib: no event loop — the host manages its own event
+                // loop and calls perry_fn_* entry points as needed. Just
+                // return after running top-level statements (which set up
+                // module-level state like Maps, class registrations, etc.).
+                ctx.block().ret_void();
+            } else {
+                // Event loop: keep running while there are active event
+                // sources (timers, intervals, WS servers, pending stdlib
+                // async ops). Without this, event-driven servers (WS,
+                // setInterval-based) exit immediately after init.
+                //
+                // Structure:
+                //   loop_header: check if any source is active → body or exit
+                //   loop_body:   tick all queues, sleep 10ms, jump to header
+                //   loop_exit:   ret 0
+                let header_idx = ctx.new_block("event_loop.header");
+                let body_idx = ctx.new_block("event_loop.body");
+                let exit_idx = ctx.new_block("event_loop.exit");
+                let header_label = ctx.block_label(header_idx);
+                let body_label = ctx.block_label(body_idx);
+                let exit_label = ctx.block_label(exit_idx);
+
+                // Initial microtask flush (4 rounds) before entering the
+                // event loop — handles fire-and-forget .then() chains that
+                // don't need the full event loop.
+                for _ in 0..4 {
+                    let _ = ctx.block().call(I32, "js_promise_run_microtasks", &[]);
+                    let _ = ctx.block().call(I32, "js_timer_tick", &[]);
+                    let _ = ctx.block().call(I32, "js_callback_timer_tick", &[]);
+                    let _ = ctx.block().call(I32, "js_interval_timer_tick", &[]);
+                }
+                ctx.block().call_void("js_run_stdlib_pump", &[]);
+                ctx.block().br(&header_label);
+
+                // loop_header: check if there's any reason to keep running
+                ctx.current_block = header_idx;
+                let has_timers = ctx.block().call(I32, "js_timer_has_pending", &[]);
+                let has_callbacks = ctx.block().call(I32, "js_callback_timer_has_pending", &[]);
+                let has_intervals = ctx.block().call(I32, "js_interval_timer_has_pending", &[]);
+                let has_stdlib = ctx.block().call(I32, "js_stdlib_has_active_handles", &[]);
+                let any1 = ctx.block().or(I32, &has_timers, &has_callbacks);
+                let any2 = ctx.block().or(I32, &has_intervals, &has_stdlib);
+                let any = ctx.block().or(I32, &any1, &any2);
+                let zero = "0".to_string();
+                let cmp = ctx.block().icmp_ne(I32, &any, &zero);
+                ctx.block().cond_br(&cmp, &body_label, &exit_label);
+
+                // loop_body: tick everything, sleep, loop
+                ctx.current_block = body_idx;
                 let _ = ctx.block().call(I32, "js_promise_run_microtasks", &[]);
                 let _ = ctx.block().call(I32, "js_timer_tick", &[]);
                 let _ = ctx.block().call(I32, "js_callback_timer_tick", &[]);
                 let _ = ctx.block().call(I32, "js_interval_timer_tick", &[]);
+                ctx.block().call_void("js_run_stdlib_pump", &[]);
+                // Issue #84: condvar-backed wait. Returns immediately when
+                // a tokio worker (net/ws/http/fetch/redis/spawn) notifies
+                // after pushing to its queue; otherwise blocks until the
+                // next timer/interval deadline or a 1 s safety cap.
+                ctx.block().call_void("js_wait_for_event", &[]);
+                ctx.block().br(&header_label);
+
+                // loop_exit: done
+                ctx.current_block = exit_idx;
+                ctx.block().ret(I32, "0");
             }
-            ctx.block().ret(I32, "0");
         }
+    let ic_globals = std::mem::take(&mut ctx.ic_globals);
+        let typed_parse_rodata = std::mem::take(&mut ctx.typed_parse_rodata);
+        let ic_end = ctx.ic_site_counter;
         let pending = std::mem::take(&mut ctx.pending_declares);
+        let buffer_alias_used = ctx.buffer_data_slots.len() as u32;
         drop(ctx);
+        llmod.ic_counter = ic_end;
+        llmod.buffer_alias_counter += buffer_alias_used;
         for (name, ret, params) in pending {
             llmod.declare_function(&name, ret, &params);
         }
+    for ic_name in &ic_globals {
+        llmod.add_raw_global(format!("@{} = private global [2 x i64] zeroinitializer", ic_name));
+    }
+    for raw in &typed_parse_rodata {
+        llmod.add_raw_global(raw.clone());
+    }
     } else {
         let init_name = format!("{}__init", module_prefix);
         // Debug: emit puts("INIT: <prefix>") at the top of each module init
@@ -1945,6 +2583,8 @@ fn compile_module_entry(
         } else {
             None
         };
+        let ic_base = llmod.ic_counter;
+    let buffer_alias_base = llmod.buffer_alias_counter;
         let init_fn = llmod.define_function(&init_name, VOID, vec![]);
         let _ = init_fn.create_block("entry");
         {
@@ -1965,7 +2605,19 @@ fn compile_module_entry(
         init_fn.mark_entry_init_boundary();
 
         let init_boxed_vars = module_boxed_vars.clone();
-        let init_integer_locals = crate::collectors::collect_integer_locals(&hir.init);
+        let clamp_fn_ids: std::collections::HashSet<u32> = cross_module.clamp3_functions
+            .union(&cross_module.clamp_u8_functions).chain(cross_module.returns_int_functions.iter()).copied().collect();
+        let init_integer_locals = crate::collectors::collect_integer_locals(&hir.init, &cross_module.flat_const_arrays.keys().copied().collect(), &clamp_fn_ids);
+        let init_index_used_locals = crate::collectors::collect_index_used_locals(&hir.init);
+        let init_non_escaping_news = crate::collectors::collect_non_escaping_news(
+            &hir.init, &init_boxed_vars, module_globals, classes,
+        );
+        let init_non_escaping_arrays = crate::collectors::collect_non_escaping_arrays(
+            &hir.init, &init_boxed_vars, module_globals,
+        );
+        let init_non_escaping_object_literals = crate::collectors::collect_non_escaping_object_literals(
+            &hir.init, &init_boxed_vars, module_globals,
+        );
         let mut ctx = FnCtx {
             func: init_fn,
             locals: HashMap::new(),
@@ -2000,19 +2652,46 @@ fn compile_module_entry(
             type_aliases: &cross_module.type_aliases,
             imported_func_param_counts: &cross_module.imported_func_param_counts,
             imported_func_return_types: &cross_module.imported_func_return_types,
+        ffi_signatures: &cross_module.ffi_signatures,
+        try_depth: 0,
             pending_declares: Vec::new(),
             integer_locals: &init_integer_locals,
+            shadow_slot_map: std::collections::HashMap::new(),
             arena_state_slot: None,
             class_keys_slots: HashMap::new(),
             cached_lengths: HashMap::new(),
             bounded_index_pairs: Vec::new(),
             i32_counter_slots: HashMap::new(),
+            index_used_locals: &init_index_used_locals,
             i18n: &cross_module.i18n,
             local_class_aliases: HashMap::new(),
             local_id_to_name: HashMap::new(),
             imported_vars: &cross_module.imported_vars,
             compile_time_constants: &cross_module.compile_time_constants,
+            scalar_replaced: std::collections::HashMap::new(),
+            scalar_replaced_arrays: std::collections::HashMap::new(),
+            scalar_ctor_target: Vec::new(),
+            non_escaping_news: init_non_escaping_news,
+            non_escaping_arrays: init_non_escaping_arrays,
+            non_escaping_object_literals: init_non_escaping_object_literals,
+            flat_const_arrays: &cross_module.flat_const_arrays,
+            array_row_aliases: HashMap::new(),
+        clamp3_functions: &cross_module.clamp3_functions,
+        clamp_u8_functions: &cross_module.clamp_u8_functions,
+        ic_site_counter: ic_base,
+        ic_globals: Vec::new(),
+        typed_parse_rodata: Vec::new(),
+        typed_parse_counter: 0,
+        buffer_data_slots: HashMap::new(),
+        buffer_alias_base,
         };
+        // Register every module-level global's ADDRESS as a GC root —
+        // same reason as the entry-module branch above (issue #36). For
+        // non-entry modules the registration runs inside their __init
+        // function, which the entry main calls in topological order
+        // right after js_gc_init, so by the time any user code executes
+        // every module's globals are already GC-rooted.
+        register_module_globals_as_gc_roots(&mut ctx, module_globals);
         init_static_fields(&mut ctx, hir)?;
         stmt::lower_stmts(&mut ctx, &hir.init)
             .with_context(|| format!("lowering init statements of non-entry module '{}'", hir.name))?;
@@ -2020,13 +2699,75 @@ fn compile_module_entry(
         if !ctx.block().is_terminated() {
             ctx.block().ret_void();
         }
+    let ic_globals = std::mem::take(&mut ctx.ic_globals);
+        let typed_parse_rodata = std::mem::take(&mut ctx.typed_parse_rodata);
+        let ic_end = ctx.ic_site_counter;
         let pending = std::mem::take(&mut ctx.pending_declares);
+        let buffer_alias_used = ctx.buffer_data_slots.len() as u32;
         drop(ctx);
+        llmod.ic_counter = ic_end;
+        llmod.buffer_alias_counter += buffer_alias_used;
         for (name, ret, params) in pending {
             llmod.declare_function(&name, ret, &params);
         }
+    for ic_name in &ic_globals {
+        llmod.add_raw_global(format!("@{} = private global [2 x i64] zeroinitializer", ic_name));
+    }
+    for raw in &typed_parse_rodata {
+        llmod.add_raw_global(raw.clone());
+    }
     }
     Ok(())
+}
+
+/// Emit LLVM alias-scope metadata for the module's Buffer/Uint8Array data
+/// pointers. Each buffer registered in `FnCtx::buffer_data_slots` gets a
+/// unique scope within a shared alias domain, plus a scope-list node
+/// (`!alias.scope` target) and a noalias-list node (`!noalias` target) that
+/// enumerates every *other* buffer's scope.
+///
+/// Numbering (chosen to avoid colliding with `!0 = !{}` used by
+/// `!invariant.load`):
+/// - `!100`                — shared alias domain
+/// - `!(101 + idx)`        — per-buffer scope, one per entry in buffer_data_slots
+/// - `!(201 + idx)`        — scope list referenced by `!alias.scope` on loads/stores
+/// - `!(301 + idx)`        — noalias list referenced by `!noalias` on loads/stores
+///
+/// LLVM's LoopVectorizer can then prove that `src[i]` reads don't alias
+/// `dst[j]` writes — the fix for the "unsafe dependent memory operations"
+/// vectorization remark on the image_conv blur kernel.
+fn emit_buffer_alias_metadata(llmod: &mut LlModule, count: u32) {
+    if count == 0 {
+        return;
+    }
+    // Shared domain.
+    llmod.add_metadata_line("!100 = distinct !{!100}".to_string());
+    // Per-buffer scope nodes.
+    for i in 0..count {
+        let sid = 101 + i;
+        llmod.add_metadata_line(format!("!{} = distinct !{{!{}, !100}}", sid, sid));
+    }
+    // Single-element alias-scope lists (one per buffer).
+    for i in 0..count {
+        let list_id = 201 + i;
+        let scope_id = 101 + i;
+        llmod.add_metadata_line(format!("!{} = !{{!{}}}", list_id, scope_id));
+    }
+    // Noalias lists: for buffer i, every *other* buffer's scope.
+    for i in 0..count {
+        let list_id = 301 + i;
+        let others: Vec<String> = (0..count)
+            .filter(|j| *j != i)
+            .map(|j| format!("!{}", 101 + j))
+            .collect();
+        if others.is_empty() {
+            // Single buffer: empty noalias set — LLVM accepts `!{}` but
+            // it's a no-op. Still emit so `!noalias !{N}` references resolve.
+            llmod.add_metadata_line(format!("!{} = !{{}}", list_id));
+        } else {
+            llmod.add_metadata_line(format!("!{} = !{{{}}}", list_id, others.join(", ")));
+        }
+    }
 }
 
 /// Emit the string pool into the module: byte-array constants, handle
@@ -2087,9 +2828,14 @@ fn emit_string_pool(
         let handle_ref = format!("@{}", entry.handle_global);
         let len_str = entry.byte_len.to_string();
 
+        let init_fn = if entry.is_wtf8 {
+            "js_string_from_wtf8_bytes"
+        } else {
+            "js_string_from_bytes"
+        };
         let handle = blk.call(
             I64,
-            "js_string_from_bytes",
+            init_fn,
             &[(PTR, &bytes_ref), (I32, &len_str)],
         );
         let nanboxed = blk.call(DOUBLE, "js_nanbox_string", &[(I64, &handle)]);
@@ -2203,6 +2949,8 @@ fn compile_static_method(
         .map(|p| (DOUBLE, format!("%arg{}", p.id)))
         .collect();
 
+    let ic_base = llmod.ic_counter;
+    let buffer_alias_base = llmod.buffer_alias_counter;
     let lf = llmod.define_function(&llvm_name, DOUBLE, params);
     let _ = lf.create_block("entry");
 
@@ -2223,7 +2971,21 @@ fn compile_static_method(
         .map(|p| (p.id, p.ty.clone()))
         .collect();
 
-    let integer_locals = crate::collectors::collect_integer_locals(&f.body);
+    let clamp_fn_ids: std::collections::HashSet<u32> = cross_module.clamp3_functions
+        .union(&cross_module.clamp_u8_functions).chain(cross_module.returns_int_functions.iter()).copied().collect();
+    let integer_locals = crate::collectors::collect_integer_locals(&f.body, &cross_module.flat_const_arrays.keys().copied().collect(), &clamp_fn_ids);
+    let index_used_locals = crate::collectors::collect_index_used_locals(&f.body);
+
+    let static_boxed_vars = module_boxed_vars.clone();
+    let non_escaping_news = crate::collectors::collect_non_escaping_news(
+        &f.body, &static_boxed_vars, module_globals, classes,
+    );
+    let non_escaping_arrays = crate::collectors::collect_non_escaping_arrays(
+        &f.body, &static_boxed_vars, module_globals,
+    );
+    let non_escaping_object_literals = crate::collectors::collect_non_escaping_object_literals(
+        &f.body, &static_boxed_vars, module_globals,
+    );
 
     let mut ctx = FnCtx {
         func: lf,
@@ -2254,7 +3016,7 @@ fn compile_static_method(
         class_keys_globals: &cross_module.class_keys_globals,
             imported_class_ctors: &cross_module.imported_class_ctors,
         func_signatures,
-        boxed_vars: module_boxed_vars.clone(),
+        boxed_vars: static_boxed_vars,
         closure_rest_params,
         local_closure_func_ids: HashMap::new(),
         namespace_imports: &cross_module.namespace_imports,
@@ -2263,18 +3025,38 @@ fn compile_static_method(
         type_aliases: &cross_module.type_aliases,
         imported_func_param_counts: &cross_module.imported_func_param_counts,
         imported_func_return_types: &cross_module.imported_func_return_types,
+        ffi_signatures: &cross_module.ffi_signatures,
+        try_depth: 0,
         pending_declares: Vec::new(),
         integer_locals: &integer_locals,
+        shadow_slot_map: std::collections::HashMap::new(),
         arena_state_slot: None,
         class_keys_slots: HashMap::new(),
         cached_lengths: HashMap::new(),
         bounded_index_pairs: Vec::new(),
             i32_counter_slots: HashMap::new(),
+        index_used_locals: &index_used_locals,
         i18n: &cross_module.i18n,
         local_class_aliases: HashMap::new(),
         local_id_to_name: HashMap::new(),
         imported_vars: &cross_module.imported_vars,
         compile_time_constants: &cross_module.compile_time_constants,
+        scalar_replaced: std::collections::HashMap::new(),
+        scalar_replaced_arrays: std::collections::HashMap::new(),
+        scalar_ctor_target: Vec::new(),
+        non_escaping_news,
+        non_escaping_arrays,
+        non_escaping_object_literals,
+        flat_const_arrays: &cross_module.flat_const_arrays,
+        array_row_aliases: HashMap::new(),
+        clamp3_functions: &cross_module.clamp3_functions,
+        clamp_u8_functions: &cross_module.clamp_u8_functions,
+        ic_site_counter: ic_base,
+        ic_globals: Vec::new(),
+        typed_parse_rodata: Vec::new(),
+        typed_parse_counter: 0,
+        buffer_data_slots: HashMap::new(),
+        buffer_alias_base,
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of static '{}::{}'", class_name, f.name))?;
@@ -2289,12 +3071,66 @@ fn compile_static_method(
             ctx.block().ret(DOUBLE, "0.0");
         }
     }
+    let ic_globals = std::mem::take(&mut ctx.ic_globals);
+    let typed_parse_rodata = std::mem::take(&mut ctx.typed_parse_rodata);
+    let ic_end = ctx.ic_site_counter;
     let pending = std::mem::take(&mut ctx.pending_declares);
+    let buffer_alias_used = ctx.buffer_data_slots.len() as u32;
     drop(ctx);
+    llmod.ic_counter = ic_end;
+    llmod.buffer_alias_counter += buffer_alias_used;
     for (name, ret, params) in pending {
         llmod.declare_function(&name, ret, &params);
     }
+    for ic_name in &ic_globals {
+        llmod.add_raw_global(format!("@{} = private global [2 x i64] zeroinitializer", ic_name));
+    }
+    for raw in &typed_parse_rodata {
+        llmod.add_raw_global(raw.clone());
+    }
     Ok(())
+}
+
+/// Register every module-level global's ADDRESS with the runtime GC
+/// root scanner. Emitted at the top of each module's `main` / `__init`
+/// function, right after `js_gc_init` and the strings-init prelude.
+///
+/// Background (issue #36): module globals are just LLVM globals of type
+/// `double` that store NaN-boxed JSValues. Before this fix the GC had
+/// no way to learn about their addresses — only string-handle globals
+/// were registered via `js_gc_register_global_root` (codegen.rs ~2217).
+/// That was fine for programs whose module-level state was reachable
+/// through the conservative stack scan at every GC cycle, but broke
+/// any program where a Map / Array / user-class instance lived only in
+/// a module `const X = new Map(...)` and a GC fired at a moment when
+/// no stack variable held the pointer. The pg driver's CONN_STATES
+/// Map is the canonical victim — after v0.5.25 made `gc_malloc`
+/// trigger GC, the Map was reliably swept mid-decode and the next
+/// `CONN_STATES.get(id)` returned a dangling header.
+///
+/// Registering the global's *address* (not its current value) means
+/// the GC reads the up-to-date pointer every cycle, so reassignments
+/// are followed correctly. `mark_global_roots` handles both NaN-boxed
+/// (POINTER_TAG / STRING_TAG / BIGINT_TAG) and raw-i64 interpretations,
+/// and both fall through the `valid_ptrs` filter, so it's safe to
+/// register every global regardless of its declared type — number /
+/// boolean / undefined bits simply don't match any live heap pointer
+/// and get discarded.
+fn register_module_globals_as_gc_roots(
+    ctx: &mut crate::expr::FnCtx<'_>,
+    module_globals: &HashMap<u32, String>,
+) {
+    // Sort by id for deterministic emit order (helps with diff-testing
+    // the generated IR and matches the existing `class_keys` pattern).
+    let mut entries: Vec<(&u32, &String)> = module_globals.iter().collect();
+    entries.sort_by_key(|(id, _)| **id);
+    for (_, global_name) in entries {
+        let addr = ctx
+            .block()
+            .ptrtoint(&format!("@{}", global_name), I64);
+        ctx.block()
+            .call_void("js_gc_register_global_root", &[(I64, &addr)]);
+    }
 }
 
 /// Initialize each class's static fields with their declared init
@@ -2485,7 +3321,9 @@ fn default_target_triple() -> String {
 ///
 /// Supported:
 ///  * `ios`, `ios-simulator`           → aarch64-apple-ios
-///  * `watchos`, `watchos-simulator`   → aarch64-apple-watchos
+///  * `visionos`, `visionos-simulator` → arm64-apple-xros1.0{,-simulator}
+///  * `watchos`                        → arm64_32-apple-watchos (ILP32)
+///  * `watchos-simulator`              → arm64-apple-watchos10.0-simulator
 ///  * `tvos`, `tvos-simulator`         → aarch64-apple-tvos
 ///  * `android`                        → aarch64-unknown-linux-android
 ///  * `linux` (x86_64 alias)           → x86_64-unknown-linux-gnu
@@ -2498,7 +3336,9 @@ pub fn resolve_target_triple(name: &str) -> Option<String> {
     match name {
         "ios" => Some("aarch64-apple-ios".to_string()),
         "ios-simulator" => Some("arm64-apple-ios17.0-simulator".to_string()),
-        "watchos" => Some("aarch64-apple-watchos".to_string()),
+        "visionos" => Some("arm64-apple-xros1.0".to_string()),
+        "visionos-simulator" => Some("arm64-apple-xros1.0-simulator".to_string()),
+        "watchos" => Some("arm64_32-apple-watchos".to_string()),
         "watchos-simulator" => Some("arm64-apple-watchos10.0-simulator".to_string()),
         "tvos" => Some("aarch64-apple-tvos".to_string()),
         "tvos-simulator" => Some("arm64-apple-tvos17.0-simulator".to_string()),

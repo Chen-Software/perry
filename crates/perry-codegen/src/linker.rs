@@ -37,7 +37,26 @@ pub fn compile_ll_to_object(ll_text: &str, target_triple: Option<&str>) -> Resul
         f.write_all(ll_text.as_bytes())?;
     }
 
-    let clang = find_clang().context("No clang found in PATH (required for --backend llvm)")?;
+    let clang = find_clang().context(if cfg!(windows) {
+        "clang not found. Install LLVM with one of:\n\
+         \n\
+         \x20   winget install LLVM.LLVM       (Windows Package Manager)\n\
+         \x20   choco install llvm             (Chocolatey)\n\
+         \x20   scoop install llvm             (Scoop)\n\
+         \n\
+         or download the installer from https://github.com/llvm/llvm-project/releases\n\
+         (look for LLVM-<version>-win64.exe). After installation, open a new terminal\n\
+         so the updated PATH takes effect, or set PERRY_LLVM_CLANG to the full path of\n\
+         clang.exe. Run `perry doctor` to verify the install."
+    } else if cfg!(target_os = "macos") {
+        "clang not found. Install LLVM with `brew install llvm` or install Xcode \
+         command-line tools with `xcode-select --install`. Or set PERRY_LLVM_CLANG \
+         to the path of clang. Run `perry doctor` to verify the install."
+    } else {
+        "clang not found in PATH. Install LLVM/clang via your package manager \
+         (e.g. `apt install clang`, `dnf install clang`, `pacman -S clang`) or set \
+         PERRY_LLVM_CLANG to the path of clang. Run `perry doctor` to verify the install."
+    })?;
 
     let mut cmd = Command::new(&clang);
     cmd.arg("-c")
@@ -62,6 +81,10 @@ pub fn compile_ll_to_object(ll_text: &str, target_triple: Option<&str>) -> Resul
         // -fno-math-errno: skip errno checks on math functions
         // (Do NOT use -ffinite-math-only or -ffast-math)
         .arg("-fno-math-errno")
+        // Use native CPU features for better codegen on the build machine.
+        // ARM uses -mcpu=native; x86 uses -march=native.
+        // Cross-compilation overrides this via -target.
+        .arg(if cfg!(target_arch = "aarch64") { "-mcpu=native" } else { "-march=native" })
         .arg(&ll_path)
         .arg("-o")
         .arg(&obj_path);
@@ -101,7 +124,7 @@ pub fn compile_ll_to_object(ll_text: &str, target_triple: Option<&str>) -> Resul
     Ok(bytes)
 }
 
-fn find_clang() -> Option<PathBuf> {
+pub fn find_clang() -> Option<PathBuf> {
     // Honor explicit override first — useful on systems with multiple clang
     // installs (e.g. Homebrew LLVM vs Xcode).
     if let Ok(p) = env::var("PERRY_LLVM_CLANG") {
@@ -110,22 +133,82 @@ fn find_clang() -> Option<PathBuf> {
             return Some(candidate);
         }
     }
-    // Otherwise trust PATH.
+    // Check PATH (with .exe extension handling on Windows).
     if which("clang") {
         return Some(PathBuf::from("clang"));
     }
-    // Well-known install prefixes (Homebrew on macOS, ROCm / distro LLVM on Linux).
-    for prefix in &[
-        "/opt/homebrew/opt/llvm/bin",
-        "/usr/local/opt/llvm/bin",
-        "/usr/lib64/rocm/llvm/bin",
-        "/usr/lib/llvm-19/bin",
-        "/usr/lib/llvm-18/bin",
-        "/usr/lib/llvm-17/bin",
-    ] {
-        let candidate = PathBuf::from(prefix).join("clang");
-        if candidate.exists() && is_executable(&candidate) {
-            return Some(candidate);
+    // Check well-known install locations.
+    #[cfg(windows)]
+    {
+        // Standalone LLVM installer (llvm.org)
+        let standalone = PathBuf::from(r"C:\Program Files\LLVM\bin\clang.exe");
+        if standalone.exists() {
+            return Some(standalone);
+        }
+        // MSVC Build Tools bundled clang (via "C++ Clang Compiler" component)
+        if let Some(path) = find_msvc_bundled_clang() {
+            return Some(path);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        // Homebrew on macOS, ROCm / distro LLVM on Linux.
+        for prefix in &[
+            "/opt/homebrew/opt/llvm/bin",
+            "/usr/local/opt/llvm/bin",
+            "/usr/lib64/rocm/llvm/bin",
+            "/usr/lib/llvm-19/bin",
+            "/usr/lib/llvm-18/bin",
+            "/usr/lib/llvm-17/bin",
+        ] {
+            let candidate = PathBuf::from(prefix).join("clang");
+            if candidate.exists() && is_executable(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Search for clang.exe bundled with Visual Studio Build Tools / Community.
+/// The "C++ Clang Compiler for Windows" workload component installs it at:
+///   <VS install>/VC/Tools/Llvm/x64/bin/clang.exe
+#[cfg(windows)]
+fn msvc_vswhere_installation_path_args() -> [&'static str; 8] {
+    [
+        "-products",
+        "*",
+        // Without the VC tools filter, `-latest` can select Management Studio.
+        "-requires",
+        "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+        "-latest",
+        "-property",
+        "installationPath",
+        "-nologo",
+    ]
+}
+
+#[cfg(windows)]
+fn find_msvc_bundled_clang() -> Option<PathBuf> {
+    let vswhere_paths = [
+        PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"),
+        PathBuf::from(r"C:\Program Files\Microsoft Visual Studio\Installer\vswhere.exe"),
+    ];
+    for vswhere in &vswhere_paths {
+        if !vswhere.exists() { continue; }
+        let output = std::process::Command::new(vswhere)
+            .args(msvc_vswhere_installation_path_args())
+            .output()
+            .ok()?;
+        let install_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if install_path.is_empty() { continue; }
+        // Check x64 first, then ARM64
+        for arch in &["x64", "ARM64"] {
+            let candidate = PathBuf::from(&install_path)
+                .join("VC").join("Tools").join("Llvm").join(arch).join("bin").join("clang.exe");
+            if candidate.exists() {
+                return Some(candidate);
+            }
         }
     }
     None
@@ -140,6 +223,14 @@ fn which(name: &str) -> bool {
         let candidate = dir.join(name);
         if candidate.exists() && is_executable(&candidate) {
             return true;
+        }
+        // On Windows, executables have .exe extension
+        #[cfg(windows)]
+        {
+            let with_exe = dir.join(format!("{}.exe", name));
+            if with_exe.exists() && is_executable(&with_exe) {
+                return true;
+            }
         }
     }
     false

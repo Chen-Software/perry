@@ -88,7 +88,7 @@ pub fn save_dialog(callback: f64, default_name_ptr: *const u8, _allowed_types_pt
         if ptr.is_null() { return ""; }
         unsafe {
             let header = ptr as *const crate::string_header::StringHeader;
-            let len = (*header).length as usize;
+            let len = (*header).byte_len as usize;
             let data = ptr.add(std::mem::size_of::<crate::string_header::StringHeader>());
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
         }

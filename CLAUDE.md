@@ -2,56 +2,33 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**NOTE**: This file is kept intentionally concise (~300 lines) because it is loaded into every conversation. Detailed historical changelogs are in CHANGELOG.md. When adding new changes, keep entries to 1-2 lines max and move older entries to CHANGELOG.md periodically.
+**NOTE**: Keep this file concise. Detailed changelogs live in CHANGELOG.md.
 
 ## Project Overview
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.16
+**Current Version:** 0.5.294
 
 ## TypeScript Parity Status
 
-Tracked via the gap test suite (`test-files/test_gap_*.ts`, 22 tests). Each test exercises a feature cluster and is compared byte-for-byte against `node --experimental-strip-types`. Run via `/tmp/run_gap_tests.sh` after `cargo build --release -p perry-runtime -p perry-stdlib -p perry`.
+Tracked via the gap test suite (`test-files/test_gap_*.ts`, 28 tests). Compared byte-for-byte against `node --experimental-strip-types`. Run via `/tmp/run_gap_tests.sh` after `cargo build --release -p perry-runtime -p perry-stdlib -p perry`.
 
-**Last sweep (post-v0.4.87):** **8/22 passing**, **347 total diff lines**.
+**Last sweep:** **18/28 passing** (re-measured v0.5.170 after Phase 3/4 work; test_gap_proxy_reflect flipped from fail→pass via Phase 4 method-call inference). Known failing: `array_methods`, `async_advanced`, `console_methods`, `error_extensions`, `fetch_response`, `global_apis`, `map_set_extended`, `object_methods`, `string_methods`, `typed_arrays`. Run via `/tmp/run_gap_tests.sh` after full rebuild.
 
-| Status | Test | Diffs |
-|--------|------|-------|
-| ✅ PASS | `date_methods` | 0 |
-| ✅ PASS | `encoding_timers` | 0 |
-| ✅ PASS | `error_extensions` | 0 |
-| ✅ PASS | `fetch_response` | 0 |
-| ✅ PASS | `json_advanced` | 0 |
-| ✅ PASS | `node_path` | 0 |
-| ✅ PASS | `node_process` | 0 |
-| ✅ PASS | `weakref_finalization` | 0 |
-| 🟡 close | `regexp_advanced` | 2 (lookbehind only) |
-| 🟡 close | `generators` | 3 |
-| 🟡 close | `number_math` | 4 |
-| 🟡 close | `string_methods` | 8 (UTF-16 length) |
-| 🟡 mid | `class_advanced` | 18 |
-| 🟡 mid | `proxy_reflect` | 27 (segfault) |
-| 🟡 mid | `object_methods` | 28 |
-| 🟡 mid | `node_fs` | 30 |
-| 🟡 mid | `global_apis` | 30 |
-| 🔴 work | `symbols` | 31 (segfault) |
-| 🔴 work | `async_advanced` | 35 (segfault) |
-| 🔴 work | `console_methods` | 40 |
-| 🔴 work | `array_methods` | 45 |
-| 🔴 work | `node_crypto_buffer` | 46 |
-
-**Known categorical gaps**: lookbehind regex (Rust `regex` crate limitation), `String.length` returns byte count instead of UTF-16 code units, `Proxy`/`Reflect` not implemented, `Symbol(...)` returns garbage, `Object.getPrototypeOf` returns wrong sentinel, `console.dir` formatting differs from Node, `console.group*` doesn't indent, `console.table` works for the standard shapes.
-
-**Next-impact targets** (biggest single-commit wins): `console.dir` formatting + `console.group` indent (~15 lines), `Promise.withResolvers` + segfault fix (~35 lines), `URL`/`Blob`/`AbortController` extensions (~15 lines), `Proxy` identity stub (~10 lines), `Symbol` sentinel stub (~10 lines).
+**Known categorical gaps**: lookbehind regex (Rust `regex` crate), `console.dir`/`console.group*` formatting, lone surrogate handling (WTF-8).
 
 ## Workflow Requirements
 
-**IMPORTANT:** Follow these practices for every code change:
+**IMPORTANT:** Follow these practices for every code change made directly on `main` (maintainer workflow):
 
 1. **Update CLAUDE.md**: Add 1-2 line entry in "Recent Changes" for new features/fixes
-2. **Increment Version**: Bump patch version (e.g., 0.2.147 → 0.2.148)
+2. **Increment Version**: Bump patch version (e.g., 0.5.48 → 0.5.49)
 3. **Commit Changes**: Include code changes and CLAUDE.md updates together
+
+### External contributor PRs
+
+PRs from outside contributors should **not** touch `[workspace.package] version` in `Cargo.toml`, the `**Current Version:**` line in `CLAUDE.md`, or add a "Recent Changes" entry. The maintainer bumps the version and writes the changelog entry at merge time — usually by rebasing the PR branch and amending. This avoids the patch-version collisions that happen when Perry's `main` ships several commits while a PR is in review (each on-main commit bumps the version; a PR that bumped to the same patch on day 1 is already behind by merge day). Contributors just write code; let the maintainer fold in the metadata last.
 
 ## Build Commands
 
@@ -99,23 +76,21 @@ Key functions: `js_nanbox_string/pointer/bigint`, `js_nanbox_get_pointer`, `js_g
 
 ## Garbage Collection
 
-Mark-sweep GC in `crates/perry-runtime/src/gc.rs` with conservative stack scanning. Arena objects (arrays, objects) discovered by linear block walking (zero per-alloc tracking). Malloc objects (strings, closures, promises, bigints, errors) tracked in thread-local Vec. Triggers on new arena block allocation (~8MB) or explicit `gc()` call. 8-byte GcHeader per allocation.
+Generational mark-sweep GC in `crates/perry-runtime/src/gc.rs` (default since v0.5.237 / Phase D). Two regions in the per-thread arena: nursery (`ARENA`, fills with new allocations, swept on minor GC) and old-gen (`OLD_ARENA`, holds tenured/evacuated objects). Conservative stack scan + precise shadow-stack roots + 9 registered scanners. Write barriers populate a remembered set so minor GC can avoid retracing the old-gen. Two-bit aging (`HAS_SURVIVED` / `TENURED`) promotes nursery survivors after 2 minor cycles; the C4b evacuation pass moves non-pinned tenured objects into old-gen with full reference rewriting. Idle nursery blocks observed empty for 2 GC cycles are `dealloc`'d back to the OS (C4b-δ, v0.5.235), and the next-trigger calc is hard-capped at the initial threshold (64 MB) so >90%-freed step-doubling can't blow up peak occupancy (C4b-δ-tune, v0.5.236). Triggers on arena block allocation (1 MB blocks since v0.5.196), malloc count threshold, or explicit `gc()` call. 8-byte GcHeader per allocation.
+
+**Escape hatches**: `PERRY_GEN_GC=0`/`off`/`false` reverts to full mark-sweep (bisection only). `PERRY_GEN_GC_EVACUATE=1` enables the copying evacuation pass (default OFF — complete and correctness-safe but adds work that's a no-op on workloads where nothing tenures). `PERRY_WRITE_BARRIERS=1` opts into codegen-emitted write barriers (default OFF — barrier emission has its own perf cost; the runtime barrier always exists). `PERRY_GC_DIAG=1` prints per-cycle diagnostics.
 
 ## Threading (`perry/thread`)
 
-User code is single-threaded by default. `perry/thread` module provides three primitives with compile-time safety (no mutable captures allowed):
-
-- **`parallelMap(array, fn)`** — data-parallel array processing across all CPU cores
-- **`parallelFilter(array, fn)`** — data-parallel array filtering across all CPU cores
+Single-threaded by default. `perry/thread` provides:
+- **`parallelMap(array, fn)`** / **`parallelFilter(array, fn)`** — data-parallel across all cores
 - **`spawn(fn)`** — background OS thread, returns Promise
 
-Values cross threads via `SerializedValue` deep-copy (zero-cost for numbers, O(n) for strings/arrays/objects). Each thread has independent arena + GC. Arena `Drop` frees blocks when worker threads exit. Results from `spawn` flow back via `PENDING_THREAD_RESULTS` queue, drained during `js_promise_run_microtasks()`.
-
-**Compiler pipeline** also parallelized via rayon: module codegen, transform passes, and nm symbol scanning.
+Values cross threads via `SerializedValue` deep-copy. Each thread has independent arena + GC. Results from `spawn` flow back via `PENDING_THREAD_RESULTS` queue, drained during `js_promise_run_microtasks()`.
 
 ## Native UI (`perry/ui`)
 
-Declarative TypeScript compiles to AppKit/UIKit calls. 47 `perry_ui_*` FFI functions. Handle-based widget system (1-based i64 handles, NaN-boxed with POINTER_TAG). 5 reactive binding types dispatched from `state_set()`. `--target ios-simulator`/`--target ios`/`--target tvos-simulator`/`--target tvos` for cross-compilation.
+Declarative TypeScript compiles to AppKit/UIKit calls. Handle-based widget system (1-based i64 handles, NaN-boxed with POINTER_TAG). `--target ios-simulator`/`--target ios`/`--target tvos-simulator`/`--target tvos` for cross-compilation.
 
 **To add a new widget** — change 4 places:
 1. Runtime: `crates/perry-ui-macos/src/widgets/` — create widget, `register_widget(view)`
@@ -125,18 +100,16 @@ Declarative TypeScript compiles to AppKit/UIKit calls. 47 `perry_ui_*` FFI funct
 
 ## Compiling npm Packages Natively (`perry.compilePackages`)
 
-Projects can list npm packages to compile natively instead of routing to V8. Configured in `package.json`:
-
+Configured in `package.json`:
 ```json
 { "perry": { "compilePackages": ["@noble/curves", "@noble/hashes"] } }
 ```
-
-**Dedup logic**: When `@noble/hashes` appears in multiple `node_modules/`, the first-resolved directory is cached in `compile_package_dirs`. Subsequent imports redirect to the same copy, preventing duplicate linker symbols.
+First-resolved directory cached in `compile_package_dirs`; subsequent imports redirect to the same copy (dedup).
 
 ## Known Limitations
 
 - **No runtime type checking**: Types erased at compile time. `typeof` via NaN-boxing tags. `instanceof` via class ID chain.
-- **No shared mutable state across threads**: Thread primitives enforce immutable captures at compile time. No `SharedArrayBuffer` or `Atomics`.
+- **No shared mutable state across threads**: No `SharedArrayBuffer` or `Atomics`.
 
 ## Common Pitfalls & Patterns
 
@@ -147,7 +120,6 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 
 ### LLVM Type Mismatches
 - Loop counter optimization produces i32 — always convert before passing to f64/i64 functions
-- Check LLVM value types before conversion; handle f64↔i64, i32→f64, i32→i64
 - Constructor parameters always f64 (NaN-boxed) at signature level
 
 ### Async / Threading
@@ -175,87 +147,30 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 
 ## Recent Changes
 
-For older versions (v0.4.144 and earlier), see CHANGELOG.md.
+Keep entries to 1-2 lines max. Full details in CHANGELOG.md.
 
-### v0.5.16 (llvm-backend) — Linux build fixes: clang discovery + duplicate symbol
-- **fix**: `find_clang()` and `find_llvm_tool()` now search common Linux LLVM install paths (`/usr/lib64/rocm/llvm/bin`, `/usr/lib/llvm-{17,18,19}/bin`) in addition to Homebrew prefixes, so Perry compiles `.ll` → `.o` on Linux without requiring `PERRY_LLVM_CLANG` env var.
-- **fix**: removed 3 AOT stubs (`js_sqlite_transaction`, `_commit`, `_rollback`) from `perry-runtime/src/closure.rs` that collided with real implementations in `perry-stdlib/src/sqlite.rs`, causing `duplicate symbol` linker errors during `cargo test --workspace`.
+- **v0.5.294** — Linux build fix: `find_clang()` / `find_llvm_tool()` (`crates/perry-codegen/src/linker.rs`) now search common Linux LLVM install prefixes (`/usr/lib64/rocm/llvm/bin`, `/usr/lib/llvm-{17,18,19}/bin`) alongside the existing Homebrew/Windows paths, so `.ll` → `.o` works without `PERRY_LLVM_CLANG`. Removed 3 AOT stubs (`js_sqlite_transaction`, `_commit`, `_rollback`) from `perry-runtime/src/closure.rs` — they collided with the real implementations in `perry-stdlib/src/sqlite.rs` and broke `cargo test --workspace` with duplicate-symbol linker errors.
+- **v0.5.293** — Repo hygiene: untrack 465 Android Gradle cache files (`android-build/.gradle/`, `android-build/app/build/`, `android-build/build/`) that were churning on every Gradle invocation, and add the matching `.gitignore` rules. Also gitignored: `docs/examples/_reports/` (CI-generated doc-test report), `/assets/` + `benchmarks/suite/assets/` (external game-project assets the user keeps adjacent for perry-ui-* manual testing — never source), and stray repro binaries `enum_repro`/`no_pragma_test`. Bench methodology: `json_polyglot/run.sh` precompiles Node TS to `.mjs` (esbuild → npx-esbuild → tsc fallback chain) as untimed setup so Node isn't charged for `--experimental-strip-types`'s per-launch parse on every run — Perry is AOT and Bun strips natively, so neither pays this; falls back to the old `--experimental-strip-types` invocation with a banner if no stripper is available. `polyglot/bench.rs` gains an FP-contract caveat block on `bench_loop_data_dependent` documenting the FMA-contract (Apple Clang, Go) vs no-contract (Rust, Swift, Perry, Node, Bun, Java) clustering. Plus `tests/test_array_index_loop.sh` runner companion to the existing `.ts` regression test.
+- **v0.5.292** — CLAUDE.md hygiene: migrated 124 verbose Recent Changes entries (~242 KB) to CHANGELOG.md verbatim, condensed the section to the last 22 versions at 1-2 lines each. CLAUDE.md 254 KB → 12 KB (95% reduction). Save the always-loaded context budget for actual project guidance.
+- **v0.5.291** — Land the actual workflow code for v0.5.289's CI disk-space fix.
+- **v0.5.290** — Stub audit: `test_gap_console_methods` removed from `known_failures.json` — passes through the parity-runner's `normalize_output` despite the raw diff showing different timer values.
+- **v0.5.289** — CI hygiene: stop the `Tests` workflow's macos-14 jobs from OOM'ing on disk space.
+- **v0.5.288** — Stub audit: `test_json` removed from `known_failures.json`, incidentally fixed by v0.5.286's `JSON.stringify(<plain f64>)` segfault fix.
+- **v0.5.286** — Stub audit: `JSON.stringify(<plain f64>)` segfaulted.
+- **v0.5.285** — Bench docs prose pass on `benchmarks/README.md`.
+- **v0.5.284** — Stub audit: two correctness bugs in the Promise microtask runner.
+- **v0.5.283** — Bench docs: rewrote the f64 bullet in `benchmarks/README.md` §Strengths so it doesn't carry contradictory framing.
+- **v0.5.281** — Stub audit: two distinct bugs in the NaN/number-formatting family.
+- **v0.5.280** — Stub audit: NaN/Infinity ToInt32 coercion.
+- **v0.5.279** — #187 follow-up (stub audit): SSO + property-read NaN bug.
+- **v0.5.278** — Stub audit: `is_inlinable` in `crates/perry-transform/src/inline.rs:213` was inlining functions with rest parameters even though the inliner's `param_map` mechanism only handles 1:1 formal-to-actual arg mapping — so `function…
+- **v0.5.277** — Stub audit: `fs.readFileSync(path)` (no encoding) now returns a real Buffer, matching Node.
+- **v0.5.276** — Bench docs: footnote on `04_array_read`'s 211 MB peak RSS row + new `benchmarks/polyglot/ARRAY_READ_NOTES.md` with analytic working-set math (10M f64 doubling fill, 8M-cap + 16M-cap coexist mid-grow → 192 MB arena peak + ~13 MB overhead),…
+- **v0.5.275** — #187 follow-up: async-factory pattern for `pg`'s `Client`/`Pool` and `mongodb`'s `MongoClient` — the npm-compatible `new T(config); await t.connect()` shape.
+- **v0.5.274** — Bench credibility: add the two comparison rows the page was missing.
+- **v0.5.273** — Stub audit: closure-null family fix.
+- **v0.5.272** — Bench refactor (code landing): the v0.5.271 entry below described two new benchmarks and a README restructure, but only metadata changes (CLAUDE.md, Cargo.toml) actually shipped under v0.5.271 due to a race during commit.
+- **v0.5.271** — Bench refactor: add the two benchmarks that address the most-likely skeptic objections to this README within 30 seconds of reading it.
+- **v0.5.270** — #187 follow-up: `Redis` (ioredis) end-to-end + fixes a pre-existing dispatch-table-symbol-mismatch bug.
 
-### v0.5.15 (llvm-backend) — perry/ui State dispatch + check-deps fix (closes #24, #25)
-- **fix**: `State(0)` constructor and `.value`/`.set()` instance methods were missing from the LLVM codegen dispatch tables, producing "not in dispatch table" warnings and silently returning `undefined`. Added `State` → `perry_ui_state_create` to `PERRY_UI_TABLE` and `value` → `perry_ui_state_get` / `set` → `perry_ui_state_set` to `PERRY_UI_INSTANCE_TABLE`.
-- **fix**: `perry check --check-deps` flagged `perry/ui`, `perry/thread`, `perry/i18n` as missing npm packages (R003) and as unsupported Node.js built-ins (U006). New `is_perry_builtin()` guard skips resolution and diagnostics for all `perry/*` imports.
-
-### v0.5.14 (llvm-backend) — Windows build fix: date.rs POSIX-only APIs
-- **fix**: `timestamp_to_local_components` used `libc::localtime_r` and `tm_gmtoff`, both POSIX-only — broke the Windows CI build. Split into `#[cfg(unix)]` (keeps `localtime_r` + `tm_gmtoff`) and `#[cfg(windows)]` (uses `libc::localtime_s` / `libc::gmtime_s`, derives tz offset by comparing local vs UTC breakdowns).
-
-### v0.5.13 (llvm-backend) — Buffer.indexOf/includes dispatch fix
-- **fix**: `Buffer.indexOf()` and `Buffer.includes()` were incorrectly routed through the string method path in codegen, because the `is_string_only_method` guard didn't exclude `Uint8Array`/`Buffer` types. Added a `static_type_of` check that skips the string dispatch when the receiver is typed as `Uint8Array` or `Buffer`, letting these methods fall through to `dispatch_buffer_method` via `js_native_call_method` as intended.
-- **cleanup**: removed leftover debug `eprintln!` in `js_buffer_index_of`.
-
-### v0.5.12 (llvm-backend) — perry/ui widget dispatch — mango renders its full UI
-- **feat**: follow-up to v0.5.10 which landed only `App({...})`. This commit adds the rest of the perry/ui surface to `lower_native_method_call` via a table-driven dispatcher (`PERRY_UI_TABLE` of `UiSig { method, runtime, args, ret }` entries using `UiArgKind::{Widget,Str,F64,Closure,I64Raw}` / `UiReturnKind::{Widget,F64,Void}`). ~40 widget methods covered in one pass: `Text` / `TextField` / `TextArea` / `Spacer` / `Divider` / `ScrollView` constructors; `menuCreate` / `menuAddItem` / `menuBarCreate` / `menuBarAttach` / `menuBarAddMenu`; text setters (`textSetFontSize` / `textSetColor` / `textSetString` / `textSetFontFamily` / `textSetFontWeight` / `textSetWraps`); button setters (`buttonSetBordered` / `buttonSetTextColor` / `buttonSetTitle`); widget mutators (`widgetAddChild` / `widgetClearChildren` / `widgetSetHidden` / `widgetSetWidth` / `widgetSetHeight` / `widgetSetHugging` / `widgetMatchParentWidth` / `widgetMatchParentHeight` / `widgetSetBackgroundColor` / `widgetSetBackgroundGradient` / `setCornerRadius`); stack mutators (`stackSetAlignment` / `stackSetDistribution`); `scrollviewSetChild`; `textfieldSetString` / `textareaSetString`. Runtime fns lazy-declared via `ctx.pending_declares`.
-- **feat**: `VStack` / `HStack` get a dedicated special case because the TS call shape (`VStack(spacing, [children])` or `VStack([children])`) doesn't fit the table — spacing is optional and children is a variadic array that needs one `perry_ui_widget_add_child` call per element. We stash the parent handle in an entry alloca so subsequent blocks reload it, then walk the array fast path.
-- **feat**: `Button` also gets a special case because the handler closure arg must stay NaN-boxed (f64), not unboxed to i64, and the label is a raw cstr pointer — neither shape is expressible as a single `UiArgKind` row.
-- **fix**: one naming inconsistency found while building the table — the runtime fn is `perry_ui_set_widget_hidden` (with `set` first, unlike every other `widget_*` setter). Fixed in the table.
-- **result**: `mango/src/app.ts -o Mango` now launches and renders the full UI tree — title bar, "Welcome to Mango" heading, "MongoDB Study Tool" subtitle, "Databases & Collections / Query & Plan / Edit & Insert / Index Viewer" menu items, and the orange "+ New Connection" button all visible in the screenshot. Verified by launching the compiled binary, positioning the window onscreen via osascript, and `/usr/sbin/screencapture`. The v0.5.0 LLVM cutover regression (mango compiled clean but exited silently with an empty window) is fully resolved.
-
-### v0.5.11 (llvm-backend) — inline-allocator regression fixes (parity 80% → 94%)
-- **fix**: the inline bump-allocator hoist (v0.5.0-followup) cached `@perry_class_keys_<class>` in a function-entry stack slot, but the entry-block hoist ran BEFORE `__perry_init_strings_*` (which is what populates the global). So freshly-allocated objects had a null `keys_array` and `js_object_get_field_by_name` returned `undefined` for every field — `test_array_of_objects` showed `sorted[0].name → undefined`. New `LlFunction::entry_init_boundary` + `entry_post_init_setup`: alloca stays at the very top (dominates), but the load+store splices in AFTER the init prelude. `mark_entry_init_boundary()` is called immediately after `js_gc_init` / `__perry_init_strings_*` / non-entry module inits in `compile_module_entry`.
-- **fix**: the inline allocator skipped `register_class(child, parent)` (the runtime allocators do it on every alloc). With every class instance going through the inline path, the CLASS_REGISTRY was never populated and `instanceof` walks broke at the first hop — `test_edge_classes` showed `square instanceof Rectangle → false` for a `class Square extends Rectangle extends Shape`. New public `js_register_class_parent(child, parent)` extern; codegen emits one call per inheriting class in `__perry_init_strings_*` (sorted by class id).
-- **infra**: parity script normalize_output now strips Node v25 `MODULE_TYPELESS_PACKAGE_JSON` warnings (4 lines printed to stderr per test file without `"type": "module"` in package.json — pure environmental noise that started after the Node v25 upgrade).
-- **result**: parity sweep 96 PASS / 6 FAIL / 0 COMPILE_FAIL = **94.1%**, beating the v0.5.0 baseline of 91.8%. Remaining 6 DIFFs are all pre-existing (timer precision, lookbehind regex, lone surrogates, NFC/NFD, async-generator baseline) — verified by reproducing on the pre-optimization commit. Numeric benchmarks (object_create 8ms, binary_trees 7ms, factorial 25ms) still beat or tie Node on every workload — the fix didn't regress any of the v0.5.2 wins.
-
-### v0.5.10 (llvm-backend) — `perry/ui.App({...})` dispatch — mango actually launches
-- **fix**: the LLVM backend port (v0.5.0 cutover) silently dropped `perry/ui` dispatch — receiver-less `NativeMethodCall { module: "perry/ui", method, object: None }` fell into `lower_native_method_call`'s catch-all early-out at `lower_call.rs:1922` and returned `double 0.0`. So `App({title, width, height, body})` at the end of any perry/ui app silently no-op'd, the binary completed init without entering `NSApplication.run()`, and exited with no output. Mango compiled cleanly under v0.5.0 through v0.5.9 but couldn't actually launch — the regression was masked because the driver doesn't have an integration test that runs the resulting binary. New per-method dispatch in `lower_call.rs::lower_native_method_call` that recognizes `perry/ui.App({...})`, walks the args[0] object literal for `title` / `width` / `height` / `icon` / `body`, lazy-declares `perry_ui_app_create` / `perry_ui_app_set_icon` / `perry_ui_app_set_body` / `perry_ui_app_run` via `pending_declares`, and emits the create/set-icon/set-body/run sequence. Verified by compiling `mango/src/app.ts -o Mango`, launching the binary, and screenshotting a native macOS window titled "Mango" (menubar shows Mango/Edit/Window — proof that NSApplication.run() is now being entered). The window's content area is empty because the other perry/ui constructors (Text/Button/VStack/HStack/etc.) are still in the same dropped state — full widget dispatch is the next followup. This commit lands `App()` only as a focused proof-of-concept that the linking + runtime + Mach-O code path works end to end.
-
-### v0.5.9 (llvm-backend) — `let C = SomeClass; new C()` correctness + alias type refinement
-- **fix**: `let C = SomeClass; new C()` now actually creates an instance of `SomeClass` instead of returning the empty-object placeholder. New `local_class_aliases: HashMap<String, String>` and `local_id_to_name: HashMap<u32, String>` fields on `FnCtx`, populated by `Stmt::Let` when the init is `Expr::ClassRef(name)` (direct alias) or `Expr::LocalGet(other_id)` where `other_id`'s name is itself an alias (chain — `let A = X; let B = A; new B()`). `lower_new` shadows its `class_name` parameter with the resolved name early so the rest of the function (alloc + ctor inline + field offsets) uses the real class. Critically, `refine_type_from_init` for `Expr::New` *also* resolves through `local_class_aliases`, so `let b: any = new C()` refines `b`'s static type to `Named("SomeClass")` not `Named("C")` — without this, the PropertyGet fast path would look up "C" in `ctx.classes`, find nothing, fall through to `js_object_get_field_by_name_f64`, and return undefined for fields that were correctly initialized in memory by the inline allocator. Verified with three test shapes: direct alias (`const C = Foo; const a = new C()`), 3-step chain (`const A = Bar; const B = A; const b = new B()`), and in-function (`function f() { const D = Foo; return new D() }`). Mango compiles cleanly.
-
-### v0.5.8 (llvm-backend) — `Expr::NewDynamic` static reroute + conditional callee branching
-- **fix**: workspace `Cargo.toml` was missing `[profile.release.package]` `strip = false` overrides for `perry-ui-ios`, `perry-ui-tvos`, `perry-ui-android`, `perry-ui-watchos`. Same staticlib+`#[no_mangle] extern "C"` FFI contract as `perry-ui-macos` (which already had the override + the explicit "UI crates must NOT strip — they export `#[no_mangle] extern "C"` symbols" comment), so a release build of those four would have silently stripped their `perry_ui_*` symbols and broken linking user binaries on `--target ios-simulator`/`ios`/`tvos-simulator`/`tvos`/android. Hadn't bitten yet because all four are in `members` but not `default-members` — a plain `cargo build --release` skips them. Added the four missing profile blocks (`strip = false`, `codegen-units = 16`) alongside the existing macOS/gtk4/windows/geisterhand ones. No code changes, no version bump.
-- **fix**: `new (Foo)()` (parenthesized ClassRef) and `new (cond ? FooClass : BarClass)()` (conditional callee) now dispatch to the right class instead of returning the empty-object placeholder. Two new shapes recognized in the `Expr::NewDynamic` lowering: (a) `Expr::ClassRef(name)` callees reroute straight to `lower_new(name, args)`, mirroring the existing `globalThis.X` reroute; (b) `Expr::Conditional { condition, then_expr, else_expr }` callees synthesize a `NewDynamic { callee: <branch>, args }` per branch and emit a runtime cond_br + phi via the existing `lower_conditional` helper, so each branch independently runs `lower_new` (or recursively the NewDynamic fallback). Nested ternaries work because the inner NewDynamic recurses through the same handler. New `try_static_class_name(callee)` helper centralizes the static-reroute pattern. The truly-dynamic fallback (`new someVar()` where the callee is a runtime value) still emits an empty-object placeholder — that needs a `js_new_dynamic(callee_value, args)` runtime helper to inspect the value's NaN tag and dispatch to the right class constructor, tracked as a v0.5.8 followup. Verified end-to-end with two TS tests: `new (cond ? Foo : Bar)()` (5 cases including a nested ternary) and `new (Foo)()` + `new arr[0]()` (placeholder fallback). Mango compiles cleanly.
-
-### v0.5.7 (llvm-backend) — `Expr::I18nString` compile-time resolution + runtime interpolation
-- **fix**: localized strings now resolve to the right translation at compile time. Previously the `Expr::I18nString` lowering returned the verbatim KEY string regardless of the project's `default_locale`, so any user calling `t("Hello")` from `perry/i18n` got `"Hello"` instead of `"Hallo"` even with `default_locale = "de"`. New `expr::I18nLowerCtx` (threaded through `CrossModuleCtx`) carries the i18n table from `opts.i18n_table` and the default locale index. The lowering pulls `translations[default_locale_idx * key_count + string_idx]` at compile time, parses `{name}` placeholders, lowers each interpolation param's value, and emits a `js_string_concat` chain that interleaves interned literal fragments with `js_string_coerce`'d param values. Empty / missing translation cells fall back to the source key. Plurals (`plural_forms`/`plural_param`) are still ignored — uses the canonical `string_idx` form, leaving CLDR plural rule selection as a followup. Also fixed: `lower_call.rs::lower_native_method_call` was discarding `NativeMethodCall { module: "perry/i18n", method: "t", object: None, args: [I18nString] }` and returning `double 0.0` because the receiver-less early-out path didn't know about `t()`. Now special-cases the `t()` unwrap and lowers the inner I18nString directly. Added `default_locale_idx` to `CompileOptions::i18n_table` (5-tuple). Verified end-to-end with a 2-locale test: en/de translations resolve correctly when `default_locale` is switched, and missing/empty cells fall back to the source key. Mango still compiles cleanly (89 localizable strings across 13 locales).
-
-### v0.5.6 (llvm-backend) — perry-stdlib auto-optimize `hex` crate fix
-- **fix**: `crates/perry-stdlib/src/sqlite.rs:54` was using `hex::encode(b)` to format SQLite `Blob` columns as hex strings, but the `hex` crate dep in `perry-stdlib`'s `Cargo.toml` is gated behind the `crypto` Cargo feature. Auto-optimize rebuilds that enabled only `database-sqlite` (e.g. mango: `better-sqlite3` + `mongodb` + fetch, no crypto) failed with `error[E0433]: failed to resolve: use of unresolved module or unlinked crate hex` and fell back to the prebuilt full stdlib, leaving every user binary 100KB+ larger than necessary. Replaced with a hand-rolled nibble loop (`const HEX: &[u8; 16] = b"0123456789abcdef"; for &byte in b { out.push(HEX[(byte >> 4) as usize]); out.push(HEX[(byte & 0x0f) as usize]); }`) so sqlite no longer depends on hex. Surgical fix — no Cargo.toml or auto-optimize logic changes. Mango now goes through the auto-optimize rebuild path: prebuilt-fallback 5.18 MB → optimized 5.01 MB (~168 KB / 3.4% savings, mostly from features the user doesn't import being stripped). Original fix done as a worktree-isolated subagent task; the agent's commit was based on a stale `llvm-backend` HEAD so the sqlite.rs change was applied manually here on top of v0.5.5.
-
-### v0.5.5 (llvm-backend) — `alloca_entry` sweep
-- **fix**: 7 cross-block alloca sites in `expr.rs` / `lower_call.rs` / `stmt.rs` migrated to `LlFunction.alloca_entry()` to close the latent SSA dominance hazards flagged in v0.5.2's followup list. Migrated: catch-clause exception binding (capturable by nested closures in the catch body), `super()`-inlined parent ctor params (capturable by closures inside the parent ctor body), `forEach` loop counter (spans cond/body/exit successor blocks), `Await` result slot (spans check/wait/settled/done/merge blocks; can be lowered inside a nested if-arm), `NewClass` `this_slot` (pushed on `this_stack` for the entire inlined ctor body with nested closures capturing `this`), and the inlined-ctor param slots in two places. Left alone with comment: `js_array_splice out_slot` (single-block scratch, dominance-safe by construction). Mango compiles + links cleanly. Original sweep done as a worktree-isolated subagent task because main was being concurrently edited; cherry-picked back here.
-
-### v0.5.4 (llvm-backend) — `Expr::ExternFuncRef`-as-value via static `ClosureHeader` thunks
-- **fix**: imported functions can now be passed as callbacks, stored in variables, and called indirectly. Previously `Expr::ExternFuncRef` lowered as a value returned a `TAG_TRUE` sentinel that worked for `if (importedFn)` truthiness checks but crashed at runtime the moment anything tried to dispatch through `js_closure_callN`. The fix mirrors the existing `__perry_wrap_<name>` machinery for local funcs (`crates/perry-codegen/src/codegen.rs:870-904`): for every entry in `opts.import_function_prefixes`, `compile_module` now emits a thin `__perry_wrap_extern_<src>__<name>` wrapper (`internal` linkage so per-module copies don't collide at link time) plus a static `ClosureHeader` constant `__perry_extern_closure_<src>__<name>` whose `func_ptr` points at the wrapper and `type_tag = CLOSURE_MAGIC`. The expr.rs lowering returns `ptrtoint @<global> to i64` NaN-boxed as POINTER. New `LlModule.add_internal_constant()` helper. Verified end-to-end with a TS test that uses `arr.map(double)`, `if (double)`, `f === g`, and `fn(3, 4)` indirect call — all four cases produce correct output (was `[undef, undef, ...]` and `undefined` before). Mango unaffected (entry path uses truthiness only).
-
-### v0.5.3 (llvm-backend) — driver hard-fails on entry-module codegen errors
-- **fix**: `crates/perry/src/commands/compile.rs` now refuses to link when the entry module is in `failed_modules`. The original 0.5.0 mango bug was a misdiagnosis chain: 13 modules (including `mango/src/app.ts`) failed codegen, the driver silently replaced each with an empty `_perry_init_*` stub, and the link step exploded with `Undefined symbols for architecture arm64: "_main"` — a downstream symptom that took manual digging to trace back to the real codegen errors hidden in cargo build noise. The driver now (a) prints a loud box-drawn failure summary right after the parallel compile loop, *before* `build_optimized_libs` floods stdout, (b) marks the entry module with `(entry)` in the failure list, and (c) returns `Err` immediately if the entry module is in the list, with a message explaining why. Non-entry failures keep the previous "stub the init, continue linking" behavior but get the same loud summary so the codegen errors aren't drowned in the cargo noise. `use_color` (was `_use_color`) is now wired through to ANSI red on the headers.
-
-### v0.5.2 (llvm-backend) — crushing the numeric benchmarks
-- **perf**: `fadd/fsub/fmul/fdiv/frem/fneg` IR builder now emits `reassoc contract` fast-math flags. Clang's `-ffast-math` does NOT retroactively apply to ops in a `.ll` input — the FMFs must be on each instruction. Adding `reassoc contract` lets LLVM break serial accumulator chains into parallel accumulators + 8x-unroll + NEON 2-wide vectorize. **`loop_overhead` 99ms → 13ms (4.1x faster than Node 54ms); `math_intensive` 50ms → 14ms (3.3x faster than Node)**.
-- **perf**: Integer-modulo fast path in `BinaryOp::Mod` when both operands are provably integer-valued. New `crate::collectors::collect_integer_locals` walker tracks locals that start from an `Integer` literal and are only ever mutated via `Update` (++/--, no `LocalSet`). Mod-by-integer on such values emits `fptosi → srem → sitofp` instead of `frem double`, which lowers to a libm `fmod()` call on ARM (no hardware instruction). LLVM's SCEV then replaces the div with a reciprocal-multiplication `msub` and hoists the conversions. **`factorial` (sum += i % 1000) 1553ms → 24ms — 64x faster, 25x faster than Node 603ms**.
-- Perry now beats Node on 8/11 numeric benchmarks (loop_overhead, math_intensive, factorial, closure, mandelbrot, matrix_multiply, array_read, nested_loops); ties on 2; loses on object_create/binary_trees only (blocked on inline bump-allocator, a pending refactor).
-
-### v0.5.1 (llvm-backend) — mango compile sweep
-- feat: 13 LLVM-backend gap fixes that let `mango` compile end-to-end with 0.5.0 (was hitting 13 module-level codegen errors that the driver silently turned into empty `_perry_init_*` stubs, leaving the link with no `_main`). Fixed: `Array.slice()` 0-arg, variadic `arr.push(a,b,c,…)`, `Expr::ArraySome`/`ArrayEvery`/`NewDynamic`/`FetchWithOptions`/`I18nString`/`ExternFuncRef`-as-value, `js_closure_call6..16` (was capped at 5). Killed the buggy cross-module pre-walker (`collect_extern_func_refs_in_*`) and replaced it with **lazy declares** via `FnCtx.pending_declares`, drained after each compile pass — fixes `use of undefined value @perry_fn_*` from cross-module calls inside closures, try/switch, and array callbacks. Closure pre-walker now also walks getters/setters/static_methods (was only methods+ctor) and recurses through ArraySome/Every/NewDynamic/FetchWithOptions/I18nString/Yield. New `LlFunction.alloca_entry()` hoists `Stmt::Let` slots to the entry block — fixes pre-existing SSA dominance verifier failure when a `let` declared inside an `if` arm is captured by a closure in a sibling branch. Mango binary: 4.9MB, links clean.
-
-### v0.5.0 — Phase K hard cutover (LLVM-only)
-- **Cranelift backend deleted.** `crates/perry-codegen-llvm/` renamed to `crates/perry-codegen/` as the only codegen path. `--backend` CLI flag removed; all `cranelift*` workspace deps dropped. Parity sweep identical pre/post: **102 MATCH / 9 DIFF / 0 CRASH / 91.8%**. Remaining DIFFs are 8 nondeterministic (timing/RNG/UUID) + async-generator baseline + long-tail features (lookbehind regex, UTF-8/UTF-16 length gap, lone surrogates).
-
-### v0.4.146-followup-2 (llvm-backend)
-- feat: `test_gap_array_methods` DIFF (3) → **MATCH**. Four coordinated fixes: 16-pass microtask drain in `main()` so top-level `.then(cb)` fires; `is_promise_expr` recognizes async-FuncRef calls via new `local_async_funcs` HashSet; nested `async function*` declarations hoist to top-level so generator transform sees them; `scan_expr_for_max_local`/`_max_func` in `perry-transform/generator.rs` now walk all array fast-path variants (ArrayMap/Filter/etc.) to prevent LocalId/FuncId collisions.
-
-### v0.4.146-followup (llvm-backend)
-- feat: **`Object.groupBy`**, **`Array.fromAsync`**, optional-chain array fast path (`obj?.map(...)` folds through array dispatch), `typeof Object.<method>` → `"function"` constant fold. `test_gap_array_methods` DIFF (7) → DIFF (3).
-
-### v0.4.148 (llvm-backend)
-- feat: `test_gap_node_crypto_buffer` DIFF (54) → **MATCH**. Full Node-style Buffer/crypto surface: new `dispatch_buffer_method` in `object.rs` routes `js_native_call_method` for any registered buffer (read/write numeric family, `swap*`, `indexOf`/`includes`, `slice`/`fill`/`compare`/`toString(enc)`); `crypto.getRandomValues`, `Buffer.compare/from/alloc/concat` wired; `Buffer.from([arr])` path decodes via `js_buffer_from_value`; type inference refines `Buffer.from`/`crypto.randomBytes` to `Named("Uint8Array")`; crypto `createHash(...).update(...).digest(enc)` chain detected as string; `bigint_value_to_i64` accepts POINTER_TAG-boxed BigInt pointers.
-
-### v0.4.147 (llvm-backend)
-- feat: `test_gap_symbols` DIFF (4) → **MATCH**. `Symbol.hasInstance` and `Symbol.toStringTag` via HIR class lowering of well-known keys (lifts to `__perry_wk_hasinstance_*`/`__perry_wk_tostringtag_*`), new `CLASS_HAS_INSTANCE_REGISTRY`/`CLASS_TO_STRING_TAG_REGISTRY` in runtime, and `Object.prototype.toString.call(x)` → `js_object_to_string` dispatch in HIR.
-
-### v0.4.146 (llvm-backend)
-- feat: `Symbol.toPrimitive` semantic support — `+currency` / `` `${currency}` `` / `currency + 0` all consult `obj[Symbol.toPrimitive]` via new `js_to_primitive(v, hint)` hook threaded through `js_number_coerce` and `js_jsvalue_to_string`. Well-known symbol cache in `symbol.rs`; computed-key method lowering via new `PostInit::SetMethodWithThis` variant. `test_gap_symbols` DIFF (10) → DIFF (4).
-
-### v0.4.145 (llvm-backend)
-- feat: real **TypedArray** support (Int8/Int16/Int32, Uint16/Uint32, Float32/Float64). New `typedarray.rs` with `TYPED_ARRAY_REGISTRY`; generic array helpers (`js_array_at`, `js_array_to_sorted`, `js_array_with`, `js_array_find_last`, etc.) detect typed-array pointers and dispatch per-kind, preserving `Int32Array(N) [ ... ]` Node format on round-trip. Reserved class IDs `0xFFFF0030..0037` for `instanceof`. `test_gap_array_methods` DIFF (35) → DIFF (7).
-
+Older entries → CHANGELOG.md.

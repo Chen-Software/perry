@@ -8,6 +8,19 @@
 //! - Built-in object implementations
 //! - Console and other global functions
 
+/// Issue #62: route every Rust heap allocation through mimalloc instead of
+/// the system `malloc`. `gc_malloc`, arena block allocation, Vec/HashMap
+/// growth inside the runtime, and the compiled-program side of the FFI all
+/// use `std::alloc::{alloc, realloc, dealloc}`, which dispatch through the
+/// global allocator — so flipping it here affects the entire hot path
+/// (strings, closures, bigints, promises, object/array backing stores)
+/// without touching any call sites. Per-thread segregated free lists cut
+/// allocation dispatch from ~25-40ns (macOS `malloc`) to ~5-10ns, which is
+/// meaningful because `gc_malloc` is called ~1M+ times/sec in allocation-
+/// heavy workloads (string concat loops, JSON roundtrip, gc_pressure).
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 pub mod value;
 pub mod gc;
 pub mod arena;
@@ -23,6 +36,7 @@ pub mod error;
 pub mod symbol;
 pub mod promise;
 pub mod timer;
+pub mod event_pump;
 pub mod builtins;
 pub mod r#box;
 pub mod process;
@@ -37,8 +51,14 @@ pub mod buffer;
 pub mod typedarray;
 pub mod text;
 pub mod child_process;
-pub mod net;
+// `net` moved to `perry-stdlib::net` (event-driven async) in A1/A1.5.
+// The old sync `perry-runtime::net` module is retained as source but
+// not exported so its `js_net_socket_{write,end,destroy}` symbols don't
+// collide with the new stdlib ones. Delete the file entirely once no
+// in-tree code references it.
+// pub mod net;
 pub mod json;
+pub mod json_tape;
 pub mod i18n;
 pub mod weakref;
 pub mod static_plugins;
@@ -51,6 +71,8 @@ pub mod geisterhand_registry;
 pub mod proxy;
 #[cfg(all(any(target_os = "ios", target_os = "tvos"), feature = "ios-game-loop"))]
 pub mod ios_game_loop;
+#[cfg(all(target_os = "watchos", feature = "watchos-game-loop"))]
+pub mod watchos_game_loop;
 
 pub use value::JSValue;
 pub use promise::Promise;
@@ -104,6 +126,30 @@ mod stdlib_pump {
                 let func: extern "C" fn() -> i32 = std::mem::transmute(f);
                 func();
             }
+        }
+    }
+
+    static STDLIB_HAS_ACTIVE_FN: AtomicPtr<()> = AtomicPtr::new(null_mut());
+
+    /// Register the stdlib's has_active_handles function pointer.
+    /// Called by perry-stdlib during initialization.
+    #[no_mangle]
+    pub extern "C" fn js_register_stdlib_has_active(f: extern "C" fn() -> i32) {
+        STDLIB_HAS_ACTIVE_FN.store(f as *mut (), Ordering::Release);
+    }
+
+    /// Check if the stdlib has active event sources (WS servers, pending
+    /// async ops, etc.). Returns 0 if perry-stdlib is not linked.
+    #[no_mangle]
+    pub extern "C" fn js_stdlib_has_active_handles() -> i32 {
+        let f = STDLIB_HAS_ACTIVE_FN.load(Ordering::Acquire);
+        if !f.is_null() {
+            unsafe {
+                let func: extern "C" fn() -> i32 = std::mem::transmute(f);
+                func()
+            }
+        } else {
+            0
         }
     }
 }

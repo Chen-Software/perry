@@ -93,12 +93,20 @@ where
 /// that don't involve pointer allocations. For complex values like arrays,
 /// objects, or strings, use queue_deferred_resolution instead.
 pub fn queue_promise_resolution(promise_ptr: usize, is_success: bool, result_bits: u64) {
-    let mut pending = PENDING_RESOLUTIONS.lock().unwrap();
-    pending.push(PendingResolution {
-        promise_ptr,
-        is_success,
-        result_bits,
-    });
+    {
+        let mut pending = PENDING_RESOLUTIONS.lock().unwrap();
+        pending.push(PendingResolution {
+            promise_ptr,
+            is_success,
+            result_bits,
+        });
+    }
+    // Issue #84: wake the main-thread event loop / await busy-wait the
+    // instant we enqueue, instead of waiting up to ~10 ms for the next
+    // poll. Drop the queue lock first so the consumer doesn't briefly
+    // block re-acquiring it. Covers all queue_promise_resolution callers
+    // — fetch, ioredis, bcrypt, zlib, spawn_for_promise, etc.
+    perry_runtime::event_pump::js_notify_main_thread();
 }
 
 /// Queue a deferred promise resolution with a conversion callback
@@ -108,12 +116,17 @@ pub fn queue_deferred_resolution<F>(promise_ptr: usize, is_success: bool, conver
 where
     F: FnOnce() -> u64 + Send + 'static,
 {
-    let mut pending = PENDING_DEFERRED.lock().unwrap();
-    pending.push(DeferredResolution {
-        promise_ptr,
-        is_success,
-        converter: Box::new(converter),
-    });
+    {
+        let mut pending = PENDING_DEFERRED.lock().unwrap();
+        pending.push(DeferredResolution {
+            promise_ptr,
+            is_success,
+            converter: Box::new(converter),
+        });
+    }
+    // Issue #84: same as queue_promise_resolution — wake the main thread
+    // immediately so the awaiter doesn't pay the old hard-sleep latency.
+    perry_runtime::event_pump::js_notify_main_thread();
 }
 
 /// Register js_stdlib_process_pending with perry-runtime's pump so that
@@ -122,8 +135,23 @@ fn ensure_pump_registered() {
     use std::sync::Once;
     static REGISTER: Once = Once::new();
     REGISTER.call_once(|| {
-        extern "C" { fn js_register_stdlib_pump(f: extern "C" fn() -> i32); }
-        unsafe { js_register_stdlib_pump(js_stdlib_process_pending); }
+        extern "C" {
+            fn js_register_stdlib_pump(f: extern "C" fn() -> i32);
+            fn js_register_stdlib_has_active(f: extern "C" fn() -> i32);
+            fn js_stdlib_init_dispatch();
+        }
+        unsafe {
+            js_register_stdlib_pump(js_stdlib_process_pending);
+            js_register_stdlib_has_active(js_stdlib_has_active_handles);
+            // Wire up the runtime-level HANDLE_METHOD_DISPATCH so that
+            // generic `jsObject.method(args)` calls on stdlib handle types
+            // (net.Socket, Fastify, ioredis) fall back to the right FFI
+            // even when codegen lost static type info — e.g. accessing the
+            // socket through a struct field (`state.sock.write(...)`).
+            // Until this was hooked in, HANDLE_METHOD_DISPATCH stayed None
+            // and those calls silently returned undefined.
+            js_stdlib_init_dispatch();
+        }
     });
 }
 
@@ -198,10 +226,65 @@ pub extern "C" fn js_stdlib_process_pending() -> i32 {
         count += http_count;
     }
 
+    // Process pending raw TCP socket events (net.Socket)
+    #[cfg(all(feature = "net", not(target_os = "ios"), not(target_os = "android")))]
+    {
+        extern "C" {
+            fn js_net_process_pending() -> i32;
+        }
+        let net_count = unsafe { js_net_process_pending() };
+        count += net_count;
+    }
+
     // Process pending worker_threads messages (stdin reader)
     count += crate::worker_threads::js_worker_threads_process_pending();
 
     count
+}
+
+/// Returns 1 if the stdlib has active event sources that need the event
+/// loop to keep running (active WS servers, pending events, etc.).
+/// Registered with perry-runtime via js_register_stdlib_has_active()
+/// so the runtime's trampoline calls this when perry-stdlib is linked.
+pub extern "C" fn js_stdlib_has_active_handles() -> i32 {
+    // Check for pending stdlib resolutions
+    {
+        let pending = PENDING_RESOLUTIONS.lock().unwrap();
+        if !pending.is_empty() {
+            return 1;
+        }
+    }
+    {
+        let pending = PENDING_DEFERRED.lock().unwrap();
+        if !pending.is_empty() {
+            return 1;
+        }
+    }
+    // Check for active WebSocket servers/connections
+    #[cfg(feature = "websocket")]
+    {
+        extern "C" {
+            fn js_ws_process_pending() -> i32;
+        }
+        // If there are pending WS events, keep running
+        // (we don't drain here — just check)
+        let has_ws = crate::ws::js_ws_has_active_handles();
+        if has_ws != 0 {
+            return 1;
+        }
+    }
+    // Check for active raw TCP sockets (net.Socket / tls.connect / upgrade).
+    // Without this, an `await net.connect(...)` returns a Promise that the
+    // runtime can't see is pending, so the event loop exits before the
+    // socket's 'connect' event ever fires through the pump.
+    #[cfg(all(feature = "net", not(target_os = "ios"), not(target_os = "android")))]
+    {
+        let has_net = crate::net::js_net_has_active_handles();
+        if has_net != 0 {
+            return 1;
+        }
+    }
+    0
 }
 
 /// Spawn an async operation that will resolve a Promise when complete

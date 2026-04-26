@@ -1,0 +1,47 @@
+{
+  "name": "@perryts/perry",
+  "version": "__VERSION__",
+  "description": "Native TypeScript compiler. Compiles TypeScript source directly to native executables via LLVM.",
+  "bin": {
+    "perry": "bin/perry.js"
+  },
+  "files": [
+    "bin/",
+    "README.md",
+    "LICENSE"
+  ],
+  "optionalDependencies": {
+    "@perryts/perry-darwin-arm64":     "__VERSION__",
+    "@perryts/perry-darwin-x64":       "__VERSION__",
+    "@perryts/perry-linux-x64":        "__VERSION__",
+    "@perryts/perry-linux-arm64":      "__VERSION__",
+    "@perryts/perry-linux-x64-musl":   "__VERSION__",
+    "@perryts/perry-linux-arm64-musl": "__VERSION__",
+    "@perryts/perry-win32-x64":        "__VERSION__"
+  },
+  "keywords": [
+    "typescript",
+    "compiler",
+    "native",
+    "llvm",
+    "aot",
+    "perry"
+  ],
+  "author": "Perry Contributors",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PerryTS/perry.git",
+    "directory": "npm/perry"
+  },
+  "homepage": "https://github.com/PerryTS/perry#readme",
+  "bugs": {
+    "url": "https://github.com/PerryTS/perry/issues"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -44,8 +44,100 @@ pub fn register_buffer(ptr: *const BufferHeader) {
     BUFFER_REGISTRY.with(|r| r.borrow_mut().insert(ptr as usize));
 }
 
+// ----- Small-buffer slab allocator ----------------------------------------
+//
+// GC interaction:
+//   Buffers carry no GcHeader and are not tracked in MALLOC_STATE (the existing
+//   malloc path also never calls `dealloc` on individual buffers — they live for
+//   the lifetime of the thread). Slab blocks are malloc'd once and retained for
+//   the same duration. No GC behaviour changes.
+//
+// Registry:
+//   Large buffers (capacity >= SMALL_BUF_THRESHOLD) still go through
+//   `register_buffer` and appear in BUFFER_REGISTRY (HashSet).
+//   Small buffers skip the HashSet insert; `is_registered_buffer` instead
+//   performs a range-check against the (tiny) list of slab blocks — O(n_slabs),
+//   typically ≤ 5 entries for a 100k-iteration allocation loop.
+//   No false positives: slab blocks exclusively contain BufferHeader allocations
+//   and all callers of `is_registered_buffer` pass the header pointer (the
+//   NaN-boxed POINTER_TAG value always points to the header start, never to
+//   interior data bytes).
+
+/// Capacities strictly below this threshold use the slab fast path.
+pub const SMALL_BUF_THRESHOLD: u32 = 256;
+
+/// One slab block covers this many bytes of BufferHeader+data storage.
+/// 256 KB → ≥ 1 000 allocations of the max small size (255 bytes), or up to
+/// 32 768 allocations of the minimum (0 bytes / header only).
+const SLAB_CAPACITY: usize = 256 * 1024;
+
+/// Per-thread bump-pointer slab for small buffers.
+/// Raw pointers stored as `usize` to keep the type `Send + Sync`.
+struct SmallBufSlab {
+    /// Byte offset of the next free slot within the current slab block.
+    current: usize,
+    /// One-past-the-end offset (absolute address as usize) of the current block.
+    end: usize,
+    /// (start, end) address pair for every slab block allocated so far.
+    /// Used by `is_registered_buffer` to confirm an address is a small buffer.
+    ranges: Vec<(usize, usize)>,
+}
+
+thread_local! {
+    static SMALL_BUF_SLAB: RefCell<SmallBufSlab> = RefCell::new(SmallBufSlab {
+        current: 0,
+        end: 0,
+        ranges: Vec::new(),
+    });
+}
+
+fn buffer_alloc_small(capacity: u32) -> *mut BufferHeader {
+    let needed = std::mem::size_of::<BufferHeader>() + capacity as usize;
+    // Round up to 8-byte boundary so every header is naturally aligned.
+    let aligned = (needed + 7) & !7;
+
+    SMALL_BUF_SLAB.with(|slab_ref| {
+        let mut slab = slab_ref.borrow_mut();
+
+        if slab.current + aligned > slab.end {
+            // Current block exhausted (or first call): allocate a fresh slab.
+            let layout = Layout::from_size_align(SLAB_CAPACITY, 8).unwrap();
+            let block = unsafe { alloc(layout) };
+            if block.is_null() {
+                panic!("buffer: failed to allocate small-buffer slab ({} bytes)", SLAB_CAPACITY);
+            }
+            let block_start = block as usize;
+            let block_end = block_start + SLAB_CAPACITY;
+            slab.ranges.push((block_start, block_end));
+            slab.current = block_start;
+            slab.end = block_end;
+        }
+
+        let ptr = slab.current as *mut BufferHeader;
+        slab.current += aligned;
+
+        unsafe {
+            (*ptr).length = 0;
+            (*ptr).capacity = capacity;
+        }
+
+        ptr
+    })
+}
+
 /// Check if a pointer is a registered buffer (for instanceof Uint8Array)
 pub fn is_registered_buffer(addr: usize) -> bool {
+    // Fast path: address falls within a small-buffer slab block.  All bytes in
+    // a slab block belong exclusively to BufferHeader allocations, so any match
+    // is definitively a buffer pointer.
+    let in_slab = SMALL_BUF_SLAB.with(|slab_ref| {
+        let slab = slab_ref.borrow();
+        slab.ranges.iter().any(|&(start, end)| addr >= start && addr < end)
+    });
+    if in_slab {
+        return true;
+    }
+    // Slow path: large buffers tracked in the HashSet registry.
     BUFFER_REGISTRY.with(|r| r.borrow().contains(&addr))
 }
 
@@ -61,6 +153,11 @@ pub fn is_uint8array_buffer(addr: usize) -> bool {
 
 /// Allocate a buffer with the given capacity
 pub fn buffer_alloc(capacity: u32) -> *mut BufferHeader {
+    // Fast path: small buffers come from a per-thread bump slab (no malloc,
+    // no HashSet insert).  Large buffers fall through to the existing malloc path.
+    if capacity < SMALL_BUF_THRESHOLD {
+        return buffer_alloc_small(capacity);
+    }
     let layout = buffer_layout(capacity as usize);
     unsafe {
         let ptr = alloc(layout) as *mut BufferHeader;
@@ -97,7 +194,7 @@ pub extern "C" fn js_buffer_from_string(str_ptr: *const StringHeader, encoding: 
     }
 
     unsafe {
-        let len = (*str_ptr).length as usize;
+        let len = (*str_ptr).byte_len as usize;
         let data_ptr = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
         let str_bytes = std::slice::from_raw_parts(data_ptr, len);
 
@@ -146,7 +243,7 @@ pub extern "C" fn js_encoding_tag_from_value(value: f64) -> i32 {
         return 0;
     }
     unsafe {
-        let len = (*str_ptr).length as usize;
+        let len = (*str_ptr).byte_len as usize;
         // Cap at a reasonable upper bound to avoid pathological reads on garbage inputs.
         if len == 0 || len > 32 {
             return 0;
@@ -274,6 +371,37 @@ pub extern "C" fn js_uint8array_alloc(length: i32) -> *mut BufferHeader {
     unsafe { (*buf).length = length; }
     mark_as_uint8array(buf as usize);
     buf
+}
+
+/// `new Uint8Array(x)` runtime dispatch.
+///
+/// The codegen can't always statically distinguish `new Uint8Array(n)` (numeric
+/// length) from `new Uint8Array(arr)` (source array) when `n` is not a literal,
+/// so this entry point inspects the NaN-box tag on the incoming value and
+/// routes accordingly. Before this helper the catch-all codegen arm always
+/// called `js_uint8array_from_array`, which treated numeric lengths as
+/// `ArrayHeader*` and silently produced a zero-length buffer (closes #38).
+#[no_mangle]
+pub extern "C" fn js_uint8array_new(val: f64) -> *mut BufferHeader {
+    let bits = val.to_bits();
+    let top16 = (bits >> 48) as u16;
+    // POINTER_TAG (0x7FFD) — an object/array pointer. Treat as source array.
+    if top16 == 0x7FFD {
+        let ptr = (bits & 0x0000_FFFF_FFFF_FFFF) as *const ArrayHeader;
+        return js_uint8array_from_array(ptr);
+    }
+    // Plain IEEE double (upper16 < 0x7FFC or > 0x7FFF) — numeric length.
+    if top16 < 0x7FFC || top16 > 0x7FFF {
+        let len = if val.is_finite() && val >= 0.0 {
+            val as i32
+        } else {
+            0
+        };
+        return js_uint8array_alloc(len);
+    }
+    // Any other tag (undefined/null/bool/string/bigint) → empty buffer,
+    // matching the JS semantics of `new Uint8Array(undefined)` et al.
+    js_uint8array_alloc(0)
 }
 
 /// Allocate a zero-filled buffer
@@ -410,7 +538,54 @@ pub extern "C" fn js_buffer_byte_length(str_ptr: *const StringHeader) -> i32 {
         return 0;
     }
     unsafe {
-        (*str_ptr).length as i32
+        (*str_ptr).byte_len as i32
+    }
+}
+
+/// Convert a buffer slice to a string. Honors the optional `start`/`end`
+/// range (Node semantics: `start` clamped to `[0, len]`, `end` clamped to
+/// `[start, len]`; defaults are `start=0, end=len`).
+///
+/// `encoding`: 0 = utf8 (default), 1 = hex, 2 = base64.
+#[no_mangle]
+pub extern "C" fn js_buffer_to_string_range(
+    buf_ptr: *const BufferHeader,
+    encoding: i32,
+    start: i32,
+    end: i32,
+) -> *mut StringHeader {
+    let buf_ptr = {
+        let bits = buf_ptr as u64;
+        let top16 = bits >> 48;
+        if top16 >= 0x7FF8 {
+            (bits & 0x0000_FFFF_FFFF_FFFF) as *const BufferHeader
+        } else {
+            buf_ptr
+        }
+    };
+    if buf_ptr.is_null() || (buf_ptr as usize) < 0x1000 {
+        return js_string_from_bytes(ptr::null(), 0);
+    }
+
+    unsafe {
+        let len = (*buf_ptr).length as i32;
+        let s = start.max(0).min(len);
+        let e = end.max(s).min(len);
+        let slice_len = (e - s) as usize;
+        let data = buffer_data(buf_ptr).add(s as usize);
+        let bytes = std::slice::from_raw_parts(data, slice_len);
+
+        match encoding {
+            1 => {
+                let hex = encode_hex(bytes);
+                js_string_from_bytes(hex.as_ptr(), hex.len() as u32)
+            }
+            2 => {
+                let b64 = encode_base64(bytes);
+                js_string_from_bytes(b64.as_ptr(), b64.len() as u32)
+            }
+            _ => js_string_from_bytes(data, slice_len as u32),
+        }
     }
 }
 
@@ -680,7 +855,7 @@ pub extern "C" fn js_buffer_write(
         let buf_len = (*buf_ptr).length as i32;
         let offset = offset.max(0).min(buf_len);
 
-        let str_len = (*str_ptr).length as usize;
+        let str_len = (*str_ptr).byte_len as usize;
         let str_data = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
         let str_bytes = std::slice::from_raw_parts(str_data, str_len);
 
@@ -793,8 +968,8 @@ fn buffer_index_of_bytes(buf: *const BufferHeader, needle: &[u8], start: i32) ->
     }
 }
 
-/// `buf.indexOf(needle, start?)` where `needle` is a string or buffer
-/// (NaN-boxed value).
+/// `buf.indexOf(needle, start?)` where `needle` is a string, buffer,
+/// or numeric byte value (NaN-boxed value).
 #[no_mangle]
 pub extern "C" fn js_buffer_index_of(buf_ptr: f64, needle: f64, start: i32) -> i32 {
     let buf = unbox_buffer_ptr(buf_ptr.to_bits()) as *const BufferHeader;
@@ -822,14 +997,25 @@ pub extern "C" fn js_buffer_index_of(buf_ptr: f64, needle: f64, start: i32) -> i
         let str_ptr = (needle_bits & 0x0000_FFFF_FFFF_FFFF) as *const StringHeader;
         if !str_ptr.is_null() {
             unsafe {
-                let len = (*str_ptr).length as usize;
+                let len = (*str_ptr).byte_len as usize;
                 let data_ptr = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                 let bytes = std::slice::from_raw_parts(data_ptr, len);
                 return buffer_index_of_bytes(buf, bytes, start);
             }
         }
     }
-    -1
+    // Numeric byte needle — INT32_TAG or plain double
+    let byte_val = if top16 == 0x7FFE {
+        // INT32_TAG: lower 32 bits are an i32
+        (needle_bits as u32) & 0xFF
+    } else if top16 < 0x7FF8 || (top16 == 0x7FF8 && needle_bits == 0x7FF8_0000_0000_0000) {
+        // Raw double — convert to byte
+        ((needle as i64) & 0xFF) as u32
+    } else {
+        return -1;
+    };
+    let byte = [byte_val as u8];
+    buffer_index_of_bytes(buf, &byte, start)
 }
 
 /// `buf.includes(needle, start?)` — boolean i32.
@@ -1338,6 +1524,49 @@ fn encode_base64(input: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_small_buffer_slab_unique_addresses() {
+        // Every allocation must occupy a distinct address (no overlap).
+        let n = 1000usize;
+        let mut ptrs: Vec<*mut BufferHeader> = Vec::new();
+        for i in 0..n {
+            let cap = (i % (SMALL_BUF_THRESHOLD as usize)) as u32;
+            let buf = buffer_alloc(cap);
+            assert!(!buf.is_null(), "slab alloc returned null at i={}", i);
+            ptrs.push(buf);
+        }
+        let addrs: HashSet<usize> = ptrs.iter().map(|&p| p as usize).collect();
+        assert_eq!(addrs.len(), n, "slab allocations must have unique addresses");
+    }
+
+    #[test]
+    fn test_small_buffer_slab_is_registered() {
+        // All slab-allocated buffers must be recognised as buffers.
+        for cap in [0u32, 1, 15, 16, 127, 255] {
+            let buf = buffer_alloc(cap);
+            assert!(
+                is_registered_buffer(buf as usize),
+                "cap={cap}: slab buffer not recognised by is_registered_buffer"
+            );
+            assert_eq!(
+                unsafe { (*buf).capacity }, cap,
+                "cap={cap}: wrong capacity stored in header"
+            );
+        }
+    }
+
+    #[test]
+    fn test_large_buffer_still_registered() {
+        // Buffers at or above the threshold still go through the HashSet path.
+        let buf = buffer_alloc(SMALL_BUF_THRESHOLD);
+        assert!(!buf.is_null());
+        assert!(
+            is_registered_buffer(buf as usize),
+            "large buffer not in BUFFER_REGISTRY"
+        );
+        assert_eq!(unsafe { (*buf).capacity }, SMALL_BUF_THRESHOLD);
+    }
 
     #[test]
     fn test_buffer_alloc() {

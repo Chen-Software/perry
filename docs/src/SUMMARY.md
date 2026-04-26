@@ -17,6 +17,10 @@
 - [Type System](language/type-system.md)
 - [Limitations](language/limitations.md)
 
+# npm Packages
+
+- [Porting Packages (experimental)](packages/porting.md)
+
 # Multi-Threading
 
 - [Overview](threading/overview.md)
@@ -46,6 +50,7 @@
 - [Overview](platforms/overview.md)
 - [macOS](platforms/macos.md)
 - [iOS](platforms/ios.md)
+- [visionOS](platforms/visionos.md)
 - [tvOS](platforms/tvos.md)
 - [watchOS](platforms/watchos.md)
 - [Android](platforms/android.md)

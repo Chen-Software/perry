@@ -6,21 +6,62 @@
 
 use perry_runtime::{js_string_from_bytes, StringHeader};
 use md5::{Md5, Digest as Md5Digest};
-use sha2::{Sha256, Digest as Sha256Digest};
+use sha1::Sha1;
+use sha2::{Sha256, Sha512, Digest as Sha256Digest};
 use rand::RngCore;
 use aes::Aes256;
 use cbc::{Encryptor, Decryptor, cipher::{KeyIvInit, block_padding::Pkcs7, BlockEncryptMut, BlockDecryptMut}};
 use base64::Engine as _;
+use crate::common::handle::{register_handle, get_handle_mut, Handle};
 
 /// Helper to extract string from StringHeader pointer
 unsafe fn string_from_header(ptr: *const StringHeader) -> Option<Vec<u8>> {
     if ptr.is_null() {
         return None;
     }
-    let len = (*ptr).length as usize;
+    let len = (*ptr).byte_len as usize;
     let data_ptr = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data_ptr, len);
     Some(bytes.to_vec())
+}
+
+/// Extract the raw bytes from a pointer that might be a Buffer, a
+/// StringHeader, or anything that uses the `[u32 byte-length prefix][bytes]`
+/// layout. StringHeader has `utf16_len` at offset 0 and `byte_len` at
+/// offset 4; BufferHeader has `length` at offset 0 and `capacity` at
+/// offset 4. Both have the payload bytes immediately after the 8-byte
+/// header, and both store the byte count (in UTF-8 / as raw bytes) in
+/// the same u32 slot for our purposes — but we pick the correct field
+/// based on whether the pointer is a registered Buffer.
+unsafe fn bytes_from_ptr(ptr: i64) -> Vec<u8> {
+    let addr = ptr as usize;
+    if addr < 0x1000 {
+        return Vec::new();
+    }
+    if perry_runtime::buffer::is_registered_buffer(addr) {
+        let buf = ptr as *const perry_runtime::buffer::BufferHeader;
+        let len = (*buf).length as usize;
+        let data = (buf as *const u8).add(std::mem::size_of::<perry_runtime::buffer::BufferHeader>());
+        return std::slice::from_raw_parts(data, len).to_vec();
+    }
+    // Fall back to StringHeader layout — the common case for literal
+    // strings passed to crypto functions.
+    let hdr = ptr as *const StringHeader;
+    let len = (*hdr).byte_len as usize;
+    let data = (hdr as *const u8).add(std::mem::size_of::<StringHeader>());
+    std::slice::from_raw_parts(data, len).to_vec()
+}
+
+/// Allocate a new Buffer, copy `bytes` into it, return the registered pointer.
+unsafe fn alloc_buffer_from_slice(bytes: &[u8]) -> *mut perry_runtime::buffer::BufferHeader {
+    let buf = perry_runtime::buffer::buffer_alloc(bytes.len() as u32);
+    if buf.is_null() {
+        return buf;
+    }
+    (*buf).length = bytes.len() as u32;
+    let dst = perry_runtime::buffer::buffer_data_mut(buf);
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
+    buf
 }
 
 /// Create SHA256 hash of data
@@ -38,6 +79,23 @@ pub unsafe extern "C" fn js_crypto_sha256(data_ptr: *const StringHeader) -> *mut
     let hex_str = hex::encode(result);
 
     js_string_from_bytes(hex_str.as_ptr(), hex_str.len() as u32)
+}
+
+/// SHA256 over arbitrary bytes. Input can be a Buffer or a string (both
+/// share the same `[u32 len][u32 cap_or_utf16_len][bytes...]` header
+/// layout up to the data pointer offset). Output is a Buffer holding the
+/// 32-byte digest. Used by `.digest()` (no arg) — the SCRAM path in
+/// `@perry/postgres` relies on this.
+///
+/// Pointer is passed as `i64` so the codegen can feed either a NaN-unboxed
+/// Buffer handle or a StringHeader pointer through the same FFI slot.
+#[no_mangle]
+pub unsafe extern "C" fn js_crypto_sha256_bytes(data_ptr: i64) -> *mut perry_runtime::buffer::BufferHeader {
+    let bytes = bytes_from_ptr(data_ptr);
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let digest = hasher.finalize();
+    alloc_buffer_from_slice(&digest)
 }
 
 /// Create MD5 hash of data
@@ -134,6 +192,47 @@ pub unsafe extern "C" fn js_crypto_hmac_sha256(
     let hex_str = hex::encode(result.into_bytes());
 
     js_string_from_bytes(hex_str.as_ptr(), hex_str.len() as u32)
+}
+
+/// HMAC-SHA-256 over arbitrary bytes, returning a Buffer. Used by
+/// `.digest()` (no arg) for SCRAM-SHA-256 key derivation.
+#[no_mangle]
+pub unsafe extern "C" fn js_crypto_hmac_sha256_bytes(
+    key_ptr: i64,
+    data_ptr: i64,
+) -> *mut perry_runtime::buffer::BufferHeader {
+    use hmac::{Hmac, Mac};
+    type HmacSha256 = Hmac<Sha256>;
+
+    let key = bytes_from_ptr(key_ptr);
+    let data = bytes_from_ptr(data_ptr);
+    let mut mac = match HmacSha256::new_from_slice(&key) {
+        Ok(m) => m,
+        Err(_) => return perry_runtime::buffer::buffer_alloc(0),
+    };
+    mac.update(&data);
+    let digest = mac.finalize().into_bytes();
+    alloc_buffer_from_slice(&digest)
+}
+
+/// PBKDF2-HMAC-SHA-256 returning a Buffer. Counterpart of
+/// `crypto.pbkdf2Sync(password, salt, iterations, keylen, 'sha256')`.
+/// Accepts string or Buffer for both password and salt.
+#[no_mangle]
+pub unsafe extern "C" fn js_crypto_pbkdf2_bytes(
+    password_ptr: i64,
+    salt_ptr: i64,
+    iterations: f64,
+    keylen: f64,
+) -> *mut perry_runtime::buffer::BufferHeader {
+    use pbkdf2::pbkdf2_hmac;
+    let password = bytes_from_ptr(password_ptr);
+    let salt = bytes_from_ptr(salt_ptr);
+    let iter = iterations as u32;
+    let klen = keylen as usize;
+    let mut out = vec![0u8; klen];
+    pbkdf2_hmac::<Sha256>(&password, &salt, iter, &mut out);
+    alloc_buffer_from_slice(&out)
 }
 
 // Type aliases for AES-256-CBC
@@ -382,4 +481,119 @@ pub unsafe extern "C" fn js_crypto_scrypt_custom(
 
     let hex_str = hex::encode(&output);
     js_string_from_bytes(hex_str.as_ptr(), hex_str.len() as u32)
+}
+
+// ---------------------------------------------------------------------------
+// Hash handle — powers `const h = crypto.createHash('sha1'); h.update(x);
+// h.digest()` (issue #86). The runtime-resident chain-collapse in
+// `perry-codegen/src/expr.rs` only catches the literal single-expression
+// form; once the user binds the hash to a local and calls update/digest on
+// subsequent statements, the chain pattern no longer matches and the calls
+// fall through to `js_native_call_method`. We register the hash state in
+// the handle registry and the small-integer dispatch path (see
+// `perry-runtime/src/object.rs` ~line 3040) routes update/digest back to
+// `dispatch_hash` below.
+// ---------------------------------------------------------------------------
+
+pub enum HashState {
+    Sha1(Sha1),
+    Sha256(Sha256),
+    Sha512(Sha512),
+    Md5(Md5),
+}
+
+pub struct HashHandle {
+    /// `Option` so `digest()` can `take()` ownership of the hasher
+    /// (sha1/sha2 `finalize()` consumes `self`).
+    state: std::sync::Mutex<Option<HashState>>,
+}
+
+/// Allocate a new Hash handle for the given algorithm. Returns the handle
+/// id NaN-boxed with POINTER_TAG (0x7FFD_…). Small integers survive the
+/// 48-bit POINTER_MASK, and the runtime's handle-range check in
+/// `js_native_call_method` (`raw_ptr < 0x100000`) routes subsequent
+/// `.update(...)` / `.digest(...)` through `HANDLE_METHOD_DISPATCH` which
+/// calls `dispatch_hash` below. Unknown algorithms return undefined.
+#[no_mangle]
+pub unsafe extern "C" fn js_crypto_create_hash(alg_ptr: i64) -> f64 {
+    let alg_bytes = bytes_from_ptr(alg_ptr);
+    let alg = std::str::from_utf8(&alg_bytes).unwrap_or("").to_ascii_lowercase();
+    let state = match alg.as_str() {
+        "sha1" | "sha-1" => HashState::Sha1(Sha1::new()),
+        "sha256" | "sha-256" => HashState::Sha256(Sha256::new()),
+        "sha512" | "sha-512" => HashState::Sha512(Sha512::new()),
+        "md5" => HashState::Md5(Md5::new()),
+        _ => return f64::from_bits(0x7FFC_0000_0000_0001),
+    };
+    let handle: Handle = register_handle(HashHandle {
+        state: std::sync::Mutex::new(Some(state)),
+    });
+    f64::from_bits(0x7FFD_0000_0000_0000u64 | ((handle as u64) & 0x0000_FFFF_FFFF_FFFF))
+}
+
+/// Dispatch `update` / `digest` on a HashHandle. Called from
+/// `common/dispatch.rs::js_handle_method_dispatch`.
+pub unsafe fn dispatch_hash(handle: i64, method: &str, args: &[f64]) -> f64 {
+    let h = match get_handle_mut::<HashHandle>(handle) {
+        Some(h) => h,
+        None => return f64::from_bits(0x7FFC_0000_0000_0001),
+    };
+    match method {
+        "update" if !args.is_empty() => {
+            let ptr = (args[0].to_bits() & 0x0000_FFFF_FFFF_FFFF) as i64;
+            let bytes = bytes_from_ptr(ptr);
+            let mut guard = h.state.lock().unwrap();
+            if let Some(state) = guard.as_mut() {
+                match state {
+                    HashState::Sha1(x) => Sha256Digest::update(x, &bytes),
+                    HashState::Sha256(x) => Sha256Digest::update(x, &bytes),
+                    HashState::Sha512(x) => Sha256Digest::update(x, &bytes),
+                    HashState::Md5(x) => Md5Digest::update(x, &bytes),
+                }
+            }
+            f64::from_bits(0x7FFD_0000_0000_0000u64 | ((handle as u64) & 0x0000_FFFF_FFFF_FFFF))
+        }
+        "digest" => {
+            let state = {
+                let mut guard = h.state.lock().unwrap();
+                guard.take()
+            };
+            let digest: Vec<u8> = match state {
+                Some(HashState::Sha1(x)) => x.finalize().to_vec(),
+                Some(HashState::Sha256(x)) => x.finalize().to_vec(),
+                Some(HashState::Sha512(x)) => x.finalize().to_vec(),
+                Some(HashState::Md5(x)) => x.finalize().to_vec(),
+                None => return f64::from_bits(0x7FFC_0000_0000_0001),
+            };
+            if args.is_empty() || is_undefined_f64(args[0]) {
+                let buf = alloc_buffer_from_slice(&digest);
+                f64::from_bits(
+                    0x7FFD_0000_0000_0000u64 | ((buf as u64) & 0x0000_FFFF_FFFF_FFFF),
+                )
+            } else {
+                let enc_ptr = (args[0].to_bits() & 0x0000_FFFF_FFFF_FFFF) as i64;
+                let enc_bytes = bytes_from_ptr(enc_ptr);
+                let enc = std::str::from_utf8(&enc_bytes)
+                    .unwrap_or("hex")
+                    .to_ascii_lowercase();
+                let encoded = match enc.as_str() {
+                    "hex" => hex::encode(&digest),
+                    "base64" => base64::engine::general_purpose::STANDARD.encode(&digest),
+                    "base64url" => base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&digest),
+                    "binary" | "latin1" => String::from_utf8_lossy(&digest).into_owned(),
+                    _ => hex::encode(&digest),
+                };
+                let s = js_string_from_bytes(encoded.as_ptr(), encoded.len() as u32);
+                f64::from_bits(
+                    0x7FFF_0000_0000_0000u64 | ((s as u64) & 0x0000_FFFF_FFFF_FFFF),
+                )
+            }
+        }
+        _ => f64::from_bits(0x7FFC_0000_0000_0001),
+    }
+}
+
+#[inline]
+fn is_undefined_f64(v: f64) -> bool {
+    v.to_bits() == 0x7FFC_0000_0000_0001
 }

@@ -1,0 +1,9 @@
+{
+  "commit": "00fa823",
+  "generated_at": "2026-04-17T18:33:13Z",
+  "sizes": {
+    "perry": 12986912,
+    "libperry_runtime": 31343464,
+    "libperry_stdlib": 209517616
+  }
+}

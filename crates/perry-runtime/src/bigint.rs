@@ -22,10 +22,20 @@ pub struct BigIntHeader {
     pub limbs: [u64; BIGINT_LIMBS],
 }
 
-/// Allocate a BigInt with GC tracking
+/// Allocate a BigInt from the arena (bump-pointer, no per-object Vec/HashSet tracking).
+///
+/// Switching from gc_malloc to arena_alloc_gc eliminates the dominant per-call
+/// overhead: system malloc (~30 ns) + MALLOC_STATE Vec push (~10 ns) +
+/// HashSet insert (~30 ns) = ~70 ns → reduced to ~20 ns bump-pointer.
+/// Arena objects are discovered by linear block walking at GC time; the mark
+/// phase already handles GC_TYPE_BIGINT (no child references to trace).
 #[inline]
 fn bigint_alloc() -> *mut BigIntHeader {
-    let raw = crate::gc::gc_malloc(std::mem::size_of::<BigIntHeader>(), crate::gc::GC_TYPE_BIGINT);
+    let raw = crate::arena::arena_alloc_gc(
+        std::mem::size_of::<BigIntHeader>(),
+        std::mem::align_of::<BigIntHeader>(),
+        crate::gc::GC_TYPE_BIGINT,
+    );
     raw as *mut BigIntHeader
 }
 
@@ -35,14 +45,14 @@ fn bigint_alloc() -> *mut BigIntHeader {
 fn is_valid_bigint_ptr(p: *const BigIntHeader) -> bool {
     let bits = p as usize;
     // Valid heap pointers: non-null, >= 0x10000, upper 16 bits must be 0 (48-bit address space)
-    bits >= 0x10000 && bits >> 48 == 0
+    bits >= 0x10000 && (bits as u64) >> 48 == 0
 }
 
 /// Strip NaN-boxing tags from a BigInt pointer (defensive guard).
 /// Returns null if the value is not a valid bigint pointer.
 #[inline(always)]
 pub fn clean_bigint_ptr(p: *const BigIntHeader) -> *const BigIntHeader {
-    let bits = p as usize;
+    let bits = p as u64;
     let top16 = bits >> 48;
     if top16 >= 0x7FF8 {
         // NaN-boxed value — extract lower 48 bits
@@ -119,7 +129,7 @@ pub extern "C" fn js_bigint_from_f64(value: f64) -> *mut BigIntHeader {
         let ptr = jsval.as_string_ptr();
         if !ptr.is_null() {
             unsafe {
-                let len = (*ptr).length as u32;
+                let len = (*ptr).byte_len as u32;
                 let data = (ptr as *const u8).add(std::mem::size_of::<crate::string::StringHeader>());
                 let result = js_bigint_from_string(data, len);
                 return result;
@@ -144,6 +154,22 @@ pub extern "C" fn js_bigint_from_string(data: *const u8, len: u32) -> *mut BigIn
     unsafe {
         let bytes = std::slice::from_raw_parts(data, len as usize);
         let s = std::str::from_utf8_unchecked(bytes);
+
+        // Fast path: decimal string that fits in i64. Postgres `int8`
+        // results, Node `Date.now()` timestamps, app IDs — the common
+        // BigInt input in real code is well under 2^63. For those we
+        // skip the per-digit 16-limb multiply (~300 u128 muls for a
+        // 20-char input) and let Rust's native str→i64 handle parsing
+        // in a single pass.
+        //
+        // `i64::from_str` returns Err on overflow / non-digit, and we
+        // fall through to the general path so hex, floats-of-ints, and
+        // arbitrary-precision still work exactly as before.
+        if !s.starts_with("0x") && !s.starts_with("0X") {
+            if let Ok(v) = s.parse::<i64>() {
+                return js_bigint_from_i64(v);
+            }
+        }
 
         // Handle negative prefix
         let (is_negative, s) = if s.starts_with('-') {
@@ -923,7 +949,7 @@ fn limbs_to_radix_string(limbs: &[u64; BIGINT_LIMBS], radix: u32) -> String {
 #[no_mangle]
 pub extern "C" fn js_bigint_to_string(a: *const BigIntHeader) -> *mut crate::string::StringHeader {
     unsafe {
-        if a.is_null() || (a as usize) < 0x10000 || (a as usize) >> 48 != 0 {
+        if a.is_null() || (a as usize) < 0x10000 || (a as u64) >> 48 != 0 {
             return std::ptr::null_mut();
         }
         let s = limbs_to_decimal_string(&(*a).limbs);
@@ -935,7 +961,7 @@ pub extern "C" fn js_bigint_to_string(a: *const BigIntHeader) -> *mut crate::str
 #[no_mangle]
 pub extern "C" fn js_bigint_to_string_radix(a: *const BigIntHeader, radix: i32) -> *mut crate::string::StringHeader {
     unsafe {
-        if a.is_null() || (a as usize) < 0x10000 || (a as usize) >> 48 != 0 {
+        if a.is_null() || (a as usize) < 0x10000 || (a as u64) >> 48 != 0 {
             return std::ptr::null_mut();
         }
         let s = limbs_to_radix_string(&(*a).limbs, radix as u32);

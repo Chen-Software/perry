@@ -26,7 +26,7 @@ fn str_from_header(ptr: *const u8) -> &'static str {
     }
     unsafe {
         let header = ptr as *const perry_runtime::string::StringHeader;
-        let len = (*header).length as usize;
+        let len = (*header).byte_len as usize;
         let data = ptr.add(std::mem::size_of::<perry_runtime::string::StringHeader>());
         std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
     }
@@ -69,7 +69,10 @@ pub fn create(placeholder_ptr: *const u8, on_change: f64) -> i64 {
                         | WS_TABSTOP.0,
                 ),
                 0, 0, 200, 24,
-                None,
+                // WS_CHILD requires a parent HWND; same pattern as picker/
+                // button/textfield — use the parking window until
+                // layout::relayout() moves the control to its real parent.
+                super::get_parking_hwnd(),
                 HMENU(control_id as *mut _),
                 HINSTANCE::from(hinstance),
                 None,

@@ -9,21 +9,100 @@ use std::ptr;
 use crate::arena::arena_alloc_gc;
 
 /// Strip NaN-boxing tags from an array pointer and guard against invalid values.
+///
+/// Issue #73 follow-up: the `> 0x1000` (4 KB) floor is too permissive
+/// for the macOS ARM64 heap layout. A corrupted NaN-box whose 48-bit
+/// handle lands in the 1 TB — 2 TB window (e.g. `0x00FF_0000_0000` —
+/// a `BufferHeader { length: 0, capacity: 255 }` read as u64) clears
+/// the old floor and segfaults `(*arr).length` / SIMD memcpy inside
+/// `js_array_slice` / `js_array_length` / etc. Real mimalloc + arena
+/// allocations on Darwin consistently land in the 3-5 TB range;
+/// constraining to `>= 2 TB && < 128 TB` rejects the observed
+/// corruption patterns without cutting off any real heap pointer.
+///
+/// v0.5.85 follow-up: also validate the GC header byte + length/capacity
+/// sanity. A pointer that passes the range check but points into the
+/// middle of another allocation (post-GC memory reuse overlaid with
+/// e.g. decoded PostgreSQL text column data) reads garbage length
+/// values — witnessed `len=775370038 cap=926234674` (both the ASCII
+/// bytes of `"6+2.2017"`) flowing through `js_array_slice` and
+/// triggering 22GB-wide memcpy segfaults. Post-check: obj_type at
+/// `handle-8` must equal GC_TYPE_ARRAY (1), and length must be
+/// <= capacity <= 16M (same bound as the GC tracer's sanity guard).
 #[inline(always)]
 fn clean_arr_ptr(arr: *const ArrayHeader) -> *const ArrayHeader {
-    let bits = arr as usize;
+    // Heap window varies by OS: Darwin mimalloc lands in the 3-5 TB range;
+    // Android scudo + Linux glibc allocate MUCH lower (often < 1 TB). Using
+    // the Darwin-tight 2 TB floor on Android silently null-s every real
+    // array pointer, turning js_array_set_f64 into a no-op.
+    #[cfg(any(target_os = "android", target_os = "linux"))]
+    const HEAP_MIN: u64 = 0x1000; // 4 KB (classic user-space floor)
+    #[cfg(not(any(target_os = "android", target_os = "linux")))]
+    const HEAP_MIN: u64 = 0x200_0000_0000; // 2 TB — above observed corrupt handles on Darwin
+    const HEAP_MAX: u64 = 0x8000_0000_0000; // 47-bit userspace cap
+    let bits = arr as u64;
     let top16 = bits >> 48;
-    if top16 >= 0x7FF8 {
+    let cleaned = if top16 >= 0x7FF8 {
         if top16 == 0x7FFC || (bits & 0x0000_FFFF_FFFF_FFFF) == 0 {
             return std::ptr::null();
         }
-        let cleaned = (bits & 0x0000_FFFF_FFFF_FFFF) as *const ArrayHeader;
-        if (cleaned as usize) < 0x1000 { return std::ptr::null(); }
-        cleaned
+        let cleaned_bits = bits & 0x0000_FFFF_FFFF_FFFF;
+        if cleaned_bits < HEAP_MIN || cleaned_bits >= HEAP_MAX {
+            return std::ptr::null();
+        }
+        cleaned_bits as *const ArrayHeader
     } else {
-        if bits < 0x1000 { return std::ptr::null(); }
+        if bits < HEAP_MIN || bits >= HEAP_MAX {
+            return std::ptr::null();
+        }
         arr
+    };
+    // Issue #179 Phase 2: lazy arrays have a GcHeader with
+    // obj_type == GC_TYPE_LAZY_ARRAY. Their layout's first two u32s
+    // are (magic, cached_length) rather than (length, capacity) —
+    // the sanity check below would reject them. Force-materialize
+    // into a real ArrayHeader and substitute the materialized
+    // pointer for every downstream accessor. O(1) on subsequent
+    // calls (idempotent via the `materialized` cache).
+    unsafe {
+        if (cleaned as usize) >= crate::gc::GC_HEADER_SIZE + 0x1000 {
+            let gc_header = (cleaned as *const u8)
+                .sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+            if (*gc_header).obj_type == crate::gc::GC_TYPE_LAZY_ARRAY {
+                let lazy = cleaned as *mut crate::json_tape::LazyArrayHeader;
+                if (*lazy).magic == crate::json_tape::LAZY_ARRAY_MAGIC {
+                    let materialized =
+                        crate::json_tape::force_materialize_lazy(lazy);
+                    return materialized as *const ArrayHeader;
+                }
+            }
+        }
     }
+    // Length/capacity sanity: a real ArrayHeader has length <= capacity,
+    // and length below 100M (800 MB of element payload — well above
+    // legitimate large result sets, far below the 775M / 926M patterns
+    // we observed when a reused arena slot landed ASCII text at offsets
+    // 0/4). Buffers can be much larger than arrays, so only gate the
+    // polymorphic entry on the tighter array-sized bound and let
+    // buffer-specific runtime paths dispatch themselves when they
+    // recognize a registered buffer pointer.
+    unsafe {
+        let hdr = &*cleaned;
+        if hdr.length > hdr.capacity || hdr.length > 100_000_000 {
+            // Allow very large BUFFERS to pass — a postgres frame can
+            // be 64MB+ of bytes (capacity in the buffer case) with
+            // length up to capacity. Detect registered buffers and
+            // wave them through; everything else at this size is
+            // almost certainly corrupted.
+            let addr = cleaned as usize;
+            if !crate::buffer::is_registered_buffer(addr)
+                && crate::typedarray::lookup_typed_array_kind(addr).is_none()
+            {
+                return std::ptr::null();
+            }
+        }
+    }
+    cleaned
 }
 
 #[inline(always)]
@@ -88,6 +167,31 @@ pub extern "C" fn js_array_alloc_with_length(capacity: u32) -> *mut ArrayHeader 
     ptr
 }
 
+/// Allocate a new array with `length == capacity == capacity` in the
+/// **longlived arena** (issue #179). Used to build the shape-cache
+/// `keys_array` backing storage, which is cache-resident for the life
+/// of the thread and anchored by `scan_shape_cache_roots`.
+///
+/// Caller fills element slots immediately via direct writes (same
+/// contract as `js_array_alloc_with_length`). Uses exact capacity — no
+/// `MIN_ARRAY_CAPACITY` padding — because keys arrays never grow
+/// (shapes are immutable once built).
+#[no_mangle]
+pub extern "C" fn js_array_alloc_with_length_longlived(capacity: u32) -> *mut ArrayHeader {
+    let ptr = crate::arena::arena_alloc_gc_longlived(
+        array_byte_size(capacity as usize),
+        8,
+        crate::gc::GC_TYPE_ARRAY,
+    ) as *mut ArrayHeader;
+
+    unsafe {
+        (*ptr).length = capacity;
+        (*ptr).capacity = capacity;
+    }
+
+    ptr
+}
+
 /// Allocate and initialize an array from a list of f64 values
 #[no_mangle]
 pub extern "C" fn js_array_from_f64(elements: *const f64, count: u32) -> *mut ArrayHeader {
@@ -100,6 +204,53 @@ pub extern "C" fn js_array_from_f64(elements: *const f64, count: u32) -> *mut Ar
     arr
 }
 
+/// Exact-sized array allocation for array literals `[a, b, c, ...]`.
+///
+/// Unlike `js_array_alloc`, this does NOT apply `MIN_ARRAY_CAPACITY=16` padding.
+/// Every byte allocated is a byte the literal uses, which keeps tight-loop
+/// allocation pressure proportional to the literal size (a 3-element literal
+/// costs 32 bytes, not 136). `length` is pre-set to `capacity` so the codegen
+/// only needs to emit direct stores for each element; no per-element
+/// `js_array_push_f64` call with redundant capacity check.
+///
+/// Caller contract: the codegen evaluates every element expression *before*
+/// calling this function, then emits direct stores to `(arr+8) + i*8` with no
+/// intervening GC-triggering operation. Between this call and completion of
+/// the stores, the array header reports `length == capacity` but elements are
+/// uninitialized; only pure LLVM stores may execute in that window.
+#[no_mangle]
+pub extern "C" fn js_array_alloc_literal(capacity: u32) -> *mut ArrayHeader {
+    let ptr = arena_alloc_gc(array_byte_size(capacity as usize), 8, crate::gc::GC_TYPE_ARRAY) as *mut ArrayHeader;
+    unsafe {
+        (*ptr).length = capacity;
+        (*ptr).capacity = capacity;
+    }
+    ptr
+}
+
+/// Issue #179 Phase 2: if `arr` points at a `LazyArrayHeader`
+/// (`GcHeader::obj_type == GC_TYPE_LAZY_ARRAY`), force the lazy
+/// value to materialize and return the real `ArrayHeader` pointer.
+/// Otherwise returns `arr` unchanged. Every array accessor that
+/// doesn't have a lazy-specific fast path (only `.length` does)
+/// should funnel through this so correctness is preserved under
+/// arbitrary JS code.
+#[inline]
+pub(crate) unsafe fn maybe_force_lazy(arr: *const ArrayHeader) -> *const ArrayHeader {
+    if arr.is_null() { return arr; }
+    if (arr as usize) < crate::gc::GC_HEADER_SIZE + 0x1000 { return arr; }
+    let gc_header = (arr as *const u8)
+        .sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+    if (*gc_header).obj_type != crate::gc::GC_TYPE_LAZY_ARRAY {
+        return arr;
+    }
+    let lazy = arr as *mut crate::json_tape::LazyArrayHeader;
+    if (*lazy).magic != crate::json_tape::LAZY_ARRAY_MAGIC {
+        return arr;
+    }
+    crate::json_tape::force_materialize_lazy(lazy) as *const ArrayHeader
+}
+
 /// Get the length of an array
 /// Also handles Sets and Maps via registry check (for-of iteration treats them as arrays)
 #[no_mangle]
@@ -110,6 +261,37 @@ pub extern "C" fn js_array_length(arr: *const ArrayHeader) -> u32 {
         }
         if crate::map::is_registered_map(arr as usize) {
             return crate::map::js_map_size(arr as *const crate::map::MapHeader);
+        }
+    }
+    // Issue #179 Phase 2: lazy array fast path. Check BEFORE
+    // `clean_arr_ptr` because that helper rejects pointers whose
+    // first two u32s look implausible as (length, capacity) — and a
+    // `LazyArrayHeader`'s first fields are (magic, cached_length),
+    // which trip the guard. Strip the NaN-box tag manually first.
+    unsafe {
+        let bits = arr as u64;
+        let top16 = bits >> 48;
+        let raw_ptr = if top16 >= 0x7FF8 {
+            if top16 == 0x7FFC { return 0; }
+            (bits & 0x0000_FFFF_FFFF_FFFF) as *const ArrayHeader
+        } else {
+            arr
+        };
+        if !raw_ptr.is_null() && (raw_ptr as usize) >= crate::gc::GC_HEADER_SIZE + 0x1000 {
+            let gc_header = (raw_ptr as *const u8)
+                .sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+            if (*gc_header).obj_type == crate::gc::GC_TYPE_LAZY_ARRAY {
+                let lazy = raw_ptr as *const crate::json_tape::LazyArrayHeader;
+                if (*lazy).magic == crate::json_tape::LAZY_ARRAY_MAGIC {
+                    // If we've already materialized (e.g. an indexed
+                    // access forced it), read the authoritative length
+                    // from the materialized tree.
+                    if !(*lazy).materialized.is_null() {
+                        return (*(*lazy).materialized).length;
+                    }
+                    return (*lazy).cached_length;
+                }
+            }
         }
     }
     let arr = clean_arr_ptr(arr);
@@ -155,6 +337,40 @@ pub extern "C" fn js_array_get_f64_unchecked(arr: *const ArrayHeader, index: u32
 /// Get an element from an array by index (returns f64)
 #[no_mangle]
 pub extern "C" fn js_array_get_f64(arr: *const ArrayHeader, index: u32) -> f64 {
+    // Issue #179 Phase 5: lazy fast path — must run BEFORE
+    // `clean_arr_ptr` because that helper force-materializes a lazy
+    // pointer into a regular ArrayHeader. For the common read-only
+    // shape (`parsed[i]` on a lazy result), force-materializing the
+    // whole tree on first access dominates the workload; the sparse
+    // per-element cache only materializes the touched subtree.
+    //
+    // Same tag-strip pattern as `js_array_length`: v0.5.206 added a
+    // lazy guard in `clean_arr_ptr` that force-materializes, but
+    // for the sparse-cache path we want to keep the LazyArrayHeader
+    // around so the cache persists across calls. Strip the NaN-box
+    // tag manually and check obj_type without going through the
+    // clean-and-validate helper.
+    unsafe {
+        let bits = arr as u64;
+        let top16 = bits >> 48;
+        let raw_ptr = if top16 >= 0x7FF8 {
+            if top16 == 0x7FFC { return f64::NAN; }
+            (bits & 0x0000_FFFF_FFFF_FFFF) as *const ArrayHeader
+        } else {
+            arr
+        };
+        if !raw_ptr.is_null() && (raw_ptr as usize) >= crate::gc::GC_HEADER_SIZE + 0x1000 {
+            let gc_header = (raw_ptr as *const u8)
+                .sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+            if (*gc_header).obj_type == crate::gc::GC_TYPE_LAZY_ARRAY {
+                let lazy = raw_ptr as *mut crate::json_tape::LazyArrayHeader;
+                if (*lazy).magic == crate::json_tape::LAZY_ARRAY_MAGIC {
+                    let value = crate::json_tape::lazy_get(lazy, index);
+                    return f64::from_bits(value.bits());
+                }
+            }
+        }
+    }
     let arr = clean_arr_ptr(arr);
     if arr.is_null() { return f64::NAN; }
     // Check if this is actually a TypedArray — dispatch through typed array helper
@@ -234,6 +450,15 @@ pub extern "C" fn js_array_set_f64(arr: *mut ArrayHeader, index: u32, value: f64
         crate::buffer::js_buffer_set(arr as *mut crate::buffer::BufferHeader, index as i32, value as i32);
         return;
     }
+    // Check if this is a typed array — route through per-kind store.
+    if crate::typedarray::lookup_typed_array_kind(arr as usize).is_some() {
+        crate::typedarray::js_typed_array_set(
+            arr as *mut crate::typedarray::TypedArrayHeader,
+            index as i32,
+            value,
+        );
+        return;
+    }
     unsafe {
         let length = (*arr).length;
         if index >= length {
@@ -254,6 +479,15 @@ pub extern "C" fn js_array_set_f64_extend(arr: *mut ArrayHeader, index: u32, val
     // Check if this is actually a buffer (Uint8Array) — write individual bytes
     if crate::buffer::is_registered_buffer(arr as usize) {
         crate::buffer::js_buffer_set(arr as *mut crate::buffer::BufferHeader, index as i32, value as i32);
+        return arr;
+    }
+    // Check if this is a typed array — route through per-kind store (no extension).
+    if crate::typedarray::lookup_typed_array_kind(arr as usize).is_some() {
+        crate::typedarray::js_typed_array_set(
+            arr as *mut crate::typedarray::TypedArrayHeader,
+            index as i32,
+            value,
+        );
         return arr;
     }
     unsafe {
@@ -838,7 +1072,7 @@ pub extern "C" fn js_array_sort_default(arr: *mut ArrayHeader) -> *mut ArrayHead
             } else {
                 let header = &*(str_ptr as *const StringHeader);
                 let bytes_ptr = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
-                let slice = std::slice::from_raw_parts(bytes_ptr, header.length as usize);
+                let slice = std::slice::from_raw_parts(bytes_ptr, header.byte_len as usize);
                 std::str::from_utf8(slice).unwrap_or("").to_string()
             };
             pairs.push((s, val));
@@ -1514,7 +1748,7 @@ pub extern "C" fn js_array_join(arr: *const ArrayHeader, separator: *const crate
         let sep_str = if separator.is_null() {
             ","
         } else {
-            let sep_len = (*separator).length as usize;
+            let sep_len = (*separator).byte_len as usize;
             let sep_data = (separator as *const u8).add(std::mem::size_of::<StringHeader>());
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(sep_data, sep_len))
         };
@@ -1531,15 +1765,23 @@ pub extern "C" fn js_array_join(arr: *const ArrayHeader, separator: *const crate
             // Convert element to string based on its type
             if jsvalue.is_string() {
                 let str_ptr = jsvalue.as_pointer() as *const StringHeader;
-                let str_len = (*str_ptr).length as usize;
+                let str_len = (*str_ptr).byte_len as usize;
                 let str_data = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                 let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(str_data, str_len));
+                result.push_str(s);
+            } else if jsvalue.is_short_string() {
+                // v0.5.214 SSO — decode inline into a stack buffer
+                // and push bytes. No heap roundtrip via
+                // materialize_to_heap.
+                let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+                let n = jsvalue.short_string_to_buf(&mut scratch);
+                let s = std::str::from_utf8_unchecked(&scratch[..n]);
                 result.push_str(s);
             } else if jsvalue.is_pointer() {
                 // POINTER_TAG — may be a string stored with the wrong tag (cross-module)
                 let ptr = (element_bits & 0x0000_FFFF_FFFF_FFFF) as *const StringHeader;
                 if !ptr.is_null() && (ptr as usize) >= 0x1000 {
-                    let str_len = (*ptr).length as usize;
+                    let str_len = (*ptr).byte_len as usize;
                     let str_data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                     let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(str_data, str_len));
                     result.push_str(s);
@@ -1568,7 +1810,7 @@ pub extern "C" fn js_array_join(arr: *const ArrayHeader, separator: *const crate
             } else if element_bits > 0x1000 && element_bits < 0x0001_0000_0000_0000 && (element_bits & 0x3) == 0 {
                 // Raw pointer fallback — string stored without NaN-box tag
                 let str_ptr = element_bits as *const StringHeader;
-                let str_len = (*str_ptr).length as usize;
+                let str_len = (*str_ptr).byte_len as usize;
                 if str_len < 10_000_000 {
                     let str_data = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                     let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(str_data, str_len));
@@ -1627,10 +1869,14 @@ pub extern "C" fn js_array_is_array(value: f64) -> f64 {
         return false_val;
     }
 
-    // Check the GC header's obj_type to confirm this is an array
+    // Check the GC header's obj_type. Both regular arrays and lazy
+    // arrays (Phase 5 JSON.parse result) are arrays from the user's
+    // perspective — `Array.isArray(JSON.parse("[...]"))` must return
+    // true without forcing the lazy header to materialize.
     unsafe {
         let gc_header = raw_ptr.sub(GC_HEADER_SIZE) as *const GcHeader;
-        if (*gc_header).obj_type == GC_TYPE_ARRAY {
+        let obj_type = (*gc_header).obj_type;
+        if obj_type == GC_TYPE_ARRAY || obj_type == crate::gc::GC_TYPE_LAZY_ARRAY {
             true_val
         } else {
             false_val

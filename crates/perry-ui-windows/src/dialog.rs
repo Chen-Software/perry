@@ -16,7 +16,7 @@ fn str_from_header(ptr: *const u8) -> &'static str {
     }
     unsafe {
         let header = ptr as *const perry_runtime::string::StringHeader;
-        let len = (*header).length as usize;
+        let len = (*header).byte_len as usize;
         let data = ptr.add(std::mem::size_of::<perry_runtime::string::StringHeader>());
         std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
     }
@@ -69,6 +69,33 @@ pub fn save_file_dialog(callback: f64, default_name_ptr: *const u8, _allowed_typ
     #[cfg(not(target_os = "windows"))]
     {
         unsafe { js_closure_call1(closure_ptr, f64::from_bits(0x7FFC_0000_0000_0001)); }
+    }
+}
+
+/// Show a simple alert (OK-only). Called from `alert(title, message)`.
+pub fn alert_simple(title_ptr: *const u8, message_ptr: *const u8) {
+    let title = str_from_header(title_ptr);
+    let message = str_from_header(message_ptr);
+
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        use windows::core::PCWSTR;
+        let title_wide = to_wide(title);
+        let message_wide = to_wide(message);
+        unsafe {
+            MessageBoxW(
+                None,
+                PCWSTR(message_wide.as_ptr()),
+                PCWSTR(title_wide.as_ptr()),
+                MB_OK,
+            );
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (title, message);
     }
 }
 

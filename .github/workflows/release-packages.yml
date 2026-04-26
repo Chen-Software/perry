@@ -3,15 +3,110 @@ name: Release Packages
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      publish_npm:
+        description: "Publish npm packages (use for the first run / to bypass release trigger)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Gate: wait for Tests + Simulator Tests to pass on this commit before we
+  # publish anything downstream (Homebrew bottle, apt .deb, npm tarballs).
+  # Both workflows are triggered by the same `push: tags: ['v*']` event that
+  # the /release skill does, so they run in parallel with this job. We poll
+  # `gh run list --commit <sha>` until each reports a conclusion. Fails fast
+  # if either workflow failed — npm publish is not reversible.
+  #
+  # Skipped on workflow_dispatch so the "first-run / bypass" lever still works.
+  # ---------------------------------------------------------------------------
+  await-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Wait for Tests + Simulator Tests (iOS) to pass
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "workflow_dispatch — bypassing test gate (manual publish)."
+            exit 0
+          fi
+          echo "Gating release on commit $SHA"
+          # Query by workflow *filename* via `gh api`, not by display name via
+          # `gh run list --workflow`. v0.5.155 shipped the latter and watched
+          # both gate workflows succeed while the poller logged "no run found
+          # yet" for 45 straight minutes — the `gh run list` name→id lookup
+          # silently returned [] in the release-event context, and the
+          # `2>/dev/null || echo '[]'` fallback made it look identical to an
+          # empty page. `gh api /repos/{repo}/actions/workflows/<file>/runs`
+          # skips the lookup, and we no longer swallow gh's stderr — a real
+          # API error now gets one retry then fails the gate loudly instead
+          # of burning the 45-min budget.
+          for wf_file in "test.yml" "simctl-tests.yml"; do
+            echo "::group::Waiting for $wf_file"
+            deadline=$(( SECONDS + 45 * 60 ))
+            retry_on_error=1
+            while :; do
+              set +e
+              api_out=$(gh api \
+                "/repos/$REPO/actions/workflows/$wf_file/runs?head_sha=$SHA&per_page=1" \
+                2>&1)
+              rc=$?
+              set -e
+              if [ $rc -ne 0 ]; then
+                echo "  gh api failed (rc=$rc):"
+                echo "$api_out" | sed 's/^/    /'
+                if [ $retry_on_error -gt 0 ]; then
+                  retry_on_error=0
+                  echo "  retrying once after 10s"
+                  sleep 10
+                  continue
+                fi
+                echo "  gh api still failing after retry — failing gate."
+                exit 1
+              fi
+              retry_on_error=1
+              status=$(echo "$api_out" | jq -r '.workflow_runs[0].status // empty')
+              conclusion=$(echo "$api_out" | jq -r '.workflow_runs[0].conclusion // empty')
+              url=$(echo "$api_out" | jq -r '.workflow_runs[0].html_url // empty')
+              if [ -z "$status" ]; then
+                echo "  no run found yet for $wf_file on $SHA — waiting"
+              elif [ "$status" = "completed" ]; then
+                if [ "$conclusion" = "success" ]; then
+                  echo "  OK  $wf_file passed: $url"
+                  break
+                else
+                  echo "  FAIL  $wf_file $conclusion: $url"
+                  exit 1
+                fi
+              else
+                echo "  $wf_file: $status ($url) — waiting"
+              fi
+              if [ $SECONDS -ge $deadline ]; then
+                echo "  timed out waiting for $wf_file"
+                exit 1
+              fi
+              sleep 30
+            done
+            echo "::endgroup::"
+          done
+          echo "All gate workflows passed — proceeding to build/publish."
+
   # ---------------------------------------------------------------------------
   # Build release binaries for all platforms
   # ---------------------------------------------------------------------------
   build:
+    needs: await-tests
     strategy:
       matrix:
         include:
@@ -27,11 +122,24 @@ jobs:
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             artifact: perry-linux-aarch64
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+            artifact: perry-linux-x86_64-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            artifact: perry-linux-aarch64-musl
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: perry-windows-x86_64
 
     runs-on: ${{ matrix.os }}
+    env:
+      # Pin the macOS deployment target so bottle object files carry a
+      # stable LC_VERSION_MIN / LC_BUILD_VERSION tag regardless of which
+      # GitHub runner OS built them. Otherwise users linking against the
+      # bottle on macOS 14 see `ld: warning: ... was built for newer 'macOS'
+      # version (15.x) than being linked (14.x)` across every stdlib .o.
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
     steps:
       - uses: actions/checkout@v4
 
@@ -40,12 +148,19 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install GTK4 development libraries (Linux)
-        if: runner.os == 'Linux'
+      - name: Install GTK4 development libraries (Linux glibc)
+        if: runner.os == 'Linux' && !endsWith(matrix.target, '-musl')
         run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev
 
+      - name: Install musl tools (Linux musl)
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
       - name: Build perry
-        run: cargo build --release --target ${{ matrix.target }}
+        # Build only the CLI crate. The default-members list includes
+        # perry-jsruntime (V8), which downloads a prebuilt that 404s on
+        # musl and isn't shipped in the release tarball on any platform.
+        run: cargo build --release --target ${{ matrix.target }} -p perry
 
       - name: Build runtime libraries
         run: |
@@ -56,8 +171,8 @@ jobs:
         if: runner.os == 'macOS'
         run: cargo build --release --target ${{ matrix.target }} -p perry-ui-macos
 
-      - name: Build UI library (Linux)
-        if: runner.os == 'Linux'
+      - name: Build UI library (Linux glibc)
+        if: runner.os == 'Linux' && !endsWith(matrix.target, '-musl')
         run: cargo build --release --target ${{ matrix.target }} -p perry-ui-gtk4
 
       - name: Build UI library (Windows)
@@ -78,12 +193,23 @@ jobs:
           cd staging
           tar czf ../${{ matrix.artifact }}.tar.gz *
 
+      # Bundle xwin.exe so `perry setup windows` can download the MS CRT + Windows
+      # SDK without requiring users to have Rust installed. xwin is pinned here to
+      # control updates — bump the version when switching to a newer xwin release.
+      # See crates/perry/src/commands/setup.rs::windows_wizard for the consumer.
+      - name: Build xwin.exe for bundling (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo install xwin --locked --version 0.9.0 --root xwin-install --target ${{ matrix.target }}
+
       - name: Package release archive (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path staging
           Copy-Item "target/${{ matrix.target }}/release/perry.exe" staging/
+          Copy-Item "xwin-install/bin/xwin.exe" staging/
           # Include static libraries for linking (runtime, stdlib, UI)
           $libs = @("perry_runtime.lib", "perry_stdlib.lib", "perry_ui_windows.lib")
           foreach ($lib in $libs) {
@@ -95,19 +221,26 @@ jobs:
           Compress-Archive -Path staging/* -DestinationPath "${{ matrix.artifact }}.zip"
 
       - name: Upload release asset (Unix)
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && github.event_name == 'release'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${{ github.event.release.tag_name }}" "${{ matrix.artifact }}.tar.gz" --clobber
 
       - name: Upload release asset (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && github.event_name == 'release'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${{ github.event.release.tag_name }}" "${{ matrix.artifact }}.zip" --clobber
 
-      - name: Upload build artifact (for deb job)
+      - name: Upload build artifact (Unix, for deb + npm-publish jobs)
         if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: staging/
+
+      - name: Upload build artifact (Windows, for npm-publish job)
+        if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
@@ -118,6 +251,7 @@ jobs:
   # ---------------------------------------------------------------------------
   homebrew:
     needs: build
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     steps:
       - name: Get release info
@@ -229,6 +363,7 @@ jobs:
   # ---------------------------------------------------------------------------
   apt:
     needs: build
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -312,6 +447,7 @@ jobs:
   # ---------------------------------------------------------------------------
   apt-repo:
     needs: apt
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     steps:
       - name: Get release info
@@ -400,6 +536,7 @@ jobs:
   # ---------------------------------------------------------------------------
   winget:
     needs: build
+    if: github.event_name == 'release'
     runs-on: windows-latest
     steps:
       - name: Get release info
@@ -415,6 +552,25 @@ jobs:
         shell: pwsh
         run: |
           Invoke-WebRequest "https://aka.ms/wingetcreate/latest" -OutFile wingetcreate.exe
+
+      - name: Sync WINGET_PAT-user's winget-pkgs fork with upstream
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_PAT }}
+        # wingetcreate --submit uses the AUTHENTICATED USER'S fork of
+        # microsoft/winget-pkgs, not the org's (PerryTS/winget-pkgs was a
+        # red herring left over from a misread of how wingetcreate works).
+        # Query the token's current user, resolve `<user>/winget-pkgs`,
+        # then merge-upstream. microsoft/winget-pkgs gets thousands of
+        # commits per day — any fork untouched for a week is already behind
+        # enough that wingetcreate's internal SyncFork call will throw the
+        # opaque "forked repository could not be synced" error we saw on
+        # the v0.5.158 first-real-release run.
+        run: |
+          $user = (gh api /user --jq '.login').Trim()
+          Write-Host "Authenticated user: $user"
+          Write-Host "Syncing $user/winget-pkgs from microsoft/winget-pkgs"
+          gh repo sync "$user/winget-pkgs" --source microsoft/winget-pkgs --force
 
       - name: Update winget manifest
         shell: pwsh
@@ -433,6 +589,7 @@ jobs:
   # ---------------------------------------------------------------------------
   update-workers:
     needs: build
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     steps:
       - name: Get release version
@@ -452,3 +609,68 @@ jobs:
             -H "Content-Type: application/json" \
             -d "{\"expected_version\": \"${{ steps.release.outputs.version }}\"}" 2>&1) || true
           echo "Hub response: ${RESPONSE}"
+
+  # ---------------------------------------------------------------------------
+  # Publish npm packages (@perryts/perry + 7 per-platform packages)
+  #
+  # Uses OIDC / Trusted Publishers (no long-lived NPM_TOKEN). Each of the 8
+  # package names must be registered on npmjs.com with this repo + workflow
+  # as a Trusted Publisher. See npm/README.md for the one-time setup.
+  # ---------------------------------------------------------------------------
+  npm-publish:
+    needs: build
+    if: >
+      github.event_name == 'release' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_npm == 'true')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write          # REQUIRED for OIDC + npm --provenance
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Upgrade npm (OIDC Trusted Publisher requires >= 11.5.1)
+        # Node 20 ships npm 10.x; versions below 11.5.1 silently fail the OIDC
+        # handshake and the registry returns a misleading 404 ("'pkg@ver' is
+        # not in this registry") on PUT. See npm/cli#9088.
+        run: npm install -g npm@latest
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts/
+
+      - name: Stage npm packages
+        run: ./scripts/stage-npm.sh release-artifacts/
+
+      - name: Sanity-check staged packages
+        run: |
+          for dir in npm/perry npm/perry-*; do
+            echo "=== $dir ==="
+            ls -la "$dir"
+            if [ -f "$dir/package.json" ]; then
+              node -e "const p=require('./$dir/package.json'); console.log(p.name, p.version)"
+            else
+              echo "MISSING package.json in $dir" >&2
+              exit 1
+            fi
+          done
+
+      - name: Publish platform packages
+        # `./` prefix is required — `npm publish npm/foo` parses `npm/foo` as
+        # a GitHub shorthand (user/repo) and tries ssh://git@github.com/npm/foo.git.
+        # See run 24632227482 npm-publish job for the symptom.
+        run: |
+          set -e
+          for pkg in ./npm/perry-*; do
+            echo "=== publishing $pkg ==="
+            npm publish "$pkg" --access public --provenance
+          done
+
+      - name: Publish wrapper (@perryts/perry) last
+        run: npm publish ./npm/perry --access public --provenance

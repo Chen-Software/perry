@@ -30,7 +30,7 @@ pub fn is_registered_map(addr: usize) -> bool {
 /// Returns null for undefined/null NaN-boxing tags.
 #[inline(always)]
 fn clean_map_ptr(map: *const MapHeader) -> *const MapHeader {
-    let bits = map as usize;
+    let bits = map as u64;
     let top16 = bits >> 48;
     if top16 >= 0x7FF8 {
         if top16 == 0x7FFC || (bits & 0x0000_FFFF_FFFF_FFFF) == 0 {
@@ -77,6 +77,16 @@ unsafe fn entries_ptr_mut(map: *mut MapHeader) -> *mut f64 {
     (*map).entries
 }
 
+/// SameValueZero key normalization: -0 → +0.
+/// ECMAScript Maps/Sets treat -0 and +0 as the same key (23.1.3.9). Without
+/// this, `0` (bits 0x0) and `-0` (bits 0x8000_0000_0000_0000) hash/compare
+/// as distinct keys. Non-number JSValues have NaN-box tags in the upper bits
+/// so `v == 0.0` stays false for them (NaN-tagged f64 is never equal to 0.0).
+#[inline(always)]
+fn normalize_zero(key: f64) -> f64 {
+    if key == 0.0 { 0.0 } else { key }
+}
+
 /// Check if a value looks like a heap pointer (raw pointer stored in f64)
 /// On most systems, heap pointers have small upper bits (0x0000 or close to it)
 fn looks_like_pointer(val: f64) -> bool {
@@ -99,8 +109,8 @@ unsafe fn strings_equal(a: *const StringHeader, b: *const StringHeader) -> bool 
     if a.is_null() || b.is_null() || (a as usize) < 0x1000 || (b as usize) < 0x1000 {
         return a == b;
     }
-    let len_a = (*a).length;
-    let len_b = (*b).length;
+    let len_a = (*a).byte_len;
+    let len_b = (*b).byte_len;
     if len_a != len_b {
         return false;
     }
@@ -247,6 +257,7 @@ unsafe fn ensure_capacity(map: *mut MapHeader) {
 pub extern "C" fn js_map_set(map: *mut MapHeader, key: f64, value: f64) -> *mut MapHeader {
     let map = clean_map_ptr_mut(map);
     if map.is_null() { return map; }
+    let key = normalize_zero(key);
     unsafe {
         // Check if key already exists
         let idx = find_key_index(map, key);
@@ -278,6 +289,7 @@ pub extern "C" fn js_map_set(map: *mut MapHeader, key: f64, value: f64) -> *mut 
 pub extern "C" fn js_map_get(map: *const MapHeader, key: f64) -> f64 {
     let map = clean_map_ptr(map);
     if map.is_null() { return f64::from_bits(TAG_UNDEFINED); }
+    let key = normalize_zero(key);
     unsafe {
         let idx = find_key_index(map, key);
 
@@ -296,6 +308,7 @@ pub extern "C" fn js_map_get(map: *const MapHeader, key: f64) -> f64 {
 pub extern "C" fn js_map_has(map: *const MapHeader, key: f64) -> i32 {
     let map = clean_map_ptr(map);
     if map.is_null() { return 0; }
+    let key = normalize_zero(key);
     unsafe {
         if find_key_index(map, key) >= 0 { 1 } else { 0 }
     }
@@ -307,6 +320,7 @@ pub extern "C" fn js_map_has(map: *const MapHeader, key: f64) -> i32 {
 pub extern "C" fn js_map_delete(map: *mut MapHeader, key: f64) -> i32 {
     let map = clean_map_ptr_mut(map);
     if map.is_null() { return 0; }
+    let key = normalize_zero(key);
     unsafe {
         let idx = find_key_index(map, key);
 

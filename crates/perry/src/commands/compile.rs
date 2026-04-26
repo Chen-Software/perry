@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::OutputFormat;
 
@@ -17,6 +18,86 @@ pub struct CompileResult {
     pub target: String,
     pub bundle_id: Option<String>,
     pub is_dylib: bool,
+    /// V2.2 codegen cache stats from this build, when the cache was enabled.
+    /// `None` when disabled (`--no-cache`, `PERRY_NO_CACHE=1`, or bitcode-link mode).
+    /// Tuple is `(hits, misses, stores, store_errors)`.
+    pub codegen_cache_stats: Option<(usize, usize, usize, usize)>,
+}
+
+/// In-memory TypeScript AST cache used by `perry dev` to skip reparsing
+/// unchanged files across rebuilds in a single dev session.
+///
+/// Keyed by canonical path. Staleness check is a full source byte comparison
+/// — if the bytes match what we parsed last time, reuse the cached `Module`;
+/// otherwise reparse and replace the entry. Content-addressed invalidation
+/// means formatter-on-save that rewrites trivia invalidates us correctly,
+/// and we never get confused by mtime weirdness (git checkout, touch, etc.).
+///
+/// Scope is strictly per-process: this cache lives for the duration of one
+/// `perry dev` invocation. `perry compile` never sees it.
+#[derive(Default)]
+pub struct ParseCache {
+    entries: HashMap<PathBuf, ParseCacheEntry>,
+    hits: usize,
+    misses: usize,
+}
+
+struct ParseCacheEntry {
+    source: String,
+    module: swc_ecma_ast::Module,
+}
+
+impl ParseCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Number of cache hits since creation (or since `reset_counters`).
+    pub fn hits(&self) -> usize {
+        self.hits
+    }
+
+    /// Number of cache misses (fresh parses) since creation.
+    pub fn misses(&self) -> usize {
+        self.misses
+    }
+
+    /// Reset hit/miss counters. Intended to be called between dev rebuilds
+    /// so the counters reflect a single rebuild rather than cumulative.
+    pub fn reset_counters(&mut self) {
+        self.hits = 0;
+        self.misses = 0;
+    }
+}
+
+/// Parse `source` via the cache: return a borrowed `&Module` from the cache,
+/// reusing the last entry if its source bytes match, else reparsing.
+fn parse_cached<'a>(
+    cache: &'a mut ParseCache,
+    path: &Path,
+    source: &str,
+    filename: &str,
+) -> Result<&'a swc_ecma_ast::Module> {
+    let fresh = cache
+        .entries
+        .get(path)
+        .map_or(false, |e| e.source == source);
+    if fresh {
+        cache.hits += 1;
+    } else {
+        let parsed = perry_parser::parse_typescript(source, filename)
+            .map_err(|e| anyhow!("Failed to parse {}: {}", path.display(), e))?;
+        cache.entries.insert(
+            path.to_path_buf(),
+            ParseCacheEntry {
+                source: source.to_string(),
+                module: parsed,
+            },
+        );
+        cache.misses += 1;
+    }
+    // The entry is guaranteed to exist at this point (we just inserted on miss).
+    Ok(&cache.entries[path].module)
 }
 
 #[derive(Args, Debug)]
@@ -109,6 +190,16 @@ pub struct CompileArgs {
     /// available.
     #[arg(long)]
     pub no_auto_optimize: bool,
+
+    /// Disable the per-module object cache at `.perry-cache/objects/`.
+    /// By default Perry caches each module's object bytes keyed by a
+    /// hash of the source plus every `CompileOptions` field that can
+    /// affect codegen, so unchanged modules skip the LLVM pipeline on
+    /// subsequent builds. Pass this flag (or set `PERRY_NO_CACHE=1`)
+    /// to force a full recompile, e.g. to reproduce an issue or work
+    /// around a suspected stale cache.
+    #[arg(long)]
+    pub no_cache: bool,
 }
 
 /// Information about a JavaScript module that will be interpreted at runtime
@@ -176,6 +267,12 @@ pub struct CompilationContext {
     /// promise rejections via `catch_unwind` in `perry-runtime/src/thread.rs`
     /// instead of aborting the whole process.
     pub needs_thread: bool,
+    /// Per-module source hash (djb2 over the canonical source bytes).
+    /// Populated during `collect_modules` as each native TS module is read
+    /// and used by V2.2's object cache to key `.perry-cache/objects/<target>/<hash>.o`
+    /// entries without re-reading the source in the codegen loop. Mirrors the
+    /// djb2 scheme already used by `build_optimized_libs` (see prior art).
+    pub module_source_hashes: HashMap<PathBuf, u64>,
 }
 
 impl std::fmt::Debug for CompilationContext {
@@ -212,7 +309,453 @@ impl CompilationContext {
             uses_fetch: false,
             uses_crypto_builtins: false,
             needs_thread: false,
+            module_source_hashes: HashMap::new(),
         }
+    }
+}
+
+/// djb2 hash over a byte slice. Matches the hasher used by
+/// `build_optimized_libs` for its `target/perry-auto-<hash>` key —
+/// kept in one place so the object cache and any future hash-keyed
+/// on-disk artifact use the same scheme.
+pub fn djb2_hash(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 5381;
+    for b in bytes {
+        hash = hash.wrapping_mul(33).wrapping_add(*b as u64);
+    }
+    hash
+}
+
+/// Streaming djb2 accumulator so multi-part keys don't have to build a
+/// giant intermediate `String`. Feed field bytes with a separator between
+/// logical fields and the resulting hash is stable across runs as long as
+/// the feed order is stable.
+#[derive(Clone)]
+struct Djb2Hasher {
+    state: u64,
+}
+
+impl Djb2Hasher {
+    fn new() -> Self {
+        Self { state: 5381 }
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.state = self.state.wrapping_mul(33).wrapping_add(*b as u64);
+        }
+    }
+    /// Feed a named field: "<name>=<value>\x1f".
+    fn field(&mut self, name: &str, value: &str) {
+        self.write(name.as_bytes());
+        self.write(b"=");
+        self.write(value.as_bytes());
+        self.write(b"\x1f");
+    }
+    fn finish(self) -> u64 {
+        self.state
+    }
+}
+
+/// Compute the on-disk object cache key for one module.
+///
+/// Design contract: the key must change whenever any input that affects
+/// the bytes `compile_module` returns changes, and must be stable across
+/// runs otherwise. We serialize every field of `CompileOptions` that the
+/// codegen reads, sort every map/set so HashMap iteration order doesn't
+/// leak in, preserve declaration order for lists where the order itself
+/// is meaningful (topological init order, FFI wrapper order), and mix
+/// in the module's source hash and the perry version.
+///
+/// We also mix in three environment variables that `perry-codegen` reads
+/// at compile time but that aren't part of `CompileOptions`:
+/// `PERRY_DEBUG_INIT`, `PERRY_DEBUG_SYMBOLS`, `PERRY_LLVM_CLANG`. See the
+/// env-var block at the bottom of this function for the rationale.
+///
+/// NOT captured in the key: the host CPU. `compile_ll_to_object` passes
+/// `-mcpu=native`/`-march=native` to clang, so the emitted `.o` bakes in
+/// whatever instruction set the build machine supports. The cache is
+/// consequently **machine-local** — `.perry-cache/` is in `.gitignore`
+/// for this reason. Sharing across machines with different CPUs (rsync,
+/// NFS, Docker bind-mount) can produce SIGILL at runtime.
+///
+/// Cross-platform non-determinism (Mach-O LC_UUID, PE TimeDateStamp,
+/// codesigning) affects the *linked binary*, not the object file — so
+/// a per-module `.o` cache can reuse bytes across runs as long as LLVM
+/// itself emits deterministic object code, which it does by default.
+fn compute_object_cache_key(
+    opts: &perry_codegen::CompileOptions,
+    source_hash: u64,
+    perry_version: &str,
+) -> u64 {
+    let mut h = Djb2Hasher::new();
+
+    // Perry version + bitcode_link gate (we shouldn't be called when
+    // emit_ir_only=true, but include it so key-space is disjoint if the
+    // caller ever forgets to check).
+    h.field("v", perry_version);
+    h.field(
+        "ir_only",
+        if opts.emit_ir_only { "1" } else { "0" },
+    );
+
+    // Module source hash — captures the module's HIR input verbatim.
+    h.field("src", &format!("{:016x}", source_hash));
+
+    // Target + top-level shape.
+    h.field("tgt", opts.target.as_deref().unwrap_or("host"));
+    h.field("out", &opts.output_type);
+    h.field("entry", if opts.is_entry_module { "1" } else { "0" });
+
+    // Feature flags that round-trip through opts. These influence which
+    // extern symbols the module refers to and which compile-time
+    // constants it bakes in.
+    h.field("stdlib", if opts.needs_stdlib { "1" } else { "0" });
+    h.field("ui", if opts.needs_ui { "1" } else { "0" });
+    h.field("gh", if opts.needs_geisterhand { "1" } else { "0" });
+    h.field("jsrt", if opts.needs_js_runtime { "1" } else { "0" });
+    h.field("gh_port", &opts.geisterhand_port.to_string());
+
+    // Ordered lists (order is significant — topological init, FFI index,
+    // bundled extension order, etc.)
+    h.field("non_entry_prefixes", &opts.non_entry_module_prefixes.join("|"));
+    h.field("mod_init_names", &opts.native_module_init_names.join("|"));
+    h.field("js_specs", &opts.js_module_specifiers.join("|"));
+    {
+        let mut buf = String::new();
+        for (path, prefix) in &opts.bundled_extensions {
+            buf.push_str(path);
+            buf.push('@');
+            buf.push_str(prefix);
+            buf.push('|');
+        }
+        h.field("bundled_ext", &buf);
+    }
+    {
+        let mut buf = String::new();
+        for (lib, funcs, header) in &opts.native_library_functions {
+            buf.push_str(lib);
+            buf.push(':');
+            buf.push_str(&funcs.join(","));
+            buf.push('@');
+            buf.push_str(header);
+            buf.push('|');
+        }
+        h.field("native_libs", &buf);
+    }
+
+    // Enabled features — sort for stability; Vec iteration is fine but
+    // the upstream computation could reorder in future.
+    {
+        let mut v: Vec<&String> = opts.enabled_features.iter().collect();
+        v.sort();
+        h.field(
+            "features",
+            &v.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(","),
+        );
+    }
+
+    // Namespace imports.
+    {
+        let mut v: Vec<&String> = opts.namespace_imports.iter().collect();
+        v.sort();
+        h.field(
+            "ns_imports",
+            &v.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(","),
+        );
+    }
+
+    // Import function prefixes (HashMap — MUST sort).
+    {
+        let mut v: Vec<(&String, &String)> = opts.import_function_prefixes.iter().collect();
+        v.sort_by(|a, b| a.0.cmp(b.0));
+        let s: String = v
+            .iter()
+            .map(|(k, vv)| format!("{}={}", k, vv))
+            .collect::<Vec<_>>()
+            .join(",");
+        h.field("import_fn_prefixes", &s);
+    }
+
+    // Imported classes — sort by name. Serialize every field that codegen
+    // reads so a changed constructor arity or new method on a re-exported
+    // class invalidates consumers.
+    {
+        let mut v: Vec<&perry_codegen::ImportedClass> = opts.imported_classes.iter().collect();
+        v.sort_by(|a, b| {
+            a.name
+                .cmp(&b.name)
+                .then(a.source_prefix.cmp(&b.source_prefix))
+        });
+        let mut buf = String::new();
+        for c in v {
+            buf.push_str(&format!(
+                "{}@{}:ctor={}:parent={}:alias={}:id={}:fields={}:methods={}|",
+                c.name,
+                c.source_prefix,
+                c.constructor_param_count,
+                c.parent_name.as_deref().unwrap_or(""),
+                c.local_alias.as_deref().unwrap_or(""),
+                c.source_class_id
+                    .map(|i| i.to_string())
+                    .unwrap_or_default(),
+                c.field_names.join(","),
+                c.method_names.join(","),
+            ));
+        }
+        h.field("imported_classes", &buf);
+    }
+
+    // Imported enums — sort by local name, serialize every member.
+    {
+        let mut v: Vec<&(String, Vec<(String, perry_hir::EnumValue)>)> =
+            opts.imported_enums.iter().collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut buf = String::new();
+        for (name, members) in v {
+            buf.push_str(name);
+            buf.push(':');
+            for (mname, mval) in members {
+                buf.push_str(&format!("{}={:?};", mname, mval));
+            }
+            buf.push('|');
+        }
+        h.field("imported_enums", &buf);
+    }
+
+    // Imported async function names (HashSet — MUST sort).
+    {
+        let mut v: Vec<&String> = opts.imported_async_funcs.iter().collect();
+        v.sort();
+        h.field(
+            "imported_async",
+            &v.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(","),
+        );
+    }
+
+    // Imported param counts (HashMap — MUST sort).
+    {
+        let mut v: Vec<(&String, &usize)> = opts.imported_func_param_counts.iter().collect();
+        v.sort_by(|a, b| a.0.cmp(b.0));
+        let s = v
+            .iter()
+            .map(|(k, vv)| format!("{}={}", k, vv))
+            .collect::<Vec<_>>()
+            .join(",");
+        h.field("imported_param_counts", &s);
+    }
+
+    // Imported return types (HashMap — MUST sort). Type has Debug but no
+    // Display; Debug is deterministic for this type (all enum/Vec, no
+    // HashMap internally as of v0.5.156).
+    {
+        let mut v: Vec<(&String, &perry_types::Type)> =
+            opts.imported_func_return_types.iter().collect();
+        v.sort_by(|a, b| a.0.cmp(b.0));
+        let s = v
+            .iter()
+            .map(|(k, vv)| format!("{}={:?}", k, vv))
+            .collect::<Vec<_>>()
+            .join(",");
+        h.field("imported_return_types", &s);
+    }
+
+    // Imported vars (HashSet — MUST sort).
+    {
+        let mut v: Vec<&String> = opts.imported_vars.iter().collect();
+        v.sort();
+        h.field(
+            "imported_vars",
+            &v.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(","),
+        );
+    }
+
+    // Type aliases (HashMap — MUST sort).
+    {
+        let mut v: Vec<(&String, &perry_types::Type)> = opts.type_aliases.iter().collect();
+        v.sort_by(|a, b| a.0.cmp(b.0));
+        let s = v
+            .iter()
+            .map(|(k, vv)| format!("{}={:?}", k, vv))
+            .collect::<Vec<_>>()
+            .join(",");
+        h.field("type_aliases", &s);
+    }
+
+    // i18n snapshot — tuple of ordered Vecs + counts, no map involved.
+    // Only the entry module embeds this, but hash it unconditionally so
+    // a mis-flagged non-entry module can't collide with an entry one.
+    if let Some((translations, key_count, locale_count, locale_codes, default_idx)) =
+        &opts.i18n_table
+    {
+        h.field("i18n_kc", &key_count.to_string());
+        h.field("i18n_lc", &locale_count.to_string());
+        h.field("i18n_def", &default_idx.to_string());
+        h.field("i18n_locales", &locale_codes.join(","));
+        // Translations are a single long Vec — join with a NUL to avoid
+        // substring ambiguity across entries.
+        h.field("i18n_tr", &translations.join("\0"));
+    } else {
+        h.field("i18n", "none");
+    }
+
+    // Environment variables read by `perry-codegen` that influence the
+    // emitted .o bytes. Not part of `CompileOptions`, but just as real an
+    // input to `compile_module` / `compile_ll_to_object`:
+    //   - PERRY_DEBUG_INIT=1 bakes a `puts("INIT: <prefix>")` call into
+    //     every module's `__init` (codegen.rs).
+    //   - PERRY_DEBUG_SYMBOLS=1 adds `-g` to clang → embeds DWARF sections
+    //     into the object (linker.rs).
+    //   - PERRY_LLVM_CLANG selects which clang binary compiles .ll → .o;
+    //     different clang versions/builds emit different bytes (linker.rs).
+    // Hashing the values (not just presence) means a persistent override
+    // like PERRY_LLVM_CLANG=/opt/homebrew/opt/llvm/bin/clang in a shell rc
+    // still gets cache reuse across runs, while flipping a debug flag on
+    // or off cleanly invalidates.
+    h.field(
+        "env_debug_init",
+        std::env::var("PERRY_DEBUG_INIT").as_deref().unwrap_or(""),
+    );
+    h.field(
+        "env_debug_symbols",
+        std::env::var("PERRY_DEBUG_SYMBOLS")
+            .as_deref()
+            .unwrap_or(""),
+    );
+    h.field(
+        "env_llvm_clang",
+        std::env::var("PERRY_LLVM_CLANG").as_deref().unwrap_or(""),
+    );
+
+    h.finish()
+}
+
+/// On-disk per-module object cache at `.perry-cache/objects/<target>/<hash:016x>.o`.
+///
+/// Each rayon codegen worker calls `lookup(key)`; on hit, it skips the LLVM
+/// pipeline and hands the cached bytes to the linker; on miss, it runs
+/// `compile_module` as usual and then calls `store(key, bytes)` to
+/// populate the cache for the next build. Atomic (tmp + rename) writes
+/// and silent IO-error handling mean the cache is strictly an optimization
+/// — any corruption or permission failure degrades gracefully to the
+/// uncached codepath.
+///
+/// Shared across rayon workers via `&self` — no locking is needed because
+/// each key corresponds to a distinct file (the key includes this module's
+/// source hash). Atomic counters track hit/miss/store for verbose reporting.
+pub struct ObjectCache {
+    /// Where to read/write cached objects. `None` when the cache is
+    /// disabled (via `--no-cache`, bitcode-link mode, or non-writable
+    /// project root).
+    cache_dir: Option<PathBuf>,
+    hits: AtomicUsize,
+    misses: AtomicUsize,
+    stores: AtomicUsize,
+    store_errors: AtomicUsize,
+}
+
+impl ObjectCache {
+    /// Create a new cache rooted at `<project_root>/.perry-cache/objects/<target>/`.
+    /// `target_triple` is the LLVM target triple (or `"host"` for the host
+    /// default). Passing `enabled = false` returns a no-op instance —
+    /// every `lookup` misses and every `store` is a silent drop.
+    pub fn new(project_root: &Path, target_triple: &str, enabled: bool) -> Self {
+        let cache_dir = if enabled {
+            let dir = project_root
+                .join(".perry-cache")
+                .join("objects")
+                .join(target_triple);
+            match fs::create_dir_all(&dir) {
+                Ok(()) => Some(dir),
+                Err(_) => None, // silent degrade: cache stays disabled
+            }
+        } else {
+            None
+        };
+        Self {
+            cache_dir,
+            hits: AtomicUsize::new(0),
+            misses: AtomicUsize::new(0),
+            stores: AtomicUsize::new(0),
+            store_errors: AtomicUsize::new(0),
+        }
+    }
+
+    /// Returns the cache file path for a given key, or `None` if the
+    /// cache is disabled.
+    fn path_for(&self, key: u64) -> Option<PathBuf> {
+        self.cache_dir
+            .as_ref()
+            .map(|d| d.join(format!("{:016x}.o", key)))
+    }
+
+    /// Look up a cached object by key. Returns `Some(bytes)` on hit,
+    /// `None` on miss (cache disabled, file missing, or IO error).
+    pub fn lookup(&self, key: u64) -> Option<Vec<u8>> {
+        let path = self.path_for(key)?;
+        match fs::read(&path) {
+            Ok(bytes) => {
+                self.hits.fetch_add(1, Ordering::Relaxed);
+                Some(bytes)
+            }
+            Err(_) => {
+                self.misses.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        }
+    }
+
+    /// Store the freshly-compiled bytes under `key`. Atomic via tmp +
+    /// rename so a concurrent reader in another process never sees a
+    /// partial file. IO errors are counted but not reported — the cache
+    /// is strictly an optimization.
+    pub fn store(&self, key: u64, bytes: &[u8]) {
+        let path = match self.path_for(key) {
+            Some(p) => p,
+            None => return,
+        };
+        // Write to a unique tmp path in the same directory, then rename.
+        // The tmp name mixes the key with a nanosecond timestamp so two
+        // workers racing on the same key don't clobber each other's tmp
+        // file mid-write (only the rename is atomic).
+        let tmp_suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let tmp_path = path.with_extension(format!("o.tmp.{:x}", tmp_suffix));
+        let result = fs::write(&tmp_path, bytes).and_then(|_| fs::rename(&tmp_path, &path));
+        match result {
+            Ok(()) => {
+                self.stores.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(_) => {
+                // Best-effort cleanup of the tmp file.
+                let _ = fs::remove_file(&tmp_path);
+                self.store_errors.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Whether the cache is actually writing to disk. `false` when
+    /// disabled by `--no-cache`, by bitcode-link mode, or by a
+    /// create-dir failure.
+    pub fn is_enabled(&self) -> bool {
+        self.cache_dir.is_some()
+    }
+
+    pub fn hits(&self) -> usize {
+        self.hits.load(Ordering::Relaxed)
+    }
+
+    pub fn misses(&self) -> usize {
+        self.misses.load(Ordering::Relaxed)
+    }
+
+    pub fn stores(&self) -> usize {
+        self.stores.load(Ordering::Relaxed)
+    }
+
+    pub fn store_errors(&self) -> usize {
+        self.store_errors.load(Ordering::Relaxed)
     }
 }
 
@@ -245,6 +788,15 @@ pub struct TargetNativeConfig {
     pub frameworks: Vec<String>,
     pub libs: Vec<String>,
     pub pkg_config: Vec<String>,
+    /// Swift sources (absolute paths) to compile via swiftc and link into the
+    /// final binary. Used by `--features watchos-swift-app` so a native lib
+    /// can ship its own `@main struct App: App` SwiftUI root.
+    pub swift_sources: Vec<PathBuf>,
+    /// Metal shader sources (absolute paths) to compile via `xcrun metal` and
+    /// pack into `<app>.app/default.metallib`. Consumed at runtime by SwiftUI's
+    /// `ShaderLibrary.default` / Metal's dynamic loader — not linked. iOS /
+    /// tvOS / watchOS only.
+    pub metal_sources: Vec<PathBuf>,
 }
 
 /// Get the Rust target triple for a given perry target string
@@ -252,8 +804,10 @@ fn rust_target_triple(target: Option<&str>) -> Option<&'static str> {
     match target {
         Some("ios-simulator") | Some("ios-widget-simulator") => Some("aarch64-apple-ios-sim"),
         Some("ios") | Some("ios-widget") => Some("aarch64-apple-ios"),
+        Some("visionos-simulator") => Some("aarch64-apple-visionos-sim"),
+        Some("visionos") => Some("aarch64-apple-visionos"),
         Some("watchos-simulator") => Some("aarch64-apple-watchos-sim"),
-        Some("watchos") => Some("aarch64-apple-watchos"),
+        Some("watchos") => Some("arm64_32-apple-watchos"),
         Some("tvos-simulator") => Some("aarch64-apple-tvos-sim"),
         Some("tvos") => Some("aarch64-apple-tvos"),
         Some("android") => Some("aarch64-linux-android"),
@@ -284,8 +838,8 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
             ar
         }
         None => {
-            eprintln!("[strip-dedup] ERROR: llvm-ar not found — cannot strip duplicates from {lib_name}");
-            return Err(anyhow::anyhow!("llvm-ar not found (install llvm-tools: rustup component add llvm-tools)"));
+            eprintln!("[strip-dedup] llvm-ar not found, skipping dedup for {lib_name} (optional — install with: rustup component add llvm-tools)");
+            return Err(anyhow::anyhow!("llvm-ar not found"));
         }
     };
 
@@ -312,6 +866,8 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
         Some("windows")
     } else if lib_name.contains("_ios") {
         Some("ios")
+    } else if lib_name.contains("_visionos") {
+        Some("visionos")
     } else if lib_name.contains("_tvos") {
         Some("tvos")
     } else if lib_name.contains("_watchos") {
@@ -559,6 +1115,21 @@ fn find_llvm_tool(tool_name: &str) -> Option<PathBuf> {
 /// On Windows, the PATH may contain a GNU `link` utility (e.g. from Git Bash/MSYS2)
 /// which is not the MSVC linker. This function searches for the real MSVC link.exe.
 #[cfg(target_os = "windows")]
+fn msvc_vswhere_installation_path_args() -> [&'static str; 8] {
+    [
+        "-products",
+        "*",
+        // Without the VC tools filter, `-latest` can select Management Studio.
+        "-requires",
+        "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+        "-latest",
+        "-property",
+        "installationPath",
+        "-nologo",
+    ]
+}
+
+#[cfg(target_os = "windows")]
 fn find_msvc_link_exe() -> Option<PathBuf> {
     // Try vswhere.exe first (most reliable)
     let vswhere_paths = [
@@ -568,7 +1139,7 @@ fn find_msvc_link_exe() -> Option<PathBuf> {
     for vswhere in &vswhere_paths {
         if vswhere.exists() {
             if let Ok(output) = Command::new(vswhere)
-                .args(["-products", "*", "-latest", "-property", "installationPath", "-nologo"])
+                .args(msvc_vswhere_installation_path_args())
                 .output()
             {
                 let install_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -597,10 +1168,135 @@ fn find_msvc_link_exe() -> Option<PathBuf> {
     find_llvm_tool("lld-link")
 }
 
+/// Find `lld-link.exe` — LLVM's drop-in replacement for MSVC `link.exe`. Ships
+/// with `winget install LLVM.LLVM`. Enables the "lightweight Windows toolchain"
+/// path: LLVM for codegen + linking, xwin'd sysroot for CRT + Windows SDK libs,
+/// no Visual Studio required. See `perry setup windows`.
+///
+/// Available on all hosts (not just Windows native): cross-compile callers on
+/// macOS/Linux targeting Windows also want to locate a bundled lld-link
+/// before falling back to vswhere-based MSVC detection.
+fn find_lld_link() -> Option<PathBuf> {
+    // Honor explicit override (shared with MSVC path).
+    if let Ok(p) = std::env::var("PERRY_LLD_LINK") {
+        let candidate = PathBuf::from(p);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    // Standard LLVM installer location.
+    let standalone = PathBuf::from(r"C:\Program Files\LLVM\bin\lld-link.exe");
+    if standalone.exists() {
+        return Some(standalone);
+    }
+    // PATH fallback.
+    if let Ok(output) = Command::new("where").arg("lld-link").output() {
+        if output.status.success() {
+            let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if let Some(first) = s.lines().next() {
+                let p = PathBuf::from(first);
+                if p.exists() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Location where `perry setup windows` writes the xwin'd Microsoft CRT +
+/// Windows SDK. Returns `Some(root)` only when `<root>/crt/lib/x86_64` exists,
+/// so callers can treat `Some` as "toolchain is complete and ready to link."
+///
+/// Default location is `%LOCALAPPDATA%\perry\windows-sdk` on Windows; can be
+/// overridden via `PERRY_WINDOWS_SYSROOT` (same env var already used by the
+/// cross-compile branch, so a single env var works for both hosts).
+/// Available on all hosts so the `is_windows` target branch (which fires on
+/// macOS/Linux cross-compiles too) can check for an xwin'd Windows SDK without
+/// needing its own cfg gate.
+fn find_perry_windows_sdk() -> Option<PathBuf> {
+    let explicit = std::env::var("PERRY_WINDOWS_SYSROOT")
+        .ok()
+        .map(PathBuf::from);
+    let default = dirs::data_local_dir().map(|p| p.join("perry").join("windows-sdk"));
+    for candidate in [explicit, default].into_iter().flatten() {
+        // Sanity-check: xwin splat populates crt/lib/x86_64 (or crt/lib/x64 with
+        // --preserve-ms-arch-notation). If neither exists, the directory isn't a
+        // completed xwin output — skip it.
+        if candidate.join("crt").join("lib").join("x86_64").exists()
+            || candidate.join("crt").join("lib").join("x64").exists()
+        {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Returns the `/SUBSYSTEM:…` flag for MSVC `link.exe` / `lld-link`.
+///
+/// CLI programs must use `CONSOLE` (3) so the OS loader attaches stdin/stdout/stderr
+/// before `main()` runs. GUI programs use `WINDOWS` (2) to suppress the console
+/// window that would otherwise flash alongside the app window. Passing neither
+/// flag lets the linker pick a default, which historically resolved to `WINDOWS`
+/// for Perry builds and silently discarded all `console.log` output (issue #120).
+fn windows_pe_subsystem_flag(needs_ui: bool) -> &'static str {
+    if needs_ui { "/SUBSYSTEM:WINDOWS" } else { "/SUBSYSTEM:CONSOLE" }
+}
+
+/// Given a sysroot directory populated by `xwin splat` (or a compatible layout),
+/// return the lib search paths for MSVC / lld-link's LIB env var. Callers pass
+/// the directory root (e.g. `%LOCALAPPDATA%\perry\windows-sdk`) and get back a
+/// `Vec<String>` of absolute lib dirs: `<root>/crt/lib/x86_64`,
+/// `<root>/sdk/lib/um/x86_64`, `<root>/sdk/lib/ucrt/x86_64`. Falls through to
+/// `<root>/lib` and finally `<root>` itself if the structured layout isn't
+/// present (e.g. a user pointed PERRY_WINDOWS_SYSROOT at a custom dir).
+fn xwin_sysroot_lib_paths(root: &Path) -> Vec<String> {
+    let mut paths = Vec::new();
+
+    // xwin default layout — also covers --preserve-ms-arch-notation (x64 suffix).
+    for (crt_sub, um_sub, ucrt_sub) in &[
+        ("crt/lib/x86_64", "sdk/lib/um/x86_64", "sdk/lib/ucrt/x86_64"),
+        ("crt/lib/x64", "sdk/lib/um/x64", "sdk/lib/ucrt/x64"),
+    ] {
+        let crt = root.join(crt_sub);
+        let um = root.join(um_sub);
+        let ucrt = root.join(ucrt_sub);
+        if crt.exists() || um.exists() || ucrt.exists() {
+            if crt.exists() { paths.push(crt.to_string_lossy().to_string()); }
+            if um.exists() { paths.push(um.to_string_lossy().to_string()); }
+            if ucrt.exists() { paths.push(ucrt.to_string_lossy().to_string()); }
+            return paths;
+        }
+    }
+
+    let flat_lib = root.join("lib");
+    if flat_lib.exists() {
+        paths.push(flat_lib.to_string_lossy().to_string());
+        return paths;
+    }
+
+    paths.push(root.to_string_lossy().to_string());
+    paths
+}
+
 /// Find MSVC library search paths (MSVC CRT, Windows SDK um, Windows SDK ucrt).
 /// Returns a semicolon-separated string suitable for the LIB environment variable.
+///
+/// On Windows, prefers `perry setup windows`'s xwin'd sysroot when present
+/// (matches the "lightweight toolchain" opt-in mental model), then falls back
+/// to vswhere-located Visual Studio install paths.
 #[cfg(target_os = "windows")]
 fn find_msvc_lib_paths() -> Option<String> {
+    // If the user ran `perry setup windows`, use that sysroot — they've
+    // expressed intent to use the lightweight LLVM + xwin path even if MSVC
+    // is also installed. Same precedence as find_msvc_link_exe_or_lld_link().
+    if let Some(sysroot) = find_perry_windows_sdk() {
+        let paths = xwin_sysroot_lib_paths(&sysroot);
+        if !paths.is_empty() {
+            return Some(paths.join(";"));
+        }
+    }
+
     let mut paths = Vec::new();
 
     // Find MSVC CRT lib path via vswhere
@@ -611,7 +1307,7 @@ fn find_msvc_lib_paths() -> Option<String> {
     for vswhere in &vswhere_paths {
         if vswhere.exists() {
             if let Ok(output) = Command::new(vswhere)
-                .args(["-products", "*", "-latest", "-property", "installationPath", "-nologo"])
+                .args(msvc_vswhere_installation_path_args())
                 .output()
             {
                 let install_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -666,43 +1362,40 @@ fn find_msvc_lib_paths() -> Option<String> {
         return None;
     }
 
-    let mut paths = Vec::new();
-
-    // Search for xwin-style structured layout (crt/lib/x86_64, sdk/lib/um/x86_64, etc.)
-    for (crt_sub, um_sub, ucrt_sub) in &[
-        ("crt/lib/x86_64", "sdk/lib/um/x86_64", "sdk/lib/ucrt/x86_64"),
-        ("crt/lib/x64", "sdk/lib/um/x64", "sdk/lib/ucrt/x64"),
-    ] {
-        let crt = root.join(crt_sub);
-        let um = root.join(um_sub);
-        let ucrt = root.join(ucrt_sub);
-        if crt.exists() || um.exists() || ucrt.exists() {
-            if crt.exists() { paths.push(crt.to_string_lossy().to_string()); }
-            if um.exists() { paths.push(um.to_string_lossy().to_string()); }
-            if ucrt.exists() { paths.push(ucrt.to_string_lossy().to_string()); }
-            break;
-        }
-    }
-
-    // Flat lib/ directory
-    if paths.is_empty() {
-        let flat_lib = root.join("lib");
-        if flat_lib.exists() {
-            paths.push(flat_lib.to_string_lossy().to_string());
-        }
-    }
-
-    // Root itself as last resort
-    if paths.is_empty() {
-        paths.push(root.to_string_lossy().to_string());
-    }
-
-    Some(paths.join(";"))
+    Some(xwin_sysroot_lib_paths(&root).join(";"))
 }
 
-/// Find a library by name, optionally searching cross-compilation target directories
+/// Find a library by name, optionally searching cross-compilation target directories.
+///
+/// Returns the located path, or a list of all searched candidate paths so the
+/// caller can surface them in an error message.
+fn find_library_with_candidates(name: &str, target: Option<&str>) -> Result<PathBuf, Vec<PathBuf>> {
+    let candidates = collect_library_candidates(name, target);
+    for path in &candidates {
+        if path.exists() {
+            return Ok(path.clone());
+        }
+    }
+    Err(candidates)
+}
+
 fn find_library(name: &str, target: Option<&str>) -> Option<PathBuf> {
+    find_library_with_candidates(name, target).ok()
+}
+
+fn collect_library_candidates(name: &str, target: Option<&str>) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
+
+    // Env-var overrides: users can point at an out-of-tree build dir (e.g. when
+    // the perry binary is copied to /usr/local/bin but the source tree lives
+    // elsewhere). Checked first so an explicit override always wins.
+    for env_var in ["PERRY_RUNTIME_DIR", "PERRY_LIB_DIR"] {
+        if let Ok(dir) = std::env::var(env_var) {
+            if !dir.is_empty() {
+                candidates.push(PathBuf::from(&dir).join(name));
+            }
+        }
+    }
 
     // For cross-compilation targets, ONLY search target-specific directories
     // to avoid linking host-platform libraries into the wrong target
@@ -735,6 +1428,14 @@ fn find_library(name: &str, target: Option<&str>) -> Option<PathBuf> {
                     } else {
                         let ios_name = name.replace(".a", "_ios.a");
                         candidates.push(dir.join(&ios_name));
+                    }
+                }
+                if matches!(target, Some("visionos") | Some("visionos-simulator")) {
+                    if name.contains("_visionos") {
+                        candidates.push(dir.join(name));
+                    } else {
+                        let visionos_name = name.replace(".a", "_visionos.a");
+                        candidates.push(dir.join(&visionos_name));
                     }
                 }
                 if matches!(target, Some("watchos") | Some("watchos-simulator")) {
@@ -787,12 +1488,7 @@ fn find_library(name: &str, target: Option<&str>) -> Option<PathBuf> {
         candidates.push(PathBuf::from(format!("/usr/lib/perry/{}", name)));
     }
 
-    for path in &candidates {
-        if path.exists() {
-            return Some(path.clone());
-        }
-    }
-    None
+    candidates
 }
 
 /// Find the runtime library for linking
@@ -803,17 +1499,31 @@ fn find_runtime_library(target: Option<&str>) -> Result<PathBuf> {
         None => "perry_runtime.lib",
         _ => "libperry_runtime.a",
     };
-    find_library(lib_name, target).ok_or_else(|| {
+    find_library_with_candidates(lib_name, target).map_err(|searched| {
         let extra = if target.is_some() {
             format!(" (for target {:?})", target.unwrap())
         } else {
             String::new()
         };
+        let target_flag = rust_target_triple(target)
+            .map(|t| format!(" --target {}", t))
+            .unwrap_or_default();
+        let searched_list = searched
+            .iter()
+            .map(|p| format!("  - {}", p.display()))
+            .collect::<Vec<_>>()
+            .join("\n");
         anyhow!(
-            "Could not find {}{}. Build it with: cargo build --release -p perry-runtime{}",
-            lib_name,
-            extra,
-            rust_target_triple(target).map(|t| format!(" --target {}", t)).unwrap_or_default()
+            "Could not find {lib}{extra}.\n\
+             Searched:\n{list}\n\n\
+             Fixes:\n\
+             - From the perry workspace: cargo build --release -p perry-runtime{tf}\n\
+             - Out-of-tree install: set PERRY_RUNTIME_DIR to the directory containing {lib}\n\
+               (e.g. export PERRY_RUNTIME_DIR=/path/to/perry/target/release)",
+            lib = lib_name,
+            extra = extra,
+            list = searched_list,
+            tf = target_flag,
         )
     })
 }
@@ -844,6 +1554,7 @@ fn find_jsruntime_library(target: Option<&str>) -> Option<PathBuf> {
 fn find_ui_library(target: Option<&str>) -> Option<PathBuf> {
     let lib_name = match target {
         Some("ios-simulator") | Some("ios") => "libperry_ui_ios.a",
+        Some("visionos-simulator") | Some("visionos") => "libperry_ui_visionos.a",
         Some("android") => "libperry_ui_android.a",
         Some("watchos-simulator") | Some("watchos") => "libperry_ui_watchos.a",
         Some("tvos-simulator") | Some("tvos") => "libperry_ui_tvos.a",
@@ -917,6 +1628,8 @@ fn find_geisterhand_runtime(target: Option<&str>) -> Option<PathBuf> {
 fn find_geisterhand_ui(target: Option<&str>) -> Option<PathBuf> {
     let name = if matches!(target, Some("ios-simulator") | Some("ios")) {
         "libperry_ui_ios.a"
+    } else if matches!(target, Some("visionos-simulator") | Some("visionos")) {
+        return None;
     } else if matches!(target, Some("android")) {
         "libperry_ui_android.a"
     } else if matches!(target, Some("linux")) || cfg!(target_os = "linux") {
@@ -932,6 +1645,11 @@ fn find_geisterhand_ui(target: Option<&str>) -> Option<PathBuf> {
 /// Auto-build geisterhand-enabled libraries when they're missing.
 /// Uses a separate target dir (target/geisterhand/) to avoid mixing with normal builds.
 fn build_geisterhand_libs(target: Option<&str>, format: OutputFormat) -> Result<()> {
+    if matches!(target, Some("visionos") | Some("visionos-simulator")) {
+        return Err(anyhow!(
+            "Geisterhand is not supported on visionOS yet."
+        ));
+    }
     // Determine which UI crate to build based on target platform
     let ui_crate = match target {
         Some("ios-simulator") | Some("ios") => "perry-ui-ios",
@@ -1033,15 +1751,30 @@ impl OptimizedLibs {
 fn build_optimized_libs(
     ctx: &CompilationContext,
     target: Option<&str>,
+    cli_features: &[String],
     format: OutputFormat,
+    verbose: u8,
 ) -> OptimizedLibs {
     use super::stdlib_features::{compute_required_features, features_to_cargo_arg};
 
-    let features = compute_required_features(
+    let mut features = compute_required_features(
         &ctx.native_module_imports,
         ctx.uses_fetch,
         ctx.uses_crypto_builtins,
     );
+    // The UI backends (perry-ui-gtk4 on Linux, perry-ui-macos, perry-ui-windows)
+    // reach into perry-stdlib's async bridge from GLib/NSTimer/WM_TIMER
+    // trampolines (js_stdlib_process_pending, js_promise_run_microtasks).
+    // Those symbols live in perry-stdlib/src/common/async_bridge.rs which is
+    // gated on `#[cfg(feature = "async-runtime")]`. For a bare UI program
+    // whose user code imports zero stdlib modules, compute_required_features
+    // returns an empty set and the auto-optimized stdlib is built with
+    // --no-default-features — no `async-runtime`, no async_bridge module, no
+    // symbol. Force `async-runtime` whenever the program pulls in a UI
+    // backend so the trampolines resolve at link time.
+    if ctx.needs_ui {
+        features.insert("async-runtime");
+    }
     let feature_arg = features_to_cargo_arg(&features);
 
     // panic = "abort" is safe whenever no `catch_unwind` callers are
@@ -1066,7 +1799,7 @@ fn build_optimized_libs(
     let workspace_root = match find_perry_workspace_root() {
         Some(p) => p,
         None => {
-            if matches!(format, OutputFormat::Text) {
+            if matches!(format, OutputFormat::Text) && verbose > 0 {
                 eprintln!(
                     "  auto-optimize: Perry workspace source not found, \
                      using prebuilt libperry_runtime.a + libperry_stdlib.a"
@@ -1100,7 +1833,18 @@ fn build_optimized_libs(
         );
     }
 
+    // Tier-3 Apple targets (tvOS, watchOS) aren't shipped with a prebuilt
+    // libstd; cargo needs `+nightly -Zbuild-std` to synthesize core/alloc/std
+    // from source for the cross-compile.
+    let is_tier3 = matches!(
+        target,
+        Some("tvos") | Some("tvos-simulator") | Some("watchos") | Some("watchos-simulator")
+    );
+
     let mut cargo_cmd = Command::new("cargo");
+    if is_tier3 {
+        cargo_cmd.arg("+nightly");
+    }
     cargo_cmd
         .current_dir(&workspace_root)
         .env("CARGO_TARGET_DIR", &target_dir)
@@ -1109,6 +1853,9 @@ fn build_optimized_libs(
         .arg("-p").arg("perry-runtime")
         .arg("-p").arg("perry-stdlib")
         .arg("--no-default-features");
+    if is_tier3 {
+        cargo_cmd.arg("-Zbuild-std=std,panic_abort");
+    }
     // Both perry-runtime and perry-stdlib accept their own feature lists.
     // Cargo's `--features` takes `crate/feature` syntax for cross-crate
     // selection — we always enable perry-stdlib's stdlib-side bridge so
@@ -1122,6 +1869,15 @@ fn build_optimized_libs(
     ];
     for f in &features {
         cross_features.push(format!("perry-stdlib/{}", f));
+    }
+    // CLI `--features` values that target the runtime (game-loop entry-point
+    // shims gated behind `ios-game-loop` / `watchos-game-loop` in
+    // `perry-runtime/Cargo.toml`) need `perry-runtime/<f>` passed through, not
+    // `perry-stdlib/<f>` — they gate a Rust module, not an npm dep surface.
+    for f in cli_features {
+        if f == "ios-game-loop" || f == "watchos-game-loop" {
+            cross_features.push(format!("perry-runtime/{}", f));
+        }
     }
     if !cross_features.is_empty() {
         cargo_cmd.arg("--features").arg(cross_features.join(","));
@@ -1306,6 +2062,7 @@ fn build_optimized_libs(
         if ctx.needs_ui {
             let ui_crate = match target {
                 Some("ios-simulator") | Some("ios") | Some("ios-widget") | Some("ios-widget-simulator") => "perry-ui-ios",
+                Some("visionos-simulator") | Some("visionos") => "perry-ui-visionos",
                 Some("android") => "perry-ui-android",
                 Some("watchos-simulator") | Some("watchos") => "perry-ui-watchos",
                 Some("tvos-simulator") | Some("tvos") => "perry-ui-tvos",
@@ -1441,8 +2198,10 @@ fn parse_native_library_manifest(
     // Parse target config
     let target_key = match target {
         Some("ios-simulator") | Some("ios") => "ios",
+        Some("visionos-simulator") | Some("visionos") => "visionos",
         Some("android") => "android",
         Some("tvos-simulator") | Some("tvos") => "tvos",
+        Some("watchos-simulator") | Some("watchos") => "watchos",
         Some("linux") => "linux",
         Some("windows") => "windows",
         Some("web") => "web",
@@ -1471,6 +2230,18 @@ fn parse_native_library_manifest(
                 pkg_config: tc.get("pkgConfig")
                     .and_then(|p| p.as_array())
                     .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default(),
+                swift_sources: tc.get("swift_sources")
+                    .and_then(|s| s.as_array())
+                    .map(|a| a.iter()
+                        .filter_map(|v| v.as_str().map(|p| package_dir.join(p)))
+                        .collect())
+                    .unwrap_or_default(),
+                metal_sources: tc.get("metal_sources")
+                    .and_then(|s| s.as_array())
+                    .map(|a| a.iter()
+                        .filter_map(|v| v.as_str().map(|p| package_dir.join(p)))
+                        .collect())
                     .unwrap_or_default(),
             }
         });
@@ -2063,6 +2834,7 @@ fn collect_modules(
     target: Option<&str>,
     next_class_id: &mut perry_hir::ClassId,
     skip_transforms: bool,
+    mut parse_cache: Option<&mut ParseCache>,
 ) -> Result<()> {
     let canonical = entry_path
         .canonicalize()
@@ -2131,6 +2903,12 @@ fn collect_modules(
     let source = fs::read_to_string(&canonical)
         .map_err(|e| anyhow!("Failed to read {}: {}", canonical.display(), e))?;
 
+    // Record the source hash for V2.2's per-module object cache. Computed here
+    // (instead of in the rayon codegen loop) so the cache key doesn't force a
+    // second read of the source bytes — we already have them.
+    ctx.module_source_hashes
+        .insert(canonical.clone(), djb2_hash(source.as_bytes()));
+
     let filename = canonical
         .file_name()
         .and_then(|n| n.to_str())
@@ -2145,13 +2923,23 @@ fn collect_modules(
         .map(|s| s.to_string())
         .unwrap_or_else(|| filename.to_string());
 
-    let ast_module = perry_parser::parse_typescript(&source, filename)
-        .map_err(|e| anyhow!("Failed to parse {}: {}", canonical.display(), e))?;
+    // Parse via the optional in-memory cache (only populated by `perry dev`).
+    // On a cache hit, we reuse the AST from the previous rebuild — the single
+    // largest time sink in the hot rebuild path on unchanged files.
+    let ast_module_owned: swc_ecma_ast::Module;
+    let ast_module: &swc_ecma_ast::Module = match parse_cache.as_deref_mut() {
+        Some(cache) => parse_cached(cache, &canonical, &source, filename)?,
+        None => {
+            ast_module_owned = perry_parser::parse_typescript(&source, filename)
+                .map_err(|e| anyhow!("Failed to parse {}: {}", canonical.display(), e))?;
+            &ast_module_owned
+        }
+    };
     let source_file_path = canonical.to_string_lossy().to_string();
 
     // If type checking is enabled, resolve types from tsgo before lowering
     let resolved_types = if ctx.type_checker.is_some() {
-        let positions = super::typecheck::collect_untyped_positions(&ast_module);
+        let positions = super::typecheck::collect_untyped_positions(ast_module);
         if !positions.is_empty() {
             let client = ctx.type_checker.as_mut().unwrap();
             match super::typecheck::resolve_types_for_file(client, &source_file_path, &positions) {
@@ -2172,7 +2960,7 @@ fn collect_modules(
     };
 
     let (mut hir_module, new_next_class_id) = perry_hir::lower_module_with_class_id_and_types(
-        &ast_module, &module_name, &source_file_path, *next_class_id, resolved_types
+        ast_module, &module_name, &source_file_path, *next_class_id, resolved_types,
     )?;
     *next_class_id = new_next_class_id; // Update the global class_id counter
 
@@ -2271,7 +3059,7 @@ fn collect_modules(
                         }
                     }
                     // Recursively collect TypeScript modules
-                    collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, target, next_class_id, skip_transforms)?;
+                    collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, target, next_class_id, skip_transforms, parse_cache.as_deref_mut())?;
                 }
                 ModuleKind::Interpreted => {
                     // Perry native extension packages (ioredis, ethers, ws, mysql2, dotenv)
@@ -2320,7 +3108,7 @@ fn collect_modules(
                     }
 
                     // Collect JS module
-                    collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, target, next_class_id, skip_transforms)?;
+                    collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, target, next_class_id, skip_transforms, parse_cache.as_deref_mut())?;
                 }
                 ModuleKind::NativeRust => {
                     // Native Rust modules are handled by stdlib
@@ -2351,11 +3139,11 @@ fn collect_modules(
             if let Some((resolved_path, kind)) = cached_resolve_import(src, &canonical, ctx) {
                 match kind {
                     ModuleKind::NativeCompiled => {
-                        collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, target, next_class_id, skip_transforms)?;
+                        collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, target, next_class_id, skip_transforms, parse_cache.as_deref_mut())?;
                     }
                     ModuleKind::Interpreted => {
                         if enable_js_runtime {
-                            collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, target, next_class_id, skip_transforms)?;
+                            collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, target, next_class_id, skip_transforms, parse_cache.as_deref_mut())?;
                         }
                     }
                     ModuleKind::NativeRust => {}
@@ -2534,6 +3322,7 @@ fn compile_for_ios_widget(ctx: &CompilationContext, args: &CompileArgs, format: 
         target: target_str,
         bundle_id: Some(app_bundle_id.to_string()),
         is_dylib: false,
+        codegen_cache_stats: None,
     })
 }
 
@@ -2621,6 +3410,7 @@ fn compile_for_watchos_widget(ctx: &CompilationContext, args: &CompileArgs, form
         target: target_str,
         bundle_id: Some(app_bundle_id.to_string()),
         is_dylib: false,
+        codegen_cache_stats: None,
     })
 }
 
@@ -2652,6 +3442,47 @@ fn find_watchos_swift_runtime() -> Option<PathBuf> {
     None
 }
 
+fn find_visionos_swift_runtime() -> Option<PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("swift").join("PerryVisionApp.swift");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+            if let Some(prefix) = dir.parent() {
+                let candidate = prefix.join("lib").join("perry").join("swift").join("PerryVisionApp.swift");
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    let source_candidate = PathBuf::from("crates/perry-ui-visionos/swift/PerryVisionApp.swift");
+    if source_candidate.exists() {
+        return Some(source_candidate);
+    }
+
+    None
+}
+
+fn apple_sdk_version(sdk: &str) -> Option<String> {
+    let output = Command::new("xcrun")
+        .args(["--sdk", sdk, "--show-sdk-version"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version = String::from_utf8(output.stdout).ok()?;
+    let version = version.trim();
+    if version.is_empty() {
+        None
+    } else {
+        Some(version.to_string())
+    }
+}
+
 /// Look up bundle_id from perry.toml for a specific section (e.g., "watchos", "ios", "app")
 fn lookup_bundle_id_from_toml(input: &std::path::Path, section: &str) -> Option<String> {
     let mut dir = input.canonicalize().ok()?;
@@ -2672,6 +3503,105 @@ fn lookup_bundle_id_from_toml(input: &std::path::Path, section: &str) -> Option<
         }
     }
     None
+}
+
+/// Compile all `metal_sources` declared across `ctx.native_libraries` into a
+/// single `<app_dir>/default.metallib`. Each `.metal` file is compiled to an
+/// intermediate `.air` via `xcrun -sdk <sdk> metal -c`, then all `.air` files
+/// are linked into `default.metallib` via `xcrun -sdk <sdk> metallib`. That's
+/// the path SwiftUI's `ShaderLibrary.default` (and `MTLDevice.makeDefaultLibrary()`)
+/// loads at runtime.
+///
+/// Deduplicates by canonical source path — shared manifests (e.g., the same
+/// package.json seen by multiple imported modules) only compile each shader
+/// once. No-op if no native lib declares `metal_sources`.
+fn compile_metallib_for_bundle(
+    ctx: &CompilationContext,
+    target: Option<&str>,
+    app_dir: &Path,
+    format: OutputFormat,
+) -> Result<()> {
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut sources: Vec<(PathBuf, String)> = Vec::new();
+    for native_lib in &ctx.native_libraries {
+        if let Some(ref tc) = native_lib.target_config {
+            for src in &tc.metal_sources {
+                let canonical = src.canonicalize().unwrap_or_else(|_| src.clone());
+                if seen.insert(canonical) {
+                    sources.push((src.clone(), native_lib.module.clone()));
+                }
+            }
+        }
+    }
+    if sources.is_empty() {
+        return Ok(());
+    }
+
+    let metal_sdk = match target {
+        Some("watchos-simulator") => "watchsimulator",
+        Some("watchos") => "watchos",
+        Some("ios-simulator") => "iphonesimulator",
+        Some("ios") => "iphoneos",
+        Some("tvos-simulator") => "appletvsimulator",
+        Some("tvos") => "appletvos",
+        other => return Err(anyhow!(
+            "metal_sources is only supported on ios/tvos/watchos (got {:?})",
+            other
+        )),
+    };
+
+    let air_dir = std::env::temp_dir()
+        .join(format!("perry_metal_{}", std::process::id()));
+    std::fs::create_dir_all(&air_dir).ok();
+
+    let mut air_files: Vec<PathBuf> = Vec::new();
+    for (src, module) in &sources {
+        if !src.exists() {
+            return Err(anyhow!(
+                "Metal source not found: {} (declared in {}'s nativeLibrary.metal_sources)",
+                src.display(),
+                module
+            ));
+        }
+        let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("shader");
+        let air_out = air_dir.join(format!("{}.air", stem));
+        let status = Command::new("xcrun")
+            .args(["-sdk", metal_sdk, "metal", "-c"])
+            .arg(src)
+            .arg("-o")
+            .arg(&air_out)
+            .status()?;
+        if !status.success() {
+            return Err(anyhow!("Failed to compile Metal shader: {}", src.display()));
+        }
+        match format {
+            OutputFormat::Text => println!("Compiled Metal shader: {}", src.display()),
+            OutputFormat::Json => {}
+        }
+        air_files.push(air_out);
+    }
+
+    let metallib_out = app_dir.join("default.metallib");
+    let mut link_cmd = Command::new("xcrun");
+    link_cmd.args(["-sdk", metal_sdk, "metallib", "-o"])
+        .arg(&metallib_out);
+    for air in &air_files {
+        link_cmd.arg(air);
+    }
+    let status = link_cmd.status()?;
+    if !status.success() {
+        return Err(anyhow!(
+            "Failed to link Metal library into {}",
+            metallib_out.display()
+        ));
+    }
+
+    match format {
+        OutputFormat::Text => println!("Wrote Metal library: {}", metallib_out.display()),
+        OutputFormat::Json => {}
+    }
+
+    Ok(())
 }
 
 /// Compile for Android widget target: emit Kotlin/Glance source + JNI bridge
@@ -2757,6 +3687,7 @@ fn compile_for_android_widget(ctx: &CompilationContext, args: &CompileArgs, form
         target: "android-widget".to_string(),
         bundle_id: Some(app_package.to_string()),
         is_dylib: false,
+        codegen_cache_stats: None,
     })
 }
 
@@ -2836,6 +3767,7 @@ fn compile_for_wearos_tile(ctx: &CompilationContext, args: &CompileArgs, format:
         target: "wearos-tile".to_string(),
         bundle_id: Some(app_package.to_string()),
         is_dylib: false,
+        codegen_cache_stats: None,
     })
 }
 
@@ -2947,6 +3879,7 @@ fn compile_for_web(ctx: &CompilationContext, args: &CompileArgs, format: OutputF
         target: "web".to_string(),
         bundle_id: None,
         is_dylib: false,
+        codegen_cache_stats: None,
     })
 }
 
@@ -3064,10 +3997,24 @@ fn compile_for_wasm(ctx: &CompilationContext, args: &CompileArgs, format: Output
         target: "wasm".to_string(),
         bundle_id: None,
         is_dylib: false,
+        codegen_cache_stats: None,
     })
 }
 
-pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u8) -> Result<CompileResult> {
+pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8) -> Result<CompileResult> {
+    run_with_parse_cache(args, None, format, use_color, verbose)
+}
+
+/// Same as [`run`] but accepts an optional in-memory [`ParseCache`] that
+/// `perry dev` uses to reuse parsed ASTs across rebuilds in a single session.
+/// Pass `None` for the batch-compile path.
+pub fn run_with_parse_cache(
+    args: CompileArgs,
+    mut parse_cache: Option<&mut ParseCache>,
+    format: OutputFormat,
+    use_color: bool,
+    verbose: u8,
+) -> Result<CompileResult> {
     match format {
         OutputFormat::Text => println!("Collecting modules..."),
         OutputFormat::Json => {}
@@ -3255,7 +4202,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
     let mut next_class_id: perry_hir::ClassId = 1; // Start at 1, 0 is reserved for "no parent"
     let skip_transforms = matches!(args.target.as_deref(), Some("web") | Some("wasm"));
 
-    collect_modules(&args.input, &mut ctx, &mut visited, args.enable_js_runtime, format, args.target.as_deref(), &mut next_class_id, skip_transforms)?;
+    collect_modules(&args.input, &mut ctx, &mut visited, args.enable_js_runtime, format, args.target.as_deref(), &mut next_class_id, skip_transforms, parse_cache.as_deref_mut())?;
 
     // Bundle extensions if --bundle-extensions specified
     let mut bundled_extensions: Vec<(PathBuf, String)> = Vec::new();
@@ -3271,7 +4218,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
                 OutputFormat::Json => {}
             }
             collect_modules(entry_path, &mut ctx, &mut visited,
-                           args.enable_js_runtime, format, args.target.as_deref(), &mut next_class_id, skip_transforms)?;
+                           args.enable_js_runtime, format, args.target.as_deref(), &mut next_class_id, skip_transforms, parse_cache.as_deref_mut())?;
             bundled_extensions.push((entry_path.canonicalize()?, plugin_id.clone()));
         }
     }
@@ -3624,8 +4571,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
         sorted
     };
 
-    // Debug: print init order for crash diagnosis
-    if let OutputFormat::Text = format {
+    if matches!(format, OutputFormat::Text) && verbose > 0 {
         eprintln!("\nModule init order ({} modules):", non_entry_module_names.len());
         for (i, name) in non_entry_module_names.iter().enumerate() {
             eprintln!("  [{}] {}", i, name);
@@ -4180,7 +5126,13 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
             .map(|f| f.trim().to_string())
             .filter(|f| !f.is_empty())
             .collect();
-        let is_mobile = matches!(target.as_deref(), Some("ios") | Some("ios-simulator") | Some("android") | Some("watchos") | Some("watchos-simulator") | Some("tvos") | Some("tvos-simulator"));
+        let is_mobile = matches!(target.as_deref(),
+            Some("ios") | Some("ios-simulator") |
+            Some("visionos") | Some("visionos-simulator") |
+            Some("android") |
+            Some("watchos") | Some("watchos-simulator") |
+            Some("tvos") | Some("tvos-simulator")
+        );
         if is_mobile {
             features.retain(|f| f != "plugins");
         }
@@ -4227,6 +5179,20 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
     // mode here so the per-module codegen can emit .ll instead of .o.
     let bitcode_link =
         std::env::var("PERRY_LLVM_BITCODE_LINK").ok().as_deref() == Some("1");
+
+    // V2.2: Per-module object cache at `.perry-cache/objects/<target>/<key>.o`.
+    // Disabled when the user passed `--no-cache`, when `PERRY_NO_CACHE=1`, or
+    // when we're in bitcode-link mode (the artifacts aren't object files).
+    // Key derivation: `compute_object_cache_key(opts, source_hash, perry_version)`.
+    let cache_env_disabled =
+        std::env::var("PERRY_NO_CACHE").ok().as_deref() == Some("1");
+    let cache_enabled = !args.no_cache && !cache_env_disabled && !bitcode_link;
+    // Target dir name for the cache layout. Using the resolved LLVM triple
+    // keeps cross-compile caches from colliding with native-host caches.
+    let cache_target_dir = target.as_deref().unwrap_or("host");
+    let object_cache = ObjectCache::new(&ctx.project_root, cache_target_dir, cache_enabled);
+    let perry_version = env!("CARGO_PKG_VERSION");
+
     let compile_results: Vec<Result<(PathBuf, Vec<u8>), String>> = ctx.native_modules.par_iter()
         .map(|(path, hir_module)| {
             // Compile this module to LLVM IR (or .ll text in bitcode-link mode)
@@ -4250,16 +5216,25 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
                 }
                 out
             };
+            // CRITICAL: iterate `non_entry_module_names` (topologically
+            // sorted above) rather than `ctx.native_modules` — the latter
+            // is a `BTreeMap<PathBuf, _>` and iterates in alphabetical
+            // path order, which silently reverses the dependency order
+            // for any project whose leaf modules sort after their
+            // dependents (e.g. `types/registry.ts` sorting after
+            // `connection.ts`). When that happens, a top-level
+            // `registerDefaultCodecs()` call in register-defaults.ts
+            // runs BEFORE types/registry.ts's init has set up the
+            // `REGISTRY_OIDS` global — the push-site writes to a stale
+            // (0.0-initialized) global while the read-site later loads
+            // from the real one. Symptom: registry appears empty to
+            // every later consumer even though primitives like
+            // `let registered = false` look shared (they only need
+            // storage, not init-order). Fixes GH #32.
             let non_entry_module_prefixes: Vec<String> = if is_entry {
-                ctx.native_modules
+                non_entry_module_names
                     .iter()
-                    .filter_map(|(p, m)| {
-                        if p == &entry_path {
-                            None
-                        } else {
-                            Some(sanitize_name(&m.name))
-                        }
-                    })
+                    .map(|name| sanitize_name(name))
                     .collect()
             } else {
                 Vec::new()
@@ -4318,8 +5293,12 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
                                         source_prefix: origin_prefix.clone(),
                                         constructor_param_count: class.constructor.as_ref().map(|c| c.params.len()).unwrap_or(0),
                                         method_names: class.methods.iter().map(|m| m.name.clone()).collect(),
+                                        getter_names: class.getters.iter().map(|(n, _)| n.clone()).collect(),
+                                        setter_names: class.setters.iter().map(|(n, _)| n.clone()).collect(),
                                         parent_name: class.extends_name.clone(),
                                         field_names: class.fields.iter().map(|f| f.name.clone()).collect(),
+                                        field_types: class.fields.iter().map(|f| f.ty.clone()).collect(),
+                                        source_class_id: Some(class.id),
                                     });
                                 }
                                 if let Some(members) = exported_enums.get(&key) {
@@ -4375,8 +5354,12 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
                             source_prefix: effective_prefix.clone(),
                             constructor_param_count: class.constructor.as_ref().map(|c| c.params.len()).unwrap_or(0),
                             method_names: class.methods.iter().map(|m| m.name.clone()).collect(),
+                            getter_names: class.getters.iter().map(|(n, _)| n.clone()).collect(),
+                            setter_names: class.setters.iter().map(|(n, _)| n.clone()).collect(),
                             parent_name: class.extends_name.clone(),
                             field_names: class.fields.iter().map(|f| f.name.clone()).collect(),
+                            field_types: class.fields.iter().map(|f| f.ty.clone()).collect(),
+                            source_class_id: Some(class.id),
                         });
                     }
 
@@ -4404,6 +5387,138 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
                     // Imported enums
                     if let Some(members) = exported_enums.get(&key) {
                         imported_enums.push((local_name.clone(), members.clone()));
+                    }
+                }
+
+                // Named imports only bring in explicitly-imported symbols, so
+                // a class that leaks out of the source module as the return
+                // type of an imported *function* (e.g. `import { makeThing }`
+                // where `makeThing(): Promise<Thing>`) leaves `Thing` invisible
+                // to this module's dispatch tables. `t.doWork(...)` then can't
+                // find `("Thing", "doWork")` in `ctx.methods` and falls through
+                // to `js_native_call_method`, which returns the receiver's
+                // ObjectHeader as a stub. Closes #83.
+                //
+                // Mirror the namespace-import behavior: for every
+                // native-compiled module we import from (and every module that
+                // module transitively re-exports from), enumerate every class
+                // defined in that module and register it for dispatch, even
+                // when the class name wasn't in the specifier list. Local
+                // classes with the same name take precedence in
+                // `compile_module` (the `class_table.contains_key` check), so
+                // this doesn't clobber anything.
+                //
+                // We iterate `ctx.native_modules` directly — NOT the
+                // `exported_classes` BTreeMap. `exported_classes` gets alias
+                // entries stamped under every re-exporter's path (the
+                // `Export::ReExport` / `Export::ExportAll` propagation loop
+                // above), so iterating it would hand us the class keyed by
+                // `index.ts` when it was actually compiled under
+                // `pool.ts`. Using each module's own `hir.classes` Vec guarantees
+                // `src_path` is the TRUE defining module, so the mangled
+                // `perry_method_<source_prefix>__<Class>__<method>` symbol
+                // matches what that module actually emitted (otherwise the
+                // linker fails with "undefined symbol
+                // _perry_method_src_index_ts__Pool__query" when Pool was
+                // compiled under src_pool_ts).
+                let mut origin_paths: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                origin_paths.insert(resolved_path_str.clone());
+                if let Some(exports) = all_module_exports.get(&resolved_path_str) {
+                    for origin_path in exports.values() {
+                        origin_paths.insert(origin_path.clone());
+                    }
+                }
+                for (src_pathbuf, src_hir) in &ctx.native_modules {
+                    let src_path = src_pathbuf.to_string_lossy().to_string();
+                    if !origin_paths.contains(&src_path) {
+                        continue;
+                    }
+                    for class in &src_hir.classes {
+                        if !class.is_exported {
+                            continue;
+                        }
+                        // Dedup across multiple import statements: the same class
+                        // may be transitively reachable from several imports, and
+                        // the same-class-twice case would produce duplicate
+                        // `@perry_class_keys_<modprefix>__<Class>` globals in IR.
+                        // Same-name local classes win via `compile_module`'s
+                        // class_table check, so this filter is strictly about
+                        // cross-module twinning.
+                        if imported_classes.iter().any(|c| c.name == class.name) {
+                            continue;
+                        }
+                        let class_prefix = compute_module_prefix(&src_path, &ctx.project_root);
+                        imported_classes.push(perry_codegen::ImportedClass {
+                            name: class.name.clone(),
+                            local_alias: None,
+                            source_prefix: class_prefix,
+                            constructor_param_count: class.constructor.as_ref().map(|c| c.params.len()).unwrap_or(0),
+                            method_names: class.methods.iter().map(|m| m.name.clone()).collect(),
+                            getter_names: class.getters.iter().map(|(n, _)| n.clone()).collect(),
+                            setter_names: class.setters.iter().map(|(n, _)| n.clone()).collect(),
+                            parent_name: class.extends_name.clone(),
+                            field_names: class.fields.iter().map(|f| f.name.clone()).collect(),
+                            field_types: class.fields.iter().map(|f| f.ty.clone()).collect(),
+                            source_class_id: Some(class.id),
+                        });
+                    }
+                }
+            }
+
+            // Transitive class closure: pull in classes referenced by
+            // field types of already-imported classes. Without this, a
+            // chain like `vm.viewport.scroll.scrollTop` (where vm is
+            // `EditorViewModel`, `viewport: ViewportManager`, `scroll:
+            // ScrollController`) breaks at the first hop because only
+            // `EditorViewModel` lives in `imported_classes` for this
+            // module — `receiver_class_name` can't walk through
+            // `viewport.scroll` because `ViewportManager` isn't in
+            // `class_table` and its field types are unknown. Closing
+            // over field types lets `PropertyGet` recursion resolve
+            // the receiver class at every step of the chain.
+            let mut visited_imports: std::collections::HashSet<String> = imported_classes
+                .iter()
+                .map(|ic| ic.name.clone())
+                .collect();
+            let mut closure_worklist: Vec<String> =
+                visited_imports.iter().cloned().collect();
+            while let Some(name) = closure_worklist.pop() {
+                let ic_idx = imported_classes
+                    .iter()
+                    .position(|ic| ic.name == name);
+                let Some(idx) = ic_idx else { continue };
+                let field_types_clone = imported_classes[idx].field_types.clone();
+                for ty in &field_types_clone {
+                    let ref_name = match ty {
+                        perry_types::Type::Named(n) => n.clone(),
+                        perry_types::Type::Generic { base, .. } => base.clone(),
+                        _ => continue,
+                    };
+                    if visited_imports.contains(&ref_name) {
+                        continue;
+                    }
+                    let found = exported_classes
+                        .iter()
+                        .find(|((_, cname), _)| cname == &ref_name)
+                        .map(|((path, _), class)| (path.clone(), *class));
+                    if let Some((src_path, class)) = found {
+                        let class_prefix = compute_module_prefix(&src_path, &ctx.project_root);
+                        imported_classes.push(perry_codegen::ImportedClass {
+                            name: class.name.clone(),
+                            local_alias: None,
+                            source_prefix: class_prefix,
+                            constructor_param_count: class.constructor.as_ref().map(|c| c.params.len()).unwrap_or(0),
+                            method_names: class.methods.iter().map(|m| m.name.clone()).collect(),
+                            getter_names: class.getters.iter().map(|(n, _)| n.clone()).collect(),
+                            setter_names: class.setters.iter().map(|(n, _)| n.clone()).collect(),
+                            parent_name: class.extends_name.clone(),
+                            field_names: class.fields.iter().map(|f| f.name.clone()).collect(),
+                            field_types: class.fields.iter().map(|f| f.ty.clone()).collect(),
+                            source_class_id: Some(class.id),
+                        });
+                        visited_imports.insert(ref_name.clone());
+                        closure_worklist.push(ref_name);
                     }
                 }
             }
@@ -4478,11 +5593,36 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
                 native_library_functions: ffi_functions.clone(),
                 i18n_table: i18n_snapshot.clone(),
             };
-            let object_code = perry_codegen::compile_module(hir_module, opts)
-                .map_err(|e| format!(
-                    "Error compiling module '{}' ({}) with --backend llvm: {:#}",
-                    hir_module.name, path.display(), e
-                ))?;
+            // V2.2 object cache lookup. The key hashes every codegen-affecting
+            // field of `opts` together with this module's source hash and the
+            // perry version. A hit returns the exact `.o` bytes we emitted
+            // the last time opts + source were identical — cross-run bit
+            // identity, not just semantic equivalence. A miss (no entry,
+            // disabled cache, or IO error) falls through to `compile_module`.
+            let cache_key = if object_cache.is_enabled() {
+                let source_hash = ctx
+                    .module_source_hashes
+                    .get(path)
+                    .copied()
+                    .unwrap_or(0);
+                Some(compute_object_cache_key(&opts, source_hash, perry_version))
+            } else {
+                None
+            };
+            let object_code = match cache_key.and_then(|k| object_cache.lookup(k)) {
+                Some(bytes) => bytes,
+                None => {
+                    let bytes = perry_codegen::compile_module(hir_module, opts)
+                        .map_err(|e| format!(
+                            "Error compiling module '{}' ({}) with --backend llvm: {:#}",
+                            hir_module.name, path.display(), e
+                        ))?;
+                    if let Some(k) = cache_key {
+                        object_cache.store(k, &bytes);
+                    }
+                    bytes
+                }
+            };
             let obj_name = hir_module.name
                 .replace(|c: char| !c.is_alphanumeric() && c != '_', "_")
                 .trim_matches('_')
@@ -4521,6 +5661,27 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
                     failed_modules.push(name.to_string());
                 }
             }
+        }
+    }
+
+    // Verbose codegen-cache stats. We print here (rather than in dev.rs
+    // alongside the parse-cache line) only when `parse_cache` is `None`
+    // — i.e. batch `perry compile` / `perry run` invocations. In the
+    // `perry dev` hot path, `run_with_parse_cache` is called with a
+    // `Some(cache)` and `dev.rs` prints both `parse cache:` and
+    // `codegen cache:` lines together after we return, so printing here
+    // would duplicate the codegen line. The env var matches the one
+    // `perry dev` uses so a single `PERRY_DEV_VERBOSE=1` turns on cache
+    // diagnostics everywhere.
+    if parse_cache.is_none()
+        && object_cache.is_enabled()
+        && std::env::var("PERRY_DEV_VERBOSE").ok().as_deref() == Some("1")
+    {
+        let h = object_cache.hits();
+        let m = object_cache.misses();
+        let total = h + m;
+        if total > 0 {
+            eprintln!("  • codegen cache: {}/{} hit ({} miss)", h, total, m);
         }
     }
 
@@ -4616,7 +5777,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
     let optimized_libs: OptimizedLibs = if args.no_auto_optimize {
         OptimizedLibs::empty()
     } else {
-        build_optimized_libs(&ctx, target.as_deref(), format)
+        build_optimized_libs(&ctx, target.as_deref(), &compiled_features, format, verbose)
     };
     let stdlib_lib_resolved: Option<PathBuf> = optimized_libs.stdlib.clone()
         .or_else(|| find_stdlib_library(target.as_deref()));
@@ -4673,6 +5834,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
         // Use TARGET (what we're compiling to), not HOST (what we're running on)
         let is_macho = matches!(target.as_deref(),
             Some("ios") | Some("ios-simulator") | Some("ios-widget") | Some("ios-widget-simulator") |
+            Some("visionos") | Some("visionos-simulator") |
             Some("macos") | Some("watchos") | Some("watchos-simulator") |
             Some("tvos") | Some("tvos-simulator")
         ) || (!is_windows && !is_linux && !is_android && cfg!(target_os = "macos"));
@@ -4898,11 +6060,15 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
     }
 
     if args.no_link {
+        let codegen_cache_stats = if object_cache.is_enabled() {
+            Some((object_cache.hits(), object_cache.misses(), object_cache.stores(), object_cache.store_errors()))
+        } else { None };
         return Ok(CompileResult {
             output_path: exe_path,
             target: target.clone().unwrap_or_else(|| "native".to_string()),
             bundle_id: None,
             is_dylib,
+            codegen_cache_stats,
         });
     }
 
@@ -4918,6 +6084,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
     }
 
     let is_ios = matches!(target.as_deref(), Some("ios-simulator") | Some("ios"));
+    let is_visionos = matches!(target.as_deref(), Some("visionos-simulator") | Some("visionos"));
     let is_android = matches!(target.as_deref(), Some("android"));
     let is_linux = matches!(target.as_deref(), Some("linux"))
         || (target.is_none() && cfg!(target_os = "linux"));
@@ -4925,6 +6092,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
         || (target.is_none() && cfg!(target_os = "windows"));
     let is_cross_windows = is_windows && !cfg!(target_os = "windows");
     let is_cross_ios = is_ios && !cfg!(target_os = "macos");
+    let is_cross_visionos = is_visionos && !cfg!(target_os = "macos");
     let is_cross_macos = matches!(target.as_deref(), Some("macos")) && !cfg!(target_os = "macos");
     // Note: is_watchos and is_tvos are defined below (near jsruntime_lib); is_cross_tvos
     // is set after them so this block keeps all is_cross_* bindings together.
@@ -4969,11 +6137,15 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
             }
         }
 
+        let codegen_cache_stats = if object_cache.is_enabled() {
+            Some((object_cache.hits(), object_cache.misses(), object_cache.stores(), object_cache.store_errors()))
+        } else { None };
         return Ok(CompileResult {
             output_path: exe_path,
             target: target.clone().unwrap_or_else(|| "native".to_string()),
             bundle_id: None,
             is_dylib: true,
+            codegen_cache_stats,
         });
     }
 
@@ -5000,7 +6172,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
     // Without this the is_tvos branch below would unconditionally call `xcrun`,
     // which only exists on macOS with Xcode.
     let is_cross_tvos = is_tvos && !cfg!(target_os = "macos");
-    let jsruntime_lib = if !is_ios && !is_android && !is_watchos && !is_tvos && (ctx.needs_js_runtime || args.enable_js_runtime) {
+    let jsruntime_lib = if !is_ios && !is_visionos && !is_android && !is_watchos && !is_tvos && (ctx.needs_js_runtime || args.enable_js_runtime) {
         match find_jsruntime_library(target.as_deref()) {
             Some(lib) => {
                 match format {
@@ -5024,34 +6196,139 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
 
     // For cross-compilation targets, use the appropriate toolchain
     let mut cmd = if is_watchos {
-        // watchOS uses swiftc to compile the PerryWatchApp.swift runtime alongside linking
+        let is_watchos_game_loop = compiled_features.iter().any(|f| f == "watchos-game-loop");
+        let is_watchos_swift_app = compiled_features.iter().any(|f| f == "watchos-swift-app");
         let sdk = if target.as_deref() == Some("watchos-simulator") { "watchsimulator" } else { "watchos" };
-        let swiftc = String::from_utf8(
-            Command::new("xcrun").args(["--sdk", sdk, "--find", "swiftc"]).output()?.stdout
-        )?.trim().to_string();
         let sysroot = String::from_utf8(
             Command::new("xcrun").args(["--sdk", sdk, "--show-sdk-path"]).output()?.stdout
         )?.trim().to_string();
         let triple = if target.as_deref() == Some("watchos-simulator") {
             "arm64-apple-watchos10.0-simulator"
         } else {
-            "arm64-apple-watchos10.0"
+            "arm64_32-apple-watchos10.0"
         };
 
-        let swift_runtime = find_watchos_swift_runtime()
+        // Find the entry object whose stem matches the user's input file stem
+        // (e.g. `test_ui_counter.ts` → `test_ui_counter_ts.o`). Three rename targets:
+        //   - Default (SwiftUI-tree app shell): `_main → _perry_main_init`, so the
+        //     Swift `@main struct PerryApp` entry wins and calls back into TS init.
+        //   - `--features watchos-game-loop`: `_main → _perry_user_main`, so the
+        //     Rust runtime's `main()` (watchos_game_loop.rs) takes over the process
+        //     entry, spawns the user's TS on a background thread, and calls
+        //     `WKApplicationMain` on the main thread for a Metal/wgpu surface.
+        //   - `--features watchos-swift-app`: `_main → _perry_user_main`, so the
+        //     native lib's own `@main struct App: App` is the process entry.
+        //     It spawns TS on a background thread from its `init()`/`.task {}`.
+        let input_stem = args.input.file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| format!("{}_ts", s))
+            .unwrap_or_else(|| "main_ts".to_string());
+        if let Some(entry_obj) = obj_paths.iter().find(|f| {
+            f.file_stem().and_then(|s| s.to_str())
+                .map(|s| s == input_stem.as_str() || s.ends_with(&format!("_{}", input_stem)))
+                .unwrap_or(false)
+        }) {
+            let objcopy = std::env::var("HOME").ok()
+                .map(|h| PathBuf::from(h).join(".rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/bin/rust-objcopy"))
+                .filter(|p| p.exists())
+                .or_else(|| std::env::var("HOME").ok()
+                    .map(|h| PathBuf::from(h).join(".rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/bin/llvm-objcopy"))
+                    .filter(|p| p.exists()))
+                .unwrap_or_else(|| PathBuf::from("rust-objcopy"));
+            let rename = if is_watchos_game_loop || is_watchos_swift_app {
+                "_main=__perry_user_main"
+            } else {
+                "_main=_perry_main_init"
+            };
+            let _ = Command::new(&objcopy)
+                .args(["--redefine-sym", rename])
+                .arg(entry_obj)
+                .status();
+        }
+
+        if is_watchos_game_loop {
+            // Game-loop: no SwiftUI scene tree — the native lib owns a
+            // CAMetalLayer-backed view and `perry-runtime/watchos-game-loop`
+            // provides the C `main()`. Link with clang, not swiftc.
+            let clang = String::from_utf8(
+                Command::new("xcrun").args(["--sdk", sdk, "--find", "clang"]).output()?.stdout
+            )?.trim().to_string();
+            let mut c = Command::new(clang);
+            c.arg("-target").arg(triple)
+             .arg("-isysroot").arg(&sysroot);
+            c
+        } else if is_watchos_swift_app {
+            // Swift-app: the native lib ships its own `@main struct App: App`
+            // (compiled separately in the native-lib loop below). Perry does
+            // not emit PerryWatchApp.swift and does not provide a C main.
+            // Use swiftc as the linker so Swift stdlib auto-links.
+            let swiftc = String::from_utf8(
+                Command::new("xcrun").args(["--sdk", sdk, "--find", "swiftc"]).output()?.stdout
+            )?.trim().to_string();
+            let mut c = Command::new(swiftc);
+            c.arg("-target").arg(triple)
+             .arg("-sdk").arg(&sysroot)
+             .arg("-parse-as-library")
+             // perry-runtime and the native lib each pull in their own std
+             // rlibs (Cargo's metadata hashing differs across workspaces even
+             // when -Zbuild-std flags match). Tell ld to take first-wins on
+             // duplicates rather than fail the link.
+             .arg("-Xlinker").arg("-ld_classic");
+            c
+        } else {
+            let swiftc = String::from_utf8(
+                Command::new("xcrun").args(["--sdk", sdk, "--find", "swiftc"]).output()?.stdout
+            )?.trim().to_string();
+            let swift_runtime = find_watchos_swift_runtime()
+                .ok_or_else(|| anyhow!(
+                    "PerryWatchApp.swift not found. Expected next to perry binary or in source tree."
+                ))?;
+            let mut c = Command::new(swiftc);
+            c.arg("-target").arg(triple)
+             .arg("-sdk").arg(&sysroot)
+             .arg("-parse-as-library")
+             .arg(&swift_runtime);
+            c
+        }
+    } else if is_visionos && is_cross_visionos {
+        return Err(anyhow!(
+            "Local visionOS compilation requires Xcode on macOS. Use a macOS host or Perry Hub remote build."
+        ));
+    } else if is_visionos {
+        let sdk = if target.as_deref() == Some("visionos-simulator") { "xrsimulator" } else { "xros" };
+        let swiftc = String::from_utf8(
+            Command::new("xcrun").args(["--sdk", sdk, "--find", "swiftc"]).output()?.stdout
+        )?.trim().to_string();
+        let sysroot = String::from_utf8(
+            Command::new("xcrun").args(["--sdk", sdk, "--show-sdk-path"]).output()?.stdout
+        )?.trim().to_string();
+        let sdk_version = apple_sdk_version(sdk).unwrap_or_else(|| "1.0".to_string());
+        let triple = if target.as_deref() == Some("visionos-simulator") {
+            format!("arm64-apple-xros{}-simulator", sdk_version)
+        } else {
+            format!("arm64-apple-xros{}", sdk_version)
+        };
+        let swift_runtime = find_visionos_swift_runtime()
             .ok_or_else(|| anyhow!(
-                "PerryWatchApp.swift not found. Expected next to perry binary or in source tree."
+                "PerryVisionApp.swift not found. Expected next to perry binary or in source tree."
             ))?;
 
-        // Rename _main to _perry_main_init in the entry object file so it doesn't
-        // conflict with the SwiftUI @main entry point in PerryWatchApp.swift.
-        // The Swift runtime calls perry_main_init() to initialize the compiled TS code.
-        if let Some(entry_obj) = obj_paths.iter().find(|f| f.to_string_lossy().contains("main_ts")) {
-            // Use rustup's llvm-objcopy to rename _main to _perry_main_init
+        let input_stem = args.input.file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| format!("{}_ts", s))
+            .unwrap_or_else(|| "main_ts".to_string());
+        if let Some(entry_obj) = obj_paths.iter().find(|f| {
+            f.file_stem().and_then(|s| s.to_str())
+                .map(|s| s == input_stem.as_str() || s.ends_with(&format!("_{}", input_stem)))
+                .unwrap_or(false)
+        }) {
             let objcopy = std::env::var("HOME").ok()
-                .map(|h| PathBuf::from(h).join(".rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/bin/llvm-objcopy"))
+                .map(|h| PathBuf::from(h).join(".rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/bin/rust-objcopy"))
                 .filter(|p| p.exists())
-                .unwrap_or_else(|| PathBuf::from("llvm-objcopy"));
+                .or_else(|| std::env::var("HOME").ok()
+                    .map(|h| PathBuf::from(h).join(".rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/bin/llvm-objcopy"))
+                    .filter(|p| p.exists()))
+                .unwrap_or_else(|| PathBuf::from("rust-objcopy"));
             let _ = Command::new(&objcopy)
                 .args(["--redefine-sym", "_main=_perry_main_init"])
                 .arg(entry_obj)
@@ -5059,7 +6336,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
         }
 
         let mut c = Command::new(swiftc);
-        c.arg("-target").arg(triple)
+        c.arg("-target").arg(&triple)
          .arg("-sdk").arg(&sysroot)
          .arg("-parse-as-library")
          .arg(&swift_runtime);
@@ -5220,26 +6497,72 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
         {
             c.arg("-target").arg("x86_64-unknown-linux-gnu");
         }
-        // Allow unresolved symbols — native libs and UI libs may not implement
-        // all functions on Linux. Matches /FORCE:UNRESOLVED on Windows.
-        c.arg("-Wl,--warn-unresolved-symbols");
+        // Unresolved symbols are now link errors (not warnings). The
+        // v0.5.0→0.5.18 Fastify/MySQL segfault (#28) was caused by
+        // --warn-unresolved-symbols silently producing binaries with
+        // null function pointers that crashed at runtime. With the
+        // native module dispatch table restored, all expected symbols
+        // are resolved; any remaining unresolved symbol is a real bug
+        // that should fail the link rather than produce a broken binary.
         c
     } else if is_windows {
-        // Windows target — use MSVC link.exe (native) or lld-link (cross)
-        // Check for PERRY_LLD_LINK override to use lld-link instead of MSVC link.exe.
-        // lld-link may handle large COFF objects differently than MSVC's linker.
+        // Windows target — two linker paths supported:
+        //   Lightweight: lld-link (from LLVM) + xwin'd sysroot (from `perry setup windows`)
+        //   MSVC:        link.exe + Visual Studio's VCTools + Windows SDK
+        //
+        // Precedence on native Windows:
+        //   1. PERRY_LLD_LINK env var (explicit override — always wins)
+        //   2. xwin'd sysroot present at %LOCALAPPDATA%\perry\windows-sdk → lld-link
+        //      (if user ran `perry setup windows`, they've opted into this path)
+        //   3. vswhere finds VCTools-enabled VS install → MSVC link.exe
+        //   4. Bail with two-option install hint
         let linker = if let Ok(lld) = std::env::var("PERRY_LLD_LINK") {
             PathBuf::from(lld)
-        } else {
-            find_msvc_link_exe().unwrap_or_else(|| {
-                if is_cross_windows {
-                    eprintln!("Warning: lld-link not found for cross-compilation. Install: rustup component add llvm-tools");
+        } else if !is_cross_windows && find_perry_windows_sdk().is_some() {
+            // User ran `perry setup windows`. Use LLVM's lld-link.
+            match find_lld_link() {
+                Some(p) => p,
+                None => {
+                    return Err(anyhow!(
+                        "`perry setup windows` has populated a Windows SDK at {} but \
+                         LLVM's lld-link.exe is missing. Install LLVM via:\n\
+                         \x20  winget install LLVM.LLVM\n\
+                         then open a new terminal and retry.",
+                        find_perry_windows_sdk().unwrap().display()
+                    ));
                 }
-                PathBuf::from("link.exe")
-            })
+            }
+        } else if let Some(path) = find_msvc_link_exe() {
+            path
+        } else if is_cross_windows {
+            eprintln!("Warning: lld-link not found for cross-compilation. Install: rustup component add llvm-tools");
+            PathBuf::from("link.exe")
+        } else {
+            // Native Windows: neither MSVC (via vswhere) nor the xwin'd sysroot
+            // is present. Fail fast with both install paths — matches the
+            // `find_clang` context pattern in perry-codegen/src/linker.rs.
+            return Err(anyhow!(
+                "No Windows linker toolchain found. Perry needs either MSVC link.exe + \
+                 Windows SDK, or LLVM's lld-link + the xwin'd sysroot from `perry setup \
+                 windows`. Pick whichever is lighter for you:\n\
+                 \n\
+                 \x20  A) Lightweight (LLVM + xwin, ~1.5 GB, no Visual Studio needed):\n\
+                 \x20       winget install LLVM.LLVM\n\
+                 \x20       perry setup windows\n\
+                 \n\
+                 \x20  B) MSVC (Visual Studio Build Tools + C++ workload, ~8 GB):\n\
+                 \x20       Visual Studio Installer → Modify → \"Desktop development with C++\"\n\
+                 \x20       or: winget install Microsoft.VisualStudio.2022.BuildTools --override \
+                 \"--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended\"\n\
+                 \n\
+                 Then open a new terminal and retry. Run `perry doctor` to verify."
+            ));
         };
         let mut c = Command::new(linker);
-        c.arg("/SUBSYSTEM:WINDOWS")
+        // /ENTRY:mainCRTStartup works for both subsystems: Perry emits
+        // `int main()` and the MSVC CRT invokes it regardless of subsystem.
+        // See windows_pe_subsystem_flag() for subsystem selection rationale.
+        c.arg(windows_pe_subsystem_flag(ctx.needs_ui))
          .arg("/ENTRY:mainCRTStartup")
          .arg("/NOLOGO")
          // Perry generates large init functions for TS modules (one function
@@ -5290,6 +6613,26 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
         Command::new("cc")
     };
 
+    // When ios-game-loop is enabled, rename _main to _perry_user_main in the
+    // entry object file so the perry runtime's main() (from ios_game_loop.rs)
+    // becomes the process entry point. It spawns _perry_user_main on a game thread.
+    if (is_ios || is_tvos) && compiled_features.iter().any(|f| f == "ios-game-loop") {
+        if let Some(entry_obj) = obj_paths.iter().find(|f| f.to_string_lossy().contains("main_ts")) {
+            // Try rust-objcopy first (newer Rust), then llvm-objcopy (older Rust)
+            let objcopy = std::env::var("HOME").ok()
+                .map(|h| PathBuf::from(h).join(".rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/bin/rust-objcopy"))
+                .filter(|p| p.exists())
+                .or_else(|| std::env::var("HOME").ok()
+                    .map(|h| PathBuf::from(h).join(".rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/bin/llvm-objcopy"))
+                    .filter(|p| p.exists()))
+                .unwrap_or_else(|| PathBuf::from("rust-objcopy"));
+            let _ = Command::new(&objcopy)
+                .args(["--redefine-sym", "_main=__perry_user_main"])
+                .arg(entry_obj)
+                .status();
+        }
+    }
+
     for obj_path in &obj_paths {
         cmd.arg(obj_path);
     }
@@ -5300,10 +6643,10 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
     if !is_windows {
         if is_android || is_linux {
             cmd.arg("-Wl,--gc-sections");
-        } else if is_cross_ios || is_cross_macos || is_cross_tvos {
+        } else if is_cross_ios || is_cross_visionos || is_cross_macos || is_cross_tvos {
             // ld64.lld called directly — no -Wl, prefix needed
             cmd.arg("-dead_strip");
-        } else if is_watchos {
+        } else if is_watchos || is_visionos {
             cmd.arg("-Xlinker").arg("-dead_strip");
         } else {
             // Native macOS/iOS via clang driver
@@ -5335,7 +6678,9 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
     // symbols (alloc, std::thread_local, etc.). The .a archive provides those
     // as a fallback — the linker only pulls object files from the .a that
     // resolve still-undefined symbols (first-definition-wins on macOS).
-    let skip_runtime = (is_android || is_watchos) && ctx.needs_ui && find_ui_library(target.as_deref()).is_some();
+    let skip_runtime = (is_android || is_watchos || is_visionos)
+        && ctx.needs_ui
+        && find_ui_library(target.as_deref()).is_some();
     if !skip_runtime {
         if let Some(ref jsruntime) = jsruntime_lib {
             cmd.arg(jsruntime);
@@ -5438,14 +6783,33 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
     }
 
     if is_watchos {
-        // watchOS frameworks (swiftc auto-links Swift stdlib)
-        cmd.arg("-framework").arg("SwiftUI")
-           .arg("-framework").arg("WatchKit")
+        // watchOS frameworks (swiftc auto-links Swift stdlib on the non-game-loop path)
+        let is_watchos_game_loop = compiled_features.iter().any(|f| f == "watchos-game-loop");
+        let is_watchos_swift_app = compiled_features.iter().any(|f| f == "watchos-swift-app");
+        if !is_watchos_game_loop {
+            cmd.arg("-framework").arg("SwiftUI");
+        }
+        cmd.arg("-framework").arg("WatchKit")
            .arg("-framework").arg("Foundation")
            .arg("-framework").arg("CoreFoundation")
            .arg("-framework").arg("Security")
            .arg("-lSystem")
            .arg("-lresolv");
+        if is_watchos_game_loop {
+            // QuartzCore for CAMetalLayer-backed rendering (Metal.framework is NOT
+            // in the watchOS SDK — the native lib must dlopen it or supply its own
+            // path to the device's Metal dylib). -lobjc for the dynamic
+            // WKApplicationDelegate class registered from watchos_game_loop.rs.
+            cmd.arg("-framework").arg("QuartzCore")
+               .arg("-lobjc");
+        }
+        if is_watchos_swift_app {
+            // SceneKit for SceneView-backed 3D rendering from the native lib's
+            // `@main struct App: App`. The lib may additionally use Canvas (2D,
+            // already covered by SwiftUI) or SpriteKit (opt-in via the
+            // manifest's `frameworks` list).
+            cmd.arg("-framework").arg("SceneKit");
+        }
     } else if is_ios {
         // iOS frameworks
         cmd.arg("-framework").arg("UIKit")
@@ -5459,6 +6823,25 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
            .arg("-framework").arg("AVFoundation") // Camera capture (AVCaptureSession)
            .arg("-framework").arg("CoreMedia") // CMSampleBuffer
            .arg("-framework").arg("CoreVideo") // CVPixelBuffer
+           .arg("-framework").arg("UserNotifications") // UNUserNotificationCenter (perry/system notificationSend)
+           .arg("-framework").arg("CoreLocation") // CLCircularRegion for UNLocationNotificationTrigger (#96)
+           .arg("-liconv")
+           .arg("-lresolv")
+           .arg("-lobjc")
+           .arg("-lSystem");
+    } else if is_visionos {
+        cmd.arg("-framework").arg("SwiftUI")
+           .arg("-framework").arg("UIKit")
+           .arg("-framework").arg("Foundation")
+           .arg("-framework").arg("CoreGraphics")
+           .arg("-framework").arg("Security")
+           .arg("-framework").arg("CoreFoundation")
+           .arg("-framework").arg("SystemConfiguration")
+           .arg("-framework").arg("QuartzCore")
+           .arg("-framework").arg("AVFAudio")
+           .arg("-framework").arg("AVFoundation")
+           .arg("-framework").arg("CoreMedia")
+           .arg("-framework").arg("CoreVideo")
            .arg("-liconv")
            .arg("-lresolv")
            .arg("-lobjc")
@@ -5611,13 +6994,13 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
             // and --allow-multiple-definition (ELF) / /FORCE:MULTIPLE (COFF)
             // handles duplicate symbols safely. On Android, skip_runtime=true
             // means the UI lib is the sole provider of perry-runtime symbols.
-            let ui_lib = if is_windows || is_android {
+            let ui_lib = if is_windows || is_android || is_visionos {
                 ui_lib
             } else {
                 match strip_duplicate_objects_from_lib(&ui_lib) {
                     Ok(trimmed) => trimmed,
                     Err(e) => {
-                        eprintln!("[strip-dedup] FAILED for UI lib, using original: {e}");
+                        eprintln!("[strip-dedup] skipped for UI lib (non-fatal): {e}");
                         ui_lib
                     }
                 }
@@ -5634,7 +7017,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
 
             if is_watchos {
                 // SwiftUI/WatchKit already linked above
-            } else if is_ios || is_tvos {
+            } else if is_ios || is_visionos || is_tvos {
                 // UIKit already linked above
             } else if is_android {
                 // Allow multiple definitions from perry-runtime in both UI lib and native libs
@@ -5642,6 +7025,24 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
             } else if is_linux {
                 // Allow multiple definitions from perry-runtime in both stdlib and UI lib
                 cmd.arg("-Wl,--allow-multiple-definition");
+                // libperry_ui_gtk4.a's glib::source::trampoline_local
+                // closures call perry-stdlib's js_stdlib_process_pending /
+                // js_promise_run_microtasks. When ctx.needs_stdlib is false
+                // (bare UI program), stdlib isn't linked via the earlier
+                // path. Force-link it here with --whole-archive so every
+                // object is pulled unconditionally. --allow-multiple-definition
+                // above lets it coexist with the runtime stub at
+                // perry-runtime/src/stdlib_stubs.rs. The async-runtime
+                // feature is force-enabled for UI builds (see
+                // build_optimized_libs), so the real js_stdlib_process_pending
+                // is guaranteed present in libperry_stdlib.a.
+                let linux_stdlib_for_ui = stdlib_lib.clone()
+                    .or_else(|| find_stdlib_library(target.as_deref()));
+                if let Some(ref stdlib) = linux_stdlib_for_ui {
+                    cmd.arg("-Wl,--whole-archive")
+                       .arg(stdlib)
+                       .arg("-Wl,--no-whole-archive");
+                }
                 // GTK4 libraries via pkg-config
                 if let Ok(output) = Command::new("pkg-config").args(["--libs", "gtk4"]).output() {
                     if output.status.success() {
@@ -5680,9 +7081,11 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
             }
         } else {
             let (lib_name, build_cmd) = if is_watchos {
-                ("libperry_ui_watchos.a", "cargo build --release -p perry-ui-watchos --target aarch64-apple-watchos")
+                ("libperry_ui_watchos.a", "cargo build --release -p perry-ui-watchos --target arm64_32-apple-watchos")
             } else if is_tvos {
                 ("libperry_ui_tvos.a", "cargo build --release -p perry-ui-tvos --target aarch64-apple-tvos")
+            } else if is_visionos {
+                ("libperry_ui_visionos.a", "cargo build --release -p perry-ui-visionos --target aarch64-apple-visionos-sim")
             } else if is_ios {
                 ("libperry_ui_ios.a", "cargo build --release -p perry-ui-ios --target aarch64-apple-ios-sim")
             } else if is_android {
@@ -5753,7 +7156,12 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
         }
     }
 
-    // Build and link external native libraries from perry.nativeLibrary manifests
+    // Build and link external native libraries from perry.nativeLibrary manifests.
+    // Swift sources are deduplicated across the loop — modules sharing the same
+    // package.json all see the same swift_sources entries, but each file should
+    // be compiled + linked once. Without this, swift's mangled symbols for
+    // structs/classes duplicate N times.
+    let mut seen_swift_sources: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     for native_lib in &ctx.native_libraries {
         if let Some(ref target_config) = native_lib.target_config {
             match format {
@@ -5781,7 +7189,12 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
                 }
 
                 if is_tier3 {
-                    cargo_cmd.arg("-Zbuild-std");
+                    // Match perry-runtime's std build flags exactly so the std
+                    // rlibs are bit-identical and dedupe at link time. Without
+                    // this, native libs pull in a parallel std with different
+                    // metadata hashes and the final Swift-driven link fails
+                    // with hundreds of duplicate-symbol errors.
+                    cargo_cmd.arg("-Zbuild-std=std,panic_abort");
                 }
 
                 // For Android, ensure 16 KB page size alignment (required by Google Play)
@@ -5882,6 +7295,101 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
                     }
                 }
             }
+
+            // Compile manifest-declared Swift sources to object files and
+            // append them to the link line. Used by `--features watchos-swift-app`
+            // so a native lib can ship its own `@main struct App: App`.
+            if !target_config.swift_sources.is_empty() {
+                if !is_watchos {
+                    return Err(anyhow!(
+                        "perry.nativeLibrary.targets.<target>.swift_sources is only supported on watchos/watchos-simulator"
+                    ));
+                }
+                let swift_sdk = if target.as_deref() == Some("watchos-simulator") {
+                    "watchsimulator"
+                } else {
+                    "watchos"
+                };
+                let swift_triple = if target.as_deref() == Some("watchos-simulator") {
+                    "arm64-apple-watchos10.0-simulator"
+                } else {
+                    "arm64_32-apple-watchos10.0"
+                };
+                let swift_sysroot = String::from_utf8(
+                    Command::new("xcrun")
+                        .args(["--sdk", swift_sdk, "--show-sdk-path"])
+                        .output()?
+                        .stdout,
+                )?
+                .trim()
+                .to_string();
+                let swiftc = String::from_utf8(
+                    Command::new("xcrun")
+                        .args(["--sdk", swift_sdk, "--find", "swiftc"])
+                        .output()?
+                        .stdout,
+                )?
+                .trim()
+                .to_string();
+
+                let swift_obj_dir = std::env::temp_dir()
+                    .join(format!("perry_swift_{}", std::process::id()));
+                std::fs::create_dir_all(&swift_obj_dir).ok();
+
+                for swift_src in &target_config.swift_sources {
+                    if !swift_src.exists() {
+                        return Err(anyhow!(
+                            "Swift source not found: {} (declared in {}'s nativeLibrary.swift_sources)",
+                            swift_src.display(),
+                            native_lib.module
+                        ));
+                    }
+                    let canonical = swift_src.canonicalize().unwrap_or_else(|_| swift_src.clone());
+                    if !seen_swift_sources.insert(canonical) {
+                        continue;
+                    }
+                    let stem = swift_src
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("swift_src");
+                    let obj_out = swift_obj_dir.join(format!("{}.o", stem));
+                    let status = Command::new(&swiftc)
+                        .arg("-target").arg(swift_triple)
+                        .arg("-sdk").arg(&swift_sysroot)
+                        .arg("-parse-as-library")
+                        .arg("-emit-object")
+                        .arg("-O")
+                        .arg("-o").arg(&obj_out)
+                        .arg(swift_src)
+                        .status()?;
+                    if !status.success() {
+                        return Err(anyhow!(
+                            "Failed to compile Swift source: {}",
+                            swift_src.display()
+                        ));
+                    }
+                    cmd.arg(&obj_out);
+                    match format {
+                        OutputFormat::Text => println!("Linking Swift object: {}", obj_out.display()),
+                        OutputFormat::Json => {}
+                    }
+                }
+            }
+
+            // Metal sources are compiled + packed into <app>.app/default.metallib
+            // after the `.app` bundle is created below. Just validate the target
+            // here so we fail early with a clear message instead of silently
+            // dropping shaders on non-Apple-bundle targets.
+            if !target_config.metal_sources.is_empty()
+                && !matches!(target.as_deref(),
+                    Some("ios") | Some("ios-simulator") |
+                    Some("tvos") | Some("tvos-simulator") |
+                    Some("watchos") | Some("watchos-simulator"))
+            {
+                return Err(anyhow!(
+                    "perry.nativeLibrary.targets.<target>.metal_sources is only supported on ios / ios-simulator / tvos / tvos-simulator / watchos / watchos-simulator"
+                ));
+            }
         }
     }
 
@@ -5935,43 +7443,49 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
         let _ = fs::remove_file(&exe_path);
 
         let exe_stem = exe_path.file_stem().and_then(|s| s.to_str()).unwrap_or(stem);
-        // Check perry.toml, then package.json for a custom bundleId, fall back to com.perry.{name}
-        // Search relative to the source file, walking up directories
-        let bundle_id = (|| -> Option<String> {
-            let mut dir = args.input.canonicalize().ok()?;
-            for _ in 0..5 {
-                dir = dir.parent()?.to_path_buf();
-                // Check perry.toml first: [ios].bundle_id, then top-level bundle_id
-                let toml_path = dir.join("perry.toml");
-                if toml_path.exists() {
-                    if let Ok(data) = fs::read_to_string(&toml_path) {
-                        if let Ok(doc) = data.parse::<toml::Table>() {
-                            let toml_bid = doc.get("ios")
-                                .and_then(|i| i.get("bundle_id"))
-                                .or_else(|| doc.get("app").and_then(|a| a.get("bundle_id")))
-                                .or_else(|| doc.get("project").and_then(|p| p.get("bundle_id")))
-                                .or_else(|| doc.get("bundle_id"))
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string());
-                            if toml_bid.is_some() {
-                                return toml_bid;
+        // Precedence: --app-bundle-id CLI flag > perry.toml [ios].bundle_id / [app]
+        // / [project] / top-level > package.json "bundleId" > com.perry.{name}.
+        // CLI wins so callers (doc-tests harness, CI, scripts) can override the
+        // embedded ID without editing manifests; without this the app installs
+        // under its fallback CFBundleIdentifier and a later `simctl launch
+        // <custom-id>` fails with FBSOpenApplicationServiceErrorDomain code=4.
+        let bundle_id = args.app_bundle_id.clone().or_else(|| {
+            (|| -> Option<String> {
+                let mut dir = args.input.canonicalize().ok()?;
+                for _ in 0..5 {
+                    dir = dir.parent()?.to_path_buf();
+                    // Check perry.toml first: [ios].bundle_id, then top-level bundle_id
+                    let toml_path = dir.join("perry.toml");
+                    if toml_path.exists() {
+                        if let Ok(data) = fs::read_to_string(&toml_path) {
+                            if let Ok(doc) = data.parse::<toml::Table>() {
+                                let toml_bid = doc.get("ios")
+                                    .and_then(|i| i.get("bundle_id"))
+                                    .or_else(|| doc.get("app").and_then(|a| a.get("bundle_id")))
+                                    .or_else(|| doc.get("project").and_then(|p| p.get("bundle_id")))
+                                    .or_else(|| doc.get("bundle_id"))
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string());
+                                if toml_bid.is_some() {
+                                    return toml_bid;
+                                }
                             }
                         }
                     }
+                    // Then check package.json
+                    let pkg = dir.join("package.json");
+                    if pkg.exists() {
+                        let data = fs::read_to_string(pkg).ok()?;
+                        let idx = data.find("\"bundleId\"")?;
+                        let colon = data[idx..].find(':')?;
+                        let q1 = data[idx + colon..].find('"')? + idx + colon + 1;
+                        let q2 = data[q1..].find('"')? + q1;
+                        return Some(data[q1..q2].to_string());
+                    }
                 }
-                // Then check package.json
-                let pkg = dir.join("package.json");
-                if pkg.exists() {
-                    let data = fs::read_to_string(pkg).ok()?;
-                    let idx = data.find("\"bundleId\"")?;
-                    let colon = data[idx..].find(':')?;
-                    let q1 = data[idx + colon..].find('"')? + idx + colon + 1;
-                    let q2 = data[q1..].find('"')? + q1;
-                    return Some(data[q1..q2].to_string());
-                }
-            }
-            None
-        })().unwrap_or_else(|| format!("com.perry.{}", exe_stem));
+                None
+            })()
+        }).unwrap_or_else(|| format!("com.perry.{}", exe_stem));
         result_bundle_id = Some(bundle_id.clone());
         result_app_dir = Some(app_dir.clone());
 
@@ -6047,6 +7561,15 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
 "#.to_string()
         };
 
+        // Simulator bundles must declare iPhoneSimulator / iphonesimulator in
+        // Info.plist. Mismatch against the Mach-O LC_BUILD_VERSION (which is
+        // "iphonesimulator" when the binary was built for -target
+        // aarch64-apple-ios-sim) causes simctl to refuse launch with
+        // `FBSOpenApplicationServiceErrorDomain code=4`.
+        let is_sim = matches!(target.as_deref(), Some("ios-simulator"));
+        let plist_supported_platform = if is_sim { "iPhoneSimulator" } else { "iPhoneOS" };
+        let plist_platform_name = if is_sim { "iphonesimulator" } else { "iphoneos" };
+        let plist_sdk_name = if is_sim { "iphonesimulator" } else { "iphoneos" };
         let info_plist = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -6071,13 +7594,13 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
     <key>MinimumOSVersion</key>
     <string>17.0</string>
     <key>CFBundleSupportedPlatforms</key>
-    <array><string>iPhoneOS</string></array>
+    <array><string>{plist_supported_platform}</string></array>
     <key>DTPlatformName</key>
-    <string>iphoneos</string>
+    <string>{plist_platform_name}</string>
     <key>DTPlatformVersion</key>
     <string>26.4</string>
     <key>DTSDKName</key>
-    <string>iphoneos26.4</string>
+    <string>{plist_sdk_name}26.4</string>
     <key>DTPlatformBuild</key>
     <string>23E237</string>
     <key>DTSDKBuild</key>
@@ -6475,11 +7998,223 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
             }
         }
 
+        compile_metallib_for_bundle(&ctx, target.as_deref(), &app_dir, format)?;
+
         match format {
             OutputFormat::Text => {
                 println!("Wrote iOS app bundle: {}", app_dir.display());
                 println!();
                 println!("To run on iOS Simulator:");
+                println!("  xcrun simctl install booted {}", app_dir.display());
+                println!("  xcrun simctl launch booted {}", bundle_id);
+            }
+            OutputFormat::Json => {
+                let result = serde_json::json!({
+                    "success": true,
+                    "output": app_dir.to_string_lossy(),
+                    "bundle_id": bundle_id,
+                    "native_modules": ctx.native_modules.len(),
+                    "js_modules": ctx.js_modules.len(),
+                });
+                println!("{}", serde_json::to_string(&result)?);
+            }
+        }
+    } else if is_visionos {
+        let app_dir = exe_path.with_extension("app");
+        let _ = fs::create_dir_all(&app_dir);
+        let bundle_exe = app_dir.join(exe_path.file_name().unwrap_or_default());
+        fs::copy(&exe_path, &bundle_exe)?;
+        let _ = fs::remove_file(&exe_path);
+
+        let exe_stem = exe_path.file_stem().and_then(|s| s.to_str()).unwrap_or(stem);
+        let bundle_id = lookup_bundle_id_from_toml(&args.input, "visionos")
+            .or_else(|| lookup_bundle_id_from_toml(&args.input, "app"))
+            .or_else(|| lookup_bundle_id_from_toml(&args.input, "ios"))
+            .unwrap_or_else(|| format!("com.perry.{}", exe_stem));
+        result_bundle_id = Some(bundle_id.clone());
+        result_app_dir = Some(app_dir.clone());
+
+        let (app_version, app_build_number, deployment_target, encryption_exempt, custom_plist_entries) = (|| -> Option<(String, String, String, Option<bool>, String)> {
+            let mut dir = args.input.canonicalize().ok()?;
+            for _ in 0..5 {
+                dir = dir.parent()?.to_path_buf();
+                let toml_path = dir.join("perry.toml");
+                if !toml_path.exists() {
+                    continue;
+                }
+                let data = fs::read_to_string(&toml_path).ok()?;
+                let doc: toml::Table = data.parse().ok()?;
+                let project = doc.get("project").and_then(|v| v.as_table());
+                let visionos = doc.get("visionos").and_then(|v| v.as_table());
+                let version = project
+                    .and_then(|p| p.get("version"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("1.0.0")
+                    .to_string();
+                let build_number = project
+                    .and_then(|p| p.get("build_number"))
+                    .and_then(|v| v.as_integer().map(|n| n.to_string()).or_else(|| v.as_str().map(|s| s.to_string())))
+                    .unwrap_or_else(|| "1".to_string());
+                let deployment_target = visionos
+                    .and_then(|v| v.get("deployment_target").or_else(|| v.get("minimum_version")))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("1.0")
+                    .to_string();
+                let encryption_exempt = visionos
+                    .and_then(|v| v.get("encryption_exempt"))
+                    .and_then(|v| v.as_bool());
+                let mut entries = String::new();
+                if let Some(info_plist) = visionos
+                    .and_then(|v| v.get("info_plist"))
+                    .and_then(|v| v.as_table())
+                {
+                    for (key, value) in info_plist {
+                        if let Some(s) = value.as_str() {
+                            entries.push_str(&format!("    <key>{}</key>\n    <string>{}</string>\n", key, s));
+                        } else if let Some(b) = value.as_bool() {
+                            entries.push_str(&format!("    <key>{}</key>\n    <{}/>\n", key, if b { "true" } else { "false" }));
+                        } else if let Some(i) = value.as_integer() {
+                            entries.push_str(&format!("    <key>{}</key>\n    <integer>{}</integer>\n", key, i));
+                        }
+                    }
+                }
+                return Some((version, build_number, deployment_target, encryption_exempt, entries));
+            }
+            Some(("1.0.0".to_string(), "1".to_string(), "1.0".to_string(), None, String::new()))
+        })().unwrap();
+
+        let platform_name = if target.as_deref() == Some("visionos-simulator") {
+            "XRSimulator"
+        } else {
+            "XROS"
+        };
+
+        let mut info_plist = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>{exe_stem}</string>
+    <key>CFBundleIdentifier</key>
+    <string>{bundle_id}</string>
+    <key>CFBundleName</key>
+    <string>{exe_stem}</string>
+    <key>CFBundleVersion</key>
+    <string>{app_build_number}</string>
+    <key>CFBundleShortVersionString</key>
+    <string>{app_version}</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>MinimumOSVersion</key>
+    <string>{deployment_target}</string>
+    <key>CFBundleSupportedPlatforms</key>
+    <array>
+        <string>{platform_name}</string>
+    </array>
+    <key>UIRequiredDeviceCapabilities</key>
+    <array>
+        <string>arm64</string>
+    </array>
+    <key>UIDeviceFamily</key>
+    <array>
+        <integer>7</integer>
+    </array>
+    <key>UILaunchScreen</key>
+    <dict/>
+    <key>UIApplicationSceneManifest</key>
+    <dict>
+        <key>UIApplicationSupportsMultipleScenes</key>
+        <true/>
+        <key>UIApplicationPreferredDefaultSceneSessionRole</key>
+        <string>UIWindowSceneSessionRoleApplication</string>
+        <key>UISceneConfigurations</key>
+        <dict/>
+    </dict>
+</dict>
+</plist>"#
+        );
+
+        let usage_descriptions = concat!(
+            "    <key>NSCameraUsageDescription</key>\n",
+            "    <string>This app uses the camera to identify colors.</string>\n",
+            "    <key>NSMicrophoneUsageDescription</key>\n",
+            "    <string>This app uses the microphone to measure sound levels.</string>\n",
+        );
+        info_plist = info_plist.replace("</dict>\n</plist>", &format!("{}</dict>\n</plist>", usage_descriptions));
+
+        if let Some(exempt) = encryption_exempt {
+            let encryption_entry = format!(
+                "    <key>ITSAppUsesNonExemptEncryption</key>\n    <{}/>\n",
+                if exempt { "false" } else { "true" }
+            );
+            info_plist = info_plist.replace("</dict>\n</plist>", &format!("{}</dict>\n</plist>", encryption_entry));
+        }
+
+        if !custom_plist_entries.is_empty() {
+            info_plist = info_plist.replace("</dict>\n</plist>", &format!("{}</dict>\n</plist>", custom_plist_entries));
+        }
+
+        fs::write(app_dir.join("Info.plist"), info_plist)?;
+
+        let source_dir = args.input.canonicalize().ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        if let Some(src_dir) = &source_dir {
+            let mut project_root = src_dir.clone();
+            for _ in 0..5 {
+                if project_root.join("package.json").exists() || project_root.join("perry.toml").exists() { break; }
+                if let Some(parent) = project_root.parent() {
+                    project_root = parent.to_path_buf();
+                } else { break; }
+            }
+            fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+                fs::create_dir_all(dst)?;
+                for entry in fs::read_dir(src)? {
+                    let entry = entry?;
+                    let ty = entry.file_type()?;
+                    let dest_path = dst.join(entry.file_name());
+                    if ty.is_dir() {
+                        copy_dir_recursive(&entry.path(), &dest_path)?;
+                    } else {
+                        fs::copy(entry.path(), &dest_path)?;
+                    }
+                }
+                Ok(())
+            }
+            for dir_name in &["logo", "assets", "resources", "images"] {
+                let resource_dir = project_root.join(dir_name);
+                if resource_dir.is_dir() {
+                    let dest = app_dir.join(dir_name);
+                    let _ = copy_dir_recursive(&resource_dir, &dest);
+                }
+            }
+        }
+
+        if let (Some(ref table), Some(ref config)) = (&i18n_table, &i18n_config) {
+            if !table.keys.is_empty() {
+                for (locale_idx, locale) in config.locales.iter().enumerate() {
+                    let lproj_dir = app_dir.join(format!("{}.lproj", locale));
+                    let _ = fs::create_dir_all(&lproj_dir);
+                    let mut strings_content = String::new();
+                    for (key_idx, key) in table.keys.iter().enumerate() {
+                        let flat_idx = locale_idx * table.keys.len() + key_idx;
+                        let value = table.translations.get(flat_idx).cloned().unwrap_or_else(|| key.clone());
+                        let escaped_key = key.replace('\\', "\\\\").replace('"', "\\\"");
+                        let escaped_val = value.replace('\\', "\\\\").replace('"', "\\\"");
+                        strings_content.push_str(&format!("\"{}\" = \"{}\";\n", escaped_key, escaped_val));
+                    }
+                    let _ = fs::write(lproj_dir.join("Localizable.strings"), &strings_content);
+                }
+            }
+        }
+
+        match format {
+            OutputFormat::Text => {
+                println!("Wrote visionOS app bundle: {}", app_dir.display());
+                println!();
+                println!("To run on Apple Vision Pro Simulator:");
                 println!("  xcrun simctl install booted {}", app_dir.display());
                 println!("  xcrun simctl launch booted {}", bundle_id);
             }
@@ -6538,6 +8273,44 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
 </plist>"#
         );
         fs::write(app_dir.join("Info.plist"), info_plist)?;
+
+        // Copy project resource directories into the bundle so
+        // bloom_load_texture / load_sound / read_file can resolve relative
+        // asset paths via [[NSBundle mainBundle] resourcePath].
+        let source_dir = args.input.canonicalize().ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        if let Some(src_dir) = &source_dir {
+            let mut project_root = src_dir.clone();
+            for _ in 0..5 {
+                if project_root.join("package.json").exists() || project_root.join("perry.toml").exists() { break; }
+                if let Some(parent) = project_root.parent() {
+                    project_root = parent.to_path_buf();
+                } else { break; }
+            }
+            fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+                fs::create_dir_all(dst)?;
+                for entry in fs::read_dir(src)? {
+                    let entry = entry?;
+                    let ty = entry.file_type()?;
+                    let dest_path = dst.join(entry.file_name());
+                    if ty.is_dir() {
+                        copy_dir_recursive(&entry.path(), &dest_path)?;
+                    } else {
+                        fs::copy(entry.path(), &dest_path)?;
+                    }
+                }
+                Ok(())
+            }
+            for dir_name in &["logo", "assets", "resources", "images"] {
+                let resource_dir = project_root.join(dir_name);
+                if resource_dir.is_dir() {
+                    let dest = app_dir.join(dir_name);
+                    let _ = copy_dir_recursive(&resource_dir, &dest);
+                }
+            }
+        }
+
+        compile_metallib_for_bundle(&ctx, target.as_deref(), &app_dir, format)?;
 
         match format {
             OutputFormat::Text => {
@@ -6604,6 +8377,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
 </plist>"#
         );
         fs::write(app_dir.join("Info.plist"), info_plist)?;
+
+        compile_metallib_for_bundle(&ctx, target.as_deref(), &app_dir, format)?;
 
         match format {
             OutputFormat::Text => {
@@ -6728,7 +8503,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
     // Strip debug symbols from the final binary (reduces size significantly)
     // Skip for iOS/Android cross-compilation — host strip can't handle foreign architectures
     // Skip when PERRY_DEBUG_SYMBOLS=1 is set — keep symbols for crash debugging
-    if !is_dylib && !is_ios && !is_tvos && target.as_deref() != Some("android")
+    if !is_dylib && !is_ios && !is_visionos && !is_tvos && target.as_deref() != Some("android")
         && std::env::var("PERRY_DEBUG_SYMBOLS").is_err() {
         if ctx.needs_plugins {
             // When plugins are enabled, use strip -x to keep exported symbols
@@ -6755,10 +8530,452 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
 
     let final_output_path = result_app_dir.unwrap_or(exe_path);
 
+    let codegen_cache_stats = if object_cache.is_enabled() {
+        Some((object_cache.hits(), object_cache.misses(), object_cache.stores(), object_cache.store_errors()))
+    } else { None };
+
     Ok(CompileResult {
         output_path: final_output_path,
         target: target.unwrap_or_else(|| "native".to_string()),
         bundle_id: result_bundle_id,
         is_dylib,
+        codegen_cache_stats,
     })
+}
+
+#[cfg(test)]
+mod parse_cache_tests {
+    use super::*;
+
+    const SRC_V1: &str = "export function greet(name: string): string { return `hi ${name}`; }\n";
+    const SRC_V2: &str = "export function greet(name: string): string { return `hello ${name}`; }\n";
+
+    #[test]
+    fn first_call_is_a_miss() {
+        let mut cache = ParseCache::new();
+        let path = PathBuf::from("/virtual/greet.ts");
+        let _ = parse_cached(&mut cache, &path, SRC_V1, "greet.ts").unwrap();
+        assert_eq!(cache.hits(), 0);
+        assert_eq!(cache.misses(), 1);
+        assert_eq!(cache.entries.len(), 1);
+    }
+
+    #[test]
+    fn identical_source_is_a_hit() {
+        let mut cache = ParseCache::new();
+        let path = PathBuf::from("/virtual/greet.ts");
+        let _ = parse_cached(&mut cache, &path, SRC_V1, "greet.ts").unwrap();
+        let _ = parse_cached(&mut cache, &path, SRC_V1, "greet.ts").unwrap();
+        assert_eq!(cache.hits(), 1);
+        assert_eq!(cache.misses(), 1);
+    }
+
+    #[test]
+    fn changed_source_is_a_miss_and_replaces_entry() {
+        let mut cache = ParseCache::new();
+        let path = PathBuf::from("/virtual/greet.ts");
+        let _ = parse_cached(&mut cache, &path, SRC_V1, "greet.ts").unwrap();
+        let _ = parse_cached(&mut cache, &path, SRC_V2, "greet.ts").unwrap();
+        // Two misses, zero hits; cache still holds one entry (the new version).
+        assert_eq!(cache.hits(), 0);
+        assert_eq!(cache.misses(), 2);
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.entries[&path].source, SRC_V2);
+    }
+
+    #[test]
+    fn reverting_to_previous_source_is_still_a_miss() {
+        // The cache keeps only the last version, not history. Reverting to a
+        // prior source counts as a miss — documented behaviour.
+        let mut cache = ParseCache::new();
+        let path = PathBuf::from("/virtual/greet.ts");
+        let _ = parse_cached(&mut cache, &path, SRC_V1, "greet.ts").unwrap();
+        let _ = parse_cached(&mut cache, &path, SRC_V2, "greet.ts").unwrap();
+        let _ = parse_cached(&mut cache, &path, SRC_V1, "greet.ts").unwrap();
+        assert_eq!(cache.hits(), 0);
+        assert_eq!(cache.misses(), 3);
+    }
+
+    #[test]
+    fn distinct_paths_are_independent() {
+        let mut cache = ParseCache::new();
+        let p_a = PathBuf::from("/virtual/a.ts");
+        let p_b = PathBuf::from("/virtual/b.ts");
+        let _ = parse_cached(&mut cache, &p_a, SRC_V1, "a.ts").unwrap();
+        let _ = parse_cached(&mut cache, &p_b, SRC_V1, "b.ts").unwrap();
+        let _ = parse_cached(&mut cache, &p_a, SRC_V1, "a.ts").unwrap();
+        let _ = parse_cached(&mut cache, &p_b, SRC_V1, "b.ts").unwrap();
+        assert_eq!(cache.hits(), 2);
+        assert_eq!(cache.misses(), 2);
+    }
+
+    #[test]
+    fn reset_counters_clears_hit_miss_but_keeps_entries() {
+        let mut cache = ParseCache::new();
+        let path = PathBuf::from("/virtual/greet.ts");
+        let _ = parse_cached(&mut cache, &path, SRC_V1, "greet.ts").unwrap();
+        let _ = parse_cached(&mut cache, &path, SRC_V1, "greet.ts").unwrap();
+        assert_eq!(cache.hits(), 1);
+        assert_eq!(cache.misses(), 1);
+        cache.reset_counters();
+        assert_eq!(cache.hits(), 0);
+        assert_eq!(cache.misses(), 0);
+        // Next lookup for the same source should be a hit, not a miss —
+        // entries survive reset_counters.
+        let _ = parse_cached(&mut cache, &path, SRC_V1, "greet.ts").unwrap();
+        assert_eq!(cache.hits(), 1);
+        assert_eq!(cache.misses(), 0);
+    }
+
+    #[test]
+    fn hit_returns_equivalent_ast_to_fresh_parse() {
+        // A cache hit must give us the same AST shape as reparsing from
+        // scratch — this is the correctness invariant V2.1 relies on.
+        let mut cache = ParseCache::new();
+        let path = PathBuf::from("/virtual/greet.ts");
+        let first = parse_cached(&mut cache, &path, SRC_V1, "greet.ts")
+            .unwrap()
+            .clone();
+        let cached = parse_cached(&mut cache, &path, SRC_V1, "greet.ts")
+            .unwrap()
+            .clone();
+        let fresh = perry_parser::parse_typescript(SRC_V1, "greet.ts").unwrap();
+        assert_eq!(first.body.len(), fresh.body.len());
+        assert_eq!(cached.body.len(), fresh.body.len());
+    }
+
+    #[test]
+    fn parse_error_propagates_and_does_not_poison_cache() {
+        let mut cache = ParseCache::new();
+        let path = PathBuf::from("/virtual/bad.ts");
+        let err = parse_cached(&mut cache, &path, "let x: number = ;", "bad.ts");
+        assert!(err.is_err());
+        // A later good parse at the same path still works and is a miss.
+        let ok = parse_cached(&mut cache, &path, SRC_V1, "bad.ts");
+        assert!(ok.is_ok());
+        assert_eq!(cache.hits(), 0);
+        assert_eq!(cache.misses(), 1);
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_toolchain_tests {
+    use super::msvc_vswhere_installation_path_args;
+
+    #[test]
+    fn vswhere_query_requires_msvc_tools_component() {
+        assert_eq!(
+            msvc_vswhere_installation_path_args(),
+            [
+                "-products",
+                "*",
+                "-requires",
+                "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                "-latest",
+                "-property",
+                "installationPath",
+                "-nologo",
+            ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod object_cache_tests {
+    use super::*;
+    use perry_codegen::{CompileOptions, ImportedClass};
+    use tempfile::tempdir;
+
+    /// A minimal `CompileOptions` with every vec/map empty. Tests that want
+    /// to vary one field mutate the returned value before hashing.
+    fn empty_opts() -> CompileOptions {
+        CompileOptions {
+            target: Some("aarch64-apple-darwin".to_string()),
+            is_entry_module: false,
+            non_entry_module_prefixes: Vec::new(),
+            import_function_prefixes: std::collections::HashMap::new(),
+            emit_ir_only: false,
+            namespace_imports: Vec::new(),
+            imported_classes: Vec::new(),
+            imported_enums: Vec::new(),
+            imported_async_funcs: std::collections::HashSet::new(),
+            type_aliases: std::collections::HashMap::new(),
+            imported_func_param_counts: std::collections::HashMap::new(),
+            imported_func_return_types: std::collections::HashMap::new(),
+            imported_vars: std::collections::HashSet::new(),
+            output_type: "executable".to_string(),
+            needs_stdlib: false,
+            needs_ui: false,
+            needs_geisterhand: false,
+            geisterhand_port: 7676,
+            needs_js_runtime: false,
+            enabled_features: Vec::new(),
+            native_module_init_names: Vec::new(),
+            js_module_specifiers: Vec::new(),
+            bundled_extensions: Vec::new(),
+            native_library_functions: Vec::new(),
+            i18n_table: None,
+        }
+    }
+
+    #[test]
+    fn djb2_hash_is_stable_and_distinct() {
+        assert_eq!(djb2_hash(b""), 5381);
+        assert_eq!(djb2_hash(b"hello"), djb2_hash(b"hello"));
+        assert_ne!(djb2_hash(b"hello"), djb2_hash(b"world"));
+    }
+
+    #[test]
+    fn key_stable_for_same_inputs() {
+        let opts = empty_opts();
+        let k1 = compute_object_cache_key(&opts, 0xdeadbeef, "0.5.156");
+        let k2 = compute_object_cache_key(&opts, 0xdeadbeef, "0.5.156");
+        assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn key_changes_with_source_hash() {
+        let opts = empty_opts();
+        let a = compute_object_cache_key(&opts, 1, "0.5.156");
+        let b = compute_object_cache_key(&opts, 2, "0.5.156");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn key_changes_with_perry_version() {
+        let opts = empty_opts();
+        let a = compute_object_cache_key(&opts, 1, "0.5.155");
+        let b = compute_object_cache_key(&opts, 1, "0.5.156");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn key_changes_with_target() {
+        let mut a = empty_opts();
+        let mut b = empty_opts();
+        a.target = Some("aarch64-apple-darwin".to_string());
+        b.target = Some("x86_64-apple-darwin".to_string());
+        assert_ne!(
+            compute_object_cache_key(&a, 1, "0.5.156"),
+            compute_object_cache_key(&b, 1, "0.5.156")
+        );
+    }
+
+    #[test]
+    fn key_changes_with_entry_flag() {
+        let mut a = empty_opts();
+        let mut b = empty_opts();
+        a.is_entry_module = false;
+        b.is_entry_module = true;
+        assert_ne!(
+            compute_object_cache_key(&a, 1, "0.5.156"),
+            compute_object_cache_key(&b, 1, "0.5.156")
+        );
+    }
+
+    #[test]
+    fn key_changes_with_non_entry_prefix_order() {
+        // Order-significant: non_entry_module_prefixes is topologically
+        // sorted, and a reorder must invalidate the cache (this is the
+        // v0.5.127-128 link-ordering regression class — the issue's
+        // acceptance criterion).
+        let mut a = empty_opts();
+        let mut b = empty_opts();
+        a.is_entry_module = true;
+        b.is_entry_module = true;
+        a.non_entry_module_prefixes = vec!["a".into(), "b".into()];
+        b.non_entry_module_prefixes = vec!["b".into(), "a".into()];
+        assert_ne!(
+            compute_object_cache_key(&a, 1, "0.5.156"),
+            compute_object_cache_key(&b, 1, "0.5.156")
+        );
+    }
+
+    #[test]
+    fn key_stable_regardless_of_hashmap_insertion_order() {
+        // HashMap iteration order is platform-dependent; the key must
+        // sort entries so two equivalent maps produce the same hash.
+        let mut a = empty_opts();
+        let mut b = empty_opts();
+        a.import_function_prefixes.insert("foo".into(), "mod_a".into());
+        a.import_function_prefixes.insert("bar".into(), "mod_b".into());
+        b.import_function_prefixes.insert("bar".into(), "mod_b".into());
+        b.import_function_prefixes.insert("foo".into(), "mod_a".into());
+        assert_eq!(
+            compute_object_cache_key(&a, 1, "0.5.156"),
+            compute_object_cache_key(&b, 1, "0.5.156")
+        );
+    }
+
+    #[test]
+    fn key_changes_with_imported_class_signature() {
+        let mut a = empty_opts();
+        let mut b = empty_opts();
+        a.imported_classes.push(ImportedClass {
+            name: "Foo".into(),
+            local_alias: None,
+            source_prefix: "src".into(),
+            constructor_param_count: 1,
+            method_names: vec!["bar".into()],
+            getter_names: vec![],
+            setter_names: vec![],
+            parent_name: None,
+            field_names: vec!["x".into()],
+            field_types: vec![],
+            source_class_id: Some(42),
+        });
+        b.imported_classes.push(ImportedClass {
+            name: "Foo".into(),
+            local_alias: None,
+            source_prefix: "src".into(),
+            constructor_param_count: 2, // different arity
+            method_names: vec!["bar".into()],
+            getter_names: vec![],
+            setter_names: vec![],
+            parent_name: None,
+            field_names: vec!["x".into()],
+            field_types: vec![],
+            source_class_id: Some(42),
+        });
+        assert_ne!(
+            compute_object_cache_key(&a, 1, "0.5.156"),
+            compute_object_cache_key(&b, 1, "0.5.156")
+        );
+    }
+
+    #[test]
+    fn key_changes_with_bitcode_mode() {
+        let mut a = empty_opts();
+        let mut b = empty_opts();
+        a.emit_ir_only = false;
+        b.emit_ir_only = true;
+        assert_ne!(
+            compute_object_cache_key(&a, 1, "0.5.156"),
+            compute_object_cache_key(&b, 1, "0.5.156")
+        );
+    }
+
+    #[test]
+    fn key_changes_with_codegen_env_vars() {
+        // Flipping an env var that perry-codegen reads (PERRY_DEBUG_INIT,
+        // PERRY_DEBUG_SYMBOLS, PERRY_LLVM_CLANG) must invalidate the key
+        // so we don't serve a cached .o that was built with different
+        // debug sections / a different clang binary.
+        //
+        // Uses unique var names (suffixed with a test-local marker) would
+        // be cleaner, but we're checking behavior against the *actual*
+        // names the codegen reads — toggling them temporarily with unsafe
+        // env::set_var is the only way. Test is #[serial]-safe only in
+        // spirit; cargo's single-threaded test runner for this binary
+        // keeps it from racing with other tests that happen to read the
+        // same vars (none today).
+        let opts = empty_opts();
+        let var = "PERRY_DEBUG_INIT";
+        // Sample state without the var, with the var, and with a different
+        // value — all three keys must be distinct.
+        let prev = std::env::var_os(var);
+        // SAFETY: Rust 1.80+ flags env::set_var/remove_var as unsafe
+        // because they're racy with other threads reading env. cargo's
+        // in-process test runner can parallelize tests; this test is
+        // still correct because `compute_object_cache_key` reads the
+        // env at call time and we don't span a .await / yield. The
+        // remaining race is another *test* reading PERRY_DEBUG_INIT
+        // mid-flight, which none do.
+        unsafe { std::env::remove_var(var) };
+        let k_unset = compute_object_cache_key(&opts, 1, "0.5.156");
+        unsafe { std::env::set_var(var, "1") };
+        let k_set = compute_object_cache_key(&opts, 1, "0.5.156");
+        unsafe { std::env::set_var(var, "2") };
+        let k_two = compute_object_cache_key(&opts, 1, "0.5.156");
+        // Restore.
+        match prev {
+            Some(v) => unsafe { std::env::set_var(var, v) },
+            None => unsafe { std::env::remove_var(var) },
+        }
+        assert_ne!(k_unset, k_set, "setting {} must change key", var);
+        assert_ne!(k_set, k_two, "changing {} value must change key", var);
+    }
+
+    #[test]
+    fn disabled_cache_always_misses_and_drops_stores() {
+        let dir = tempdir().unwrap();
+        let cache = ObjectCache::new(dir.path(), "test-target", false);
+        assert!(!cache.is_enabled());
+        assert!(cache.lookup(0xdeadbeef).is_none());
+        cache.store(0xdeadbeef, b"payload");
+        // Nothing was written — a second lookup still misses.
+        assert!(cache.lookup(0xdeadbeef).is_none());
+        // No counters bumped for a disabled cache.
+        assert_eq!(cache.hits(), 0);
+        assert_eq!(cache.stores(), 0);
+    }
+
+    #[test]
+    fn store_then_lookup_round_trips_bytes() {
+        let dir = tempdir().unwrap();
+        let cache = ObjectCache::new(dir.path(), "test-target", true);
+        assert!(cache.is_enabled());
+        let key = 0xcafef00d;
+        let payload = b"the quick brown fox".to_vec();
+        cache.store(key, &payload);
+        assert_eq!(cache.stores(), 1);
+        let got = cache.lookup(key).expect("must hit after store");
+        assert_eq!(got, payload);
+        assert_eq!(cache.hits(), 1);
+        assert_eq!(cache.misses(), 0);
+    }
+
+    #[test]
+    fn lookup_miss_bumps_miss_counter() {
+        let dir = tempdir().unwrap();
+        let cache = ObjectCache::new(dir.path(), "test-target", true);
+        assert!(cache.lookup(0x1234).is_none());
+        assert_eq!(cache.hits(), 0);
+        assert_eq!(cache.misses(), 1);
+    }
+
+    #[test]
+    fn cache_files_land_under_target_subdirectory() {
+        // The on-disk layout must be .perry-cache/objects/<target>/<hex>.o
+        // so cross-compile caches can coexist without colliding.
+        let dir = tempdir().unwrap();
+        let cache = ObjectCache::new(dir.path(), "aarch64-apple-darwin", true);
+        cache.store(0xabc, b"xx");
+        let expected = dir
+            .path()
+            .join(".perry-cache")
+            .join("objects")
+            .join("aarch64-apple-darwin")
+            .join(format!("{:016x}.o", 0xabc_u64));
+        assert!(expected.exists(), "missing: {}", expected.display());
+    }
+
+    #[test]
+    fn different_targets_do_not_share_entries() {
+        let dir = tempdir().unwrap();
+        let a = ObjectCache::new(dir.path(), "target-a", true);
+        let b = ObjectCache::new(dir.path(), "target-b", true);
+        a.store(0x777, b"from-a");
+        assert!(b.lookup(0x777).is_none());
+        assert_eq!(a.lookup(0x777).as_deref(), Some(b"from-a".as_ref()));
+    }
+}
+
+#[cfg(test)]
+mod windows_link_tests {
+    use super::windows_pe_subsystem_flag;
+
+    // Regression guard for issue #120: without an explicit subsystem flag the
+    // MSVC linker historically defaulted to WINDOWS (2), silently detaching
+    // stdout/stderr so console.log output never reached the terminal.
+
+    #[test]
+    fn cli_build_uses_console_subsystem() {
+        assert_eq!(windows_pe_subsystem_flag(false), "/SUBSYSTEM:CONSOLE");
+    }
+
+    #[test]
+    fn ui_build_uses_windows_subsystem() {
+        assert_eq!(windows_pe_subsystem_flag(true), "/SUBSYSTEM:WINDOWS");
+    }
 }

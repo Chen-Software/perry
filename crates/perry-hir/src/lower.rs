@@ -49,6 +49,21 @@ pub struct LoweringContext {
     pub(crate) interfaces: Vec<(String, InterfaceId)>,
     /// Type aliases: name -> (id, type_params, aliased_type)
     pub(crate) type_aliases: Vec<(String, TypeAliasId, Vec<TypeParam>, Type)>,
+    /// Issue #179 typed-parse: interface name → field names in AST
+    /// source order. Populated alongside `interfaces` during
+    /// `lower_interface_decl`. `ObjectType::properties` is a HashMap
+    /// that loses source order; this side table preserves it so
+    /// `JSON.parse<Item[]>` codegen can emit a shape hint whose order
+    /// matches typical `JSON.stringify` output (source order ≈
+    /// insertion order ≈ what we see on the wire). Lost order would
+    /// still be correct, just not fast-path friendly.
+    pub(crate) interface_source_keys: std::collections::HashMap<String, Vec<String>>,
+    /// Issue #179 typed-parse: interface name → resolved `ObjectType`.
+    /// `resolve_typed_parse_ty` uses this so `JSON.parse<Item[]>`
+    /// lowers to `Array<Object{fields}>` instead of `Array<Named("Item")>`.
+    /// Without this, codegen sees only `Named` and can't extract the
+    /// shape, so the specialized parse path never fires.
+    pub(crate) interface_object_types: std::collections::HashMap<String, perry_types::ObjectType>,
     /// Imported functions: local_name -> original_name (the exported name in the source module)
     pub(crate) imported_functions: Vec<(String, String)>,
     /// Native module imports: local_name -> (module_name, method_name)
@@ -176,6 +191,22 @@ pub struct LoweringContext {
     /// Used to resolve `new.target` to a placeholder object whose `.name`
     /// returns the class name. None outside any constructor.
     pub(crate) in_constructor_class: Option<String>,
+    /// Phase 3 anon-class registry for closed-shape object literals: shape key
+    /// (canonical field-name + type-tag joined) -> synthetic class name. Lets
+    /// identical-shape literals within the same module share one synthesized
+    /// class — shared class_id, shared keys_array global, shared direct-GEP
+    /// field layout. Dedup is per-module only; cross-module dedup would need
+    /// a stable hash and is deferred.
+    pub(crate) anon_shape_classes: HashMap<String, String>,
+    /// Counter for generating anon-class names (`__AnonShape_N`).
+    pub(crate) next_anon_shape_id: u32,
+    /// Phase 4.1: method return types registry keyed by (class_name,
+    /// method_name). Populated as methods are lowered so call-site inference
+    /// (`infer_call_return_type`'s Member arm) can resolve `obj.method()` to
+    /// the method's declared or inferred return type when `obj`'s type is
+    /// `Type::Named(class_name)`. Mirrors `func_return_types` but for the
+    /// method-dispatch path.
+    pub(crate) class_method_return_types: Vec<(String, String, Type)>,
 }
 
 impl LoweringContext {
@@ -202,6 +233,8 @@ impl LoweringContext {
             enums: Vec::new(),
             interfaces: Vec::new(),
             type_aliases: Vec::new(),
+            interface_source_keys: std::collections::HashMap::new(),
+            interface_object_types: std::collections::HashMap::new(),
             imported_functions: Vec::new(),
             native_modules: Vec::new(),
             builtin_module_aliases: Vec::new(),
@@ -243,6 +276,9 @@ impl LoweringContext {
             class_expr_aliases: HashMap::new(),
             in_constructor_class: None,
             mixin_funcs: HashMap::new(),
+            anon_shape_classes: HashMap::new(),
+            next_anon_shape_id: 0,
+            class_method_return_types: Vec::new(),
         }
     }
 
@@ -283,6 +319,96 @@ impl LoweringContext {
             .find(|(alias_name, _, type_params, _)| alias_name == name && type_params.is_empty())
             .map(|(_, _, _, ty)| ty.clone())
     }
+}
+
+/// Issue #179 typed-parse: extract the field-name list in source
+/// order from a `JSON.parse<T>` AST type argument. `T` may be:
+/// - A type literal `{id: number, name: string}` — direct extraction
+/// - `Array<T>` / `T[]` — recurse on element
+/// - A named interface reference `Item` — resolve via ctx and re-walk
+///   the interface declaration's member list
+///
+/// Returns None on any unresolved reference or unsupported shape. The
+/// caller treats that as "no fast-path order available" and emits the
+/// slow-path only (still correct, just slower).
+fn extract_typed_parse_source_order(
+    ts_type: &swc_ecma_ast::TsType,
+    ctx: &LoweringContext,
+) -> Option<Vec<String>> {
+    use swc_ecma_ast as ast;
+    match ts_type {
+        ast::TsType::TsArrayType(arr) => {
+            extract_typed_parse_source_order(&arr.elem_type, ctx)
+        }
+        ast::TsType::TsTypeLit(lit) => {
+            let mut keys = Vec::with_capacity(lit.members.len());
+            for member in &lit.members {
+                if let ast::TsTypeElement::TsPropertySignature(prop) = member {
+                    if let ast::Expr::Ident(ident) = prop.key.as_ref() {
+                        keys.push(ident.sym.to_string());
+                    } else {
+                        return None;
+                    }
+                }
+            }
+            if keys.is_empty() { None } else { Some(keys) }
+        }
+        ast::TsType::TsTypeRef(tref) => {
+            // `Array<T>` — recurse on the element type argument.
+            if let Some(type_params) = &tref.type_params {
+                let name = match &tref.type_name {
+                    ast::TsEntityName::Ident(i) => i.sym.as_ref(),
+                    _ => return None,
+                };
+                if name == "Array" && type_params.params.len() == 1 {
+                    return extract_typed_parse_source_order(&type_params.params[0], ctx);
+                }
+            }
+            // Named interface reference — look up the source-order
+            // field list recorded by `lower_interface_decl`.
+            let name = match &tref.type_name {
+                ast::TsEntityName::Ident(i) => i.sym.to_string(),
+                _ => return None,
+            };
+            ctx.interface_source_keys.get(&name).cloned()
+        }
+        _ => None,
+    }
+}
+
+/// Issue #179 typed-parse: fully resolve a `JSON.parse<T>` type argument
+/// down to a structural form codegen can use (ObjectType with fields /
+/// Array of object). Named/interface references are expanded via the
+/// lowering context's type-alias table. Unresolvable references collapse
+/// to `Type::Any` so the caller falls through to the generic parser.
+fn resolve_typed_parse_ty(ctx: &LoweringContext, ty: Type) -> Type {
+    match ty {
+        Type::Named(ref name) => {
+            // Interface reference? Expand to ObjectType from the
+            // typed-parse side table (populated by `lower_interface_decl`).
+            if let Some(obj) = ctx.interface_object_types.get(name) {
+                return Type::Object(obj.clone());
+            }
+            // Type alias? Expand and recurse.
+            match ctx.resolve_type_alias(name) {
+                Some(resolved) => resolve_typed_parse_ty(ctx, resolved),
+                None => Type::Any,
+            }
+        }
+        Type::Array(elem) => {
+            let resolved = resolve_typed_parse_ty(ctx, *elem);
+            Type::Array(Box::new(resolved))
+        }
+        Type::Generic { base, type_args } if base == "Array" && type_args.len() == 1 => {
+            let resolved = resolve_typed_parse_ty(ctx, type_args.into_iter().next().unwrap());
+            Type::Array(Box::new(resolved))
+        }
+        // Object/primitive/tuple types pass through unchanged.
+        other => other,
+    }
+}
+
+impl LoweringContext {
 
     pub(crate) fn fresh_local(&mut self) -> LocalId {
         let id = self.next_local_id;
@@ -465,6 +591,141 @@ impl LoweringContext {
         self.classes.push((name, id));
     }
 
+    /// Phase 3: synthesize (or retrieve) an anon class for a closed-shape object
+    /// literal. `fields_with_types` is parallel to the literal's source-declared
+    /// properties — source order is preserved so the anon class's field layout
+    /// matches JS evaluation order. Returns the synthetic class name.
+    ///
+    /// The synthesized class has fields with `init: None`. Each literal's
+    /// values are stored via per-literal `PropertySet` statements emitted
+    /// after the allocation at the Object-arm call site (wrapped in an
+    /// `Expr::Sequence`). This preserves the per-literal values under
+    /// shape-deduplication — earlier versions put the init values on the
+    /// class itself, which meant dedup'd classes silently kept only the
+    /// FIRST literal's values (every subsequent `{name:"b",…}` saw the
+    /// original `{name:"a",…}` inits — broke `arr.map(x => x.name)` into
+    /// `[a, a, a, a]`).
+    pub(crate) fn synthesize_anon_shape_class(
+        &mut self,
+        fields_with_types: &[(String, Type, Expr)],
+    ) -> String {
+        // Canonical shape key: each field as `name:tag` joined by ',' in source
+        // order. Different declaration orders -> different classes (preserves
+        // JS eval order). Type tag is a coarse primitive fingerprint so two
+        // literals with identical names but Number vs String fields don't
+        // share a misleading class.
+        fn tag(ty: &Type) -> &'static str {
+            match ty {
+                Type::Number => "n",
+                Type::Int32 => "i",
+                Type::String => "s",
+                Type::Boolean => "b",
+                Type::BigInt => "B",
+                Type::Null => "N",
+                Type::Void => "v",
+                Type::Array(_) => "a",
+                Type::Object(_) => "o",
+                Type::Function(_) => "f",
+                Type::Named(_) => "c",
+                Type::Promise(_) => "p",
+                _ => "?",
+            }
+        }
+        let mut shape_key = String::new();
+        for (name, ty, _) in fields_with_types {
+            shape_key.push_str(name);
+            shape_key.push(':');
+            shape_key.push_str(tag(ty));
+            shape_key.push(',');
+        }
+
+        if let Some(existing) = self.anon_shape_classes.get(&shape_key) {
+            return existing.clone();
+        }
+
+        let anon_id = self.next_anon_shape_id;
+        self.next_anon_shape_id += 1;
+        let class_name = format!("__AnonShape_{}", anon_id);
+        let class_id = self.fresh_class();
+
+        // Fields have `init: None` — each literal's values are passed as
+        // positional constructor args, so the class stays shape-only (no
+        // per-literal state). See the method doc comment for why this
+        // matters under shape-deduplication.
+        let fields: Vec<ClassField> = fields_with_types
+            .iter()
+            .map(|(name, ty, _init_expr_unused)| ClassField {
+                name: name.clone(),
+                ty: ty.clone(),
+                init: None,
+                is_private: false,
+                is_readonly: false,
+            })
+            .collect();
+
+        // Synthesize a constructor `(f1, f2, ...) => { this.f1 = f1; this.f2 = f2; ... }`.
+        // `Expr::New { args }` at call sites passes each literal's values
+        // in field-declaration order; the constructor body assigns them.
+        // PropertySet's direct-GEP path fires because `this` resolves to
+        // the anon class via the usual class_stack/this_stack dance in
+        // lower_call.rs::lower_new.
+        let mut ctor_params: Vec<Param> = Vec::with_capacity(fields_with_types.len());
+        let mut ctor_body: Vec<Stmt> = Vec::with_capacity(fields_with_types.len());
+        for (name, ty, _value) in fields_with_types {
+            let param_id = self.fresh_local();
+            ctor_params.push(Param {
+                id: param_id,
+                name: name.clone(),
+                ty: ty.clone(),
+                default: None,
+                is_rest: false,
+            });
+            ctor_body.push(Stmt::Expr(Expr::PropertySet {
+                object: Box::new(Expr::This),
+                property: name.clone(),
+                value: Box::new(Expr::LocalGet(param_id)),
+            }));
+        }
+        let constructor = Function {
+            id: self.fresh_func(),
+            name: "constructor".to_string(),
+            type_params: Vec::new(),
+            params: ctor_params,
+            return_type: Type::Void,
+            body: ctor_body,
+            is_async: false,
+            is_generator: false,
+            is_exported: false,
+            captures: Vec::new(),
+            decorators: Vec::new(),
+        };
+
+        // Register in the name->id index so lookup_class finds it, and push to
+        // pending_classes so it flushes into module.classes after the enclosing
+        // statement finishes lowering (same pattern as anonymous class
+        // expressions — see `ast::Expr::Class` arm in lower_expr).
+        self.register_class(class_name.clone(), class_id);
+        self.pending_classes.push(Class {
+            id: class_id,
+            name: class_name.clone(),
+            type_params: Vec::new(),
+            extends: None,
+            extends_name: None,
+            native_extends: None,
+            fields,
+            constructor: Some(constructor),
+            methods: Vec::new(),
+            getters: Vec::new(),
+            setters: Vec::new(),
+            static_fields: Vec::new(),
+            static_methods: Vec::new(),
+            is_exported: false,
+        });
+
+        self.anon_shape_classes.insert(shape_key, class_name.clone());
+        class_name
+    }
+
     pub(crate) fn lookup_func_name(&self, func_id: FuncId) -> Option<&str> {
         self.functions.iter().find(|(_, id)| *id == func_id).map(|(name, _)| name.as_str())
     }
@@ -623,6 +884,48 @@ impl LoweringContext {
             .find(|(n, _, _)| n == func_name)
             .map(|(_, module, class)| (module.as_str(), class.as_str()))
     }
+}
+
+/// Map a function's declared return type to a native-instance class when it
+/// matches a known stdlib pattern. Lets a wrapper function like
+/// `function openSocket(host, port): Socket { ... }` advertise that calls
+/// to it produce a Socket instance — call sites then register the local
+/// via the user-factory consumer in the var-decl handler, so subsequent
+/// `sock.on(...)` / `sock.write(...)` dispatches statically through the
+/// NATIVE_MODULE_TABLE just like `const sock = net.createConnection(...)`.
+///
+/// Recognizes both `T` and `Promise<T>` return types so async wrappers
+/// work without ceremony.
+fn native_instance_from_return_type(ty: &Type) -> Option<(&'static str, &'static str)> {
+    let inner = match ty {
+        Type::Generic { base, type_args } if base == "Promise" => {
+            type_args.first().unwrap_or(ty)
+        }
+        Type::Promise(inner) => inner.as_ref(),
+        other => other,
+    };
+    if let Type::Named(name) = inner {
+        return match name.as_str() {
+            "Socket" => Some(("net", "Socket")),
+            "Redis" => Some(("ioredis", "Redis")),
+            "EventEmitter" => Some(("events", "EventEmitter")),
+            "Pool" => Some(("mysql2/promise", "Pool")),
+            "PoolConnection" => Some(("mysql2/promise", "PoolConnection")),
+            "WebSocket" => Some(("ws", "WebSocket")),
+            "WebSocketServer" => Some(("ws", "WebSocketServer")),
+            _ => None,
+        };
+    }
+    None
+}
+
+// Internal anchor — keeps the file's outer impl block intact while
+// `native_instance_from_return_type` lives at module scope.
+#[allow(dead_code)]
+struct __PerryHirSentinel;
+impl LoweringContext {
+    #[allow(dead_code)]
+    fn __perry_hir_sentinel(&self) {}
 
     pub(crate) fn register_func_return_type(&mut self, name: String, ty: Type) {
         self.func_return_types.push((name, ty));
@@ -632,6 +935,37 @@ impl LoweringContext {
         self.func_return_types.iter().rev()
             .find(|(n, _)| n == name)
             .map(|(_, ty)| ty)
+    }
+
+    /// Phase 4.1: register a method's return type so call-site inference can
+    /// resolve `obj.method()` when `obj: Type::Named(class_name)`. Called
+    /// from `lower_class_from_ast` right after each method's Function is
+    /// built, so both declared annotations and Phase 4-expansion body
+    /// inferences flow through. Extends-chain traversal happens at lookup
+    /// time via `lookup_class_method_return_type`.
+    pub(crate) fn register_class_method_return_type(
+        &mut self,
+        class_name: String,
+        method_name: String,
+        ty: Type,
+    ) {
+        self.class_method_return_types.push((class_name, method_name, ty));
+    }
+
+    /// Phase 4.1: lookup the return type of `class_name.method_name`.
+    /// Does NOT walk the extends chain today — that needs the parent class
+    /// name accessible from the context, which the current registry doesn't
+    /// track. Callers handle inheritance externally if needed. Reverse
+    /// iteration so the latest registration wins for shadowing (mirrors
+    /// `lookup_func_return_type`).
+    pub(crate) fn lookup_class_method_return_type(
+        &self,
+        class_name: &str,
+        method_name: &str,
+    ) -> Option<&Type> {
+        self.class_method_return_types.iter().rev()
+            .find(|(c, m, _)| c == class_name && m == method_name)
+            .map(|(_, _, ty)| ty)
     }
 
     pub(crate) fn enter_scope(&mut self) -> (usize, usize, usize) {
@@ -2494,6 +2828,15 @@ fn lower_module_decl(
                     if !matches!(func.return_type, Type::Any) {
                         ctx.register_func_return_type(func_name.clone(), func.return_type.clone());
                     }
+                    // If the declared return type maps to a native instance
+                    // (e.g. `function openSocket(): Socket { ... }`), register
+                    // the function as a factory so call sites can pick up
+                    // the instance class — see lookup_func_return_native_instance.
+                    if let Some((module, class)) = native_instance_from_return_type(&func.return_type) {
+                        ctx.func_return_native_instances.push((
+                            func_name.clone(), module.to_string(), class.to_string()
+                        ));
+                    }
                     // Store parameter defaults for call-site resolution
                     let defaults: Vec<Option<Expr>> = func.params.iter().map(|p| p.default.clone()).collect();
                     let param_ids: Vec<LocalId> = func.params.iter().map(|p| p.id).collect();
@@ -2588,6 +2931,11 @@ fn lower_module_decl(
                                                         ("mysql2" | "mysql2/promise", "createConnection") => Some("Connection"),
                                                         ("pg", "connect") => Some("Client"),
                                                         ("http" | "https", "request" | "get") => Some("ClientRequest"),
+                                                        // net.createConnection(host, port) returns a Socket handle.
+                                                        // Without registering this, subsequent `sock.write/on/end/destroy`
+                                                        // calls fall through to dynamic dispatch and never reach
+                                                        // the `js_net_socket_*` FFI functions.
+                                                        ("net", "createConnection") => Some("Socket"),
                                                         // node-cron's `cron.schedule(expr, cb)` returns a job
                                                         // handle whose `start()`/`stop()`/`isRunning()` etc.
                                                         // dispatch via the ("node-cron", true, METHOD) entries
@@ -2651,6 +2999,7 @@ fn lower_module_decl(
                                                             ("mysql2" | "mysql2/promise", "createConnection") => Some("Connection"),
                                                             ("pg", "connect") => Some("Client"),
                                                             ("http" | "https", "request" | "get") => Some("ClientRequest"),
+                                                            ("axios", "get" | "post" | "put" | "delete" | "patch" | "request") => Some("Response"),
                                                             _ => None,
                                                         };
                                                         if let Some(class_name) = class_name {
@@ -2737,6 +3086,13 @@ fn lower_module_decl(
                                             "Pool" => Some(("mysql2/promise", "Pool")),
                                             "PoolConnection" => Some(("mysql2/promise", "PoolConnection")),
                                             "WebSocket" | "WebSocketServer" => Some(("ws", type_name.as_str())),
+                                            // perry-stdlib net.Socket: lets library wrappers like
+                                            //   export function openSocket(host, port): Socket { ... }
+                                            // propagate native-instance tagging to callers, so
+                                            //   const sock = openSocket(...);
+                                            //   sock.on(...);   // dispatches to js_net_socket_on
+                                            // works without ceremony.
+                                            "Socket" => Some(("net", "Socket")),
                                             _ => {
                                                 // Also check dotted names (e.g., mysql.Pool)
                                                 if let Some(dot_pos) = type_name.find('.') {
@@ -3168,6 +3524,11 @@ fn lower_namespace_as_class(
                         if !matches!(func.return_type, Type::Any) {
                             ctx.register_func_return_type(func.name.clone(), func.return_type.clone());
                         }
+                        if let Some((module, class)) = native_instance_from_return_type(&func.return_type) {
+                            ctx.func_return_native_instances.push((
+                                func.name.clone(), module.to_string(), class.to_string()
+                            ));
+                        }
                         static_methods.push(func);
                     }
                     ast::Decl::Var(var_decl) => {
@@ -3254,6 +3615,11 @@ fn lower_stmt(
                     }
                     let func = lower_fn_decl(ctx, fn_decl)?;
                     // Register return type for call-site inference
+                    if let Some((module, class)) = native_instance_from_return_type(&func.return_type) {
+                        ctx.func_return_native_instances.push((
+                            func.name.clone(), module.to_string(), class.to_string()
+                        ));
+                    }
                     if !matches!(func.return_type, Type::Any) {
                         ctx.register_func_return_type(func.name.clone(), func.return_type.clone());
                     }
@@ -3541,6 +3907,65 @@ fn lower_stmt(
                             for s in &stmts {
                                 if let Stmt::Let { id, .. } = s {
                                     ctx.var_hoisted_ids.insert(*id);
+                                }
+                            }
+                        }
+                        // Track awaited native module calls as native instances
+                        // so property accesses (response.status, response.data) route
+                        // through NativeMethodCall dispatch instead of generic PropertyGet.
+                        for s in &stmts {
+                            if let Stmt::Let { name, init: Some(Expr::Await(inner)), .. } = s {
+                                if let Expr::NativeMethodCall { module: mod_name, method, .. } = inner.as_ref() {
+                                    let class_name = match (mod_name.as_str(), method.as_str()) {
+                                        ("axios", "get" | "post" | "put" | "delete" | "patch" | "request") => Some("Response"),
+                                        ("mongodb", "connect") => Some("MongoClient"),
+                                        ("pg", "connect") => Some("Client"),
+                                        _ => None,
+                                    };
+                                    if let Some(cn) = class_name {
+                                        ctx.register_native_instance(name.clone(), mod_name.clone(), cn.to_string());
+                                    }
+                                }
+                            }
+                            // Track synchronous native module factories as native instances.
+                            // Added for workstream A1.5 so `const sock = net.createConnection(...)`
+                            // registers `sock` as a Socket instance; without this, subsequent
+                            // `sock.write/on/end/destroy` miss the NATIVE_MODULE_TABLE dispatch
+                            // and never reach the `js_net_socket_*` FFI in perry-stdlib.
+                            if let Stmt::Let { name, init: Some(Expr::NativeMethodCall { module: mod_name, method, object: None, .. }), .. } = s {
+                                let class_name = match (mod_name.as_str(), method.as_str()) {
+                                    ("net", "createConnection" | "connect") => Some("Socket"),
+                                    // tls.connect returns the same Socket class — reuses
+                                    // all the write/end/destroy/on/upgradeToTLS dispatch.
+                                    ("tls", "connect") => Some("Socket"),
+                                    _ => None,
+                                };
+                                if let Some(cn) = class_name {
+                                    // Register under `"net"` (the module the Socket class belongs to)
+                                    // regardless of which module the factory lived in, so method
+                                    // dispatch resolves correctly.
+                                    ctx.register_native_instance(name.clone(), "net".to_string(), cn.to_string());
+                                    let _ = mod_name; // suppress unused on tls branch
+                                }
+                            }
+                            // User-defined factory wrappers: when the init is a
+                            // bare call to `userFunc(...)` and `userFunc` was
+                            // registered as a native-instance factory (via
+                            // its declared return type), inherit the class so
+                            // downstream `local.method(...)` dispatches statically.
+                            // Example: `function openSocket(): Socket { ... }`
+                            // followed by `const sock = openSocket(...)` registers
+                            // sock as ("net", "Socket").
+                            if let Stmt::Let { name, init: Some(Expr::Call { callee, .. }), .. } = s {
+                                if let Expr::FuncRef(func_id) = callee.as_ref() {
+                                    let func_name_owned = ctx.lookup_func_name(*func_id).map(|s| s.to_string());
+                                    if let Some(func_name) = func_name_owned {
+                                        let lookup = ctx.lookup_func_return_native_instance(&func_name)
+                                            .map(|(m, c)| (m.to_string(), c.to_string()));
+                                        if let Some((m, c)) = lookup {
+                                            ctx.register_native_instance(name.clone(), m, c);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -4535,7 +4960,9 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                 // Global Infinity identifier
                 Ok(Expr::Number(f64::INFINITY))
             } else {
-                // Assume it's a global (like console)
+                // GlobalGet(0) is a sentinel: codegen routes by name from the
+                // parent PropertyGet/Call/Member context. Bare uses lower to
+                // 0.0 (perry-codegen/src/expr.rs Expr::GlobalGet arm).
                 if name != "console" && name != "process" && name != "globalThis" && name != "Buffer"
                     && name != "Date" && name != "JSON" && name != "Math" && name != "Object"
                     && name != "Array" && name != "String" && name != "Number" && name != "Boolean"
@@ -4549,8 +4976,12 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                     && name != "Headers" && name != "fetch" && name != "crypto" && name != "performance"
                     && name != "queueMicrotask" && name != "structuredClone" && name != "atob" && name != "btoa"
                     && name != "BigInt" {
+                    eprintln!(
+                        "  Warning: unknown identifier '{}' — assuming global; member access will dispatch by name at runtime, bare reads lower to 0",
+                        name
+                    );
                 }
-                Ok(Expr::GlobalGet(0)) // TODO: proper global lookup
+                Ok(Expr::GlobalGet(0))
             }
         }
         ast::Expr::Bin(bin) => {
@@ -4752,6 +5183,42 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
             // Check if any argument has spread
             let has_spread = call.args.iter().any(|arg| arg.spread.is_some());
 
+            // Pre-scan: if this call is `<fastify app>.get|post|...|addHook(path, handler)`,
+            // the handler is an arrow function whose first two params are
+            // the FastifyRequest and FastifyReply. Register them as native
+            // instances BEFORE lowering the arrow so that `request.header(...)`
+            // and `request.headers[...]` inside the handler dispatch through
+            // `Expr::NativeMethodCall` instead of generic object access.
+            //
+            // In v0.4.51 this was (presumably) handled by the old codegen's
+            // per-method dispatch table; in v0.5.x the dispatch happens at
+            // HIR lower time via `lookup_native_instance(name)`, so we need
+            // the annotation here for the lookup to succeed.
+            let fastify_handler_names: Option<(String, String)> = pre_scan_fastify_handler_params(ctx, call);
+            if let Some((req_name, reply_name)) = &fastify_handler_names {
+                ctx.register_native_instance(req_name.clone(), "fastify".to_string(), "Request".to_string());
+                if !reply_name.is_empty() {
+                    ctx.register_native_instance(reply_name.clone(), "fastify".to_string(), "Reply".to_string());
+                }
+            }
+
+            // perry/ui reactive Text: `Text(\`...${state.value}...\`)` where at least one
+            // interpolation is `<ident>.value` on a State binding. Desugars to
+            // `{ __h = Text(concat); stateOnChange(state, v => textSetString(__h, concat)); __h }`
+            // so the label updates when state.set(...) fires subscribers. Closes #104.
+            if let Some(desugared) = try_desugar_reactive_text(ctx, call)? {
+                return Ok(desugared);
+            }
+
+            // perry/ui reactive animation: `widget.animateOpacity(<expr reading
+            // state.value>, dur)` or `.animatePosition(...)` desugars to an IIFE
+            // that runs the initial animation and registers a `stateOnChange`
+            // subscriber per referenced State so the animation re-fires when
+            // any read state changes. Closes the follow-up to #109.
+            if let Some(desugared) = try_desugar_reactive_animate(ctx, call)? {
+                return Ok(desugared);
+            }
+
             let mut args = call.args.iter()
                 .map(|arg| lower_expr(ctx, &arg.expr))
                 .collect::<Result<Vec<_>>>()?;
@@ -4922,6 +5389,21 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                     signal,
                                                 });
                                             }
+                                        }
+                                        "exit" => {
+                                            // process.exit() / process.exit(code) — never
+                                            // returns, terminates the process. Until now this
+                                            // fell through to generic NativeMethodCall which
+                                            // silently no-op'd, so scripts that rely on it to
+                                            // end the event loop (e.g. `main().then(() =>
+                                            // process.exit(0))` in a net-socket driver) would
+                                            // hang with the socket still keeping the loop alive.
+                                            let code = if args.len() >= 1 {
+                                                Some(Box::new(args.into_iter().next().unwrap()))
+                                            } else {
+                                                None
+                                            };
+                                            return Ok(Expr::ProcessExit(code));
                                         }
                                         _ => {} // Fall through to generic handling
                                     }
@@ -5301,16 +5783,12 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             let connection_listener = args.get(1).cloned().map(Box::new);
                                             return Ok(Expr::NetCreateServer { options, connection_listener });
                                         }
-                                        "createConnection" | "connect" => {
-                                            let port = args.get(0).cloned().unwrap_or(Expr::Number(0.0));
-                                            let host = args.get(1).cloned().map(Box::new);
-                                            let connect_listener = args.get(2).cloned().map(Box::new);
-                                            return Ok(Expr::NetCreateConnection {
-                                                port: Box::new(port),
-                                                host,
-                                                connect_listener
-                                            });
-                                        }
+                                        // createConnection/connect fall through to generic NativeMethodCall
+                                        // so they dispatch via NATIVE_MODULE_TABLE to the new
+                                        // event-driven `js_net_socket_connect` in perry-stdlib (A1/A1.5).
+                                        // The dedicated `Expr::NetCreateConnection` variant was never
+                                        // lowered by the LLVM backend and remained as vestigial HIR;
+                                        // the generic path gives us working codegen for free.
                                         _ => {} // Fall through to generic handling
                                     }
                                 }
@@ -5318,12 +5796,16 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
 
                             if let Some((module_name, _imported_method)) = ctx.lookup_native_module(&obj_name) {
                                 // Skip modules handled specifically below (path, fs, child_process, etc.)
+                                // `net` used to be in this list back when its method calls
+                                // were short-circuited into `Expr::NetCreateConnection` etc.
+                                // After A1.5 `net` goes through the generic NativeMethodCall
+                                // path so the LLVM backend's NATIVE_MODULE_TABLE dispatches
+                                // to `js_net_socket_*` in perry-stdlib.
                                 let is_handled_module = module_name == "path" || module_name == "node:path"
                                     || module_name == "fs" || module_name == "node:fs"
                                     || module_name == "child_process" || module_name == "node:child_process"
                                     || module_name == "crypto" || module_name == "node:crypto"
-                                    || module_name == "os" || module_name == "node:os"
-                                    || module_name == "net" || module_name == "node:net";
+                                    || module_name == "os" || module_name == "node:os";
                                 if !is_handled_module {
                                     // This is a call on a native module (e.g., mysql.createConnection)
                                     if let ast::MemberProp::Ident(method_ident) = &member.prop {
@@ -5422,15 +5904,40 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                             let method_name = method_ident.sym.to_string();
                             // Lower the object expression first
                             let object_expr = lower_expr(ctx, &member.obj)?;
-                            // Check if it's a NativeMethodCall for a math library
+                            // Check if it's a NativeMethodCall for a fluent-API native module
                             if let Expr::NativeMethodCall { module, class_name, .. } = &object_expr {
                                 // Methods that return the same type (builder pattern)
                                 let is_math_lib = matches!(module.as_str(), "big.js" | "decimal.js" | "bignumber.js");
-                                let is_fluent_method = matches!(method_name.as_str(),
+                                let is_math_method = matches!(method_name.as_str(),
+                                    // arithmetic + chainable rounding/formatting
                                     "plus" | "minus" | "times" | "div" | "mod" |
-                                    "pow" | "sqrt" | "abs" | "neg" | "round" | "floor" | "ceil" | "toFixed"
+                                    "pow" | "sqrt" | "abs" | "neg" | "round" | "floor" | "ceil" | "toFixed" |
+                                    // decimal.js: terminal-shape methods that still need
+                                    // NativeMethodCall dispatch (so a.plus(b).eq(c) etc.
+                                    // doesn't fall back to the generic Call+PropertyGet path).
+                                    "toString" | "toNumber" | "valueOf" |
+                                    "eq" | "lt" | "lte" | "gt" | "gte" | "cmp" |
+                                    "isZero" | "isPositive" | "isNegative"
                                 );
-                                if is_math_lib && is_fluent_method {
+                                // commander Command — every fluent method either
+                                // returns the same handle (name/version/description/
+                                // option/requiredOption/action) or a sub-Command with
+                                // the same module + class (.command(name)). Either way
+                                // the next chained call must dispatch through the
+                                // commander NativeModSig table, not the generic
+                                // dynamic-property fallback. Without this branch
+                                // `program.name(...).version(...)` only the first
+                                // call landed as a NativeMethodCall and the rest
+                                // silently no-op'd at codegen — issue #187.
+                                let is_commander = module.as_str() == "commander";
+                                let is_commander_method = matches!(method_name.as_str(),
+                                    "name" | "version" | "description" |
+                                    "option" | "requiredOption" |
+                                    "action" | "command" | "parse" | "opts"
+                                );
+                                if (is_math_lib && is_math_method)
+                                    || (is_commander && is_commander_method)
+                                {
                                     return Ok(Expr::NativeMethodCall {
                                         module: module.clone(),
                                         class_name: class_name.clone(),
@@ -5597,7 +6104,41 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                 let reviver = iter.next().unwrap();
                                                 return Ok(Expr::JsonParseWithReviver(Box::new(text), Box::new(reviver)));
                                             } else if args.len() >= 1 {
-                                                return Ok(Expr::JsonParse(Box::new(args.into_iter().next().unwrap())));
+                                                let text = args.into_iter().next().unwrap();
+                                                // Issue #179 typed-parse plan: if the call site
+                                                // provides a TypeScript type argument (e.g.
+                                                // `JSON.parse<Item[]>(blob)`), carry it into HIR
+                                                // so codegen can emit a specialized parse path.
+                                                // Semantically identical to JsonParse at runtime
+                                                // (the `<T>` erases — Node-compatible).
+                                                if let Some(type_args) = call.type_args.as_ref() {
+                                                    if let Some(ts_type) = type_args.params.first() {
+                                                        let ty = extract_ts_type_with_ctx(ts_type, Some(ctx));
+                                                        // Resolve Named → structural (interface)
+                                                        // aliases so codegen sees the full
+                                                        // ObjectType without re-walking the alias
+                                                        // table. Array<Named> inner element
+                                                        // also gets resolved.
+                                                        let resolved = resolve_typed_parse_ty(ctx, ty);
+                                                        if !matches!(resolved, Type::Any | Type::Unknown) {
+                                                            // Source-order field list for the
+                                                            // inner Object type, if we can
+                                                            // extract it from the AST. Codegen
+                                                            // uses this for the fast-path
+                                                            // per-field comparison.
+                                                            let ordered_keys =
+                                                                extract_typed_parse_source_order(
+                                                                    ts_type, ctx,
+                                                                );
+                                                            return Ok(Expr::JsonParseTyped {
+                                                                text: Box::new(text),
+                                                                ty: resolved,
+                                                                ordered_keys,
+                                                            });
+                                                        }
+                                                    }
+                                                }
+                                                return Ok(Expr::JsonParse(Box::new(text)));
                                             }
                                         }
                                         "stringify" => {
@@ -5820,6 +6361,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                         "asinh" => { if args.len() >= 1 { return Ok(Expr::MathAsinh(Box::new(args.into_iter().next().unwrap()))); } }
                                         "acosh" => { if args.len() >= 1 { return Ok(Expr::MathAcosh(Box::new(args.into_iter().next().unwrap()))); } }
                                         "atanh" => { if args.len() >= 1 { return Ok(Expr::MathAtanh(Box::new(args.into_iter().next().unwrap()))); } }
+                                        "exp" => { if args.len() >= 1 { return Ok(Expr::MathExp(Box::new(args.into_iter().next().unwrap()))); } }
                                         _ => {} // Fall through to generic handling
                                     }
                                 }
@@ -6186,19 +6728,9 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                 connection_listener,
                                             });
                                         }
-                                        "createConnection" | "connect" => {
-                                            if args.len() >= 1 {
-                                                let mut args_iter = args.into_iter();
-                                                let port = args_iter.next().unwrap();
-                                                let host = args_iter.next().map(Box::new);
-                                                let connect_listener = args_iter.next().map(Box::new);
-                                                return Ok(Expr::NetCreateConnection {
-                                                    port: Box::new(port),
-                                                    host,
-                                                    connect_listener,
-                                                });
-                                            }
-                                        }
+                                        // createConnection/connect: see sibling site above —
+                                        // falls through to generic NativeMethodCall so the LLVM
+                                        // backend's NATIVE_MODULE_TABLE dispatch can handle it.
                                         _ => {} // Fall through to generic handling
                                     }
                                 }
@@ -6578,17 +7110,38 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                     match method_name {
                                         "push" => {
                                             if args.len() >= 1 {
-                                                // Check if the argument has spread operator
-                                                if call.args.len() >= 1 && call.args[0].spread.is_some() {
-                                                    return Ok(Expr::ArrayPushSpread {
-                                                        array_id,
-                                                        source: Box::new(args.into_iter().next().unwrap()),
-                                                    });
+                                                // Check if any argument has spread operator —
+                                                // when present, route through the spread path.
+                                                // Multi-arg push without spread is desugared to a
+                                                // Sequence of ArrayPush statements (one per arg);
+                                                // JS spec returns the final array length, which is
+                                                // exactly what the last ArrayPush returns.
+                                                let any_spread = call.args.iter().any(|a| a.spread.is_some());
+                                                if any_spread {
+                                                    if args.len() == 1 {
+                                                        return Ok(Expr::ArrayPushSpread {
+                                                            array_id,
+                                                            source: Box::new(args.into_iter().next().unwrap()),
+                                                        });
+                                                    }
+                                                    // Mixed regular + spread: bail to generic
+                                                    // dispatch (no current single-IR-shape).
+                                                } else {
+                                                    if args.len() == 1 {
+                                                        return Ok(Expr::ArrayPush {
+                                                            array_id,
+                                                            value: Box::new(args.into_iter().next().unwrap()),
+                                                        });
+                                                    }
+                                                    let mut stmts: Vec<Expr> = Vec::with_capacity(args.len());
+                                                    for a in args.into_iter() {
+                                                        stmts.push(Expr::ArrayPush {
+                                                            array_id,
+                                                            value: Box::new(a),
+                                                        });
+                                                    }
+                                                    return Ok(Expr::Sequence(stmts));
                                                 }
-                                                return Ok(Expr::ArrayPush {
-                                                    array_id,
-                                                    value: Box::new(args.into_iter().next().unwrap()),
-                                                });
                                             }
                                         }
                                         "pop" => {
@@ -7714,7 +8267,14 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             Expr::ArrayToReversed { .. } | Expr::ArrayToSorted { .. } |
                                             Expr::ArrayToSpliced { .. } | Expr::ArrayWith { .. } |
                                             Expr::ArrayEntries(_) | Expr::ArrayKeys(_) | Expr::ArrayValues(_) |
-                                            Expr::ObjectKeys(_) | Expr::ObjectValues(_) | Expr::ObjectEntries(_)
+                                            Expr::ObjectKeys(_) | Expr::ObjectValues(_) | Expr::ObjectEntries(_) |
+                                            // `process.argv` is a `string[]`. Without this arm the
+                                            // fallthrough picked String.slice semantics — so
+                                            // `process.argv.slice(2)` returned a "string" whose
+                                            // length was the argv count and whose elements were
+                                            // NaN-box bits of string pointers read as doubles
+                                            // (closes #41).
+                                            Expr::ProcessArgv
                                         ) {
                                             let mut args_iter = args.into_iter();
                                             let start = args_iter.next().unwrap();
@@ -8595,6 +9155,66 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                             "stdin" => return Ok(Expr::ProcessStdin),
                             "stdout" => return Ok(Expr::ProcessStdout),
                             "stderr" => return Ok(Expr::ProcessStderr),
+                            "env" => return Ok(Expr::ProcessEnv),
+                            _ => {}
+                        }
+                    }
+                }
+                // `globalThis.process` returns an object whose `.env`/`.argv`/
+                // etc. should resolve just like bare `process.*`. Without this
+                // shim, `globalThis.process.env` walks through generic
+                // PropertyGet dispatch and hits a 0.0 sentinel. Matches the
+                // static `process.env` fast path above.
+                if obj_ident.sym.as_ref() == "globalThis" {
+                    if let ast::MemberProp::Ident(prop_ident) = &member.prop {
+                        if prop_ident.sym.as_ref() == "process" {
+                            // `globalThis.process` on its own — fall through
+                            // to generic handling below (returns 0.0 sentinel,
+                            // which is fine as the outer chain handles env/etc.).
+                        }
+                    }
+                }
+            }
+            // Handle `globalThis.process.X` (and any PropertyGet whose object
+            // resolves to `globalThis.process`): treat the outer `.X` as if
+            // it were a bare `process.X` access. Unwraps transparent TS
+            // wrappers (TsAs, TsNonNull, TsSatisfies, TsTypeAssertion, Paren)
+            // so that `(globalThis as any).process.env` works too.
+            fn unwrap_transparent(e: &ast::Expr) -> &ast::Expr {
+                let mut cur = e;
+                loop {
+                    match cur {
+                        ast::Expr::TsAs(x) => cur = &x.expr,
+                        ast::Expr::TsNonNull(x) => cur = &x.expr,
+                        ast::Expr::TsSatisfies(x) => cur = &x.expr,
+                        ast::Expr::TsTypeAssertion(x) => cur = &x.expr,
+                        ast::Expr::TsConstAssertion(x) => cur = &x.expr,
+                        ast::Expr::Paren(x) => cur = &x.expr,
+                        _ => return cur,
+                    }
+                }
+            }
+            let member_obj_unwrapped = unwrap_transparent(member.obj.as_ref());
+            if let ast::Expr::Member(inner) = member_obj_unwrapped {
+                let inner_obj_unwrapped = unwrap_transparent(inner.obj.as_ref());
+                let inner_is_global_process = matches!(
+                    inner_obj_unwrapped,
+                    ast::Expr::Ident(i) if i.sym.as_ref() == "globalThis"
+                ) && matches!(
+                    &inner.prop,
+                    ast::MemberProp::Ident(p) if p.sym.as_ref() == "process"
+                );
+                if inner_is_global_process {
+                    if let ast::MemberProp::Ident(prop_ident) = &member.prop {
+                        match prop_ident.sym.as_ref() {
+                            "argv" => return Ok(Expr::ProcessArgv),
+                            "platform" => return Ok(Expr::OsPlatform),
+                            "arch" => return Ok(Expr::OsArch),
+                            "pid" => return Ok(Expr::ProcessPid),
+                            "ppid" => return Ok(Expr::ProcessPpid),
+                            "version" => return Ok(Expr::ProcessVersion),
+                            "versions" => return Ok(Expr::ProcessVersions),
+                            "env" => return Ok(Expr::ProcessEnv),
                             _ => {}
                         }
                     }
@@ -8900,10 +9520,15 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                 }
                 ast::MemberProp::Computed(computed) => {
                     let index = Box::new(lower_expr(ctx, &computed.expr)?);
-                    // Specialize for Uint8Array/Buffer variables → byte-level access
+                    // Specialize for Uint8Array/Buffer variables → byte-level access.
+                    // Params declared `Buffer` (e.g. `function f(src: Buffer)`)
+                    // reach here with `Type::Named("Buffer")` — treat it as a
+                    // synonym for Uint8Array so `src[i]` uses the byte-read
+                    // path instead of the generic f64-element IndexGet, which
+                    // would return NaN-boxed pointer bits as a denormal f64.
                     if let Expr::LocalGet(id) = &*object {
                         if let Some((_, _, ty)) = ctx.locals.iter().find(|(_, lid, _)| lid == id) {
-                            if matches!(ty, Type::Named(n) if n == "Uint8Array") {
+                            if matches!(ty, Type::Named(n) if n == "Uint8Array" || n == "Buffer") {
                                 return Ok(Expr::Uint8ArrayGet { array: object, index });
                             }
                         }
@@ -9189,10 +9814,12 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                         }
                         ast::MemberProp::Computed(computed) => {
                             let index = Box::new(lower_expr(ctx, &computed.expr)?);
-                            // Specialize for Uint8Array/Buffer variables → byte-level access
+                            // Specialize for Uint8Array/Buffer variables → byte-level access.
+                            // See mirrored comment in IndexGet lowering: params
+                            // typed `Buffer` must route through the byte-write path.
                             if let Expr::LocalGet(id) = &*object {
                                 if let Some((_, _, ty)) = ctx.locals.iter().find(|(_, lid, _)| lid == id) {
-                                    if matches!(ty, Type::Named(n) if n == "Uint8Array") {
+                                    if matches!(ty, Type::Named(n) if n == "Uint8Array" || n == "Buffer") {
                                         return Ok(Expr::Uint8ArraySet { array: object, index, value });
                                     }
                                 }
@@ -9273,6 +9900,89 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
             }
         }
         ast::Expr::Object(obj) => {
+            // Phase 3: closed-shape object literals lower to `new __AnonShape_N()`
+            // so downstream field access hits the direct-GEP fast path. The
+            // anon class is synthesized with `init: Some(value_expr)` on each
+            // field, and `apply_field_initializers_recursive` at codegen time
+            // emits `PropertySet { this, field, init }` — PropertySet's
+            // direct-GEP arm at `crates/perry-codegen/src/expr.rs:2277-2293`
+            // fires because `this` resolves to the anon class via class_stack.
+            //
+            // Runtime parity for Object.* introspection APIs on anon-shape
+            // classes is handled runtime-side in perry-runtime's object module
+            // — see that crate's handling of `class_id`-tagged objects on
+            // getOwnPropertyDescriptor / Object.keys / JSON.stringify / etc.
+            fn is_closed_shape(obj: &ast::ObjectLit) -> bool {
+                if obj.props.is_empty() { return false; }
+                for p in &obj.props {
+                    match p {
+                        ast::PropOrSpread::Spread(_) => return false,
+                        ast::PropOrSpread::Prop(prop) => match prop.as_ref() {
+                            ast::Prop::KeyValue(kv) => match &kv.key {
+                                ast::PropName::Ident(_)
+                                | ast::PropName::Str(_)
+                                | ast::PropName::Num(_) => {}
+                                _ => return false,
+                            },
+                            ast::Prop::Shorthand(_) => {}
+                            _ => return false,
+                        },
+                    }
+                }
+                true
+            }
+            if is_closed_shape(obj) {
+                let mut fields: Vec<(String, Type, Expr)> = Vec::new();
+                let mut bail = false;
+                let mut seen = std::collections::HashSet::new();
+                for prop in &obj.props {
+                    let ast::PropOrSpread::Prop(p) = prop else { unreachable!() };
+                    match p.as_ref() {
+                        ast::Prop::KeyValue(kv) => {
+                            let key = match &kv.key {
+                                ast::PropName::Ident(ident) => ident.sym.to_string(),
+                                ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+                                ast::PropName::Num(n) => n.value.to_string(),
+                                _ => unreachable!(),
+                            };
+                            if !seen.insert(key.clone()) { bail = true; break; }
+                            let ty = crate::lower_types::infer_type_from_expr(&kv.value, ctx);
+                            let value = lower_expr(ctx, &kv.value)?;
+                            fields.push((key, ty, value));
+                        }
+                        ast::Prop::Shorthand(ident) => {
+                            let name = ident.sym.to_string();
+                            if !seen.insert(name.clone()) { bail = true; break; }
+                            let (value, ty) = if let Some(func_id) = ctx.lookup_func(&name) {
+                                (Expr::FuncRef(func_id), Type::Any)
+                            } else if let Some(local_id) = ctx.lookup_local(&name) {
+                                let ty = ctx.lookup_local_type(&name).cloned().unwrap_or(Type::Any);
+                                (Expr::LocalGet(local_id), ty)
+                            } else if ctx.lookup_class(&name).is_some() {
+                                (Expr::ClassRef(name.clone()), Type::Any)
+                            } else {
+                                bail = true; break;
+                            };
+                            fields.push((name, ty, value));
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                if !bail {
+                    // Split (name, ty, value) into parallel vecs before the
+                    // synthesize call consumes ownership of the shape.
+                    let args: Vec<Expr> = fields.iter().map(|(_, _, v)| v.clone()).collect();
+                    let class_name = ctx.synthesize_anon_shape_class(&fields);
+                    return Ok(Expr::New {
+                        class_name,
+                        args,
+                        type_args: Vec::new(),
+                    });
+                }
+            }
+            // Legacy path — spread, methods/getters/setters, computed keys,
+            // dup keys, or unresolvable shorthand.
+            //
             // Check if any spread elements exist; if so, use ObjectSpread
             let has_spread = obj.props.iter().any(|p| matches!(p, ast::PropOrSpread::Spread(_)));
             if has_spread {
@@ -9811,30 +10521,82 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                         || class_name == "ReferenceError" || class_name == "SyntaxError"
                         || class_name == "BugIndicatingError" {
                         // new Error() / new Error(message) / new Error(message, { cause })
+                        //
+                        // 2-arg form detection runs at AST level (not HIR) because Phase 3
+                        // synthesises anon classes for closed-shape object literals — the
+                        // options `{ cause: e }` would become `Expr::New { __AnonShape_N }`
+                        // after lower_expr, and the `Expr::Object(fields)` match below
+                        // would miss it. Pull `cause` directly from the AST first, then
+                        // fall through to the standard argument lowering for other shapes.
+                        let ast_args = new_expr.args.as_deref().unwrap_or(&[]);
+                        if ast_args.len() == 2 && class_name == "Error" {
+                            let msg = lower_expr(ctx, &ast_args[0].expr)?;
+                            // Peel `Expr::Paren(({ cause: e }))` — SWC preserves paren
+                            // nodes, so without unwrapping the outer Object match below
+                            // would miss `new Error(msg, ({ cause }))` and we'd silently
+                            // drop the cause.
+                            let mut opts_expr: &ast::Expr = &ast_args[1].expr;
+                            while let ast::Expr::Paren(p) = opts_expr {
+                                opts_expr = &p.expr;
+                            }
+                            // Look for `{ cause: <expr> }` or `{ cause }` at the AST level.
+                            if let ast::Expr::Object(opts_obj) = opts_expr {
+                                for prop in &opts_obj.props {
+                                    if let ast::PropOrSpread::Prop(p) = prop {
+                                        match p.as_ref() {
+                                            ast::Prop::KeyValue(kv) => {
+                                                let key = match &kv.key {
+                                                    ast::PropName::Ident(i) => i.sym.to_string(),
+                                                    ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+                                                    _ => continue,
+                                                };
+                                                if key == "cause" {
+                                                    let cause = lower_expr(ctx, &kv.value)?;
+                                                    return Ok(Expr::ErrorNewWithCause {
+                                                        message: Box::new(msg),
+                                                        cause: Box::new(cause),
+                                                    });
+                                                }
+                                            }
+                                            // ES2022 shorthand `new Error(msg, { cause })`
+                                            // — the canonical idiom inside a `catch (cause)`
+                                            // block. Resolve the ident the same way the
+                                            // HIR Object-literal lowering does: func /
+                                            // local / class-ref precedence.
+                                            ast::Prop::Shorthand(ident) => {
+                                                let name = ident.sym.to_string();
+                                                if name != "cause" { continue; }
+                                                let cause = if let Some(func_id) = ctx.lookup_func(&name) {
+                                                    Expr::FuncRef(func_id)
+                                                } else if let Some(local_id) = ctx.lookup_local(&name) {
+                                                    Expr::LocalGet(local_id)
+                                                } else if ctx.lookup_class(&name).is_some() {
+                                                    Expr::ClassRef(name.clone())
+                                                } else {
+                                                    // Unresolvable identifier — fall through
+                                                    // to the no-cause path below.
+                                                    continue;
+                                                };
+                                                return Ok(Expr::ErrorNewWithCause {
+                                                    message: Box::new(msg),
+                                                    cause: Box::new(cause),
+                                                });
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
+                            // No recognizable `cause` key — lower the opts for side effects,
+                            // then emit a plain Error with just the message.
+                            let _ = lower_expr(ctx, &ast_args[1].expr)?;
+                            return Ok(Expr::ErrorNew(Some(Box::new(msg))));
+                        }
+
                         let args = new_expr.args.as_ref()
                             .map(|args| args.iter().map(|a| lower_expr(ctx, &a.expr)).collect::<Result<Vec<_>>>())
                             .transpose()?
                             .unwrap_or_default();
-
-                        // Detect 2-arg form: new Error(msg, { cause })
-                        if args.len() == 2 && class_name == "Error" {
-                            let mut iter = args.into_iter();
-                            let msg = iter.next().unwrap();
-                            let opts = iter.next().unwrap();
-                            // Try to extract `.cause` from the options object literal
-                            if let Expr::Object(fields) = &opts {
-                                for (key, val) in fields {
-                                    if key == "cause" {
-                                        return Ok(Expr::ErrorNewWithCause {
-                                            message: Box::new(msg),
-                                            cause: Box::new(val.clone()),
-                                        });
-                                    }
-                                }
-                            }
-                            // Fallback: just create the error without cause
-                            return Ok(Expr::ErrorNew(Some(Box::new(msg))));
-                        }
 
                         if args.is_empty() {
                             return match class_name.as_str() {
@@ -9934,10 +10696,10 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                         // new Uint8Array(buffer, byteOffset, length) etc.
                     }
 
-                    // Handle other typed-array constructors (Int8/16/32, Uint16/32, Float32/64).
-                    // Uint8Array stays on the Buffer path above.
+                    // Handle other typed-array constructors (Int8/16/32, Uint16/32, Float32/64,
+                    // Uint8ClampedArray). Uint8Array stays on the Buffer path above.
                     if let Some(kind) = crate::ir::typed_array_kind_for_name(class_name.as_str()) {
-                        if class_name != "Uint8Array" && class_name != "Uint8ClampedArray" {
+                        if class_name != "Uint8Array" {
                             let args = new_expr.args.as_ref()
                                 .map(|args| args.iter().map(|a| lower_expr(ctx, &a.expr)).collect::<Result<Vec<_>>>())
                                 .transpose()?
@@ -10330,10 +11092,16 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                 ast::SuperProp::Ident(_ident) => {
                     // This is typically used in Call expressions like super.method()
                     // We return a placeholder that will be handled specially
-                    Err(anyhow!("Direct super property access not yet supported, use super.method()"))
+                    crate::lower_bail!(
+                        super_prop.span,
+                        "Direct super property access not yet supported, use super.method()"
+                    );
                 }
                 ast::SuperProp::Computed(_) => {
-                    Err(anyhow!("Computed super property access not supported"))
+                    crate::lower_bail!(
+                        super_prop.span,
+                        "Computed super property access not supported"
+                    );
                 }
             }
         }
@@ -10772,6 +11540,503 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
 
 /// Unescape template literal strings (handle \n, \t, etc.)
 fn _unescape_template() {}
+
+/// Lower a template literal AST node to its desugared string-concat HIR
+/// expression: `\`pre${x}post\`` → `Expr::Binary(Add, "pre", x) + "post"`.
+/// Mirrors the inline Tpl lowering at `ast::Expr::Tpl` — extracted so the
+/// reactive-Text desugaring can re-lower the same template twice (once for
+/// the initial widget value, once inside the rebuild closure).
+fn lower_tpl_to_concat(ctx: &mut LoweringContext, tpl: &ast::Tpl) -> Result<Expr> {
+    if tpl.quasis.is_empty() {
+        return Ok(Expr::String(String::new()));
+    }
+    let first_raw = tpl.quasis.first().map(|q| q.raw.as_ref()).unwrap_or("");
+    let mut result = Expr::String(unescape_template(first_raw));
+    for (i, expr) in tpl.exprs.iter().enumerate() {
+        let lowered = lower_expr(ctx, expr)?;
+        result = Expr::Binary {
+            op: BinaryOp::Add,
+            left: Box::new(result),
+            right: Box::new(lowered),
+        };
+        if let Some(quasi) = tpl.quasis.get(i + 1) {
+            let quasi_str: &str = quasi.raw.as_ref();
+            if !quasi_str.is_empty() {
+                result = Expr::Binary {
+                    op: BinaryOp::Add,
+                    left: Box::new(result),
+                    right: Box::new(Expr::String(unescape_template(quasi_str))),
+                };
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// If `call` matches `Text(\`...${state.value}...\`)` with at least one State
+/// interpolation, desugar into an auto-reactive binding. Returns `Ok(None)`
+/// for anything else so the generic Call lowering runs.
+///
+/// The promise (docs/src/ui/state.md): *"Perry detects `state.value` reads
+/// inside template literals and creates reactive bindings."* Prior to this,
+/// the detection existed nowhere and `count.set(...)` didn't update the
+/// rendered label on any platform — most visibly on web/wasm (issue #104)
+/// where users ran the counter example and saw static text.
+///
+/// Generated HIR shape:
+/// ```text
+/// Sequence([
+///   LocalSet(__h, Text(initial_concat)),
+///   stateOnChange(state1, closure((_v) -> textSetString(__h, fresh_concat))),
+///   stateOnChange(state2, closure((_v) -> textSetString(__h, fresh_concat))),
+///   ...,
+///   LocalGet(__h),
+/// ])
+/// ```
+///
+/// The concat is re-lowered for each closure so each subscriber reads every
+/// state freshly — correct for `Text(\`${a.value} and ${b.value}\`)` where a
+/// change to `a` still needs the current value of `b`.
+fn try_desugar_reactive_text(
+    ctx: &mut LoweringContext,
+    call: &ast::CallExpr,
+) -> Result<Option<Expr>> {
+    // Callee must be the bare identifier `Text`.
+    let ast::Callee::Expr(callee_expr) = &call.callee else {
+        return Ok(None);
+    };
+    let ast::Expr::Ident(ident) = callee_expr.as_ref() else {
+        return Ok(None);
+    };
+    if ident.sym.as_ref() != "Text" {
+        return Ok(None);
+    }
+    // `Text` must resolve to `perry/ui`'s Text import. Rejects a user-defined
+    // `function Text(...)` or an import from another module.
+    match ctx.lookup_native_module("Text") {
+        Some(("perry/ui", Some(m))) if m == "Text" => {}
+        _ => return Ok(None),
+    }
+    // Only the 1-arg positional form. Spread or additional config args fall
+    // through — avoids clobbering setter-chained call forms that we haven't
+    // proven we can reproduce bit-for-bit.
+    if call.args.iter().any(|a| a.spread.is_some()) {
+        return Ok(None);
+    }
+    if call.args.len() != 1 {
+        return Ok(None);
+    }
+    let ast::Expr::Tpl(tpl) = call.args[0].expr.as_ref() else {
+        return Ok(None);
+    };
+
+    // Collect unique `<ident>.value` interpolations where `<ident>` is a
+    // State binding. De-dup by name so two references to the same state
+    // only register one subscriber.
+    let mut state_names: Vec<String> = Vec::new();
+    for expr in tpl.exprs.iter() {
+        let ast::Expr::Member(member) = expr.as_ref() else { continue };
+        let ast::MemberProp::Ident(prop) = &member.prop else { continue };
+        if prop.sym.as_ref() != "value" { continue }
+        let ast::Expr::Ident(obj_ident) = member.obj.as_ref() else { continue };
+        let name = obj_ident.sym.to_string();
+        let is_state = matches!(
+            ctx.lookup_native_instance(&name),
+            Some(("perry/ui", "State"))
+        );
+        if is_state && !state_names.contains(&name) {
+            state_names.push(name);
+        }
+    }
+    if state_names.is_empty() {
+        return Ok(None);
+    }
+
+    // Emit as an IIFE closure so the widget handle can be a *real* function
+    // local (backed by a WASM local or LLVM alloca) rather than a bare LocalId
+    // floating inside an Expr::Sequence. The WASM backend only registers
+    // locals via `Stmt::Let`; a LocalSet/LocalGet pair with no backing Let
+    // falls through to TAG_UNDEFINED at read time, which silently drops the
+    // widget from its parent container.
+    //
+    //   (() => {
+    //     const __h = Text(concat);
+    //     stateOnChange(state1, (__v) => textSetString(__h, concat));
+    //     ...
+    //     return __h;
+    //   })()
+    let outer_func_id = ctx.fresh_func();
+    let outer_scope = ctx.enter_scope();
+    let widget_id = ctx.define_local("__perry_reactive_text_h".to_string(), Type::Any);
+
+    let initial_concat = lower_tpl_to_concat(ctx, tpl)?;
+    let text_call = Expr::NativeMethodCall {
+        module: "perry/ui".to_string(),
+        method: "Text".to_string(),
+        object: None,
+        args: vec![initial_concat],
+        class_name: None,
+    };
+
+    let mut outer_body: Vec<Stmt> = Vec::new();
+    outer_body.push(Stmt::Let {
+        id: widget_id,
+        name: "__perry_reactive_text_h".to_string(),
+        ty: Type::Any,
+        mutable: false,
+        init: Some(text_call),
+    });
+
+    for state_name in &state_names {
+        let state_local = ctx.lookup_local(state_name)
+            .ok_or_else(|| anyhow!("reactive Text: state '{}' not in scope", state_name))?;
+
+        // Inner rebuild closure: (__v) => textSetString(__h, <fresh concat>).
+        // A fresh concat is required because the callback reads the *current*
+        // state values at fire-time — re-using `initial_concat` would bind to
+        // the HIR tree already consumed by the Let above.
+        let inner_func_id = ctx.fresh_func();
+        let inner_scope = ctx.enter_scope();
+        let v_param_id = ctx.define_local("__v".to_string(), Type::Any);
+        let v_param = Param {
+            id: v_param_id,
+            name: "__v".to_string(),
+            ty: Type::Any,
+            default: None,
+            is_rest: false,
+        };
+        let fresh_concat = lower_tpl_to_concat(ctx, tpl)?;
+        let set_text_call = Expr::NativeMethodCall {
+            module: "perry/ui".to_string(),
+            method: "textSetString".to_string(),
+            object: None,
+            args: vec![
+                Expr::LocalGet(widget_id),
+                fresh_concat,
+            ],
+            class_name: None,
+        };
+        let inner_body = vec![Stmt::Expr(set_text_call)];
+        ctx.exit_scope(inner_scope);
+
+        let mut inner_refs = Vec::new();
+        let mut inner_visited = std::collections::HashSet::new();
+        for stmt in &inner_body {
+            collect_local_refs_stmt(stmt, &mut inner_refs, &mut inner_visited);
+        }
+        let mut inner_captures: Vec<LocalId> = inner_refs.into_iter()
+            .filter(|id| *id != v_param_id)
+            .collect();
+        inner_captures.sort();
+        inner_captures.dedup();
+        inner_captures = ctx.filter_module_level_captures(inner_captures);
+
+        let inner_closure = Expr::Closure {
+            func_id: inner_func_id,
+            params: vec![v_param],
+            return_type: Type::Any,
+            body: inner_body,
+            captures: inner_captures,
+            mutable_captures: Vec::new(),
+            captures_this: false,
+            enclosing_class: None,
+            is_async: false,
+        };
+
+        outer_body.push(Stmt::Expr(Expr::NativeMethodCall {
+            module: "perry/ui".to_string(),
+            method: "stateOnChange".to_string(),
+            object: None,
+            args: vec![Expr::LocalGet(state_local), inner_closure],
+            class_name: None,
+        }));
+    }
+
+    outer_body.push(Stmt::Return(Some(Expr::LocalGet(widget_id))));
+    ctx.exit_scope(outer_scope);
+
+    let mut outer_refs = Vec::new();
+    let mut outer_visited = std::collections::HashSet::new();
+    for stmt in &outer_body {
+        collect_local_refs_stmt(stmt, &mut outer_refs, &mut outer_visited);
+    }
+    let mut outer_captures: Vec<LocalId> = outer_refs.into_iter()
+        .filter(|id| *id != widget_id)
+        .collect();
+    outer_captures.sort();
+    outer_captures.dedup();
+    outer_captures = ctx.filter_module_level_captures(outer_captures);
+
+    let outer_closure = Expr::Closure {
+        func_id: outer_func_id,
+        params: vec![],
+        return_type: Type::Any,
+        body: outer_body,
+        captures: outer_captures,
+        mutable_captures: Vec::new(),
+        captures_this: false,
+        enclosing_class: None,
+        is_async: false,
+    };
+
+    Ok(Some(Expr::Call {
+        callee: Box::new(outer_closure),
+        args: vec![],
+        type_args: vec![],
+    }))
+}
+
+/// Walk an AST expression and collect identifiers used as `<ident>.value`
+/// where `<ident>` resolves to a `perry/ui` State native instance. Callers
+/// use the collected names to register `stateOnChange` subscribers.
+///
+/// Covers the expression shapes most commonly found in animation arguments:
+/// ternaries, binary/logical ops, parens, template literals, unary,
+/// assignment RHS, call args, array/object literals, and member reads. The
+/// catch-all silently skips unhandled shapes — worst case, a state read
+/// inside an exotic expression just won't trigger reactivity (same
+/// conservative failure mode as #104's template walker).
+fn collect_state_value_reads(ctx: &LoweringContext, expr: &ast::Expr, out: &mut Vec<String>) {
+    match expr {
+        ast::Expr::Member(member) => {
+            // `<ident>.value` where ident is a registered State.
+            if let ast::MemberProp::Ident(prop) = &member.prop {
+                if prop.sym.as_ref() == "value" {
+                    if let ast::Expr::Ident(obj) = member.obj.as_ref() {
+                        let name = obj.sym.to_string();
+                        if matches!(
+                            ctx.lookup_native_instance(&name),
+                            Some(("perry/ui", "State"))
+                        ) && !out.contains(&name)
+                        {
+                            out.push(name);
+                            return;
+                        }
+                    }
+                }
+            }
+            collect_state_value_reads(ctx, member.obj.as_ref(), out);
+        }
+        ast::Expr::Paren(p) => collect_state_value_reads(ctx, &p.expr, out),
+        ast::Expr::Cond(c) => {
+            collect_state_value_reads(ctx, &c.test, out);
+            collect_state_value_reads(ctx, &c.cons, out);
+            collect_state_value_reads(ctx, &c.alt, out);
+        }
+        ast::Expr::Bin(b) => {
+            collect_state_value_reads(ctx, &b.left, out);
+            collect_state_value_reads(ctx, &b.right, out);
+        }
+        ast::Expr::Unary(u) => collect_state_value_reads(ctx, &u.arg, out),
+        ast::Expr::Tpl(t) => {
+            for e in &t.exprs {
+                collect_state_value_reads(ctx, e, out);
+            }
+        }
+        ast::Expr::Call(c) => {
+            if let ast::Callee::Expr(ce) = &c.callee {
+                collect_state_value_reads(ctx, ce, out);
+            }
+            for a in &c.args {
+                collect_state_value_reads(ctx, &a.expr, out);
+            }
+        }
+        ast::Expr::Array(a) => {
+            for el in a.elems.iter().flatten() {
+                collect_state_value_reads(ctx, &el.expr, out);
+            }
+        }
+        ast::Expr::Seq(s) => {
+            for e in &s.exprs {
+                collect_state_value_reads(ctx, e, out);
+            }
+        }
+        ast::Expr::TsNonNull(n) => collect_state_value_reads(ctx, &n.expr, out),
+        ast::Expr::TsAs(a) => collect_state_value_reads(ctx, &a.expr, out),
+        ast::Expr::TsTypeAssertion(a) => collect_state_value_reads(ctx, &a.expr, out),
+        _ => {}
+    }
+}
+
+/// Desugar `widget.animateOpacity(<expr>, dur)` / `.animatePosition(...)`
+/// into an IIFE that runs the initial animation and registers a
+/// `stateOnChange` subscriber per `State` read in the args, so toggling the
+/// state re-fires the animation.
+///
+/// Generated HIR shape (animateOpacity with one state dependency):
+/// ```text
+/// (() => {
+///     const __h = <widget>;
+///     widgetAnimateOpacity(__h, target, dur);       // initial
+///     stateOnChange(state1, (__v) => widgetAnimateOpacity(__h, fresh_target, dur));
+///     return undefined;
+/// })()
+/// ```
+///
+/// Like the reactive-Text desugar (#104), the target expression is re-lowered
+/// for the subscriber body so it reads the *current* state value at fire time.
+fn try_desugar_reactive_animate(
+    ctx: &mut LoweringContext,
+    call: &ast::CallExpr,
+) -> Result<Option<Expr>> {
+    let ast::Callee::Expr(callee_expr) = &call.callee else {
+        return Ok(None);
+    };
+    let ast::Expr::Member(member) = callee_expr.as_ref() else {
+        return Ok(None);
+    };
+    let ast::MemberProp::Ident(prop) = &member.prop else {
+        return Ok(None);
+    };
+    let (method_name, expected_arity) = match prop.sym.as_ref() {
+        "animateOpacity" => ("widgetAnimateOpacity", 2),
+        "animatePosition" => ("widgetAnimatePosition", 3),
+        _ => return Ok(None),
+    };
+    if call.args.iter().any(|a| a.spread.is_some()) {
+        return Ok(None);
+    }
+    if call.args.len() != expected_arity {
+        return Ok(None);
+    }
+
+    // Collect unique state names whose `.value` is read anywhere in the args.
+    // Preserving insertion order keeps subscriber registration deterministic.
+    let mut state_names: Vec<String> = Vec::new();
+    for arg in &call.args {
+        collect_state_value_reads(ctx, &arg.expr, &mut state_names);
+    }
+    if state_names.is_empty() {
+        return Ok(None);
+    }
+
+    // Lower the receiver once; store in an IIFE local so the initial call and
+    // every subscriber share the same widget handle without re-evaluating
+    // side-effectful receiver expressions.
+    let widget_expr = lower_expr(ctx, member.obj.as_ref())?;
+
+    let outer_func_id = ctx.fresh_func();
+    let outer_scope = ctx.enter_scope();
+    let widget_id = ctx.define_local("__perry_anim_widget".to_string(), Type::Any);
+
+    let mut outer_body: Vec<Stmt> = Vec::new();
+    outer_body.push(Stmt::Let {
+        id: widget_id,
+        name: "__perry_anim_widget".to_string(),
+        ty: Type::Any,
+        mutable: false,
+        init: Some(widget_expr),
+    });
+
+    let mut initial_args: Vec<Expr> = Vec::with_capacity(expected_arity + 1);
+    initial_args.push(Expr::LocalGet(widget_id));
+    for a in &call.args {
+        initial_args.push(lower_expr(ctx, &a.expr)?);
+    }
+    outer_body.push(Stmt::Expr(Expr::NativeMethodCall {
+        module: "perry/ui".to_string(),
+        method: method_name.to_string(),
+        object: None,
+        args: initial_args,
+        class_name: None,
+    }));
+
+    for state_name in &state_names {
+        let state_local = ctx.lookup_local(state_name)
+            .ok_or_else(|| anyhow!("reactive animate: state '{}' not in scope", state_name))?;
+
+        let inner_func_id = ctx.fresh_func();
+        let inner_scope = ctx.enter_scope();
+        let v_param_id = ctx.define_local("__v".to_string(), Type::Any);
+        let v_param = Param {
+            id: v_param_id,
+            name: "__v".to_string(),
+            ty: Type::Any,
+            default: None,
+            is_rest: false,
+        };
+
+        let mut fresh_args: Vec<Expr> = Vec::with_capacity(expected_arity + 1);
+        fresh_args.push(Expr::LocalGet(widget_id));
+        for a in &call.args {
+            fresh_args.push(lower_expr(ctx, &a.expr)?);
+        }
+        let animate_call = Expr::NativeMethodCall {
+            module: "perry/ui".to_string(),
+            method: method_name.to_string(),
+            object: None,
+            args: fresh_args,
+            class_name: None,
+        };
+        let inner_body = vec![Stmt::Expr(animate_call)];
+        ctx.exit_scope(inner_scope);
+
+        let mut inner_refs = Vec::new();
+        let mut inner_visited = std::collections::HashSet::new();
+        for stmt in &inner_body {
+            collect_local_refs_stmt(stmt, &mut inner_refs, &mut inner_visited);
+        }
+        let mut inner_captures: Vec<LocalId> = inner_refs.into_iter()
+            .filter(|id| *id != v_param_id)
+            .collect();
+        inner_captures.sort();
+        inner_captures.dedup();
+        inner_captures = ctx.filter_module_level_captures(inner_captures);
+
+        let inner_closure = Expr::Closure {
+            func_id: inner_func_id,
+            params: vec![v_param],
+            return_type: Type::Any,
+            body: inner_body,
+            captures: inner_captures,
+            mutable_captures: Vec::new(),
+            captures_this: false,
+            enclosing_class: None,
+            is_async: false,
+        };
+
+        outer_body.push(Stmt::Expr(Expr::NativeMethodCall {
+            module: "perry/ui".to_string(),
+            method: "stateOnChange".to_string(),
+            object: None,
+            args: vec![Expr::LocalGet(state_local), inner_closure],
+            class_name: None,
+        }));
+    }
+
+    outer_body.push(Stmt::Return(Some(Expr::Undefined)));
+    ctx.exit_scope(outer_scope);
+
+    let mut outer_refs = Vec::new();
+    let mut outer_visited = std::collections::HashSet::new();
+    for stmt in &outer_body {
+        collect_local_refs_stmt(stmt, &mut outer_refs, &mut outer_visited);
+    }
+    let mut outer_captures: Vec<LocalId> = outer_refs.into_iter()
+        .filter(|id| *id != widget_id)
+        .collect();
+    outer_captures.sort();
+    outer_captures.dedup();
+    outer_captures = ctx.filter_module_level_captures(outer_captures);
+
+    let outer_closure = Expr::Closure {
+        func_id: outer_func_id,
+        params: vec![],
+        return_type: Type::Any,
+        body: outer_body,
+        captures: outer_captures,
+        mutable_captures: Vec::new(),
+        captures_this: false,
+        enclosing_class: None,
+        is_async: false,
+    };
+
+    Ok(Some(Expr::Call {
+        callee: Box::new(outer_closure),
+        args: vec![],
+        type_args: vec![],
+    }))
+}
 
 /// Try to lower a Widget({...}) call from perry/widget into a WidgetDecl.
 /// Returns Some(WidgetDecl) if this is a widget declaration, None otherwise.

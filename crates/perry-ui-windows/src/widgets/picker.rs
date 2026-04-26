@@ -23,7 +23,7 @@ fn str_from_header(ptr: *const u8) -> &'static str {
     }
     unsafe {
         let header = ptr as *const perry_runtime::string::StringHeader;
-        let len = (*header).length as usize;
+        let len = (*header).byte_len as usize;
         let data = ptr.add(std::mem::size_of::<perry_runtime::string::StringHeader>());
         std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
     }
@@ -73,7 +73,13 @@ pub fn create(label_ptr: *const u8, on_change: f64, _style: i64) -> i64 {
                         | WS_VSCROLL.0,
                 ),
                 0, 0, 200, 200, // height includes dropdown area
-                None,
+                // WS_CHILD requires a parent HWND — the main app window
+                // doesn't exist yet when widgets are constructed during
+                // the body-builder closure, so use the parking window
+                // (same approach as button/textfield/toggle/slider/etc).
+                // layout::relayout() moves the widget to its real parent
+                // once the App() container hierarchy is resolved.
+                super::get_parking_hwnd(),
                 HMENU(control_id as *mut _),
                 HINSTANCE::from(hinstance),
                 None,

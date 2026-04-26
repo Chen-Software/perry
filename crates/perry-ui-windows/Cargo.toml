@@ -8,8 +8,12 @@ crate-type = ["rlib", "staticlib"]
 
 [dependencies]
 perry-ui = { path = "../perry-ui" }
+perry-ui-testkit = { workspace = true }
 perry-runtime = { path = "../perry-runtime", default-features = false, features = ["stdlib"] }
 libc = "0.2"
+# Proper PNG encoder (deflate). The old inline encoder wrote stored blocks
+# → 2.7 MB baseline for a 900×788 window. With real compression: ~50 KB.
+png = "0.17"
 
 [features]
 geisterhand = []

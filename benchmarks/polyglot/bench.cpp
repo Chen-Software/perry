@@ -108,6 +108,31 @@ void bench_accumulate() {
     printf("  checksum: %.0f\n", sum);
 }
 
+// Data-dependent loop with sequential multiply-carry. Sibling to
+// bench_loop_overhead but genuinely non-foldable: array reads + a
+// multiplicative carry through `sum` defeat reassoc, IV-simplify, and
+// the vectorizer. See bench.rs for the asm-verification dump (the
+// generated loop body is a 4-instruction scalar fmul/fadd chain with
+// two array loads).
+void bench_loop_data_dependent() {
+    constexpr int N = 64;
+    constexpr long long ITERATIONS = 100000000LL;
+    unsigned long long seed = 42;
+    double x[N];
+    for (int i = 0; i < N; i++) {
+        seed = (seed * 1103515245ULL + 12345ULL) & 0x7FFFFFFFULL;
+        // [0.5, 1.0): contracts to a bounded fixed point. See bench.rs.
+        x[i] = 0.5 + (static_cast<double>(seed) / 2147483647.0) * 0.5;
+    }
+    auto start = Clock::now();
+    double sum = 1.0;
+    for (long long i = 0; i < ITERATIONS; i++) {
+        sum = sum * x[i & (N - 1)] + x[(i * 7) & (N - 1)];
+    }
+    printf("loop_data_dependent:%lld\n", elapsed_ms(start));
+    printf("  checksum: %.6f\n", sum);
+}
+
 int main() {
     bench_fibonacci();
     bench_loop_overhead();
@@ -117,5 +142,6 @@ int main() {
     bench_object_create();
     bench_nested_loops();
     bench_accumulate();
+    bench_loop_data_dependent();
     return 0;
 }

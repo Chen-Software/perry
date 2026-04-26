@@ -97,6 +97,28 @@ def bench_accumulate():
     print(f"  checksum: {sum_val:.0f}")
 
 
+def bench_loop_data_dependent():
+    # Data-dependent loop with sequential multiply-carry. Sibling to
+    # bench_loop_overhead but genuinely non-foldable. Python is its own
+    # interpreter, so no asm-level verification applies; the kernel is
+    # identical to the compiled-language versions for fairness.
+    N = 64
+    ITERATIONS = 100_000_000
+    seed = 42
+    x = [0.0] * N
+    for i in range(N):
+        seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF
+        # [0.5, 1.0): contracts to a bounded fixed point. See bench.rs.
+        x[i] = 0.5 + (seed / 2_147_483_647.0) * 0.5
+    start = time.monotonic()
+    sum_val = 1.0
+    for i in range(ITERATIONS):
+        sum_val = sum_val * x[i & (N - 1)] + x[(i * 7) & (N - 1)]
+    elapsed = int((time.monotonic() - start) * 1000)
+    print(f"loop_data_dependent:{elapsed}")
+    print(f"  checksum: {sum_val:.6f}")
+
+
 if __name__ == "__main__":
     bench_fibonacci()
     bench_loop_overhead()
@@ -106,3 +128,4 @@ if __name__ == "__main__":
     bench_object_create()
     bench_nested_loops()
     bench_accumulate()
+    bench_loop_data_dependent()

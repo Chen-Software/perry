@@ -830,13 +830,13 @@ pub extern "C" fn perry_ui_widget_set_on_double_click(handle: i64, callback: f64
 // =============================================================================
 
 #[no_mangle]
-pub extern "C" fn perry_ui_widget_animate_opacity(handle: i64, target: f64, duration_ms: f64) {
-    widgets::animate_opacity(handle, target, duration_ms);
+pub extern "C" fn perry_ui_widget_animate_opacity(handle: i64, target: f64, duration_secs: f64) {
+    widgets::animate_opacity(handle, target, duration_secs);
 }
 
 #[no_mangle]
-pub extern "C" fn perry_ui_widget_animate_position(handle: i64, dx: f64, dy: f64, duration_ms: f64) {
-    widgets::animate_position(handle, dx, dy, duration_ms);
+pub extern "C" fn perry_ui_widget_animate_position(handle: i64, dx: f64, dy: f64, duration_secs: f64) {
+    widgets::animate_position(handle, dx, dy, duration_secs);
 }
 
 // =============================================================================
@@ -966,6 +966,70 @@ pub extern "C" fn perry_system_keychain_delete(key_ptr: i64) {
 #[no_mangle]
 pub extern "C" fn perry_system_notification_send(title_ptr: i64, body_ptr: i64) {
     system::notification_send(title_ptr as *const u8, body_ptr as *const u8);
+}
+
+/// Real impl (#95): kick off FCM token fetch + register the JS closure that
+/// fires when FCM hands us a registration token. Requires a real
+/// `google-services.json` to actually work — the placeholder bundled with
+/// the template lets the build succeed but the SDK rejects it at runtime.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_register_remote(callback: f64) {
+    system::notification_register_remote(callback);
+}
+
+/// Real impl (#95): register the JS closure that fires for foreground FCM
+/// payloads. `PerryFirebaseMessagingService.onMessageReceived` forwards
+/// the JSON-serialized RemoteMessage to native via JNI.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_receive(callback: f64) {
+    system::notification_on_receive(callback);
+}
+
+/// Schedule a fire-after-N-seconds notification via AlarmManager (#96).
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_interval(
+    id_ptr: i64, title_ptr: i64, body_ptr: i64, seconds: f64, repeats: f64,
+) {
+    system::notification_schedule_interval(
+        id_ptr as *const u8, title_ptr as *const u8, body_ptr as *const u8,
+        seconds, repeats,
+    );
+}
+
+/// Schedule a fire-at-wallclock-ms notification via AlarmManager (#96).
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_calendar(
+    id_ptr: i64, title_ptr: i64, body_ptr: i64, timestamp_ms: f64,
+) {
+    system::notification_schedule_calendar(
+        id_ptr as *const u8, title_ptr as *const u8, body_ptr as *const u8,
+        timestamp_ms,
+    );
+}
+
+/// Logged no-op — Geofencing API requires `FUSED_LOCATION_PROVIDER` + a
+/// runtime `ACCESS_FINE_LOCATION` grant. Deferred to #96 follow-up.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_location(
+    id_ptr: i64, title_ptr: i64, body_ptr: i64, lat: f64, lon: f64, radius: f64,
+) {
+    system::notification_schedule_location(
+        id_ptr as *const u8, title_ptr as *const u8, body_ptr as *const u8,
+        lat, lon, radius,
+    );
+}
+
+/// Cancel a scheduled or already-displayed notification by id (#96).
+#[no_mangle]
+pub extern "C" fn perry_system_notification_cancel(id_ptr: i64) {
+    system::notification_cancel(id_ptr as *const u8);
+}
+
+/// Real impl (#97): register the tap callback so `PerryNotificationReceiver`
+/// can dispatch back to it when the user taps a delivered notification.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_tap(callback: f64) {
+    system::notification_on_tap(callback);
 }
 
 #[no_mangle]

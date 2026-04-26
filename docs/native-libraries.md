@@ -498,7 +498,7 @@ const decompressedAsync = await zlib.gunzip(compressedAsync);
 import fetch from 'node-fetch';
 
 // Simple GET request
-const response = await fetch('https://api.example.com/data');
+const response = await fetch('https://jsonplaceholder.typicode.com/posts/1');
 const text = await response.text();
 const json = await response.json();
 
@@ -508,7 +508,7 @@ if (response.ok) {
 }
 
 // Convenience function for text
-const text2 = await fetch.fetchText('https://example.com/page');
+const text2 = await fetch.fetchText('https://jsonplaceholder.typicode.com/posts/1');
 ```
 
 ### Response Properties
@@ -923,22 +923,22 @@ const dayEnd = endOfDay(new Date());
 import axios from 'axios';
 
 // Simple requests
-const response = await axios.get('https://api.example.com/data');
-const postResponse = await axios.post('https://api.example.com/data', { name: 'Alice' });
-const putResponse = await axios.put('https://api.example.com/data/1', { name: 'Bob' });
-const deleteResponse = await axios.delete('https://api.example.com/data/1');
+const response = await axios.get('https://jsonplaceholder.typicode.com/posts/1');
+const postResponse = await axios.post('https://jsonplaceholder.typicode.com/posts', { title: 'hello' });
+const putResponse = await axios.put('https://jsonplaceholder.typicode.com/posts/1', { title: 'updated' });
+const deleteResponse = await axios.delete('https://jsonplaceholder.typicode.com/posts/1');
 
 // Full request with config
 const response2 = await axios.request({
   method: 'POST',
-  url: 'https://api.example.com/data',
+  url: 'https://jsonplaceholder.typicode.com/posts',
   headers: { 'Content-Type': 'application/json' },
-  data: { name: 'Alice' }
+  data: { title: 'hello' }
 });
 
 // Create instance with defaults
 const api = axios.create({
-  baseURL: 'https://api.example.com',
+  baseURL: 'https://jsonplaceholder.typicode.com',
   timeout: 5000,
   headers: { 'Authorization': 'Bearer token' }
 });

@@ -4,7 +4,7 @@ Perry natively implements HTTP servers, clients, and WebSocket support.
 
 ## Fastify Server
 
-```typescript
+```typescript,no-test
 import fastify from "fastify";
 
 const app = fastify();
@@ -33,27 +33,27 @@ Perry's Fastify implementation is API-compatible with the npm package. Routes, r
 
 ## Fetch API
 
-```typescript
+```typescript,no-test
 // GET request
-const response = await fetch("https://api.example.com/data");
+const response = await fetch("https://jsonplaceholder.typicode.com/posts/1");
 const data = await response.json();
 
 // POST request
-const result = await fetch("https://api.example.com/data", {
+const result = await fetch("https://jsonplaceholder.typicode.com/posts", {
   method: "POST",
   headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ key: "value" }),
+  body: JSON.stringify({ title: "hello", body: "world", userId: 1 }),
 });
 ```
 
 ## Axios
 
-```typescript
+```typescript,no-test
 import axios from "axios";
 
-const { data } = await axios.get("https://api.example.com/users");
+const { data } = await axios.get("https://jsonplaceholder.typicode.com/users/1");
 
-const response = await axios.post("https://api.example.com/users", {
+const response = await axios.post("https://jsonplaceholder.typicode.com/users", {
   name: "Perry",
   email: "perry@example.com",
 });
@@ -61,7 +61,7 @@ const response = await axios.post("https://api.example.com/users", {
 
 ## WebSocket
 
-```typescript
+```typescript,no-test
 import { WebSocket } from "ws";
 
 const ws = new WebSocket("ws://localhost:8080");

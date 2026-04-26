@@ -15,7 +15,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 #[cfg(not(target_os = "ios"))]
 use crate::common::async_bridge::{queue_promise_resolution, spawn};
-use crate::common::{register_handle, get_handle_mut, Handle};
+use crate::common::{register_handle, get_handle_mut, for_each_handle_of, Handle};
 
 fn ws_file_log(msg: &str) {
     use std::io::Write;
@@ -50,6 +50,61 @@ lazy_static::lazy_static! {
     /// Pending WebSocket events to be processed on the main thread
     static ref WS_PENDING_EVENTS: Mutex<Vec<PendingWsEvent>> = Mutex::new(Vec::new());
 }
+
+#[cfg(not(target_os = "ios"))]
+static WS_GC_REGISTERED: std::sync::Once = std::sync::Once::new();
+
+/// Register the ws GC root scanner exactly once. Safe to call from any
+/// ws FFI entry point on the main thread. Mirrors `net::ensure_gc_scanner_registered`
+/// (issue #35) — user closures passed to `.on(event, cb)` are stored in
+/// WS_CLIENT_LISTENERS (for client sockets) or inside a WsServerHandle
+/// (for servers); neither is visible to the GC mark phase without this
+/// scanner, so a malloc-triggered sweep between registration and
+/// dispatch would free the closure and the next event would call freed
+/// memory.
+#[cfg(not(target_os = "ios"))]
+fn ensure_gc_scanner_registered() {
+    WS_GC_REGISTERED.call_once(|| {
+        perry_runtime::gc::gc_register_root_scanner(scan_ws_roots);
+    });
+}
+
+/// GC root scanner for WebSocket event listener closures. Covers both
+/// the global `WS_CLIENT_LISTENERS` map (for `WebSocket` clients) and
+/// every `WsServerHandle` currently in the handle registry (for
+/// `WebSocketServer` instances).
+#[cfg(not(target_os = "ios"))]
+fn scan_ws_roots(mark: &mut dyn FnMut(f64)) {
+    let mark_cb = |cb: i64, mark: &mut dyn FnMut(f64)| {
+        if cb != 0 {
+            let boxed = f64::from_bits(
+                0x7FFD_0000_0000_0000 | (cb as u64 & 0x0000_FFFF_FFFF_FFFF),
+            );
+            mark(boxed);
+        }
+    };
+
+    if let Ok(per_client) = WS_CLIENT_LISTENERS.lock() {
+        for client in per_client.values() {
+            for cb_vec in client.listeners.values() {
+                for &cb in cb_vec.iter() {
+                    mark_cb(cb, mark);
+                }
+            }
+        }
+    }
+
+    for_each_handle_of::<WsServerHandle, _>(|server| {
+        for cb_vec in server.listeners.values() {
+            for &cb in cb_vec.iter() {
+                mark_cb(cb, mark);
+            }
+        }
+    });
+}
+
+/// Number of active WS servers — keeps the event loop alive.
+static WS_ACTIVE_SERVERS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 #[cfg(not(target_os = "ios"))]
 struct WsConnection {
@@ -98,12 +153,25 @@ enum PendingWsEvent {
     Listening(Handle),
 }
 
+/// Push a WS event and wake the main-thread pump (issue #84).
+///
+/// Every producer in this file runs inside a tokio-spawned task or
+/// upgrade handler, so direct `.push()` without a notify would leave the
+/// event invisible to the main thread until the next `js_wait_for_event`
+/// timeout (old code: 10 ms). Wrapping here covers all 18 call sites at
+/// once.
+#[cfg(not(target_os = "ios"))]
+fn push_ws_event(ev: PendingWsEvent) {
+    WS_PENDING_EVENTS.lock().unwrap().push(ev);
+    perry_runtime::event_pump::js_notify_main_thread();
+}
+
 /// Helper to extract string from StringHeader pointer
 unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
     if ptr.is_null() {
         return None;
     }
-    let len = (*ptr).length as usize;
+    let len = (*ptr).byte_len as usize;
     let data_ptr = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data_ptr, len);
     std::str::from_utf8(bytes).ok().map(|s| s.to_string())
@@ -114,6 +182,7 @@ unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
 #[cfg(not(target_os = "ios"))]
 #[no_mangle]
 pub unsafe extern "C" fn js_ws_connect(url_ptr: *const StringHeader) -> *mut perry_runtime::Promise {
+    ensure_gc_scanner_registered();
     #[cfg(target_os = "android")]
     {
         extern "C" { fn __android_log_print(prio: i32, tag: *const u8, fmt: *const u8, ...) -> i32; }
@@ -189,7 +258,7 @@ pub unsafe extern "C" fn js_ws_connect(url_ptr: *const StringHeader) -> *mut per
                                             .map(|l| l.listeners.get("message").map(|v| !v.is_empty()).unwrap_or(false))
                                             .unwrap_or(false);
                                         if has_listeners {
-                                            WS_PENDING_EVENTS.lock().unwrap().push(
+                                            push_ws_event(
                                                 PendingWsEvent::Message(ws_id_io, text)
                                             );
                                         } else {
@@ -205,7 +274,7 @@ pub unsafe extern "C" fn js_ws_connect(url_ptr: *const StringHeader) -> *mut per
                                         if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_io) {
                                             conn.is_open = false;
                                         }
-                                        WS_PENDING_EVENTS.lock().unwrap().push(
+                                        push_ws_event(
                                             PendingWsEvent::Close(ws_id_io, code, reason)
                                         );
                                         break;
@@ -214,10 +283,10 @@ pub unsafe extern "C" fn js_ws_connect(url_ptr: *const StringHeader) -> *mut per
                                         if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_io) {
                                             conn.is_open = false;
                                         }
-                                        WS_PENDING_EVENTS.lock().unwrap().push(
+                                        push_ws_event(
                                             PendingWsEvent::Error(ws_id_io, format!("{}", e))
                                         );
-                                        WS_PENDING_EVENTS.lock().unwrap().push(
+                                        push_ws_event(
                                             PendingWsEvent::Close(ws_id_io, 1006, String::new())
                                         );
                                         break;
@@ -287,6 +356,7 @@ pub unsafe extern "C" fn js_ws_connect(url_ptr: *const StringHeader) -> *mut per
 #[cfg(not(target_os = "ios"))]
 #[no_mangle]
 pub unsafe extern "C" fn js_ws_connect_start(url_nanboxed: f64) -> f64 {
+    ensure_gc_scanner_registered();
     #[cfg(target_os = "android")]
     {
         extern "C" { fn __android_log_print(prio: i32, tag: *const u8, fmt: *const u8, ...) -> i32; }
@@ -343,7 +413,7 @@ pub unsafe extern "C" fn js_ws_connect_start(url_nanboxed: f64) -> f64 {
                                             .map(|l| l.listeners.get("message").map(|v| !v.is_empty()).unwrap_or(false))
                                             .unwrap_or(false);
                                         if has_listeners {
-                                            WS_PENDING_EVENTS.lock().unwrap().push(
+                                            push_ws_event(
                                                 PendingWsEvent::Message(ws_id_io, text)
                                             );
                                         } else {
@@ -359,7 +429,7 @@ pub unsafe extern "C" fn js_ws_connect_start(url_nanboxed: f64) -> f64 {
                                         if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_io) {
                                             conn.is_open = false;
                                         }
-                                        WS_PENDING_EVENTS.lock().unwrap().push(
+                                        push_ws_event(
                                             PendingWsEvent::Close(ws_id_io, code, reason)
                                         );
                                         break;
@@ -368,10 +438,10 @@ pub unsafe extern "C" fn js_ws_connect_start(url_nanboxed: f64) -> f64 {
                                         if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_io) {
                                             conn.is_open = false;
                                         }
-                                        WS_PENDING_EVENTS.lock().unwrap().push(
+                                        push_ws_event(
                                             PendingWsEvent::Error(ws_id_io, format!("{}", e))
                                         );
-                                        WS_PENDING_EVENTS.lock().unwrap().push(
+                                        push_ws_event(
                                             PendingWsEvent::Close(ws_id_io, 1006, String::new())
                                         );
                                         break;
@@ -407,7 +477,7 @@ pub unsafe extern "C" fn js_ws_connect_start(url_nanboxed: f64) -> f64 {
                 });
             }
             Err(e) => {
-                WS_PENDING_EVENTS.lock().unwrap().push(
+                push_ws_event(
                     PendingWsEvent::Error(ws_id, format!("WebSocket connection error: {}", e))
                 );
             }
@@ -495,6 +565,21 @@ pub unsafe extern "C" fn js_ws_close(handle: i64) {
 #[no_mangle]
 pub unsafe extern "C" fn js_ws_close(handle: i64) {
     unsafe { perry_native_ws_close(handle as f64); }
+}
+
+/// Server-side bridges: `sendToClient(handle, msg)` / `closeClient(handle)`.
+/// `ws.on('connection', cb)` delivers the client handle as a plain f64
+/// number (see `PendingWsEvent::Connection` dispatch — `client_ws_id as f64`,
+/// not NaN-boxed), so the codegen passes f64 here rather than the i64 form
+/// `js_ws_send`/`js_ws_close` use for receiver-style `ws.send(...)` calls.
+#[no_mangle]
+pub unsafe extern "C" fn js_ws_send_to_client(handle_f64: f64, message_ptr: *const StringHeader) {
+    js_ws_send(handle_f64 as i64, message_ptr);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_ws_close_client(handle_f64: f64) {
+    js_ws_close(handle_f64 as i64);
 }
 
 /// Check if WebSocket is open
@@ -655,6 +740,7 @@ pub unsafe extern "C" fn js_ws_on(
     event_name_ptr: *const StringHeader,
     callback_ptr: i64,
 ) -> i64 {
+    ensure_gc_scanner_registered();
     let event_name = match string_from_header(event_name_ptr) {
         Some(name) => name,
         None => {
@@ -697,6 +783,7 @@ pub unsafe extern "C" fn js_ws_on(
 #[cfg(not(target_os = "ios"))]
 #[no_mangle]
 pub unsafe extern "C" fn js_ws_server_new(opts_f64: f64) -> Handle {
+    ensure_gc_scanner_registered();
     // Extract port from options object
     let port = {
         let opts_bits = opts_f64.to_bits();
@@ -737,6 +824,11 @@ pub unsafe extern "C" fn js_ws_server_new(opts_f64: f64) -> Handle {
         client_ids: Vec::new(),
         shutdown_tx: Some(shutdown_tx),
     });
+    WS_ACTIVE_SERVERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // WS dispatches message/connection events to user closures from
+    // tokio worker threads, whose stacks the main-thread GC can't scan.
+    // Mark GC-unsafe for as long as the server is running (issue #31).
+    perry_runtime::gc::js_gc_enter_unsafe_zone();
     // Spawn the accept loop
     let handle_id = server_handle;
     spawn(async move {
@@ -744,7 +836,7 @@ pub unsafe extern "C" fn js_ws_server_new(opts_f64: f64) -> Handle {
         let listener = match tokio::net::TcpListener::bind(&addr).await {
             Ok(l) => l,
             Err(e) => {
-                WS_PENDING_EVENTS.lock().unwrap().push(
+                push_ws_event(
                     PendingWsEvent::ServerError(handle_id, format!("WebSocketServer bind error: {}", e))
                 );
                 return;
@@ -752,7 +844,7 @@ pub unsafe extern "C" fn js_ws_server_new(opts_f64: f64) -> Handle {
         };
 
         // Queue 'listening' event
-        WS_PENDING_EVENTS.lock().unwrap().push(
+        push_ws_event(
             PendingWsEvent::Listening(handle_id)
         );
 
@@ -797,7 +889,7 @@ pub unsafe extern "C" fn js_ws_server_new(opts_f64: f64) -> Handle {
                                     WS_CLIENT_PARENT_SERVER.lock().unwrap().insert(ws_id, handle_id);
 
                                     // Queue 'connection' event
-                                    WS_PENDING_EVENTS.lock().unwrap().push(
+                                    push_ws_event(
                                         PendingWsEvent::Connection(handle_id, ws_id)
                                     );
 
@@ -811,13 +903,13 @@ pub unsafe extern "C" fn js_ws_server_new(opts_f64: f64) -> Handle {
                                                     match msg_result {
                                                         Some(Ok(Message::Text(text))) => {
                                                             ws_file_log(&format!("[WS-srv-io] id={} recv len={}", ws_id_io, text.len()));
-                                                            WS_PENDING_EVENTS.lock().unwrap().push(
+                                                            push_ws_event(
                                                                 PendingWsEvent::Message(ws_id_io, text)
                                                             );
                                                         }
                                                         Some(Ok(Message::Binary(data))) => {
                                                             let text = String::from_utf8_lossy(&data).to_string();
-                                                            WS_PENDING_EVENTS.lock().unwrap().push(
+                                                            push_ws_event(
                                                                 PendingWsEvent::Message(ws_id_io, text)
                                                             );
                                                         }
@@ -828,7 +920,7 @@ pub unsafe extern "C" fn js_ws_server_new(opts_f64: f64) -> Handle {
                                                             if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_io) {
                                                                 conn.is_open = false;
                                                             }
-                                                            WS_PENDING_EVENTS.lock().unwrap().push(
+                                                            push_ws_event(
                                                                 PendingWsEvent::Close(ws_id_io, code, reason)
                                                             );
                                                             break;
@@ -837,10 +929,10 @@ pub unsafe extern "C" fn js_ws_server_new(opts_f64: f64) -> Handle {
                                                             if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_io) {
                                                                 conn.is_open = false;
                                                             }
-                                                            WS_PENDING_EVENTS.lock().unwrap().push(
+                                                            push_ws_event(
                                                                 PendingWsEvent::Error(ws_id_io, format!("{}", e))
                                                             );
-                                                            WS_PENDING_EVENTS.lock().unwrap().push(
+                                                            push_ws_event(
                                                                 PendingWsEvent::Close(ws_id_io, 1006, String::new())
                                                             );
                                                             break;
@@ -884,14 +976,14 @@ pub unsafe extern "C" fn js_ws_server_new(opts_f64: f64) -> Handle {
                                     });
                                 }
                                 Err(e) => {
-                                    WS_PENDING_EVENTS.lock().unwrap().push(
+                                    push_ws_event(
                                         PendingWsEvent::ServerError(handle_id, format!("WebSocket accept error: {}", e))
                                     );
                                 }
                             }
                         }
                         Err(e) => {
-                            WS_PENDING_EVENTS.lock().unwrap().push(
+                            push_ws_event(
                                 PendingWsEvent::ServerError(handle_id, format!("TCP accept error: {}", e))
                             );
                         }
@@ -913,6 +1005,8 @@ pub unsafe extern "C" fn js_ws_server_new(opts_f64: f64) -> Handle {
 #[cfg(not(target_os = "ios"))]
 #[no_mangle]
 pub unsafe extern "C" fn js_ws_server_close(handle: i64) {
+    WS_ACTIVE_SERVERS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    perry_runtime::gc::js_gc_exit_unsafe_zone();
     if let Some(server) = get_handle_mut::<WsServerHandle>(handle) {
         server.is_listening = false;
 
@@ -930,6 +1024,32 @@ pub unsafe extern "C" fn js_ws_server_close(handle: i64) {
             }
         }
     }
+}
+
+/// Returns 1 if there are active WS servers or connections that need
+/// the event loop to keep running.
+#[cfg(not(target_os = "ios"))]
+pub fn js_ws_has_active_handles() -> i32 {
+    // Check the active-server counter (set in js_ws_server_new)
+    if WS_ACTIVE_SERVERS.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+        return 1;
+    }
+    // Check for active connections
+    let conns = WS_CONNECTIONS.lock().unwrap();
+    if !conns.is_empty() {
+        return 1;
+    }
+    // Check for pending events
+    let pending = WS_PENDING_EVENTS.lock().unwrap();
+    if !pending.is_empty() {
+        return 1;
+    }
+    0
+}
+
+#[cfg(target_os = "ios")]
+pub fn js_ws_has_active_handles() -> i32 {
+    0
 }
 
 /// Process pending WebSocket events (called from js_stdlib_process_pending)

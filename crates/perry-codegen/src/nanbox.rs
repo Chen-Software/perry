@@ -31,6 +31,7 @@ pub const POINTER_TAG_I64: &str   = "9222527611924643840";
 pub const POINTER_MASK_I64: &str  = "281474976710655";
 pub const INT32_TAG_I64: &str     = "9222809086901354496";
 pub const STRING_TAG_I64: &str    = "9223090561878065152";
+pub const BIGINT_TAG_I64: &str    = "9221683186994511872";
 
 /// Format a `u64` as a signed LLVM i64 literal (LLVM IR integer literals are signed).
 pub fn i64_literal(v: u64) -> String {
@@ -79,6 +80,7 @@ mod tests {
         assert_eq!(i64_literal(POINTER_MASK), POINTER_MASK_I64);
         assert_eq!(i64_literal(INT32_TAG), INT32_TAG_I64);
         assert_eq!(i64_literal(STRING_TAG), STRING_TAG_I64);
+        assert_eq!(i64_literal(BIGINT_TAG), BIGINT_TAG_I64);
     }
 
     #[test]

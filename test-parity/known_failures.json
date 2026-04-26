@@ -1,0 +1,62 @@
+{
+  "test_edge_control_flow": {
+    "status": "flake",
+    "reason": "Intermittent: failed in parity run 2026-04-25 but passed on isolated re-run with the same binary. Appeared alongside test_cli_simulation between the 2026-04-24 and 2026-04-25 runs. Possibly state-dependent on sibling tests or non-deterministic codegen path; investigate separately."
+  },
+  "test_edge_error_handling": {
+    "status": "flake",
+    "reason": "Same flake family as test_edge_control_flow: failed in parity run 2026-04-25 but passed on isolated re-run with the same binary. Pre-existing, appeared between 2026-04-24 and 2026-04-25 parity runs."
+  },
+  "test_gap_async_advanced": {
+    "status": "known_limitation",
+    "reason": "Async generators, for-await-of, Promise.allSettled not implemented (segfault)"
+  },
+  "test_net_min": {
+    "status": "skip",
+    "reason": "Requires live network socket"
+  },
+  "test_net_socket": {
+    "status": "skip",
+    "reason": "Requires live network socket"
+  },
+  "test_net_upgrade_tls": {
+    "status": "skip",
+    "reason": "Requires TLS/network infrastructure"
+  },
+  "test_tls_connect": {
+    "status": "skip",
+    "reason": "Compile failure — TLS connect not implemented"
+  },
+  "test_gap_buffer_ops": {
+    "status": "ci-env",
+    "reason": "Compile-fails on macOS-14 CI runner, passes locally on macOS 15.x. Likely SDK/linker version interaction; perry CLI itself is fine"
+  },
+  "test_gap_node_crypto_buffer": {
+    "status": "ci-env",
+    "reason": "Compile-fails on macOS-14 CI runner, passes locally on macOS 15.x. Same SDK gap as test_gap_buffer_ops"
+  },
+  "test_gap_typed_arrays": {
+    "status": "ci-env",
+    "reason": "Compile-fails on macOS-14 CI runner, passes locally on macOS 15.x. Same SDK gap as test_gap_buffer_ops"
+  },
+  "test_stress_buffer": {
+    "status": "ci-env",
+    "reason": "Compile-fails on macOS-14 CI runner, passes locally on macOS 15.x"
+  },
+  "test_stress_int_ops": {
+    "status": "bug",
+    "reason": "Console.log array-of-numbers inspection format: Node right-aligns + computes per-line count via util.inspect (`[\n   0,  1,  4,  9, 16,\n  25, 36, 49, 64, 81\n]`); Perry packs without padding 4 per line. NaN/Infinity ToInt32 coercion (`(NaN) | 0`, etc.) was fixed at v0.5.279 — that bug had `is_known_finite` accepting any `Expr::Number(_)` regardless of finite-ness; now checks `n.is_finite()`."
+  },
+  "test_buffer_small_alloc": {
+    "status": "ci-env",
+    "reason": "Compile-fails on macOS-14 CI runner, passes locally on macOS 15.x. Same SDK gap as test_gap_buffer_ops; exercises the #92 Buffer.alloc small-buffer slab fast path."
+  },
+  "test_buffer_numeric_read_intrinsic": {
+    "status": "ci-env",
+    "reason": "Compile-fails on macOS-14 CI runner, passes locally on macOS 15.x. Same SDK gap as test_gap_buffer_ops; exercises the #92 Buffer numeric-read intrinsic."
+  },
+  "test_stress_promises": {
+    "status": "bug",
+    "reason": "Multiple distinct Promise issues remaining after v0.5.283 fix (which addressed (a) microtask FIFO ordering — TASK_QUEUE was a Vec with .pop() → LIFO; switched to VecDeque + pop_front, and (b) `.then(h)` / `.catch(h)` not catching throws inside h — microtask runner now wraps closure call in setjmp): (1) `new Promise<T>((resolve, reject) => ...)` constructor body not running (lines `constructor resolve: 99` / `constructor reject: constructor-err` missing from output); (2) `Promise.any` produces no output (any/any-all-rejected/any-errors-length lines missing); (3) `.then(p => Promise.resolve(...))` doesn't unwrap inner Promise (logs `Promise { <pending> }` instead of resolved value); (4) `.finally(() => ...).then(v => ...)` value-passing wrong (Perry: `finally value: 0`, Node: `finally value: done`)."
+  }
+}

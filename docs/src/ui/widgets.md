@@ -1,285 +1,175 @@
 # Widgets
 
 Perry provides native widgets that map to each platform's native controls.
+Every example on this page is a real runnable program verified by CI
+(`scripts/run_doc_tests.sh`) — the snippet you read is the same source that's
+compiled and launched.
+
+The widget API is **free functions**, not methods. A widget is a 64-bit
+opaque handle; you pass it into helpers like `textSetFontSize(widget, 18)`
+rather than calling `widget.setFontSize(18)`. That's the only shape perry/ui
+supports — no fluent chain, no prototype methods.
 
 ## Text
 
 Displays read-only text.
 
 ```typescript
-import { Text } from "perry/ui";
-
-const label = Text("Hello, World!");
-label.setFontSize(18);
-label.setColor("#333333");
-label.setFontFamily("Menlo");
+{{#include ../../examples/ui/widgets/text.ts}}
 ```
 
-**Methods:**
-- `setText(text: string)` — Update the text content
-- `setFontSize(size: number)` — Set font size in points
-- `setColor(hex: string)` — Set text color (hex string)
-- `setFontFamily(family: string)` — Set font family (e.g., `"Menlo"` for monospaced)
-- `setAccessibilityLabel(label: string)` — Set accessibility label
+Color is RGBA with each channel in `[0.0, 1.0]` — divide a hex byte by 255
+(`0x33 / 255 ≈ 0.2`).
 
-Text widgets inside template literals with `state.value` update automatically:
+**Helpers:** `textSetString`, `textSetFontSize`, `textSetFontWeight`,
+`textSetFontFamily`, `textSetColor`, `textSetWraps`, `textSetSelectable`.
 
-```typescript
-const count = State(0);
-Text(`Count: ${count.value}`); // Updates when count changes
-```
+Text widgets inside template literals with `state.value` update automatically
+— perry detects the state read and rewires the widget to re-render on change.
+See [State Management](state.md).
 
 ## Button
 
 A clickable button.
 
 ```typescript
-import { Button } from "perry/ui";
-
-const btn = Button("Click Me", () => {
-  console.log("Clicked!");
-});
-btn.setCornerRadius(8);
-btn.setBackgroundColor("#007AFF");
+{{#include ../../examples/ui/widgets/button.ts}}
 ```
 
-**Methods:**
-- `setOnClick(callback: () => void)` — Set click handler
-- `setImage(sfSymbolName: string)` — Set SF Symbol icon (macOS/iOS)
-- `setContentTintColor(hex: string)` — Set tint color
-- `setImagePosition(position: number)` — Set image position relative to text
-- `setEnabled(enabled: boolean)` — Enable/disable the button
-- `setAccessibilityLabel(label: string)` — Set accessibility label
+**Helpers:** `buttonSetTitle`, `buttonSetBordered`, `buttonSetImage`
+(SF Symbol name on macOS/iOS), `buttonSetImagePosition`,
+`buttonSetContentTintColor`, `buttonSetTextColor`, `widgetSetEnabled`.
 
 ## TextField
 
-An editable text input.
+An editable single-line text input.
 
 ```typescript
-import { TextField, State } from "perry/ui";
-
-const text = State("");
-const field = TextField(text, "Placeholder...");
+{{#include ../../examples/ui/widgets/textfield.ts}}
 ```
 
-`TextField` takes a `State` for two-way binding — the state updates as the user types, and setting the state updates the field.
+`TextField(placeholder, onChange)` fires `onChange` as the user types. Pair
+with `stateBindTextfield(state, field)` for two-way binding so programmatic
+`state.set(…)` also updates the visible text.
 
-**Methods:**
-- `setText(text: string)` — Set the text programmatically
-- `setPlaceholder(text: string)` — Set placeholder text
-- `setEnabled(enabled: boolean)` — Enable/disable editing
+**Helpers:** `textfieldSetString`, `textfieldSetFontSize`,
+`textfieldSetTextColor`, `textfieldSetBackgroundColor`,
+`textfieldSetBorderless`, `textfieldSetOnSubmit`, `textfieldSetOnFocus`,
+`textfieldSetNextKeyView`.
 
 ## SecureField
 
-A password input field (text is masked).
+A password input — identical signature to `TextField`, but text is masked.
 
 ```typescript
-import { SecureField, State } from "perry/ui";
-
-const password = State("");
-SecureField(password, "Enter password...");
+{{#include ../../examples/ui/widgets/secure_field.ts}}
 ```
-
-Same API as `TextField` but input is hidden.
 
 ## Toggle
 
 A boolean on/off switch.
 
 ```typescript
-import { Toggle, State } from "perry/ui";
-
-const enabled = State(false);
-Toggle("Enable notifications", enabled);
+{{#include ../../examples/ui/widgets/toggle.ts}}
 ```
-
-The `State` is bound two-way — toggling updates the state, and setting the state updates the toggle.
 
 ## Slider
 
 A numeric slider.
 
 ```typescript
-import { Slider, State } from "perry/ui";
-
-const value = State(50);
-Slider(value, 0, 100); // state, min, max
+{{#include ../../examples/ui/widgets/slider.ts}}
 ```
+
+`Slider(min, max, onChange)` — `onChange` fires on every drag. Use
+`stateBindSlider(state, slider)` for two-way binding.
 
 ## Picker
 
-A dropdown selection control.
+A dropdown selection control. Items are added with `pickerAddItem`.
 
 ```typescript
-import { Picker, State } from "perry/ui";
-
-const selected = State(0);
-Picker(["Option A", "Option B", "Option C"], selected);
+{{#include ../../examples/ui/widgets/picker.ts}}
 ```
 
-## Image
+## ImageFile / ImageSymbol
 
-Displays an image.
+Two distinct constructors:
+
+- `ImageFile(path)` — image from a file path
+- `ImageSymbol(name)` — SF Symbol glyph name (macOS/iOS only)
 
 ```typescript
-import { Image } from "perry/ui";
-
-const img = Image("path/to/image.png");
-img.setWidth(200);
-img.setHeight(150);
+{{#include ../../examples/ui/widgets/image_symbol.ts}}
 ```
 
-On macOS/iOS, you can also use SF Symbol names:
-
-```typescript
-Image("star.fill"); // SF Symbol
-```
+Use `widgetSetWidth(img, N)` / `widgetSetHeight(img, N)` to size the image.
 
 ## ProgressView
 
 An indeterminate or determinate progress indicator.
 
 ```typescript
-import { ProgressView } from "perry/ui";
-
-const progress = ProgressView();
-// Or with a value (0.0 to 1.0)
-const progress = ProgressView(0.5);
+{{#include ../../examples/ui/widgets/progressview.ts}}
 ```
-
-## Form and Section
-
-Group controls into a form layout.
-
-```typescript
-import { Form, Section, TextField, Toggle, State } from "perry/ui";
-
-const name = State("");
-const notifications = State(true);
-
-Form([
-  Section("Personal Info", [
-    TextField(name, "Name"),
-  ]),
-  Section("Settings", [
-    Toggle("Notifications", notifications),
-  ]),
-]);
-```
-
-## Table
-
-A data table with rows and columns.
-
-```typescript
-import { Table } from "perry/ui";
-
-const table = Table(10, 3, (row, col) => {
-  return `Cell ${row},${col}`;
-});
-
-table.setColumnHeader(0, "Name");
-table.setColumnHeader(1, "Email");
-table.setColumnHeader(2, "Role");
-table.setColumnWidth(0, 200);
-table.setColumnWidth(1, 250);
-
-table.setOnRowSelect((row) => {
-  console.log(`Selected row: ${row}`);
-});
-```
-
-**Methods:**
-- `setColumnHeader(col: number, title: string)` — Set column header text
-- `setColumnWidth(col: number, width: number)` — Set column width
-- `updateRowCount(count: number)` — Update the number of rows
-- `setOnRowSelect(callback: (row: number) => void)` — Row selection handler
-- `getSelectedRow()` — Get currently selected row index
 
 ## TextArea
 
-A multi-line text input.
+A multi-line text input. Same `(placeholder, onChange)` signature as
+`TextField` but renders as a multi-line box.
 
 ```typescript
-import { TextArea, State } from "perry/ui";
-
-const content = State("");
-TextArea(content, "Enter text...");
+{{#include ../../examples/ui/widgets/textarea.ts}}
 ```
 
-**Methods:**
-- `setText(text: string)` — Set the text programmatically
-- `getText()` — Get the current text
+**Helpers:** `textareaSetString`.
 
-## QRCode
+## Sections
 
-Generates and displays a QR code.
+Group controls into labelled sections. Perry has no `Form()` widget — use a
+`VStack` of `Section(title)`s and attach children via `widgetAddChild`.
 
 ```typescript
-import { QRCode } from "perry/ui";
-
-const qr = QRCode("https://example.com", 200); // data, size
-qr.setData("https://other-url.com");            // Update data
+{{#include ../../examples/ui/widgets/sections.ts}}
 ```
 
-## Canvas
+## Platform-specific widgets
 
-A drawing surface. See [Canvas](canvas.md) for the full drawing API.
+These exist only on specific platforms and aren't verified by the
+cross-platform doc-tests:
 
-```typescript
-import { Canvas } from "perry/ui";
+- **`Table(rows, cols, renderer)`** — macOS only. A data table with rows,
+  columns, and a cell renderer.
+- **`QRCode(data, size)`** — macOS only. Renders a QR code.
+- **`Canvas(width, height, draw)`** — all desktop platforms. A drawing
+  surface; see [Canvas](canvas.md).
+- **`CameraView()`** — iOS only (other platforms planned). See
+  [Camera](camera.md).
 
-const canvas = Canvas(400, 300, (ctx) => {
-  ctx.fillRect(10, 10, 100, 100);
-  ctx.strokeRect(50, 50, 100, 100);
-});
-```
+These are linked from their own pages with platform-specific examples.
 
-## CameraView
+## Common widget helpers
 
-A live camera preview with color sampling. See [Camera](camera.md) for the full API.
+Every widget handle accepts these:
 
-```typescript
-import { CameraView, cameraStart, cameraSampleColor, cameraSetOnTap } from "perry/ui";
+| Helper | Description |
+|---|---|
+| `widgetSetWidth(w, n)` / `widgetSetHeight(w, n)` | Explicit size in points |
+| `widgetSetBackgroundColor(w, r, g, b, a)` | RGBA in [0, 1] |
+| `setCornerRadius(w, r)` | Rounded corners in points |
+| `widgetSetOpacity(w, alpha)` | Opacity in [0, 1] |
+| `widgetSetEnabled(w, flag)` | `0` disables, `1` enables |
+| `widgetSetHidden(w, flag)` | `0` visible, `1` hidden |
+| `widgetSetTooltip(w, text)` | Tooltip on hover (desktop only) |
+| `widgetSetOnClick(w, cb)` | Click handler |
+| `widgetSetOnHover(w, cb)` | Hover enter/leave (desktop only) |
+| `widgetSetOnDoubleClick(w, cb)` | Double-click handler |
+| `widgetSetEdgeInsets(w, top, left, bottom, right)` | Padding around contents |
+| `widgetSetBorderColor(w, r, g, b, a)` / `widgetSetBorderWidth(w, n)` | Border |
+| `widgetAddChild(parent, child)` | Attach a child to a container |
+| `widgetSetContextMenu(w, menu)` | Right-click menu |
 
-const cam = CameraView();
-cameraStart(cam);
-
-cameraSetOnTap(cam, (x, y) => {
-  const rgb = cameraSampleColor(x, y); // packed r*65536 + g*256 + b
-});
-```
-
-> **iOS only.** Other platforms are planned.
-
-**Functions:**
-- `CameraView()` — Create a camera preview widget
-- `cameraStart(handle)` — Start live capture
-- `cameraStop(handle)` — Stop capture
-- `cameraFreeze(handle)` — Pause preview (freeze frame)
-- `cameraUnfreeze(handle)` — Resume preview
-- `cameraSampleColor(x, y)` — Sample color at normalized coordinates (returns packed RGB or -1)
-- `cameraSetOnTap(handle, callback)` — Register tap handler with `(x, y)` coordinates
-
-## Common Widget Methods
-
-All widgets support these methods:
-
-| Method | Description |
-|--------|-------------|
-| `setWidth(width)` | Set width |
-| `setHeight(height)` | Set height |
-| `setBackgroundColor(hex)` | Set background color |
-| `setCornerRadius(radius)` | Set corner radius |
-| `setOpacity(alpha)` | Set opacity (0.0–1.0) |
-| `setEnabled(enabled)` | Enable/disable interaction |
-| `setHidden(hidden)` | Show/hide widget |
-| `setTooltip(text)` | Set tooltip text |
-| `setOnClick(callback)` | Set click handler |
-| `setOnHover(callback)` | Set hover handler |
-| `setOnDoubleClick(callback)` | Set double-click handler |
-
-See [Styling](styling.md) and [Events](events.md) for complete details.
+See [Styling](styling.md) and [Events](events.md) for deeper coverage.
 
 ## Next Steps
 

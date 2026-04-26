@@ -1,0 +1,178 @@
+{
+  "commit": "c89b3ad5",
+  "generated_at": "2026-04-23T13:05:00Z",
+  "notes": "json_roundtrip row rerun at v0.5.173 (best-of-5): Perry 314ms vs Node 377ms → Perry now 1.2x faster than Node (was 1.58x slower at v0.5.166, baseline commit 00fa823). Other rows unchanged from the 2026-04-17 sweep.",
+  "benchmarks": {
+    "02_loop_overhead": {
+      "perry_ms": 0,
+      "perry_rss_kb": 1712,
+      "node_ms": 54,
+      "node_rss_kb": 34481,
+      "memory_ratio": 0.05
+    },
+    "03_array_write": {
+      "perry_ms": 3,
+      "perry_rss_kb": 212208,
+      "node_ms": 9,
+      "node_rss_kb": 281506,
+      "speed_ratio": 0.333,
+      "memory_ratio": 0.754
+    },
+    "04_array_read": {
+      "perry_ms": 4,
+      "perry_rss_kb": 212240,
+      "node_ms": 13,
+      "node_rss_kb": 282978,
+      "speed_ratio": 0.308,
+      "memory_ratio": 0.75
+    },
+    "05_fibonacci": {
+      "perry_ms": 317,
+      "perry_rss_kb": 1776,
+      "node_ms": 1028,
+      "node_rss_kb": 34449,
+      "speed_ratio": 0.308,
+      "memory_ratio": 0.052
+    },
+    "06_math_intensive": {
+      "perry_ms": 15,
+      "perry_rss_kb": 1776,
+      "node_ms": 50,
+      "node_rss_kb": 36642,
+      "speed_ratio": 0.3,
+      "memory_ratio": 0.048
+    },
+    "07_object_create": {
+      "perry_ms": 0,
+      "perry_rss_kb": 1792,
+      "node_ms": 9,
+      "node_rss_kb": 37762,
+      "memory_ratio": 0.047
+    },
+    "08_string_concat": {
+      "perry_ms": 0,
+      "perry_rss_kb": 1968,
+      "node_ms": 2,
+      "node_rss_kb": 41586,
+      "memory_ratio": 0.047
+    },
+    "09_method_calls": {
+      "perry_ms": 1,
+      "perry_rss_kb": 1760,
+      "node_ms": 11,
+      "node_rss_kb": 36689,
+      "speed_ratio": 0.091,
+      "memory_ratio": 0.048
+    },
+    "10_nested_loops": {
+      "perry_ms": 9,
+      "perry_rss_kb": 1840,
+      "node_ms": 17,
+      "node_rss_kb": 34993,
+      "speed_ratio": 0.529,
+      "memory_ratio": 0.053
+    },
+    "11_prime_sieve": {
+      "perry_ms": 4,
+      "perry_rss_kb": 17888,
+      "node_ms": 8,
+      "node_rss_kb": 58450,
+      "speed_ratio": 0.5,
+      "memory_ratio": 0.306
+    },
+    "12_binary_trees": {
+      "perry_ms": 0,
+      "perry_rss_kb": 1776,
+      "node_ms": 9,
+      "node_rss_kb": 37458,
+      "memory_ratio": 0.047
+    },
+    "13_factorial": {
+      "perry_ms": 35,
+      "perry_rss_kb": 1744,
+      "node_ms": 608,
+      "node_rss_kb": 37522,
+      "speed_ratio": 0.058,
+      "memory_ratio": 0.046
+    },
+    "14_closure": {
+      "perry_ms": 0,
+      "perry_rss_kb": 1792,
+      "node_ms": 311,
+      "node_rss_kb": 36866,
+      "memory_ratio": 0.049
+    },
+    "15_mandelbrot": {
+      "perry_ms": 21,
+      "perry_rss_kb": 1760,
+      "node_ms": 25,
+      "node_rss_kb": 36850,
+      "speed_ratio": 0.84,
+      "memory_ratio": 0.048
+    },
+    "16_matrix_multiply": {
+      "perry_ms": 21,
+      "perry_rss_kb": 4816,
+      "node_ms": 35,
+      "node_rss_kb": 41730,
+      "speed_ratio": 0.6,
+      "memory_ratio": 0.115
+    },
+    "bench_gc_pressure": {
+      "perry_ms": 16,
+      "perry_rss_kb": 21376,
+      "node_ms": 13,
+      "node_rss_kb": 42147,
+      "speed_ratio": 1.231,
+      "memory_ratio": 0.507
+    },
+    "bench_json_roundtrip": {
+      "perry_ms": 314,
+      "perry_rss_kb": 310640,
+      "node_ms": 377,
+      "node_rss_kb": 186768,
+      "speed_ratio": 0.833,
+      "memory_ratio": 1.663
+    },
+    "bench_object_property": {
+      "perry_ms": 9,
+      "perry_rss_kb": 13520,
+      "node_ms": 16,
+      "node_rss_kb": 38290,
+      "speed_ratio": 0.562,
+      "memory_ratio": 0.353
+    },
+    "bench_int_arithmetic": {
+      "perry_ms": 7,
+      "perry_rss_kb": 1776,
+      "node_ms": 73,
+      "node_rss_kb": 34849,
+      "speed_ratio": 0.096,
+      "memory_ratio": 0.051
+    },
+    "bench_buffer_readwrite": {
+      "perry_ms": 23,
+      "perry_rss_kb": 2784,
+      "node_ms": 86,
+      "node_rss_kb": 36385,
+      "speed_ratio": 0.267,
+      "memory_ratio": 0.077
+    },
+    "bench_array_grow": {
+      "perry_ms": 12,
+      "perry_rss_kb": 34176,
+      "node_ms": 13,
+      "node_rss_kb": 97330,
+      "speed_ratio": 0.923,
+      "memory_ratio": 0.351
+    },
+    "bench_string_heavy": {
+      "perry_ms": 37,
+      "perry_rss_kb": 49696,
+      "node_ms": 49,
+      "node_rss_kb": 41795,
+      "speed_ratio": 0.755,
+      "memory_ratio": 1.189
+    }
+  }
+}

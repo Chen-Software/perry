@@ -15,11 +15,65 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use crate::common::async_bridge::spawn;
-use crate::common::{register_handle, get_handle_mut, Handle};
+use crate::common::{register_handle, get_handle_mut, for_each_handle_of, Handle};
 
 /// Pending HTTP events to be processed on the main thread
 static HTTP_PENDING_EVENTS: once_cell::sync::Lazy<Mutex<Vec<PendingHttpEvent>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(Vec::new()));
+
+/// Push an HTTP event and wake the main thread (issue #84).
+/// Every producer is inside an `async move { ... }` running on a tokio
+/// worker — without the notify the event waits for the next event-loop
+/// timeout to be picked up.
+fn push_http_event(ev: PendingHttpEvent) {
+    HTTP_PENDING_EVENTS.lock().unwrap().push(ev);
+    perry_runtime::event_pump::js_notify_main_thread();
+}
+
+static HTTP_GC_REGISTERED: std::sync::Once = std::sync::Once::new();
+
+/// Register the http GC root scanner exactly once. User closures passed
+/// to `http.request(options, cb)` or `req.on('error', cb)` / `res.on(...)`
+/// are stored inside ClientRequestHandle / IncomingMessageHandle values
+/// in the handle registry and would otherwise not be marked by GC —
+/// issue #35 pattern, same root cause as net.Socket listeners.
+fn ensure_gc_scanner_registered() {
+    HTTP_GC_REGISTERED.call_once(|| {
+        perry_runtime::gc::gc_register_root_scanner(scan_http_roots);
+    });
+}
+
+/// GC root scanner for HTTP callback closures. Walks every
+/// ClientRequestHandle (response callback + 'error' listeners) and
+/// IncomingMessageHandle ('data' / 'end' / 'error' listeners) in the
+/// handle registry.
+fn scan_http_roots(mark: &mut dyn FnMut(f64)) {
+    let mark_cb = |cb: i64, mark: &mut dyn FnMut(f64)| {
+        if cb != 0 {
+            let boxed = f64::from_bits(
+                0x7FFD_0000_0000_0000 | (cb as u64 & 0x0000_FFFF_FFFF_FFFF),
+            );
+            mark(boxed);
+        }
+    };
+
+    for_each_handle_of::<ClientRequestHandle, _>(|req| {
+        mark_cb(req.response_callback, mark);
+        for cb_vec in req.listeners.values() {
+            for &cb in cb_vec.iter() {
+                mark_cb(cb, mark);
+            }
+        }
+    });
+
+    for_each_handle_of::<IncomingMessageHandle, _>(|msg| {
+        for cb_vec in msg.listeners.values() {
+            for &cb in cb_vec.iter() {
+                mark_cb(cb, mark);
+            }
+        }
+    });
+}
 
 /// Events that fire on the main thread via js_http_process_pending
 enum PendingHttpEvent {
@@ -77,7 +131,7 @@ unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
     if ptr.is_null() {
         return None;
     }
-    let len = (*ptr).length as usize;
+    let len = (*ptr).byte_len as usize;
     let data_ptr = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data_ptr, len);
     std::str::from_utf8(bytes).ok().map(|s| s.to_string())
@@ -268,6 +322,7 @@ unsafe fn extract_string_value(val: f64) -> Option<String> {
 /// Returns a ClientRequest handle (i64)
 #[no_mangle]
 pub unsafe extern "C" fn js_http_request(options_f64: f64, callback_i64: i64) -> Handle {
+    ensure_gc_scanner_registered();
     let method = get_object_string_field(options_f64, "method")
         .unwrap_or_else(|| "GET".to_string())
         .to_uppercase();
@@ -317,6 +372,7 @@ pub unsafe extern "C" fn js_http_request(options_f64: f64, callback_i64: i64) ->
 /// Same as http.request but defaults to https protocol
 #[no_mangle]
 pub unsafe extern "C" fn js_https_request(options_f64: f64, callback_i64: i64) -> Handle {
+    ensure_gc_scanner_registered();
     let method = get_object_string_field(options_f64, "method")
         .unwrap_or_else(|| "GET".to_string())
         .to_uppercase();
@@ -367,6 +423,7 @@ pub unsafe extern "C" fn js_https_request(options_f64: f64, callback_i64: i64) -
 /// First arg can be a string URL or an options object
 #[no_mangle]
 pub unsafe extern "C" fn js_http_get(url_or_options_f64: f64, callback_i64: i64) -> Handle {
+    ensure_gc_scanner_registered();
     let (url, headers, timeout_ms) = if is_string_value(url_or_options_f64) {
         let url = extract_string_value(url_or_options_f64).unwrap_or_default();
         (url, HashMap::new(), None)
@@ -421,6 +478,7 @@ pub unsafe extern "C" fn js_http_get(url_or_options_f64: f64, callback_i64: i64)
 /// Same as http.get but defaults to https
 #[no_mangle]
 pub unsafe extern "C" fn js_https_get(url_or_options_f64: f64, callback_i64: i64) -> Handle {
+    ensure_gc_scanner_registered();
     let (url, headers, timeout_ms) = if is_string_value(url_or_options_f64) {
         let url = extract_string_value(url_or_options_f64).unwrap_or_default();
         // If URL doesn't start with https://, prepend it
@@ -530,7 +588,7 @@ pub unsafe extern "C" fn js_http_client_request_end(handle: Handle, body_f64: f6
         let client = match client.build() {
             Ok(c) => c,
             Err(e) => {
-                HTTP_PENDING_EVENTS.lock().unwrap().push(PendingHttpEvent::Error {
+                push_http_event(PendingHttpEvent::Error {
                     request_handle: req_handle,
                     error_message: format!("Failed to create HTTP client: {}", e),
                 });
@@ -573,7 +631,7 @@ pub unsafe extern "C" fn js_http_client_request_end(handle: Handle, body_f64: f6
 
                 let body = response.bytes().await.unwrap_or_default().to_vec();
 
-                HTTP_PENDING_EVENTS.lock().unwrap().push(PendingHttpEvent::Response {
+                push_http_event(PendingHttpEvent::Response {
                     request_handle: req_handle,
                     status,
                     status_message,
@@ -582,7 +640,7 @@ pub unsafe extern "C" fn js_http_client_request_end(handle: Handle, body_f64: f6
                 });
             }
             Err(e) => {
-                HTTP_PENDING_EVENTS.lock().unwrap().push(PendingHttpEvent::Error {
+                push_http_event(PendingHttpEvent::Error {
                     request_handle: req_handle,
                     error_message: format!("{}", e),
                 });
@@ -601,6 +659,7 @@ pub unsafe extern "C" fn js_http_on(
     event_name_ptr: *const StringHeader,
     callback_ptr: i64,
 ) -> Handle {
+    ensure_gc_scanner_registered();
     let event_name = match string_from_header(event_name_ptr) {
         Some(name) => name,
         None => return handle,

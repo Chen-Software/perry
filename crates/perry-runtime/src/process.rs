@@ -40,7 +40,7 @@ pub extern "C" fn js_getenv(name_ptr: *const StringHeader) -> *mut StringHeader 
             return std::ptr::null_mut();
         }
 
-        let len = (*name_ptr).length as usize;
+        let len = (*name_ptr).byte_len as usize;
         let data_ptr = (name_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
 
         // Convert to Rust string
@@ -152,6 +152,45 @@ fn get_rss_bytes() -> u64 {
     {
         0
     }
+}
+
+/// `process.env` as a materialized JS object.
+///
+/// Built lazily on first access from `std::env::vars()` so the object
+/// reflects the inherited OS environment (matching Node/Bun semantics).
+/// Subsequent calls return the same cached pointer — user mutations to
+/// keys stay visible, which is Node's spec too (`process.env` is a live
+/// object, not a snapshot rebuilt on every read).
+///
+/// Returns an f64 NaN-boxed POINTER_TAG value so the codegen can hand
+/// it straight to subsequent PropertyGet dispatch.
+#[no_mangle]
+pub extern "C" fn js_process_env() -> f64 {
+    use std::cell::Cell;
+    thread_local! {
+        static CACHED_ENV: Cell<f64> = const { Cell::new(0.0) };
+    }
+    let cached = CACHED_ENV.with(|c| c.get());
+    if cached != 0.0 {
+        return cached;
+    }
+
+    let vars: Vec<(String, String)> = std::env::vars().collect();
+    // Pad alloc_limit so small env sets still have headroom; large
+    // environments (CI runners) spill to the overflow Vec path.
+    let alloc_limit = std::cmp::max(vars.len() as u32, 8);
+    let obj = crate::object::js_object_alloc(0, alloc_limit);
+    unsafe {
+        for (k, v) in &vars {
+            let key = js_string_from_bytes(k.as_ptr(), k.len() as u32);
+            let val = js_string_from_bytes(v.as_ptr(), v.len() as u32);
+            let val_f64 = f64::from_bits(JSValue::string_ptr(val).bits());
+            crate::object::js_object_set_field_by_name(obj, key, val_f64);
+        }
+    }
+    let boxed = f64::from_bits(JSValue::pointer(obj as *const u8).bits());
+    CACHED_ENV.with(|c| c.set(boxed));
+    boxed
 }
 
 /// process.memoryUsage() -> object { rss, heapTotal, heapUsed, external, arrayBuffers }

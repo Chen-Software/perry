@@ -3,7 +3,7 @@
 use anyhow::{anyhow, Result};
 use clap::Args;
 use perry_diagnostics::{
-    Diagnostic, DiagnosticCode, DiagnosticEmitter, Diagnostics, JsonEmitter, SourceCache,
+    Diagnostic, DiagnosticCode, DiagnosticEmitter, Diagnostics, JsonEmitter, SourceCache, Span,
     TerminalEmitter,
 };
 use std::collections::HashSet;
@@ -226,15 +226,39 @@ pub fn run(args: CheckArgs, format: OutputFormat, use_color: bool, verbose: u8) 
         }
 
         // Try to lower to HIR to catch more errors
+        let file_id = parse_result.file_id;
         match perry_hir::lower_module(&parse_result.module, &filename, &filename) {
             Ok(_hir_module) => {
                 // Successfully lowered
             }
             Err(e) => {
-                all_diagnostics.push(
-                    Diagnostic::error(DiagnosticCode::UnsupportedFeature, format!("{}", e))
-                        .build(),
-                );
+                // If the lowering error carried a span, attach it so the
+                // diagnostic emitter can print file:line:column and the
+                // offending source snippet. Otherwise fall back to a
+                // location-less message (but still tag it with the file_id
+                // so the emitter can at least show the filename).
+                let (message, span) = if let Some(lower_err) =
+                    e.downcast_ref::<perry_hir::error::LowerError>()
+                {
+                    let span = match lower_err.span {
+                        Some(swc_span) => {
+                            Span::new(file_id, swc_span.lo.0, swc_span.hi.0)
+                        }
+                        None => Span::DUMMY,
+                    };
+                    (lower_err.message.clone(), span)
+                } else {
+                    // No span info — prefix the filename so the user at
+                    // least knows which file produced the error.
+                    (format!("{}: {}", filename, e), Span::DUMMY)
+                };
+
+                let mut builder =
+                    Diagnostic::error(DiagnosticCode::UnsupportedFeature, message);
+                if !span.is_dummy() {
+                    builder = builder.with_span(span);
+                }
+                all_diagnostics.push(builder.build());
             }
         }
 
@@ -360,10 +384,15 @@ pub fn run(args: CheckArgs, format: OutputFormat, use_color: bool, verbose: u8) 
                 if use_color {
                     println!(
                         "{}",
-                        console::style("✓ Compilation is guaranteed to succeed").green()
+                        console::style("✓ Parsing, HIR lowering, and dependency checks passed").green()
+                    );
+                    println!(
+                        "{}",
+                        console::style("  (codegen not verified — run `perry compile` for end-to-end validation)").dim()
                     );
                 } else {
-                    println!("[OK] Compilation is guaranteed to succeed");
+                    println!("[OK] Parsing, HIR lowering, and dependency checks passed");
+                    println!("     (codegen not verified — run `perry compile` for end-to-end validation)");
                 }
             } else if args.check_deps {
                 println!();
@@ -377,7 +406,7 @@ pub fn run(args: CheckArgs, format: OutputFormat, use_color: bool, verbose: u8) 
                 }
             } else if errors == 0 {
                 println!();
-                println!("Note: Run with --check-deps to verify dependencies and guarantee compilation.");
+                println!("Note: Run with --check-deps to verify dependencies.");
             }
 
             // Handle fix output
@@ -433,6 +462,11 @@ pub fn run(args: CheckArgs, format: OutputFormat, use_color: bool, verbose: u8) 
 
             let errors = all_diagnostics.error_count();
             let warnings = all_diagnostics.warning_count();
+            // Named "compilation_guaranteed" historically, but the check
+            // does not run codegen — only parse, HIR lowering, and
+            // dependency checks. Kept under the same key for JSON
+            // backcompat, though a more accurate name would be
+            // `frontend_checks_passed`.
             let compilation_guaranteed =
                 args.check_deps && errors == 0 && (warnings == 0 || !args.strict);
 

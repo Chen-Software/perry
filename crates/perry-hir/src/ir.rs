@@ -14,12 +14,15 @@ pub const TYPED_ARRAY_KIND_INT32: u8 = 4;
 pub const TYPED_ARRAY_KIND_UINT32: u8 = 5;
 pub const TYPED_ARRAY_KIND_FLOAT32: u8 = 6;
 pub const TYPED_ARRAY_KIND_FLOAT64: u8 = 7;
+/// Uint8ClampedArray: 1-byte elements, stores via ToUint8Clamp (not truncate-wrap).
+pub const TYPED_ARRAY_KIND_UINT8_CLAMPED: u8 = 8;
 
 /// Map a class name (e.g. "Int32Array") to its `TYPED_ARRAY_KIND_*` tag.
 pub fn typed_array_kind_for_name(name: &str) -> Option<u8> {
     match name {
         "Int8Array" => Some(TYPED_ARRAY_KIND_INT8),
-        "Uint8Array" | "Uint8ClampedArray" => Some(TYPED_ARRAY_KIND_UINT8),
+        "Uint8Array" => Some(TYPED_ARRAY_KIND_UINT8),
+        "Uint8ClampedArray" => Some(TYPED_ARRAY_KIND_UINT8_CLAMPED),
         "Int16Array" => Some(TYPED_ARRAY_KIND_INT16),
         "Uint16Array" => Some(TYPED_ARRAY_KIND_UINT16),
         "Int32Array" => Some(TYPED_ARRAY_KIND_INT32),
@@ -38,8 +41,18 @@ pub const NATIVE_MODULES: &[&str] = &[
     "pg",
     "uuid",
     "bcrypt",
-    // Note: ioredis NOT in NATIVE_MODULES - native class tracking happens via class name detection
-    // in lower.rs. Adding it here would make imports skip JS module loading.
+    // ioredis is now in NATIVE_MODULES — the prior workaround (class-name-only
+    // tracking in lower.rs:910) was needed when `import { Redis } from 'ioredis'`
+    // was expected to fall through to a JS interpreter, but Perry's native Rust
+    // ioredis impl is the canonical path and the JS fallback path no longer
+    // runs anything. Keeping it out of NATIVE_MODULES forced `requires_stdlib`
+    // to return false, which made `Linking (runtime-only)` skip the stdlib
+    // archive — every direct `js_ioredis_*` reference (e.g. from the new
+    // `lower_builtin_new` "Redis" branch below) link-failed with `Undefined
+    // symbols: _js_ioredis_new`. Listing it here lets the linker pull in
+    // perry-stdlib (gated on the `database-redis` feature via stdlib_features.rs).
+    "ioredis",
+    "axios",
     "node-fetch",
     "ws",
     "zlib",
@@ -67,6 +80,7 @@ pub const NATIVE_MODULES: &[&str] = &[
     "buffer",
     "child_process",
     "net",
+    "tls",
     "stream",
     "fs",
     "path",
@@ -116,7 +130,10 @@ pub fn is_native_module_with_externals(path: &str, externals: &[String]) -> bool
 /// Modules that are handled by perry-runtime alone (no stdlib needed).
 /// These are Node.js builtins and perry-specific modules implemented in the runtime crate.
 const RUNTIME_ONLY_MODULES: &[&str] = &[
-    "fs", "path", "os", "buffer", "child_process", "net", "stream", "url", "util",
+    // `net` moved to perry-stdlib (event-driven async TCP) in A1/A1.5 —
+    // deliberately NOT in this list so `requires_stdlib("net")` returns true
+    // and the auto-optimizer enables the `net` feature on perry-stdlib.
+    "fs", "path", "os", "buffer", "child_process", "stream", "url", "util",
     "perry/ui",
     "perry/system",
     "perry/widget",
@@ -753,6 +770,10 @@ pub enum Expr {
     Integer(i64), // Integer literal that fits in i64 (for optimization)
     BigInt(String), // Store as string to preserve precision
     String(String),
+    /// String literal containing WTF-8 bytes (lone surrogates U+D800..U+DFFF).
+    /// Raw WTF-8 bytes — cannot be represented as a valid Rust String.
+    /// Lowers to js_string_from_wtf8_bytes at runtime.
+    WtfString(Vec<u8>),
     /// Localizable string — resolved at compile time from locale files.
     /// The string_idx indexes into the global i18n string table (2D: [locale][key]).
     /// For parameterized strings like "Hello, {name}!", params contains the values to interpolate.
@@ -998,6 +1019,12 @@ pub enum Expr {
     EnvGet(String),
     // Dynamic environment variable access: process.env[expr]
     EnvGetDynamic(Box<Expr>),
+    // Bare `process.env` as a value (not followed by .KEY) — materializes
+    // the OS environment as a JS object. Used by patterns like
+    // `const e = process.env`, `Object.keys(process.env)`, and indirect
+    // access through `globalThis`/aliases where the static `.KEY` fast
+    // path doesn't fire.
+    ProcessEnv,
     // Process uptime: process.uptime() -> number (seconds)
     ProcessUptime,
     // Process current working directory: process.cwd() -> string
@@ -1024,6 +1051,9 @@ pub enum Expr {
     ProcessChdir(Box<Expr>),
     // process.kill(pid, signal?) -> void
     ProcessKill { pid: Box<Expr>, signal: Option<Box<Expr>> },
+    // process.exit(code?) -> never. Bare `process.exit()` lowers as
+    // `ProcessExit(None)` which the runtime treats as code 0.
+    ProcessExit(Option<Box<Expr>>),
     // process.stdin -> stub object { write: fn }
     ProcessStdin,
     // process.stdout -> stub object { write: fn }
@@ -1104,6 +1134,22 @@ pub enum Expr {
 
     // JSON operations
     JsonParse(Box<Expr>),                // JSON.parse(string) -> value
+    /// `JSON.parse<T>(string)` with a compile-time type argument
+    /// (issue #179 tier 1 via typed-parse plan). The `ty` carries the
+    /// expected shape so codegen can emit a specialized parse call.
+    /// `ordered_keys`, when present, is the field list in SOURCE order
+    /// (as declared in the TypeScript interface/type literal) —
+    /// preserved from the AST because `ObjectType::properties` is a
+    /// HashMap that loses insertion order. Codegen uses this to emit
+    /// the shape hint in an order that matches how JSON.stringify
+    /// output typically lays out fields (declaration order), so the
+    /// per-field fast path in `parse_object_shaped` actually hits.
+    /// Semantically identical to `JsonParse` (the `<T>` is fully
+    /// erased at runtime — Node-compatible); Perry may opt into a
+    /// faster specialized path per shape. Falls back to the generic
+    /// parser transparently if the input doesn't match the declared
+    /// shape.
+    JsonParseTyped { text: Box<Expr>, ty: Type, ordered_keys: Option<Vec<String>> },
     JsonParseReviver { text: Box<Expr>, reviver: Box<Expr> },
     JsonParseWithReviver(Box<Expr>, Box<Expr>),
     JsonStringify(Box<Expr>),            // JSON.stringify(value) -> string
@@ -1145,6 +1191,7 @@ pub enum Expr {
     MathAsinh(Box<Expr>),                // Math.asinh(x) -> number
     MathAcosh(Box<Expr>),                // Math.acosh(x) -> number
     MathAtanh(Box<Expr>),                // Math.atanh(x) -> number
+    MathExp(Box<Expr>),                  // Math.exp(x) -> number (e^x)
 
     /// performance.now() -> number (high-resolution time in ms)
     PerformanceNow,

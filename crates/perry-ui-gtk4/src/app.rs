@@ -76,7 +76,7 @@ pub(crate) fn str_from_header(ptr: *const u8) -> &'static str {
     }
     unsafe {
         let header = ptr as *const perry_runtime::string::StringHeader;
-        let len = (*header).length as usize;
+        let len = (*header).byte_len as usize;
         let data = ptr.add(std::mem::size_of::<perry_runtime::string::StringHeader>());
         std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
     }
@@ -296,6 +296,26 @@ pub fn app_run(_app_handle: i64) {
                 unsafe { js_closure_call0(ptr); }
             }
         });
+
+        // If PERRY_UI_TEST_MODE is set, schedule an automatic exit so doc-example
+        // programs can be verified in CI without a human.
+        if perry_ui_testkit::is_test_mode() {
+            let delay = std::time::Duration::from_millis(
+                perry_ui_testkit::exit_delay_ms() as u64,
+            );
+            let app_clone = app.clone();
+            glib::timeout_add_local_once(delay, move || {
+                if let Some(path) = perry_ui_testkit::screenshot_path() {
+                    let mut len: usize = 0;
+                    let ptr = crate::screenshot::perry_ui_screenshot_capture(&mut len as *mut usize);
+                    if !ptr.is_null() && len > 0 {
+                        perry_ui_testkit::write_screenshot_bytes(&path, ptr, len);
+                        unsafe { libc::free(ptr as *mut libc::c_void); }
+                    }
+                }
+                app_clone.quit();
+            });
+        }
     });
 
     // Install shutdown handler for on_terminate

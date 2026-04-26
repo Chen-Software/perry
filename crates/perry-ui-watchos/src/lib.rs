@@ -5,6 +5,7 @@
 //! it as SwiftUI views reactively.
 
 pub mod app;
+pub mod audio;
 pub mod tree;
 pub mod state;
 pub mod widgets;
@@ -19,7 +20,7 @@ fn str_from_header(ptr: *const u8) -> &'static str {
     }
     unsafe {
         let header = ptr as *const perry_runtime::string::StringHeader;
-        let len = (*header).length as usize;
+        let len = (*header).byte_len as usize;
         let data = ptr.add(std::mem::size_of::<perry_runtime::string::StringHeader>());
         std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
     }
@@ -618,7 +619,8 @@ pub extern "C" fn perry_ui_hstack_create_with_insets(spacing: f64, top: f64, lef
 #[no_mangle] pub extern "C" fn perry_ui_poll_open_file() -> i64 { 0 }
 #[no_mangle] pub extern "C" fn perry_ui_widget_add_overlay(_parent: i64, _child: i64) {}
 #[no_mangle] pub extern "C" fn perry_ui_widget_set_overlay_frame(_h: i64, _x: f64, _y: f64, _w: f64, _h2: f64) {}
-#[no_mangle] pub extern "C" fn perry_ui_alert(_title: i64, _msg: i64, _btns: i64, _cb: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_alert(_title: i64, _msg: i64, _btns: f64, _cb: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_alert_simple(_title: i64, _msg: i64) {}
 #[no_mangle] pub extern "C" fn perry_ui_sheet_create(_w: f64, _h: f64, _title: i64) -> i64 { 0 }
 #[no_mangle] pub extern "C" fn perry_ui_sheet_present(_sheet: i64) {}
 #[no_mangle] pub extern "C" fn perry_ui_sheet_dismiss(_sheet: i64) {}
@@ -656,10 +658,10 @@ pub extern "C" fn perry_ui_hstack_create_with_insets(spacing: f64, top: f64, lef
 
 #[no_mangle] pub extern "C" fn perry_system_open_url(_url: i64) {}
 #[no_mangle] pub extern "C" fn perry_system_request_location(_cb: f64) {}
-#[no_mangle] pub extern "C" fn perry_system_audio_start() -> i64 { 0 }
-#[no_mangle] pub extern "C" fn perry_system_audio_stop() {}
-#[no_mangle] pub extern "C" fn perry_system_audio_get_level() -> f64 { 0.0 }
-#[no_mangle] pub extern "C" fn perry_system_audio_get_peak() -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn perry_system_audio_start() -> f64 { 1.0 }
+#[no_mangle] pub extern "C" fn perry_system_audio_stop() { audio::stop() }
+#[no_mangle] pub extern "C" fn perry_system_audio_get_level() -> f64 { audio::get_level() }
+#[no_mangle] pub extern "C" fn perry_system_audio_get_peak() -> f64 { audio::get_peak() }
 #[no_mangle] pub extern "C" fn perry_system_audio_get_waveform(_count: f64) -> f64 { 0.0 }
 #[no_mangle] pub extern "C" fn perry_system_get_device_model() -> i64 { 0 }
 #[no_mangle] pub extern "C" fn perry_system_is_dark_mode() -> i64 { 0 }
@@ -669,6 +671,13 @@ pub extern "C" fn perry_ui_hstack_create_with_insets(spacing: f64, top: f64, lef
 #[no_mangle] pub extern "C" fn perry_system_keychain_get(_key: i64) -> f64 { f64::from_bits(0x7FFC_0000_0000_0001) }
 #[no_mangle] pub extern "C" fn perry_system_keychain_delete(_key: i64) {}
 #[no_mangle] pub extern "C" fn perry_system_notification_send(_title: i64, _body: i64) {}
+#[no_mangle] pub extern "C" fn perry_system_notification_register_remote(_callback: f64) {}
+#[no_mangle] pub extern "C" fn perry_system_notification_on_receive(_callback: f64) {}
+#[no_mangle] pub extern "C" fn perry_system_notification_schedule_interval(_id_ptr: i64, _title_ptr: i64, _body_ptr: i64, _seconds: f64, _repeats: f64) {}
+#[no_mangle] pub extern "C" fn perry_system_notification_schedule_calendar(_id_ptr: i64, _title_ptr: i64, _body_ptr: i64, _timestamp_ms: f64) {}
+#[no_mangle] pub extern "C" fn perry_system_notification_schedule_location(_id_ptr: i64, _title_ptr: i64, _body_ptr: i64, _lat: f64, _lon: f64, _radius: f64) {}
+#[no_mangle] pub extern "C" fn perry_system_notification_cancel(_id_ptr: i64) {}
+#[no_mangle] pub extern "C" fn perry_system_notification_on_tap(_callback: f64) {}
 #[no_mangle]
 pub extern "C" fn perry_system_get_locale() -> i64 {
     extern "C" { fn js_string_from_bytes(ptr: *const u8, len: i32) -> i64; }

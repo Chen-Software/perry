@@ -4,7 +4,7 @@ Perry uses reactive state to automatically update the UI when data changes.
 
 ## Creating State
 
-```typescript
+```typescript,no-test
 import { State } from "perry/ui";
 
 const count = State(0);           // number state
@@ -16,7 +16,7 @@ const items = State<string[]>([]); // array state
 
 ## Reading and Writing
 
-```typescript
+```typescript,no-test
 const value = count.value;  // Read current value
 count.set(42);              // Set new value → triggers UI update
 ```
@@ -27,7 +27,7 @@ Every `.set()` call re-renders the widget tree with the new value.
 
 Template literals with `state.value` update automatically:
 
-```typescript
+```typescript,no-test
 import { Text, State } from "perry/ui";
 
 const count = State(0);
@@ -37,36 +37,41 @@ Text(`Count: ${count.value}`);
 
 This works because Perry detects `state.value` reads inside template literals and creates reactive bindings.
 
-## Two-Way Binding
+## Binding Inputs to State
 
-`TextField` and other input widgets bind to state bidirectionally:
+Input widgets expose an `onChange` callback. Forward that into a state's
+`.set(...)` to keep the state in sync as the user types/toggles/drags:
 
-```typescript
-import { TextField, State } from "perry/ui";
+```typescript,no-test
+import { TextField, State, stateBindTextfield } from "perry/ui";
 
 const input = State("");
-TextField(input, "Type here...");
+const field = TextField("Type here...", (value: string) => input.set(value));
 
-// input.value always reflects what the user typed
-// input.set("hello") updates the text field
+// Optional: also let input.set("hello") update the field on screen.
+stateBindTextfield(input, field);
 ```
 
-Controls that support two-way binding:
-- `TextField(state, placeholder)` — text input
-- `SecureField(state, placeholder)` — password input
-- `Toggle(label, state)` — boolean toggle
-- `Slider(state, min, max)` — numeric slider
-- `Picker(options, state)` — selection
+Input control signatures:
+- `TextField(placeholder, onChange)` — text input, `onChange: (value: string) => void`
+- `SecureField(placeholder, onChange)` — password input, `onChange: (value: string) => void`
+- `Toggle(label, onChange)` — boolean toggle, `onChange: (value: boolean) => void`
+- `Slider(min, max, onChange)` — numeric slider, `onChange: (value: number) => void`
+- `Picker(onChange)` — dropdown, `onChange: (index: number) => void`; items via `pickerAddItem`
+
+For programmatic-to-UI sync (state-drives-widget) use the dedicated binders:
+`stateBindTextfield`, `stateBindSlider`, `stateBindToggle`, `stateBindTextNumeric`,
+`stateBindVisibility`.
 
 ## onChange Callbacks
 
-Listen for state changes:
+Listen for state changes with the free-function `stateOnChange`:
 
-```typescript
-import { State } from "perry/ui";
+```typescript,no-test
+import { State, stateOnChange } from "perry/ui";
 
 const count = State(0);
-count.onChange((newValue) => {
+stateOnChange(count, (newValue: number) => {
   console.log(`Count changed to ${newValue}`);
 });
 ```
@@ -75,7 +80,7 @@ count.onChange((newValue) => {
 
 Render a list from numeric state (the index count):
 
-```typescript
+```typescript,no-test
 import { VStack, Text, ForEach, State } from "perry/ui";
 
 const items = State(["Apple", "Banana", "Cherry"]);
@@ -92,7 +97,7 @@ VStack(16, [
 
 `ForEach` re-renders the list when the count state changes:
 
-```typescript
+```typescript,no-test
 // Add an item
 items.set([...items.value, "Date"]);
 itemCount.set(itemCount.value + 1);
@@ -106,7 +111,7 @@ itemCount.set(itemCount.value - 1);
 
 Use state to conditionally show widgets:
 
-```typescript
+```typescript,no-test
 import { VStack, Text, Button, State } from "perry/ui";
 
 const showDetails = State(false);
@@ -121,7 +126,7 @@ VStack(16, [
 
 Text can depend on multiple state values:
 
-```typescript
+```typescript,no-test
 const firstName = State("John");
 const lastName = State("Doe");
 
@@ -131,7 +136,7 @@ Text(`Hello, ${firstName.value} ${lastName.value}!`);
 
 ## State with Objects and Arrays
 
-```typescript
+```typescript,no-test
 const user = State({ name: "Perry", age: 0 });
 
 // Update by replacing the whole object
@@ -153,49 +158,12 @@ todos.set([...items]);
 ## Complete Example
 
 ```typescript
-import { App, Text, Button, TextField, VStack, HStack, State, ForEach, Spacer, Divider } from "perry/ui";
-
-const todos = State<string[]>([]);
-const count = State(0);
-const input = State("");
-
-App({
-  title: "Todo App",
-  width: 480,
-  height: 600,
-  body: VStack(16, [
-    Text("My Todos"),
-
-    HStack(8, [
-      TextField(input, "What needs to be done?"),
-      Button("Add", () => {
-        const text = input.value;
-        if (text.length > 0) {
-          todos.set([...todos.value, text]);
-          count.set(count.value + 1);
-          input.set("");
-        }
-      }),
-    ]),
-
-    Divider(),
-
-    ForEach(count, (i: number) =>
-      HStack(8, [
-        Text(todos.value[i]),
-        Spacer(),
-        Button("Delete", () => {
-          todos.set(todos.value.filter((_, idx) => idx !== i));
-          count.set(count.value - 1);
-        }),
-      ])
-    ),
-
-    Spacer(),
-    Text(`${count.value} items`),
-  ]),
-});
+{{#include ../../examples/ui/state/todo_app.ts}}
 ```
+
+This program is built and run by CI (`scripts/run_doc_tests.sh`), so the
+snippet above always matches the compiled artifact under
+[`docs/examples/ui/state/todo_app.ts`](../../examples/ui/state/todo_app.ts).
 
 ## Next Steps
 

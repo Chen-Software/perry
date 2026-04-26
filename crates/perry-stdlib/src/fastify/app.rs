@@ -3,7 +3,7 @@
 use perry_runtime::{js_string_from_bytes, StringHeader, JSValue};
 
 use crate::common::{get_handle_mut, register_handle, Handle};
-use super::{FastifyApp, FastifyConfig};
+use super::{FastifyApp, FastifyConfig, ensure_gc_scanner_registered};
 use super::context::string_from_nanboxed;
 
 // ============================================================================
@@ -13,6 +13,7 @@ use super::context::string_from_nanboxed;
 /// Create a new Fastify application
 #[no_mangle]
 pub unsafe extern "C" fn js_fastify_create() -> Handle {
+    ensure_gc_scanner_registered();
     register_handle(FastifyApp::new())
 }
 
@@ -23,6 +24,7 @@ pub unsafe extern "C" fn js_fastify_create() -> Handle {
 /// - bodyLimit: number
 #[no_mangle]
 pub unsafe extern "C" fn js_fastify_create_with_opts(opts: f64) -> Handle {
+    ensure_gc_scanner_registered();
     let mut config = FastifyConfig::default();
 
     // Parse options if it's an object
@@ -144,12 +146,9 @@ unsafe fn register_route(app_handle: Handle, method: &str, path: i64, handler: i
     };
 
     if let Some(app) = get_handle_mut::<FastifyApp>(app_handle) {
-        let full = if app.prefix.is_empty() { path_str.clone() } else { format!("{}{}", app.prefix, path_str) };
-        eprintln!("[ROUTE] {} {} (handle={})", method, full, app_handle);
         app.add_route(method, &path_str, raw_handler);
         return true;
     }
-    eprintln!("[ROUTE] handle {} not found", app_handle);
     false
 }
 
@@ -270,7 +269,7 @@ unsafe fn extract_jsvalue_string(value: f64) -> Option<String> {
     if ptr == 0 {
         return None;
     }
-    let len = (*(ptr as *const StringHeader)).length as usize;
+    let len = (*(ptr as *const StringHeader)).byte_len as usize;
     let data_ptr = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data_ptr, len);
     Some(String::from_utf8_lossy(bytes).to_string())

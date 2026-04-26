@@ -8,8 +8,9 @@ use anyhow::{anyhow, bail, Result};
 use perry_hir::Stmt;
 
 use crate::expr::{lower_expr, FnCtx};
+use crate::loop_purity::body_needs_asm_barrier;
 use crate::lower_conditional::lower_truthy;
-use crate::types::{DOUBLE, I32};
+use crate::types::{DOUBLE, I8, I32, I64, PTR};
 
 /// Lower a sequence of statements into the current block of `ctx`. If any
 /// statement splits control flow, `ctx.current_block` is updated to the
@@ -49,6 +50,14 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
             } else {
                 v
             };
+            // Pop any currently-open try frames before returning so the
+            // runtime's TRY_DEPTH counter stays balanced. Otherwise an
+            // early `return` inside `try { ... }` leaks one frame per
+            // call — at 128 the runtime panics with "Try block nesting
+            // too deep".
+            for _ in 0..ctx.try_depth {
+                ctx.block().call_void("js_try_end", &[]);
+            }
             ctx.block().ret(DOUBLE, &final_v);
             Ok(())
         }
@@ -60,14 +69,22 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
                 let blk = ctx.block();
                 let handle = blk.call(crate::types::I64, "js_promise_resolved", &[(DOUBLE, &zero)]);
                 let boxed = crate::expr::nanbox_pointer_inline_pub(blk, &handle);
+                // Pop open try frames first (see above).
+                for _ in 0..ctx.try_depth {
+                    ctx.block().call_void("js_try_end", &[]);
+                }
                 ctx.block().ret(DOUBLE, &boxed);
             } else {
+                // Pop open try frames first (see above).
+                for _ in 0..ctx.try_depth {
+                    ctx.block().call_void("js_try_end", &[]);
+                }
                 ctx.block().ret(DOUBLE, "0.0");
             }
             Ok(())
         }
 
-        Stmt::Let { id, name, init, ty, .. } => {
+        Stmt::Let { id, name, init, ty, mutable, .. } => {
             // `let C = SomeClass` aliases the local `C` to the class
             // `SomeClass` for `new C()` site rerouting. The HIR lowers
             // class identifiers referenced as values to `Expr::ClassRef`,
@@ -112,6 +129,25 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
                 }
                 _ => {}
             }
+
+            // Issue #50: row-alias detection. When `let krow = X[i]` where
+            // `X` is a folded flat-const 2D int array, record
+            // `krow_id → (X_id, i)` so a later `krow[j]` can lower through
+            // the same flat `[N x i32]` load path as an inline `X[i][j]`.
+            // Only fires for non-mutable lets (reassignment would invalidate
+            // the alias relationship).
+            if !*mutable {
+                if let Some(perry_hir::Expr::IndexGet { object, index }) = init.as_ref() {
+                    if let perry_hir::Expr::LocalGet(const_id) = object.as_ref() {
+                        if ctx.flat_const_arrays.contains_key(const_id) {
+                            ctx.array_row_aliases.insert(
+                                *id,
+                                (*const_id, Box::new((**index).clone())),
+                            );
+                        }
+                    }
+                }
+            }
             // Refine the declared type from the initializer when the
             // declared type is Any. The HIR's destructuring lowering
             // declares synthetic `__destruct_*` lets as `ty: Any` even
@@ -143,6 +179,162 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
                 ctx.local_closure_func_ids.insert(*id, *cfid);
             }
 
+            // Scalar replacement: if this Let binds a non-escaping array
+            // literal, skip the heap allocation entirely. Each element gets
+            // its own stack alloca; constant-index reads in the Let's scope
+            // load directly from the corresponding slot. See the
+            // `collect_non_escaping_arrays` pass in collectors.rs for the
+            // escape criteria.
+            if let Some(perry_hir::Expr::Array(elements)) = init.as_ref() {
+                if ctx.non_escaping_arrays.contains_key(id) {
+                    let n = elements.len();
+                    let mut slots: Vec<String> = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        slots.push(ctx.func.alloca_entry(DOUBLE));
+                    }
+                    // Evaluate each element expression first; store the
+                    // result into its slot. Order matches source, so any
+                    // side effects stay observable in the same sequence the
+                    // heap-allocating path would have produced.
+                    for (i, elem) in elements.iter().enumerate() {
+                        let v = lower_expr(ctx, elem)?;
+                        ctx.block().store(DOUBLE, &v, &slots[i]);
+                    }
+                    ctx.scalar_replaced_arrays.insert(*id, slots);
+
+                    // Register the local's type + a dummy slot so any surviving
+                    // LocalGet (e.g. debug instrumentation, unrecognized
+                    // expression shapes the collector conservatively rejected)
+                    // still resolves; the actual scalar-replaced reads short-
+                    // circuit before hitting this slot.
+                    ctx.local_types.insert(*id, refined_ty);
+                    let dummy_slot = ctx.func.alloca_entry(DOUBLE);
+                    ctx.locals.insert(*id, dummy_slot);
+                    return Ok(());
+                }
+            }
+
+            // Scalar replacement: if this Let binds a non-escaping object
+            // literal, skip the heap allocation entirely. One alloca per
+            // unique field; PropertyGet/Set already resolve through
+            // `ctx.scalar_replaced`, so no additional read path is needed.
+            // See `collect_non_escaping_object_literals` in collectors.rs.
+            if let Some(perry_hir::Expr::Object(props)) = init.as_ref() {
+                if let Some(field_order) = ctx.non_escaping_object_literals.get(id).cloned() {
+                    let undef = crate::nanbox::double_literal(f64::from_bits(
+                        crate::nanbox::TAG_UNDEFINED,
+                    ));
+                    let mut field_slots: std::collections::HashMap<String, String> =
+                        std::collections::HashMap::with_capacity(field_order.len());
+                    for fname in &field_order {
+                        let slot = ctx.func.alloca_entry(DOUBLE);
+                        ctx.func.entry_allocas_push_store(DOUBLE, &undef, &slot);
+                        field_slots.insert(fname.clone(), slot);
+                    }
+
+                    // Evaluate and store each property expression in source
+                    // order — duplicate keys naturally do last-write-wins
+                    // because they share a slot. Side effects of each value
+                    // expression stay observable in declaration order.
+                    for (key, value_expr) in props {
+                        let v = lower_expr(ctx, value_expr)?;
+                        if let Some(slot) = field_slots.get(key).cloned() {
+                            ctx.block().store(DOUBLE, &v, &slot);
+                        }
+                    }
+
+                    ctx.scalar_replaced.insert(*id, field_slots);
+
+                    // Register type + dummy slot so any surviving LocalGet
+                    // (conservative collector rejects are possible) resolves
+                    // — the scalar-replaced PropertyGet/Set paths short-
+                    // circuit before loading this slot.
+                    ctx.local_types.insert(*id, refined_ty);
+                    let dummy_slot = ctx.func.alloca_entry(DOUBLE);
+                    ctx.locals.insert(*id, dummy_slot);
+                    return Ok(());
+                }
+            }
+
+            // Scalar replacement: if this Let binds a non-escaping New,
+            // skip the heap allocation entirely. Create a stack alloca
+            // per field and inline the constructor stores into those allocas.
+            //
+            // Imported classes are excluded: their constructor bodies live
+            // in the source module's .o and aren't available here, so
+            // inlining produces a zero-initialized stub-shaped object with
+            // no fields populated. The call must go through the standard
+            // heap-allocation path so `lower_new` emits the cross-module
+            // `<prefix>__<class>_constructor` call.
+            if let Some(perry_hir::Expr::New { class_name, args, .. }) = init.as_ref() {
+                let is_imported = ctx.imported_class_ctors.contains_key(class_name);
+                if ctx.non_escaping_news.contains_key(id) && !is_imported {
+                    // Extract all class data we need (field names + ctor) before
+                    // taking mutable borrows on ctx. Clone out of the shared
+                    // `classes` map so we release the immutable borrow early.
+                    let scalar_data = collect_scalar_class_data(ctx, class_name);
+
+                    if let Some((all_fields, ctor)) = scalar_data {
+                        // Create per-field allocas
+                        let mut field_slots: std::collections::HashMap<String, String> =
+                            std::collections::HashMap::new();
+                        for fname in &all_fields {
+                            let slot = ctx.func.alloca_entry(DOUBLE);
+                            let undef = crate::nanbox::double_literal(f64::from_bits(
+                                crate::nanbox::TAG_UNDEFINED,
+                            ));
+                            ctx.func.entry_allocas_push_store(DOUBLE, &undef, &slot);
+                            field_slots.insert(fname.clone(), slot);
+                        }
+
+                        ctx.scalar_replaced.insert(*id, field_slots);
+
+                        // Register type + dummy slot so LocalGet doesn't fail
+                        ctx.local_types.insert(*id, refined_ty);
+                        let dummy_slot = ctx.func.alloca_entry(DOUBLE);
+                        ctx.locals.insert(*id, dummy_slot);
+
+                        // Lower args first
+                        let mut lowered_args: Vec<String> = Vec::new();
+                        for a in args {
+                            lowered_args.push(lower_expr(ctx, a)?);
+                        }
+
+                        // Push scalar ctor target so PropertySet on `this` routes to allocas
+                        ctx.scalar_ctor_target.push(*id);
+                        ctx.class_stack.push(class_name.clone());
+                        // A dummy this_stack entry — the ctor body references Expr::This
+                        // but scalar-replaced PropertySet intercepts it before loading
+                        let dummy_this = ctx.func.alloca_entry(DOUBLE);
+                        ctx.this_stack.push(dummy_this);
+
+                        // Apply field initializers
+                        crate::lower_call::apply_field_initializers_recursive_pub(ctx, class_name)?;
+
+                        // Inline constructor body if present
+                        if let Some(ctor) = &ctor {
+                            let saved_locals = ctx.locals.clone();
+                            let saved_local_types = ctx.local_types.clone();
+                            for (param, arg_val) in ctor.params.iter().zip(lowered_args.iter()) {
+                                let slot = ctx.func.alloca_entry(DOUBLE);
+                                ctx.block().store(DOUBLE, arg_val, &slot);
+                                ctx.locals.insert(param.id, slot);
+                                ctx.local_types.insert(param.id, param.ty.clone());
+                            }
+                            crate::stmt::lower_stmts(ctx, &ctor.body)?;
+                            ctx.locals = saved_locals;
+                            ctx.local_types = saved_local_types;
+                        }
+
+                        ctx.this_stack.pop();
+                        ctx.class_stack.pop();
+                        ctx.scalar_ctor_target.pop();
+
+                        return Ok(());
+                    }
+                }
+            }
+
             // CRITICAL: register the local's storage BEFORE lowering
             // the init expression. Self-recursive closures (`let f = (n)
             // => f(n-1) ...`) reference the let-bound name from inside
@@ -158,6 +350,25 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
                     let v = lower_expr(ctx, init_expr)?;
                     let g_ref = format!("@{}", global_name);
                     ctx.block().store(DOUBLE, &v, &g_ref);
+
+                    // Buffer data-pointer slot: when init is BufferAlloc on an
+                    // immutable module global, pre-compute the data base pointer
+                    // (handle + 8, past BufferHeader) and store it in a ptr
+                    // alloca. Uint8ArrayGet/Set then uses `getelementptr inbounds`
+                    // from this pointer instead of the inttoptr chain — giving
+                    // LLVM proper pointer provenance for auto-vectorization.
+                    if !*mutable {
+                        if matches!(init_expr, perry_hir::Expr::BufferAlloc { .. }) {
+                            let blk = ctx.block();
+                            let handle = crate::expr::unbox_to_i64(blk, &v);
+                            let handle_ptr = blk.inttoptr(I64, &handle);
+                            let data_ptr = blk.gep(I8, &handle_ptr, &[(I32, "8")]);
+                            let slot = ctx.func.alloca_entry(PTR);
+                            ctx.block().store(PTR, &data_ptr, &slot);
+                            let scope_idx = ctx.buffer_alias_base + ctx.buffer_data_slots.len() as u32;
+                            ctx.buffer_data_slots.insert(*id, (slot, scope_idx));
+                        }
+                    }
                 }
                 return Ok(());
             }
@@ -220,9 +431,95 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
             }
             ctx.locals.insert(*id, slot.clone());
             ctx.local_types.insert(*id, refined_ty);
+            // Int32 specialization (issue #48): if this local qualifies as
+            // integer-valued (all writes are `| 0` / `>>> 0` / bitwise / int
+            // literal / ++/--), allocate a parallel i32 slot. Update/LocalSet
+            // mirror writes to it; IndexGet and hot-loop consumers prefer it
+            // over the double slot — skipping the `fadd → fcvtzs → scvtf`
+            // round-trip per iteration of `sum = (sum + i) | 0`.
+            //
+            // Only fire on `mutable` locals: an immutable `const SEED = 0xDEAD_BEEF`
+            // never benefits from i32 specialization (no per-iteration cost), and
+            // its initializer may legitimately exceed i32 range (e.g. 0x9E3779B9
+            // = 2654435769 > INT32_MAX) — fptosi'ing it saturates to INT32_MAX
+            // and silently corrupts every read of the i32 slot. Mutable locals
+            // are always written through paths we control (Update, `(expr) | 0`)
+            // which produce in-range int32 values per JS ToInt32 semantics.
+            let init_in_i32_range = match init.as_ref() {
+                Some(perry_hir::Expr::Integer(n)) => i32::try_from(*n).is_ok(),
+                _ => true, // non-Integer init: writes will always go via i32-coercing paths
+            };
+            // Issue #140: only emit the parallel i32 shadow slot when this local
+            // actually participates in an array/buffer index expression. Pure
+            // accumulators (`sum = sum + 1` between `Date.now()` calls) would
+            // otherwise get a dead i32/sitofp mirror that blocks LLVM's
+            // vectorizer — combined with the #74 `asm sideeffect` loop barrier
+            // the fadd reduction can't be SIMD-widened. Real loop counters that
+            // match `classify_for_length_hoist` in `lower_for` still pick up
+            // their i32 slot via the loop-specific allocation path a few hundred
+            // lines below, so `for (let i=0; i<arr.length; i++) arr[i]=v` keeps
+            // its fast-path even when this gate skips the Let site.
+            let needs_i32_slot = ctx.integer_locals.contains(id)
+                && ctx.index_used_locals.contains(id)
+                && *mutable
+                && init_in_i32_range
+                && !ctx.boxed_vars.contains(id)
+                && !ctx.module_globals.contains_key(id)
+                && !ctx.i32_counter_slots.contains_key(id);
+            if needs_i32_slot {
+                let i32_slot = ctx.func.alloca_entry(I32);
+                ctx.func.entry_allocas_push_store(I32, "0", &i32_slot);
+                ctx.i32_counter_slots.insert(*id, i32_slot);
+            }
             if let Some(init_expr) = init {
                 let v = lower_expr(ctx, init_expr)?;
                 ctx.block().store(DOUBLE, &v, &slot);
+                // Gen-GC Phase A sub-phase 3b: if this local has a
+                // shadow-frame slot, mirror the store into the
+                // frame. Bitcast double → i64 (NaN-box bits) then
+                // call js_shadow_slot_set. LLVM will fold the
+                // redundant double-alloca and i64-pass through
+                // mem2reg/SROA in many cases; when it can't, the
+                // cost is one bitcast + one call per pointer-typed
+                // Let — measured noise on bench_json_roundtrip.
+                // Only fires when PERRY_SHADOW_STACK=1 is set at
+                // compile time, since the map is empty otherwise.
+                if let Some(&slot_idx) = ctx.shadow_slot_map.get(id) {
+                    let v_i64 = ctx.block().bitcast_double_to_i64(&v);
+                    ctx.block().call_void(
+                        "js_shadow_slot_set",
+                        &[(I32, &slot_idx.to_string()), (I64, &v_i64)],
+                    );
+                }
+                // Seed the i32 slot from the init value when the local has one.
+                // Use fptosi→i64 + trunc→i32 instead of direct fptosi→i32
+                // to handle unsigned values (e.g. `let s = 0x9E3779B9 >>> 0`
+                // where the double exceeds INT32_MAX). Direct fptosi→i32 is
+                // UB for such values; going through i64 then truncating gives
+                // the correct bit pattern.
+                if let Some(i32_slot) = ctx.i32_counter_slots.get(id).cloned() {
+                    let v_i64 = ctx.block().fptosi(DOUBLE, &v, crate::types::I64);
+                    let v_i32 = ctx.block().trunc(crate::types::I64, &v_i64, I32);
+                    ctx.block().store(I32, &v_i32, &i32_slot);
+                }
+                // Buffer data-pointer slot for local (non-global) const buffers.
+                // `const src = Buffer.alloc(N)` at module-level lives here when
+                // `src` doesn't escape to functions — same pattern as the
+                // image_conv blur kernel. The pre-computed ptr slot lets
+                // Uint8ArrayGet/Set emit `getelementptr inbounds` from a
+                // proper `ptr` base instead of an `inttoptr` chain.
+                if !*mutable {
+                    if matches!(init_expr, perry_hir::Expr::BufferAlloc { .. }) {
+                        let blk = ctx.block();
+                        let handle = crate::expr::unbox_to_i64(blk, &v);
+                        let handle_ptr = blk.inttoptr(I64, &handle);
+                        let data_ptr = blk.gep(I8, &handle_ptr, &[(I32, "8")]);
+                        let buf_slot = ctx.func.alloca_entry(PTR);
+                        ctx.block().store(PTR, &data_ptr, &buf_slot);
+                        let scope_idx = ctx.buffer_alias_base + ctx.buffer_data_slots.len() as u32;
+                        ctx.buffer_data_slots.insert(*id, (buf_slot, scope_idx));
+                    }
+                }
             } else if let Some(cv) = ctx.compile_time_constants.get(id) {
                 // Compile-time constants (e.g. `declare const __platform__: number`)
                 // have no init expression but their value is known. Store the
@@ -453,17 +750,30 @@ fn lower_try(
     // assignments. The standard `blk.call()` doesn't support call
     // attributes, so we emit the instruction manually.
     let sjr_reg = blk.next_reg();
-    blk.emit_raw(format!(
-        "{} = call i32 @setjmp(ptr {}) #0",
-        sjr_reg, jmpbuf
-    ));
+    // Windows MSVC uses _setjmp(buf, frame_ptr); Unix uses setjmp(buf).
+    if cfg!(target_os = "windows") {
+        blk.emit_raw(format!(
+            "{} = call i32 @_setjmp(ptr {}, ptr null) #0",
+            sjr_reg, jmpbuf
+        ));
+    } else {
+        blk.emit_raw(format!(
+            "{} = call i32 @setjmp(ptr {}) #0",
+            sjr_reg, jmpbuf
+        ));
+    }
     let sjr = sjr_reg;
     let is_exc = blk.icmp_ne(I32, &sjr, "0");
     blk.cond_br(&is_exc, &catch_label, &try_body_label);
 
     // --- try body ---
     ctx.current_block = try_body_idx;
+    // Track that this try frame is open so any `return` inside the body
+    // pops it via `js_try_end` before falling through to the function's
+    // ret. Decremented after the body finishes lowering.
+    ctx.try_depth += 1;
     lower_stmts(ctx, body)?;
+    ctx.try_depth -= 1;
     if !ctx.block().is_terminated() {
         ctx.block().call_void("js_try_end", &[]);
         ctx.block().br(&finally_label);
@@ -621,6 +931,61 @@ fn lower_for(
             None
         };
 
+    // Issue #168: when the `i < arr.length` peephole didn't fire, also
+    // detect the simpler `i < n` shape where `n` is a number-typed local
+    // or function parameter. Emitting `fptosi(n)` once at the loop head
+    // and using `icmp slt i32 %i, %n.i32` in the condition block
+    // replaces `fcmp olt double`, letting LLVM's SCEV model `i` as a
+    // clean integer induction variable — prerequisite for LoopVectorizer
+    // to widen Buffer-read and similar intrinsic-heavy bodies.
+    let local_bound_classification: Option<(u32, u32, perry_hir::CompareOp)> =
+        if hoist_classification.is_none() {
+            condition.and_then(|cond| classify_for_local_bound(cond, ctx))
+        } else {
+            None
+        };
+    // Track whether *we* allocated the counter's i32 slot (vs. the Let
+    // site having done so already).  Only the site that inserted should
+    // remove it at loop exit to avoid disturbing a pre-existing slot.
+    let local_bound_counter_i32_was_fresh: bool;
+    let i32_local_bound_slot: Option<String> =
+        if let Some((counter_id, bound_id, _op)) = local_bound_classification {
+            // Allocate a parallel i32 slot for the counter if not already
+            // present.  The Let-site may have skipped it when the counter
+            // wasn't in `index_used_locals`; providing it here enables both
+            // `icmp slt i32` in the condition and `add i32 1` in Update.
+            let fresh = if !ctx.i32_counter_slots.contains_key(&counter_id) {
+                if let Some(counter_slot) = ctx.locals.get(&counter_id).cloned() {
+                    let i32_slot = ctx.func.alloca_entry(I32);
+                    let cur_dbl = ctx.block().load(DOUBLE, &counter_slot);
+                    let cur_i32 = ctx.block().fptosi(DOUBLE, &cur_dbl, I32);
+                    ctx.block().store(I32, &cur_i32, &i32_slot);
+                    ctx.i32_counter_slots.insert(counter_id, i32_slot);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            local_bound_counter_i32_was_fresh = fresh;
+            // Hoist `fptosi(n)` to a fresh i32 alloca before the cond block
+            // so LLVM sees a loop-invariant integer bound — critical for
+            // SCEV / LoopVectorizer to recognize the induction variable.
+            if let Some(bound_slot) = ctx.locals.get(&bound_id).cloned() {
+                let bound_dbl = ctx.block().load(DOUBLE, &bound_slot);
+                let bound_i32 = ctx.block().fptosi(DOUBLE, &bound_dbl, I32);
+                let slot = ctx.func.alloca_entry(I32);
+                ctx.block().store(I32, &bound_i32, &slot);
+                Some(slot)
+            } else {
+                None
+            }
+        } else {
+            local_bound_counter_i32_was_fresh = false;
+            None
+        };
+
     let cond_idx = ctx.new_block("for.cond");
     let body_idx = ctx.new_block("for.body");
     let update_idx = ctx.new_block("for.update");
@@ -639,10 +1004,28 @@ fn lower_for(
     let used_i32_cond = if let (Some((_, counter_id)), Some(ref len_i32_slot)) =
         (hoist_classification, &i32_length_slot)
     {
+        // Existing path: `i < arr.length` with hoisted i32 length.
         if let Some(ctr_i32_slot) = ctx.i32_counter_slots.get(&counter_id).cloned() {
             let ctr = ctx.block().load(I32, &ctr_i32_slot);
             let len = ctx.block().load(I32, len_i32_slot);
             let cmp = ctx.block().icmp_slt(I32, &ctr, &len);
+            ctx.block().cond_br(&cmp, &body_label, &exit_label);
+            true
+        } else {
+            false
+        }
+    } else if let (Some((counter_id, _, op)), Some(ref bound_i32_slot)) =
+        (local_bound_classification, &i32_local_bound_slot)
+    {
+        // Issue #168: `i < n` / `i <= n` where `n` is a number-typed local
+        // or parameter.  The fptosi(n) was hoisted above; use icmp i32.
+        if let Some(ctr_i32_slot) = ctx.i32_counter_slots.get(&counter_id).cloned() {
+            let ctr = ctx.block().load(I32, &ctr_i32_slot);
+            let bound = ctx.block().load(I32, bound_i32_slot);
+            let cmp = match op {
+                perry_hir::CompareOp::Le => ctx.block().icmp_sle(I32, &ctr, &bound),
+                _ => ctx.block().icmp_slt(I32, &ctr, &bound),
+            };
             ctx.block().cond_br(&cmp, &body_label, &exit_label);
             true
         } else {
@@ -677,6 +1060,17 @@ fn lower_for(
     // Body block.
     ctx.current_block = body_idx;
     lower_stmts(ctx, body)?;
+    // Issue #74: insert an empty `asm sideeffect` in bodies whose
+    // statements are all LLVM-pure (local-only arithmetic, no calls,
+    // no heap mutation). Without this, clang -O3's loop-deletion
+    // pass folds patterns like `for (let i=0;i<N;i++) sum+=1;` to
+    // `sum=N` and eliminates the loop entirely — so two `Date.now()`
+    // calls bracketing the loop end up adjacent in the binary and
+    // report 0ms wall-clock. The barrier emits zero machine
+    // instructions but is opaque to IndVarSimplify.
+    if !ctx.block().is_terminated() && body_needs_asm_barrier(body) {
+        ctx.block().asm_sideeffect_barrier();
+    }
     if !ctx.block().is_terminated() {
         ctx.block().br(&update_label);
     }
@@ -702,6 +1096,15 @@ fn lower_for(
         ctx.bounded_index_pairs.pop();
     }
     let _ = hoisted_length_slot;
+    // Pop the i32 counter slot we inserted for the `i < n` number-bound
+    // path, but only if *we* were the ones that inserted it (the Let site
+    // may have already provided a slot, which should outlive the loop).
+    if local_bound_counter_i32_was_fresh {
+        if let Some((counter_id, _, _)) = local_bound_classification {
+            ctx.i32_counter_slots.remove(&counter_id);
+        }
+    }
+    let _ = i32_local_bound_slot;
 
     // Exit block — subsequent statements continue here.
     ctx.current_block = exit_idx;
@@ -751,6 +1154,66 @@ fn classify_for_length_hoist(
         return None;
     }
     Some((arr_id, bounded_idx_id))
+}
+
+/// Inspect a `for` loop's condition and return `Some((counter_id, bound_id,
+/// op))` if the condition is the shape `counter < bound` (or `<=`) where
+/// both sides are `LocalGet` ids, the counter is in `integer_locals`, and
+/// the bound is either (a) provably integer-valued (`integer_locals`) or
+/// (b) a number-typed local / parameter whose slot is accessible directly
+/// (i.e. not boxed and not a module global).
+///
+/// Case (b) relies on Perry's trust-types philosophy: a `number`-typed local
+/// used as a for-loop bound is expected to hold a whole-number value at
+/// runtime.  Callers that pass non-integer floats as loop bounds would
+/// observe at most one iteration difference — a trade-off that is within
+/// Perry's existing trust-types contract.
+///
+/// Used by `lower_for` to enable the same i32 counter specialization as
+/// the `i < arr.length` peephole (`classify_for_length_hoist`) on the
+/// common case where the loop bound comes from a function parameter or a
+/// number-typed local variable.
+fn classify_for_local_bound(
+    cond: &perry_hir::Expr,
+    ctx: &crate::expr::FnCtx<'_>,
+) -> Option<(u32, u32, perry_hir::CompareOp)> {
+    use perry_hir::{CompareOp, Expr};
+    let (op, left, right) = match cond {
+        Expr::Compare { op, left, right } => (*op, left.as_ref(), right.as_ref()),
+        _ => return None,
+    };
+    if !matches!(op, CompareOp::Lt | CompareOp::Le) {
+        return None;
+    }
+    let counter_id = match left {
+        Expr::LocalGet(id) => *id,
+        _ => return None,
+    };
+    let bound_id = match right {
+        Expr::LocalGet(id) => *id,
+        _ => return None,
+    };
+    // Counter must be provably integer-valued (initialized from integer
+    // literal, only mutated by Update ++/--).
+    if !ctx.integer_locals.contains(&counter_id) {
+        return None;
+    }
+    // Bound is safe to fptosi when provably integer-valued, OR when it is a
+    // number-typed slot that is accessible without boxing (params and simple
+    // `let` locals).  Module globals and boxed (closure-captured) variables
+    // go through different load paths so we skip those.
+    let bound_is_integer_safe = ctx.integer_locals.contains(&bound_id)
+        || (ctx.locals.contains_key(&bound_id)
+            && !ctx.boxed_vars.contains(&bound_id)
+            && !ctx.module_globals.contains_key(&bound_id)
+            && matches!(
+                ctx.local_types.get(&bound_id),
+                Some(perry_types::Type::Number | perry_types::Type::Int32)
+            ));
+    if !bound_is_integer_safe {
+        return None;
+    }
+    Some((counter_id, bound_id, op))
 }
 
 fn stmt_preserves_array_length(
@@ -961,7 +1424,8 @@ fn expr_preserves_array_length(
         | Expr::Bool(_)
         | Expr::Null
         | Expr::Undefined
-        | Expr::String(_) => true,
+        | Expr::String(_)
+        | Expr::WtfString(_) => true,
         // Default: conservative reject for HIR variants we haven't
         // analyzed. Better to lose the optimization than to silently
         // hoist past a body that mutates the array.
@@ -1013,6 +1477,10 @@ fn lower_while(ctx: &mut FnCtx<'_>, condition: &perry_hir::Expr, body: &[Stmt]) 
 
     ctx.current_block = body_idx;
     lower_stmts(ctx, body)?;
+    // Issue #74: see lower_for for rationale.
+    if !ctx.block().is_terminated() && body_needs_asm_barrier(body) {
+        ctx.block().asm_sideeffect_barrier();
+    }
     if !ctx.block().is_terminated() {
         ctx.block().br(&cond_label);
     }
@@ -1052,6 +1520,10 @@ fn lower_do_while(
 
     ctx.current_block = body_idx;
     lower_stmts(ctx, body)?;
+    // Issue #74: see lower_for for rationale.
+    if !ctx.block().is_terminated() && body_needs_asm_barrier(body) {
+        ctx.block().asm_sideeffect_barrier();
+    }
     if !ctx.block().is_terminated() {
         ctx.block().br(&cond_label);
     }
@@ -1348,4 +1820,40 @@ fn stmt_variant_name(s: &Stmt) -> &'static str {
 #[allow(dead_code)]
 fn _keep_anyhow_in_scope() -> anyhow::Error {
     anyhow!("")
+}
+
+/// Extract all field names (parent chain + own) and the constructor for
+/// a class, cloning everything out of `ctx.classes` so the immutable
+/// borrow is released before the caller mutates `ctx`.
+///
+/// Returns `None` if the class is not found in `ctx.classes`.
+fn collect_scalar_class_data(
+    ctx: &FnCtx<'_>,
+    class_name: &str,
+) -> Option<(Vec<String>, Option<perry_hir::Function>)> {
+    let class = ctx.classes.get(class_name)?;
+    let mut all_fields: Vec<String> = Vec::new();
+    let mut chain: Vec<String> = Vec::new();
+    let mut p = class.extends_name.clone();
+    while let Some(pname) = p {
+        chain.push(pname.clone());
+        if let Some(pc) = ctx.classes.get(pname.as_str()) {
+            p = pc.extends_name.clone();
+        } else {
+            break;
+        }
+    }
+    chain.reverse();
+    for pname in &chain {
+        if let Some(pc) = ctx.classes.get(pname.as_str()) {
+            for f in &pc.fields {
+                all_fields.push(f.name.clone());
+            }
+        }
+    }
+    for f in &class.fields {
+        all_fields.push(f.name.clone());
+    }
+    let ctor = class.constructor.clone();
+    Some((all_fields, ctor))
 }

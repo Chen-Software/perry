@@ -1,0 +1,427 @@
+// Type declarations for perry/ui — Perry's native UI framework
+// These types are auto-written by `perry init` / `perry types` so IDEs
+// and tsc can resolve `import { ... } from "perry/ui"`.
+
+declare const __widget: unique symbol;
+
+/**
+ * Instance methods available on every Widget handle. The handle itself is
+ * a NaN-boxed number at runtime; the compiler lowers these method calls to
+ * `perry_ui_widget_*` FFI entries.
+ */
+export interface WidgetMethods {
+    /**
+     * Animate the widget's opacity to `target` over `durationSecs` seconds.
+     * The animation starts from the widget's current opacity.
+     */
+    animateOpacity(target: number, durationSecs: number): void;
+    /**
+     * Animate the widget's position by `(dx, dy)` pixels over `durationSecs`
+     * seconds, relative to its current position.
+     */
+    animatePosition(dx: number, dy: number, durationSecs: number): void;
+}
+
+/** Opaque handle to a native UI widget. */
+export type Widget = number & WidgetMethods & { readonly [__widget]: void };
+
+/** Reactive state container. Generic over the value type it holds. */
+export interface State<T = number> {
+    /** Current value of the state. */
+    readonly value: T;
+    /** Set the state value and trigger bound UI updates. */
+    set(value: T): void;
+}
+
+/** Native window with instance methods. */
+export interface Window {
+    show(): void;
+    hide(): void;
+    close(): void;
+    setBody(body: Widget): void;
+    setSize(width: number, height: number): void;
+    onFocusLost(callback: () => void): void;
+}
+
+// ---------------------------------------------------------------------------
+// Constructors
+// ---------------------------------------------------------------------------
+
+/** Create and run a native application. Blocks the main thread. */
+export function App(config: {
+    title: string;
+    width: number;
+    height: number;
+    icon?: string;
+    body: Widget;
+}): void;
+
+/** Vertical stack layout. */
+export function VStack(children: Widget[]): Widget;
+export function VStack(spacing: number, children: Widget[]): Widget;
+
+/** Horizontal stack layout. */
+export function HStack(children: Widget[]): Widget;
+export function HStack(spacing: number, children: Widget[]): Widget;
+
+/** Static text label. */
+export function Text(content: string): Widget;
+
+/** Clickable button. */
+export function Button(label: string, onPress: () => void): Widget;
+
+/** Single-line text input. */
+export function TextField(placeholder: string, onChange: (value: string) => void): Widget;
+
+/** Multi-line text input. */
+export function TextArea(placeholder: string, onChange: (value: string) => void): Widget;
+
+/** Password / secure text input. */
+export function SecureField(placeholder: string, onChange: (value: string) => void): Widget;
+
+/** Boolean toggle switch. */
+export function Toggle(label: string, onChange: (value: boolean) => void): Widget;
+
+/** Numeric slider. */
+export function Slider(min: number, max: number, onChange: (value: number) => void): Widget;
+
+/** Scrollable container. */
+export function ScrollView(): Widget;
+
+/** Flexible space. */
+export function Spacer(): Widget;
+
+/** Visual separator line. */
+export function Divider(): Widget;
+
+/** Indeterminate or determinate progress indicator. */
+export function ProgressView(): Widget;
+
+/** Depth stack (overlapping children). */
+export function ZStack(): Widget;
+
+/** Dropdown picker. */
+export function Picker(onChange: (index: number) => void): Widget;
+
+/** Form section with a title. */
+export function Section(title: string): Widget;
+
+/** Navigation stack for push/pop navigation. */
+export function NavStack(): Widget;
+
+/**
+ * Tab bar container.
+ *
+ * **Platform support:** fully implemented on iOS, tvOS, Android. On macOS,
+ * Windows, and GTK4 this is currently a no-op stub (returns handle 0) and
+ * watchOS silently substitutes a VStack. Prefer `NavStack` or a custom
+ * segmented control on desktop until these land.
+ */
+export function TabBar(onChange: (index: number) => void): Widget;
+
+/** Create a native window. */
+export function Window(title: string, width: number, height: number): Window;
+
+/**
+ * Virtualized vertical list. `render(index)` is invoked lazily — on macOS,
+ * backed by NSTableView, so only rows currently within the visible rect are
+ * realized. Use this for lists of hundreds or thousands of items; for small
+ * lists a plain `VStack` + `ForEach` is simpler.
+ *
+ * Row height defaults to 44pt (uniform). Override with `lazyvstackSetRowHeight`.
+ * Call `lazyvstackUpdate(handle, newCount)` when the underlying data changes.
+ */
+export function LazyVStack(count: number, render: (index: number) => Widget): Widget;
+export function lazyvstackUpdate(handle: Widget, count: number): void;
+export function lazyvstackSetRowHeight(handle: Widget, height: number): void;
+
+/** Vertical split view. */
+export function SplitView(): Widget;
+
+/** Image from a file path. */
+export function ImageFile(path: string): Widget;
+
+/** Image from a system symbol name (SF Symbols). */
+export function ImageSymbol(name: string): Widget;
+
+/** VStack with built-in edge insets. */
+export function VStackWithInsets(spacing: number, top: number, left: number, bottom: number, right: number): Widget;
+
+/** HStack with built-in edge insets. */
+export function HStackWithInsets(spacing: number, top: number, left: number, bottom: number, right: number): Widget;
+
+/** Reactive state container constructor. */
+export function State<T>(initial: T): State<T>;
+
+/**
+ * Re-render a container's children from a count-driven state.
+ *
+ * `count` is a `State<number>` representing how many items to render.
+ * Whenever the count changes, `render(i)` is invoked for `i = 0..count-1`
+ * and the returned widgets replace the container's children. Pair this with
+ * a separate array state that you keep in sync with the count.
+ */
+export function ForEach(count: State<number>, render: (index: number) => Widget): Widget;
+
+// ---------------------------------------------------------------------------
+// Text setters
+// ---------------------------------------------------------------------------
+
+export function textSetString(widget: Widget, text: string): void;
+export function textSetColor(widget: Widget, r: number, g: number, b: number, a: number): void;
+export function textSetFontSize(widget: Widget, size: number): void;
+export function textSetFontWeight(widget: Widget, size: number, weight: number): void;
+export function textSetFontFamily(widget: Widget, family: string): void;
+export function textSetWraps(widget: Widget, maxWidth: number): void;
+export function textSetSelectable(widget: Widget, selectable: number): void;
+
+// ---------------------------------------------------------------------------
+// Button setters
+// ---------------------------------------------------------------------------
+
+export function buttonSetBordered(widget: Widget, bordered: number): void;
+export function buttonSetTitle(widget: Widget, title: string): void;
+export function buttonSetTextColor(widget: Widget, r: number, g: number, b: number, a: number): void;
+export function buttonSetImage(widget: Widget, symbolName: string): void;
+export function buttonSetImagePosition(widget: Widget, position: number): void;
+export function buttonSetContentTintColor(widget: Widget, r: number, g: number, b: number, a: number): void;
+
+// ---------------------------------------------------------------------------
+// Generic widget operations
+// ---------------------------------------------------------------------------
+
+export function widgetAddChild(parent: Widget, child: Widget): void;
+export function widgetAddChildAt(parent: Widget, child: Widget, index: number): void;
+export function widgetClearChildren(widget: Widget): void;
+export function widgetRemoveChild(parent: Widget, child: Widget): void;
+export function widgetReorderChild(widget: Widget, fromIndex: number, toIndex: number): void;
+export function widgetSetWidth(widget: Widget, width: number): void;
+export function widgetSetHeight(widget: Widget, height: number): void;
+export function widgetSetHugging(widget: Widget, priority: number): void;
+export function widgetSetHidden(widget: Widget, hidden: number): void;
+export function widgetMatchParentWidth(widget: Widget): void;
+export function widgetMatchParentHeight(widget: Widget): void;
+export function widgetSetBackgroundColor(widget: Widget, r: number, g: number, b: number, a: number): void;
+export function widgetSetBackgroundGradient(
+    widget: Widget,
+    r1: number, g1: number, b1: number, a1: number,
+    r2: number, g2: number, b2: number, a2: number,
+    angle: number,
+): void;
+export function widgetSetOpacity(widget: Widget, opacity: number): void;
+export function widgetSetEnabled(widget: Widget, enabled: number): void;
+export function widgetSetTooltip(widget: Widget, text: string): void;
+export function widgetSetControlSize(widget: Widget, size: number): void;
+export function widgetSetEdgeInsets(widget: Widget, top: number, left: number, bottom: number, right: number): void;
+export function widgetSetBorderColor(widget: Widget, r: number, g: number, b: number, a: number): void;
+export function widgetSetBorderWidth(widget: Widget, width: number): void;
+export function widgetSetContextMenu(widget: Widget, menu: Widget): void;
+export function widgetAddOverlay(widget: Widget, overlay: Widget): void;
+export function widgetSetOverlayFrame(widget: Widget, x: number, y: number, width: number, height: number): void;
+export function widgetSetOnClick(widget: Widget, callback: () => void): void;
+export function widgetSetOnHover(widget: Widget, callback: () => void): void;
+export function widgetSetOnDoubleClick(widget: Widget, callback: () => void): void;
+/** Animate opacity to `target` over `durationSecs` seconds. */
+export function widgetAnimateOpacity(widget: Widget, target: number, durationSecs: number): void;
+/** Animate position by `(dx, dy)` pixels over `durationSecs` seconds. */
+export function widgetAnimatePosition(widget: Widget, dx: number, dy: number, durationSecs: number): void;
+
+/** Set padding (edge insets) on a widget. */
+export function setPadding(widget: Widget, top: number, left: number, bottom: number, right: number): void;
+
+/** Set corner radius on a widget. */
+export function setCornerRadius(widget: Widget, radius: number): void;
+
+// ---------------------------------------------------------------------------
+// TextField / TextArea
+// ---------------------------------------------------------------------------
+
+export function textfieldSetString(widget: Widget, text: string): void;
+export function textfieldGetString(widget: Widget): string;
+export function textfieldFocus(widget: Widget): void;
+export function textfieldBlurAll(): void;
+export function textfieldSetNextKeyView(widget: Widget, next: Widget): void;
+export function textfieldSetOnSubmit(widget: Widget, callback: () => void): void;
+export function textfieldSetOnFocus(widget: Widget, callback: () => void): void;
+export function textfieldSetBackgroundColor(widget: Widget, r: number, g: number, b: number, a: number): void;
+export function textfieldSetBorderless(widget: Widget, borderless: number): void;
+export function textfieldSetFontSize(widget: Widget, size: number): void;
+export function textfieldSetTextColor(widget: Widget, r: number, g: number, b: number, a: number): void;
+export function textareaSetString(widget: Widget, text: string): void;
+export function textareaGetString(widget: Widget): string;
+
+// ---------------------------------------------------------------------------
+// ScrollView
+// ---------------------------------------------------------------------------
+
+export function scrollviewSetChild(scrollView: Widget, child: Widget): void;
+export function scrollViewSetChild(scrollView: Widget, child: Widget): void;
+export function scrollViewGetOffset(scrollView: Widget): number;
+export function scrollViewSetOffset(scrollView: Widget, x: number, y: number): void;
+export function scrollViewScrollTo(scrollView: Widget, x: number, y: number): void;
+
+// ---------------------------------------------------------------------------
+// Stack layout
+// ---------------------------------------------------------------------------
+
+export function stackSetAlignment(widget: Widget, alignment: number): void;
+export function stackSetDistribution(widget: Widget, distribution: number): void;
+export function stackSetDetachesHidden(widget: Widget, detach: number): void;
+
+// ---------------------------------------------------------------------------
+// State management (free-function API)
+// ---------------------------------------------------------------------------
+
+export function stateCreate(initial: number): State;
+export function stateGet(state: State): number;
+export function stateSet(state: State, value: number): void;
+export function stateOnChange(state: State, callback: (value: number) => void): void;
+export function stateBindTextNumeric(state: State, text: Widget, prefix: string, suffix: string): void;
+export function stateBindSlider(state: State, slider: Widget): void;
+export function stateBindToggle(state: State, toggle: Widget): void;
+export function stateBindVisibility(state: State, showWidget: Widget, hideWidget: Widget): void;
+export function stateBindTextfield(state: State<string>, textfield: Widget): void;
+
+// ---------------------------------------------------------------------------
+// Image
+// ---------------------------------------------------------------------------
+
+export function imageSetSize(image: Widget, width: number, height: number): void;
+export function imageSetTint(image: Widget, r: number, g: number, b: number, a: number): void;
+
+// ---------------------------------------------------------------------------
+// ProgressView
+// ---------------------------------------------------------------------------
+
+export function progressviewSetValue(widget: Widget, value: number): void;
+
+// ---------------------------------------------------------------------------
+// Menu
+// ---------------------------------------------------------------------------
+
+export function menuCreate(): Widget;
+export function menuAddItem(menu: Widget, title: string, callback: () => void): void;
+export function menuAddSeparator(menu: Widget): void;
+export function menuAddSubmenu(menu: Widget, title: string, submenu: Widget): void;
+export function menuClear(menu: Widget): void;
+export function menuAddItemWithShortcut(menu: Widget, title: string, shortcut: string, callback: () => void): void;
+export function menuAddStandardAction(menu: Widget, action: string, title: string, shortcut: string): void;
+export function menuBarCreate(): Widget;
+export function menuBarAddMenu(menuBar: Widget, title: string, menu: Widget): void;
+export function menuBarAttach(menuBar: Widget): void;
+
+// ---------------------------------------------------------------------------
+// NavigationStack
+// ---------------------------------------------------------------------------
+
+export function navstackPush(navStack: Widget, view: Widget, title: string): void;
+export function navstackPop(navStack: Widget): void;
+
+// ---------------------------------------------------------------------------
+// Picker
+// ---------------------------------------------------------------------------
+
+export function pickerAddItem(picker: Widget, title: string): void;
+export function pickerGetSelected(picker: Widget): number;
+export function pickerSetSelected(picker: Widget, index: number): void;
+
+// ---------------------------------------------------------------------------
+// TabBar
+// ---------------------------------------------------------------------------
+
+export function tabbarAddTab(tabBar: Widget, title: string, content: Widget): void;
+export function tabbarSetSelected(tabBar: Widget, index: number): void;
+
+// ---------------------------------------------------------------------------
+// Sheet
+// ---------------------------------------------------------------------------
+
+export function sheetCreate(body: Widget, width: number, height: number): Widget;
+export function sheetPresent(sheet: Widget): void;
+export function sheetDismiss(sheet: Widget): void;
+
+// ---------------------------------------------------------------------------
+// SplitView / FrameSplit
+// ---------------------------------------------------------------------------
+
+export function splitViewAddChild(splitView: Widget, child: Widget): void;
+export function frameSplitCreate(dividerPosition: number): Widget;
+export function frameSplitAddChild(frameSplit: Widget, child: Widget): void;
+
+// ---------------------------------------------------------------------------
+// Toolbar
+// ---------------------------------------------------------------------------
+
+export function toolbarCreate(): Widget;
+export function toolbarAddItem(toolbar: Widget, identifier: string, label: string, callback: () => void): void;
+export function toolbarAttach(toolbar: Widget, window: Widget): void;
+
+// ---------------------------------------------------------------------------
+// Clipboard
+// ---------------------------------------------------------------------------
+
+export function clipboardRead(): string;
+export function clipboardWrite(text: string): void;
+
+// ---------------------------------------------------------------------------
+// Dialogs
+// ---------------------------------------------------------------------------
+
+export function alert(title: string, message: string): void;
+/**
+ * Show a modal alert with multiple labeled buttons. The callback is invoked
+ * with the 0-based index of the button the user clicked.
+ *
+ * On macOS the first button becomes the default (Return key); on Windows the
+ * native MessageBox API is used with OK/OKCancel/YesNoCancel layouts
+ * depending on button count. Pass a `"destructive"` style via convention by
+ * placing the destructive label last and checking the index in the callback.
+ */
+export function alertWithButtons(
+  title: string,
+  message: string,
+  buttons: string[],
+  callback: (index: number) => void,
+): void;
+export function openFileDialog(callback: (path: string) => void): void;
+export function openFolderDialog(callback: (path: string) => void): void;
+export function saveFileDialog(callback: (path: string) => void, defaultName: string, extension: string): void;
+export function pollOpenFile(): string;
+
+// ---------------------------------------------------------------------------
+// Keyboard shortcuts
+// ---------------------------------------------------------------------------
+
+export function addKeyboardShortcut(key: string, callback: () => void): void;
+
+// ---------------------------------------------------------------------------
+// App lifecycle hooks
+// ---------------------------------------------------------------------------
+
+/**
+ * Register a callback to run just before the app exits. The macOS backend
+ * wires this to `applicationWillTerminate:`, GTK4 uses `connect_shutdown`,
+ * and Windows uses `WM_DESTROY`. Typical use: flush state, close database
+ * connections, write preferences.
+ */
+export function onTerminate(callback: () => void): void;
+
+/**
+ * Register a callback to run when the app becomes the frontmost app
+ * (initial launch, dock click, cmd-tab). Runs once per activation. Use to
+ * refresh data when the user returns to the app.
+ */
+export function onActivate(callback: () => void): void;
+
+// ---------------------------------------------------------------------------
+// Timer
+// ---------------------------------------------------------------------------
+
+export function appSetTimer(app: Widget, intervalMs: number, callback: () => void): void;
+
+// ---------------------------------------------------------------------------
+// Embed
+// ---------------------------------------------------------------------------
+
+/** Embed a raw NSView pointer as a widget. Advanced use only. */
+export function embedNSView(pointer: number): Widget;

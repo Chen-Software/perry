@@ -12,16 +12,16 @@ fn str_from_header(ptr: *const u8) -> &'static str {
     if ptr.is_null() { return ""; }
     unsafe {
         let header = ptr as *const crate::string_header::StringHeader;
-        let len = (*header).length as usize;
+        let len = (*header).byte_len as usize;
         let data = ptr.add(std::mem::size_of::<crate::string_header::StringHeader>());
         std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
     }
 }
 
 /// Show an alert dialog with title, message, buttons array, and callback.
-/// buttons_ptr is a NaN-boxed pointer to a JS array of strings.
+/// `arr_ptr` is the raw (already-unboxed) pointer to a JS array of strings.
 /// callback receives the button index (0-based).
-pub fn show(title_ptr: *const u8, message_ptr: *const u8, buttons_ptr: i64, callback: f64) {
+pub fn show(title_ptr: *const u8, message_ptr: *const u8, arr_ptr: i64, callback: f64) {
     let _mtm = MainThreadMarker::new().expect("perry/ui must run on the main thread");
     let title = str_from_header(title_ptr);
     let message = str_from_header(message_ptr);
@@ -43,14 +43,18 @@ pub fn show(title_ptr: *const u8, message_ptr: *const u8, buttons_ptr: i64, call
             fn js_get_string_pointer_unified(val: f64) -> i64;
         }
 
-        let arr_ptr = js_nanbox_get_pointer(f64::from_bits(buttons_ptr as u64));
-        let len = js_array_get_length(arr_ptr);
-        for i in 0..len {
-            let elem = js_array_get_element(arr_ptr, i);
-            let str_ptr = js_get_string_pointer_unified(elem) as *const u8;
-            let label = str_from_header(str_ptr);
-            let ns_label = NSString::from_str(label);
-            let _: Retained<AnyObject> = msg_send![&*alert, addButtonWithTitle: &*ns_label];
+        let len = if arr_ptr != 0 { js_array_get_length(arr_ptr) } else { 0 };
+        if len == 0 {
+            let ns_ok = NSString::from_str("OK");
+            let _: Retained<AnyObject> = msg_send![&*alert, addButtonWithTitle: &*ns_ok];
+        } else {
+            for i in 0..len {
+                let elem = js_array_get_element(arr_ptr, i);
+                let str_ptr = js_get_string_pointer_unified(elem) as *const u8;
+                let label = str_from_header(str_ptr);
+                let ns_label = NSString::from_str(label);
+                let _: Retained<AnyObject> = msg_send![&*alert, addButtonWithTitle: &*ns_label];
+            }
         }
 
         // Run modal
@@ -59,6 +63,31 @@ pub fn show(title_ptr: *const u8, message_ptr: *const u8, buttons_ptr: i64, call
         let button_index = (response - 1000) as f64;
 
         let closure_ptr = js_nanbox_get_pointer(callback) as *const u8;
-        js_closure_call1(closure_ptr, button_index);
+        if !closure_ptr.is_null() {
+            js_closure_call1(closure_ptr, button_index);
+        }
+    }
+}
+
+/// Simple OK-only alert (no callback). Called from `alert(title, message)`.
+pub fn show_simple(title_ptr: *const u8, message_ptr: *const u8) {
+    let _mtm = MainThreadMarker::new().expect("perry/ui must run on the main thread");
+    let title = str_from_header(title_ptr);
+    let message = str_from_header(message_ptr);
+
+    unsafe {
+        let alert_cls = AnyClass::get(c"NSAlert").unwrap();
+        let alert: Retained<AnyObject> = msg_send![alert_cls, new];
+
+        let ns_title = NSString::from_str(title);
+        let _: () = msg_send![&*alert, setMessageText: &*ns_title];
+
+        let ns_message = NSString::from_str(message);
+        let _: () = msg_send![&*alert, setInformativeText: &*ns_message];
+
+        let ns_ok = NSString::from_str("OK");
+        let _: Retained<AnyObject> = msg_send![&*alert, addButtonWithTitle: &*ns_ok];
+
+        let _response: isize = msg_send![&*alert, runModal];
     }
 }

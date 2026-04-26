@@ -13,6 +13,52 @@ fn is_negative_zero(n: f64) -> bool {
     n.to_bits() == 0x8000_0000_0000_0000u64
 }
 
+/// Format a finite, non-zero, non-integer-like f64 per ECMAScript
+/// NumberToString. Caller has already filtered NaN / ±Infinity / ±0 /
+/// integer-shaped values; this only decides decimal vs scientific
+/// notation per the |n| < 10^-6 / |n| >= 10^21 thresholds.
+///
+/// Without the threshold split, Rust's Display impl produces 300-digit
+/// decimals for `Number.MAX_VALUE` (`1.7976931348623157e+308` → 309
+/// zeros) and 16-digit `0.000…0002…` decimals for `Number.EPSILON`,
+/// neither of which matches Node.
+#[inline]
+fn format_finite_number_js(value: f64) -> String {
+    let abs = value.abs();
+    if abs >= 1e21 || abs < 1e-6 {
+        crate::string::fix_exponent_format(&format!("{:e}", value))
+    } else {
+        format!("{}", value)
+    }
+}
+
+/// Decode the textual content of any string-shaped JSValue (heap
+/// `STRING_TAG` or inline `SHORT_STRING_TAG`) into a fresh `String`.
+/// Returns `None` for non-string values. SSO values are decoded
+/// inline via the value's NaN-box payload — no heap touch.
+///
+/// Centralizes the SSO-aware dispatch every print/format/coerce
+/// path needs: pre-SSO (≤ v0.5.215), the `is_string()` check used
+/// throughout this file rejected SSO so any short string returned
+/// by `JSON.parse` (e.g. `"perry"` from `{"foo":"perry"}`) fell
+/// through to the "regular number" branch and printed as `NaN`
+/// (because SHORT_STRING_TAG bits are NaN bits).
+fn jsvalue_string_content(value: f64) -> Option<String> {
+    let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+    let (ptr, len) = crate::string::str_bytes_from_jsvalue(value, &mut scratch)?;
+    if ptr.is_null() {
+        return Some(String::new());
+    }
+    unsafe {
+        let bytes = std::slice::from_raw_parts(ptr, len as usize);
+        Some(
+            std::str::from_utf8(bytes)
+                .unwrap_or("[invalid utf8]")
+                .to_string(),
+        )
+    }
+}
+
 /// Print a value to stdout (console.log implementation)
 #[no_mangle]
 pub extern "C" fn js_console_log(value: JSValue) {
@@ -31,7 +77,7 @@ pub extern "C" fn js_console_log(value: JSValue) {
             // Print integers without decimal point
             println!("{}", n as i64);
         } else {
-            println!("{}", n);
+            println!("{}", format_finite_number_js(n));
         }
     } else if value.is_int32() {
         println!("{}", value.as_int32());
@@ -56,25 +102,21 @@ pub extern "C" fn js_console_log_dynamic(value: f64) {
         println!("{}null", p);
     } else if jsval.is_bool() {
         println!("{}{}", p, jsval.as_bool());
-    } else if jsval.is_string() {
-        // String pointer (uses STRING_TAG 0x7FFF)
-        let ptr = jsval.as_string_ptr();
-        if ptr.is_null() {
-            println!("{}null", p);
-        } else {
-            unsafe {
-                let len = (*ptr).length as usize;
-                let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
-                let bytes = std::slice::from_raw_parts(data, len);
-                if let Ok(s) = std::str::from_utf8(bytes) {
-                    println!("{}{}", p, s);
-                } else {
-                    println!("{}[invalid utf8]", p);
-                }
-            }
+    } else if jsval.is_any_string() {
+        // Heap STRING_TAG or inline SHORT_STRING_TAG (SSO).
+        match jsvalue_string_content(value) {
+            Some(s) => println!("{}{}", p, s),
+            None => println!("{}null", p),
         }
     } else if jsval.is_pointer() {
         // Object/array pointer - format as JSON
+        println!("{}{}", p, format_jsvalue(value, 0));
+    } else if jsval.is_bigint() {
+        // Bigint — defer to format_jsvalue which already prints the
+        // "<digits>n" form. Without this, the fall-through below
+        // treats the NaN-tagged bits as a raw double and prints
+        // `NaN` for every single-arg `console.log(x)` where x is a
+        // bigint (refs GH #33).
         println!("{}{}", p, format_jsvalue(value, 0));
     } else if jsval.is_int32() {
         println!("{}{}", p, jsval.as_int32());
@@ -119,7 +161,7 @@ pub extern "C" fn js_console_log_number(value: f64) {
     } else if value.fract() == 0.0 && value.abs() < (i64::MAX as f64) {
         println!("{}", value as i64);
     } else {
-        println!("{}", value);
+        println!("{}", format_finite_number_js(value));
     }
 }
 
@@ -140,21 +182,10 @@ pub extern "C" fn js_console_error_dynamic(value: f64) {
         eprintln!("null");
     } else if jsval.is_bool() {
         eprintln!("{}", jsval.as_bool());
-    } else if jsval.is_string() {
-        let ptr = jsval.as_string_ptr();
-        if ptr.is_null() {
-            eprintln!("null");
-        } else {
-            unsafe {
-                let len = (*ptr).length as usize;
-                let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
-                let bytes = std::slice::from_raw_parts(data, len);
-                if let Ok(s) = std::str::from_utf8(bytes) {
-                    eprintln!("{}", s);
-                } else {
-                    eprintln!("[invalid utf8]");
-                }
-            }
+    } else if jsval.is_any_string() {
+        match jsvalue_string_content(value) {
+            Some(s) => eprintln!("{}", s),
+            None => eprintln!("null"),
         }
     } else if jsval.is_pointer() {
         // Object/array pointer - format as JSON
@@ -172,7 +203,7 @@ pub extern "C" fn js_console_error_dynamic(value: f64) {
         } else if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
             eprintln!("{}", n as i64);
         } else {
-            eprintln!("{}", n);
+            eprintln!("{}", format_finite_number_js(n));
         }
     }
 }
@@ -185,7 +216,7 @@ pub extern "C" fn js_console_error_number(value: f64) {
     } else if value.fract() == 0.0 && value.abs() < (i64::MAX as f64) {
         eprintln!("{}", value as i64);
     } else {
-        eprintln!("{}", value);
+        eprintln!("{}", format_finite_number_js(value));
     }
 }
 
@@ -206,21 +237,10 @@ pub extern "C" fn js_console_warn_dynamic(value: f64) {
         eprintln!("null");
     } else if jsval.is_bool() {
         eprintln!("{}", jsval.as_bool());
-    } else if jsval.is_string() {
-        let ptr = jsval.as_string_ptr();
-        if ptr.is_null() {
-            eprintln!("null");
-        } else {
-            unsafe {
-                let len = (*ptr).length as usize;
-                let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
-                let bytes = std::slice::from_raw_parts(data, len);
-                if let Ok(s) = std::str::from_utf8(bytes) {
-                    eprintln!("{}", s);
-                } else {
-                    eprintln!("[invalid utf8]");
-                }
-            }
+    } else if jsval.is_any_string() {
+        match jsvalue_string_content(value) {
+            Some(s) => eprintln!("{}", s),
+            None => eprintln!("null"),
         }
     } else if jsval.is_pointer() {
         // Object/array pointer - format as JSON
@@ -238,7 +258,7 @@ pub extern "C" fn js_console_warn_dynamic(value: f64) {
         } else if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
             eprintln!("{}", n as i64);
         } else {
-            eprintln!("{}", n);
+            eprintln!("{}", format_finite_number_js(n));
         }
     }
 }
@@ -251,7 +271,7 @@ pub extern "C" fn js_console_warn_number(value: f64) {
     } else if value.fract() == 0.0 && value.abs() < (i64::MAX as f64) {
         eprintln!("{}", value as i64);
     } else {
-        eprintln!("{}", value);
+        eprintln!("{}", format_finite_number_js(value));
     }
 }
 
@@ -285,16 +305,8 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
             "null".to_string()
         } else if jsval.is_bool() {
             jsval.as_bool().to_string()
-        } else if jsval.is_string() {
-            let ptr = jsval.as_string_ptr();
-            if ptr.is_null() {
-                "null".to_string()
-            } else {
-                let len = (*ptr).length as usize;
-                let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
-                let bytes = std::slice::from_raw_parts(data, len);
-                std::str::from_utf8(bytes).unwrap_or("[invalid utf8]").to_string()
-            }
+        } else if jsval.is_any_string() {
+            jsvalue_string_content(value).unwrap_or_else(|| "null".to_string())
         } else if jsval.is_bigint() {
             // Format BigInt by converting to string
             let ptr = jsval.as_bigint_ptr();
@@ -305,7 +317,7 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
                 if str_ptr.is_null() {
                     "0n".to_string()
                 } else {
-                    let len = (*str_ptr).length as usize;
+                    let len = (*str_ptr).byte_len as usize;
                     let data = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                     let bytes = std::slice::from_raw_parts(data, len);
                     let num_str = std::str::from_utf8(bytes).unwrap_or("0");
@@ -323,7 +335,7 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
                 if s_ptr.is_null() {
                     "Symbol()".to_string()
                 } else {
-                    let len = (*s_ptr).length as usize;
+                    let len = (*s_ptr).byte_len as usize;
                     let data = (s_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                     let bytes = std::slice::from_raw_parts(data, len);
                     std::str::from_utf8(bytes).unwrap_or("Symbol()").to_string()
@@ -355,7 +367,7 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
                     let name_str = if name_ptr.is_null() {
                         "Error".to_string()
                     } else {
-                        let len = (*name_ptr).length as usize;
+                        let len = (*name_ptr).byte_len as usize;
                         let data = (name_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                         let bytes = std::slice::from_raw_parts(data, len);
                         std::str::from_utf8(bytes).unwrap_or("Error").to_string()
@@ -364,7 +376,7 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
                     let message_str = if message_ptr.is_null() {
                         "".to_string()
                     } else {
-                        let len = (*message_ptr).length as usize;
+                        let len = (*message_ptr).byte_len as usize;
                         let data = (message_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                         let bytes = std::slice::from_raw_parts(data, len);
                         std::str::from_utf8(bytes).unwrap_or("").to_string()
@@ -390,7 +402,7 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
                         let elem_value = *data_ptr.add(i);
                         let elem_jsval = JSValue::from_bits(elem_value.to_bits());
                         // Quote string elements like Node's util.inspect: 'hello'
-                        if elem_jsval.is_string() {
+                        if elem_jsval.is_any_string() {
                             let s = format_jsvalue(elem_value, depth + 1);
                             parts.push(format!("'{}'", s));
                         } else {
@@ -419,7 +431,7 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
                     let obj_ptr = ptr as *const crate::object::ObjectHeader;
                     let keys_array = (*obj_ptr).keys_array;
 
-                    if !keys_array.is_null() && (keys_array as usize) > 0x10000 && ((keys_array as usize) >> 48) == 0 {
+                    if !keys_array.is_null() && (keys_array as usize) > 0x10000 && ((keys_array as u64) >> 48) == 0 {
                         format_object_as_json(obj_ptr, depth)
                     } else {
                         "[object Object]".to_string()
@@ -467,7 +479,7 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
             } else if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
                 (n as i64).to_string()
             } else {
-                n.to_string()
+                format_finite_number_js(n)
             }
         }
     }
@@ -548,7 +560,7 @@ unsafe fn format_object_as_json(obj_ptr: *const crate::object::ObjectHeader, dep
             if key_ptr.is_null() {
                 continue;
             }
-            let len = (*key_ptr).length as usize;
+            let len = (*key_ptr).byte_len as usize;
             let data = (key_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
             let bytes = std::slice::from_raw_parts(data, len);
             std::str::from_utf8(bytes).unwrap_or("").to_string()
@@ -587,18 +599,11 @@ fn format_jsvalue_for_json(value: f64, depth: usize) -> String {
             "null".to_string()
         } else if jsval.is_bool() {
             jsval.as_bool().to_string()
-        } else if jsval.is_string() {
-            let ptr = jsval.as_string_ptr();
-            if ptr.is_null() {
-                "null".to_string()
-            } else {
-                let len = (*ptr).length as usize;
-                let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
-                let bytes = std::slice::from_raw_parts(data, len);
-                let s = std::str::from_utf8(bytes).unwrap_or("[invalid utf8]");
-                // Escape and quote strings for JSON-like output
-                format!("'{}'", escape_string(s))
-            }
+        } else if jsval.is_any_string() {
+            // Escape and quote strings for JSON-like output. SSO + heap
+            // strings handled identically via the central decoder.
+            let s = jsvalue_string_content(value).unwrap_or_default();
+            format!("'{}'", escape_string(&s))
         } else if jsval.is_bigint() {
             let ptr = jsval.as_bigint_ptr();
             if ptr.is_null() {
@@ -608,7 +613,7 @@ fn format_jsvalue_for_json(value: f64, depth: usize) -> String {
                 if str_ptr.is_null() {
                     "0n".to_string()
                 } else {
-                    let len = (*str_ptr).length as usize;
+                    let len = (*str_ptr).byte_len as usize;
                     let data = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                     let bytes = std::slice::from_raw_parts(data, len);
                     let num_str = std::str::from_utf8(bytes).unwrap_or("0");
@@ -631,7 +636,7 @@ fn format_jsvalue_for_json(value: f64, depth: usize) -> String {
                     let name_str = if name_ptr.is_null() {
                         "Error".to_string()
                     } else {
-                        let len = (*name_ptr).length as usize;
+                        let len = (*name_ptr).byte_len as usize;
                         let data = (name_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                         let bytes = std::slice::from_raw_parts(data, len);
                         std::str::from_utf8(bytes).unwrap_or("Error").to_string()
@@ -640,7 +645,7 @@ fn format_jsvalue_for_json(value: f64, depth: usize) -> String {
                     let message_str = if message_ptr.is_null() {
                         "".to_string()
                     } else {
-                        let len = (*message_ptr).length as usize;
+                        let len = (*message_ptr).byte_len as usize;
                         let data = (message_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                         let bytes = std::slice::from_raw_parts(data, len);
                         std::str::from_utf8(bytes).unwrap_or("").to_string()
@@ -691,7 +696,7 @@ fn format_jsvalue_for_json(value: f64, depth: usize) -> String {
                         }
                         let obj_ptr = ptr as *const crate::object::ObjectHeader;
                         let keys_array = (*obj_ptr).keys_array;
-                        if !keys_array.is_null() && (keys_array as usize) > 0x10000 && ((keys_array as usize) >> 48) == 0 {
+                        if !keys_array.is_null() && (keys_array as usize) > 0x10000 && ((keys_array as u64) >> 48) == 0 {
                             format_object_as_json(obj_ptr, depth)
                         } else {
                             "[object Object]".to_string()
@@ -714,7 +719,7 @@ fn format_jsvalue_for_json(value: f64, depth: usize) -> String {
             } else if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
                 (n as i64).to_string()
             } else {
-                n.to_string()
+                format_finite_number_js(n)
             }
         }
     }
@@ -837,14 +842,21 @@ pub extern "C" fn js_mod(a: JSValue, b: JSValue) -> JSValue {
 
 #[no_mangle]
 pub extern "C" fn js_eq(a: JSValue, b: JSValue) -> JSValue {
-    // Strict equality for numbers
-    if a.is_number() && b.is_number() {
-        JSValue::bool(a.as_number() == b.as_number())
-    } else if a.bits() == b.bits() {
-        JSValue::bool(true)
-    } else {
-        JSValue::bool(false)
-    }
+    // Delegate to the SSO-aware strict-equality entry in value.rs,
+    // which already handles cross-representation string compares
+    // (heap STRING_TAG + inline SHORT_STRING_TAG, in any order) plus
+    // BigInt-by-value, INT32-vs-f64, and the negative-zero / NaN
+    // edge cases. The previous implementation was bit-equality with
+    // a number-only special case — `JSON.parse(...).foo === "perry"`
+    // returned `false` because the JSON parser emits SSO for ≤ 5-byte
+    // strings while `"perry"` literals are interned to heap strings,
+    // and the bits diverge across representations even when the text
+    // is identical.
+    let result = crate::value::js_jsvalue_equals(
+        f64::from_bits(a.bits()),
+        f64::from_bits(b.bits()),
+    );
+    JSValue::bool(result != 0)
 }
 
 /// JS abstract equality (==). Implements the coercion rules:
@@ -855,7 +867,15 @@ pub extern "C" fn js_eq(a: JSValue, b: JSValue) -> JSValue {
 /// - string == number: coerce string to number
 #[no_mangle]
 pub extern "C" fn js_loose_eq(a: JSValue, b: JSValue) -> JSValue {
-    // Same bits → always equal (handles null==null, undefined==undefined, etc.)
+    // Both numbers FIRST: IEEE 754 equality correctly handles NaN!=NaN
+    // (NaN has well-defined bits, so the later same-bits fast path
+    // would otherwise incorrectly return true for NaN==NaN). Also
+    // handles +0 == -0 correctly (different bits, IEEE 754 says equal).
+    if a.is_number() && b.is_number() {
+        return JSValue::bool(a.as_number() == b.as_number());
+    }
+    // Same bits → always equal (handles null==null, undefined==undefined,
+    // identical pointers, identical SSO encodings, etc.)
     if a.bits() == b.bits() {
         return JSValue::bool(true);
     }
@@ -867,15 +887,16 @@ pub extern "C" fn js_loose_eq(a: JSValue, b: JSValue) -> JSValue {
     if a.is_null() || a.is_undefined() || b.is_null() || b.is_undefined() {
         return JSValue::bool(false);
     }
-    // Both numbers
-    if a.is_number() && b.is_number() {
-        return JSValue::bool(a.as_number() == b.as_number());
-    }
-    // Both strings: content compare
-    if a.is_string() && b.is_string() {
-        let result = crate::string::js_string_equals(
-            a.as_string_ptr(),
-            b.as_string_ptr(),
+    // Both strings (heap STRING_TAG and/or inline SHORT_STRING_TAG):
+    // content compare. The previous `is_string() && is_string()` test
+    // missed any SSO operand — `JSON.parse(...).foo == "perry"` returned
+    // false because the JSON parser emits SSO for ≤5-byte strings while
+    // string literals are interned to heap strings, and the bit patterns
+    // diverged across representations even with identical text.
+    if a.is_any_string() && b.is_any_string() {
+        let result = crate::value::js_jsvalue_equals(
+            f64::from_bits(a.bits()),
+            f64::from_bits(b.bits()),
         );
         return JSValue::bool(result != 0);
     }
@@ -888,12 +909,13 @@ pub extern "C" fn js_loose_eq(a: JSValue, b: JSValue) -> JSValue {
         let b_num = if b.as_bool() { 1.0 } else { 0.0 };
         return js_loose_eq(a, JSValue::number(b_num));
     }
-    // String vs number: coerce string to number
-    if a.is_number() && b.is_string() {
+    // String vs number: coerce string to number. `is_any_string` so
+    // SSO operands get the same coercion as heap strings.
+    if a.is_number() && b.is_any_string() {
         let b_num = js_number_coerce(f64::from_bits(b.bits()));
         return JSValue::bool(a.as_number() == b_num);
     }
-    if a.is_string() && b.is_number() {
+    if a.is_any_string() && b.is_number() {
         let a_num = js_number_coerce(f64::from_bits(a.bits()));
         return JSValue::bool(a_num == b.as_number());
     }
@@ -967,8 +989,10 @@ pub extern "C" fn js_value_typeof(value: f64) -> *mut StringHeader {
         get_cached(&TYPEOF_OBJECT, "object")
     } else if jsval.is_bool() {
         get_cached(&TYPEOF_BOOLEAN, "boolean")
-    } else if jsval.is_string() {
-        // String pointer (uses STRING_TAG)
+    } else if jsval.is_any_string() {
+        // String pointer (STRING_TAG) OR inline SSO (SHORT_STRING_TAG).
+        // `typeof` doesn't distinguish between representations — both
+        // are observed as "string" from user code.
         get_cached(&TYPEOF_STRING, "string")
     } else if crate::value::is_js_handle(value) {
         // JS handle from V8 runtime - always an object
@@ -1013,7 +1037,7 @@ pub extern "C" fn js_parse_int(str_ptr: *const StringHeader, radix: f64) -> f64 
     }
 
     unsafe {
-        let len = (*str_ptr).length as usize;
+        let len = (*str_ptr).byte_len as usize;
         let data = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
         let bytes = std::slice::from_raw_parts(data, len);
 
@@ -1078,42 +1102,151 @@ pub extern "C" fn js_parse_float(str_ptr: *const StringHeader) -> f64 {
     }
 
     unsafe {
-        let len = (*str_ptr).length as usize;
+        let len = (*str_ptr).byte_len as usize;
         let data = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
         let bytes = std::slice::from_raw_parts(data, len);
+        parse_float_bytes(bytes)
+    }
+}
 
-        if let Ok(s) = std::str::from_utf8(bytes) {
-            let trimmed = s.trim();
-            if trimmed.is_empty() {
-                return f64::NAN;
-            }
+/// Core parseFloat logic operating on raw bytes — no heap allocation.
+/// Exposed as `pub(crate)` so unit tests can call it directly.
+pub(crate) fn parse_float_bytes(bytes: &[u8]) -> f64 {
+    // JS spec: strip leading StrWhiteSpace (ASCII subset covers all common cases)
+    let bytes = bytes.trim_ascii_start();
+    if bytes.is_empty() {
+        return f64::NAN;
+    }
 
-            // Parse as much of the string as is a valid float
-            // JavaScript parseFloat stops at first invalid character
-            let valid_chars: String = trimmed.chars()
-                .scan(false, |seen_dot, c| {
-                    if c.is_ascii_digit() {
-                        Some(c)
-                    } else if c == '.' && !*seen_dot {
-                        *seen_dot = true;
-                        Some(c)
-                    } else if c == '-' || c == '+' {
-                        Some(c)
-                    } else if c == 'e' || c == 'E' {
-                        Some(c)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+    // Detect optional sign, then check for "Infinity"
+    let (neg, rest) = match bytes.first() {
+        Some(b'-') => (true, &bytes[1..]),
+        Some(b'+') => (false, &bytes[1..]),
+        _ => (false, bytes),
+    };
+    if rest.starts_with(b"Infinity") {
+        return if neg { f64::NEG_INFINITY } else { f64::INFINITY };
+    }
 
-            match valid_chars.parse::<f64>() {
-                Ok(n) => n,
-                Err(_) => f64::NAN,
-            }
-        } else {
-            f64::NAN
+    // Scan for the longest valid StrDecimalLiteral prefix — zero allocations.
+    let end = float_prefix_end(bytes);
+    if end == 0 {
+        return f64::NAN;
+    }
+
+    // bytes[..end] contains only ASCII chars (digits, sign, '.', 'e'/'E'), so
+    // from_utf8_unchecked is safe.
+    let s = unsafe { std::str::from_utf8_unchecked(&bytes[..end]) };
+    s.parse::<f64>().unwrap_or(f64::NAN)
+}
+
+/// Returns the byte length of the leading StrDecimalLiteral prefix in `bytes`.
+/// Returns 0 when no valid prefix exists (e.g. `"abc"`, `"."`, `"+"`).
+fn float_prefix_end(bytes: &[u8]) -> usize {
+    let mut i = 0;
+    let n = bytes.len();
+
+    // Optional sign
+    if i < n && (bytes[i] == b'-' || bytes[i] == b'+') {
+        i += 1;
+    }
+
+    // Integer digits
+    let int_start = i;
+    while i < n && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    let has_int = i > int_start;
+
+    // Optional fractional part
+    let mut has_frac = false;
+    if i < n && bytes[i] == b'.' {
+        i += 1;
+        let frac_start = i;
+        while i < n && bytes[i].is_ascii_digit() {
+            i += 1;
         }
+        has_frac = i > frac_start;
+    }
+
+    // Need at least one digit on either side of the (optional) decimal point
+    if !has_int && !has_frac {
+        return 0;
+    }
+
+    // Optional exponent — only consumed when at least one exponent digit follows
+    if i < n && (bytes[i] == b'e' || bytes[i] == b'E') {
+        let exp_start = i;
+        i += 1;
+        if i < n && (bytes[i] == b'-' || bytes[i] == b'+') {
+            i += 1;
+        }
+        let exp_digit_start = i;
+        while i < n && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == exp_digit_start {
+            i = exp_start; // backtrack: bare 'e' or 'e±' with no digits
+        }
+    }
+
+    i
+}
+
+#[cfg(test)]
+mod parse_float_tests {
+    use super::parse_float_bytes;
+
+    fn pf(s: &str) -> f64 {
+        parse_float_bytes(s.as_bytes())
+    }
+
+    #[test]
+    fn well_formed_inputs() {
+        assert_eq!(pf("3.14"), 3.14_f64);
+        assert_eq!(pf("1e10"), 1e10_f64);
+        assert_eq!(pf("-0.5"), -0.5_f64);
+        assert_eq!(pf("1234567890.12345"), 1234567890.12345_f64);
+        assert_eq!(pf("0"), 0.0_f64);
+        assert_eq!(pf("42"), 42.0_f64);
+        assert_eq!(pf(".5"), 0.5_f64);
+        assert_eq!(pf("5."), 5.0_f64);
+        assert_eq!(pf("+3.14"), 3.14_f64);
+    }
+
+    #[test]
+    fn leading_whitespace() {
+        assert_eq!(pf("  3.14"), 3.14_f64);
+        assert_eq!(pf("\t3.14"), 3.14_f64);
+        assert_eq!(pf("\n3.14"), 3.14_f64);
+    }
+
+    #[test]
+    fn trailing_junk() {
+        assert_eq!(pf("3.14abc"), 3.14_f64);
+        assert_eq!(pf("1e10xyz"), 1e10_f64);
+        assert_eq!(pf("42 extra"), 42.0_f64);
+        // bare 'e' with no exponent digits — stop before 'e'
+        assert_eq!(pf("1e"), 1.0_f64);
+        assert_eq!(pf("1e+"), 1.0_f64);
+    }
+
+    #[test]
+    fn invalid_inputs_return_nan() {
+        assert!(pf("abc").is_nan());
+        assert!(pf("").is_nan());
+        assert!(pf("   ").is_nan());
+        assert!(pf(".").is_nan());
+        assert!(pf("+").is_nan());
+        assert!(pf("-").is_nan());
+    }
+
+    #[test]
+    fn infinity_variants() {
+        assert_eq!(pf("Infinity"), f64::INFINITY);
+        assert_eq!(pf("-Infinity"), f64::NEG_INFINITY);
+        assert_eq!(pf("+Infinity"), f64::INFINITY);
+        assert_eq!(pf("  Infinity"), f64::INFINITY);
     }
 }
 
@@ -1133,42 +1266,47 @@ pub extern "C" fn js_number_coerce(value: f64) -> f64 {
         0.0
     } else if jsval.is_bool() {
         if jsval.as_bool() { 1.0 } else { 0.0 }
-    } else if jsval.is_string() {
-        // Parse string as number
-        let ptr = jsval.as_string_ptr();
-        if ptr.is_null() {
-            return f64::NAN;
-        }
-        unsafe {
-            let len = (*ptr).length as usize;
-            let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
-            let bytes = std::slice::from_raw_parts(data, len);
-            if let Ok(s) = std::str::from_utf8(bytes) {
-                let trimmed = s.trim();
-                if trimmed.is_empty() {
-                    return 0.0;
-                }
-                // Handle hex strings (0x/0X prefix) — JavaScript Number() supports these
-                if trimmed.starts_with("0x") || trimmed.starts_with("0X") {
-                    return match u64::from_str_radix(&trimmed[2..], 16) {
-                        Ok(n) => n as f64,
-                        Err(_) => f64::NAN,
-                    };
-                }
-                // Handle negative hex
-                if trimmed.starts_with("-0x") || trimmed.starts_with("-0X") {
-                    return match u64::from_str_radix(&trimmed[3..], 16) {
-                        Ok(n) => -(n as f64),
-                        Err(_) => f64::NAN,
-                    };
-                }
-                match trimmed.parse::<f64>() {
-                    Ok(n) => n,
-                    Err(_) => f64::NAN,
-                }
-            } else {
-                f64::NAN
+    } else if jsval.is_any_string() {
+        // Parse string as number. Accepts both STRING_TAG heap
+        // pointers and SHORT_STRING_TAG inline SSO values
+        // (v0.5.216). Decode via `str_bytes_from_jsvalue` into a
+        // stack scratch buffer for SSO; heap strings get a direct
+        // view over the StringHeader payload.
+        let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+        let view = crate::string::str_bytes_from_jsvalue(value, &mut scratch);
+        if let Some((data, len)) = view {
+            if data.is_null() && len == 0 {
+                return 0.0;
             }
+            unsafe {
+                let bytes = std::slice::from_raw_parts(data, len as usize);
+                if let Ok(s) = std::str::from_utf8(bytes) {
+                    let trimmed = s.trim();
+                    if trimmed.is_empty() {
+                        return 0.0;
+                    }
+                    if trimmed.starts_with("0x") || trimmed.starts_with("0X") {
+                        return match u64::from_str_radix(&trimmed[2..], 16) {
+                            Ok(n) => n as f64,
+                            Err(_) => f64::NAN,
+                        };
+                    }
+                    if trimmed.starts_with("-0x") || trimmed.starts_with("-0X") {
+                        return match u64::from_str_radix(&trimmed[3..], 16) {
+                            Ok(n) => -(n as f64),
+                            Err(_) => f64::NAN,
+                        };
+                    }
+                    match trimmed.parse::<f64>() {
+                        Ok(n) => n,
+                        Err(_) => f64::NAN,
+                    }
+                } else {
+                    f64::NAN
+                }
+            }
+        } else {
+            f64::NAN
         }
     } else if jsval.is_int32() {
         // INT32 NaN-boxed value → convert to f64
@@ -1206,8 +1344,15 @@ pub extern "C" fn js_string_coerce(value: f64) -> *mut StringHeader {
     } else if jsval.is_bool() {
         if jsval.as_bool() { "true".to_string() } else { "false".to_string() }
     } else if jsval.is_string() {
-        // Already a string, return as-is
+        // Already a heap string, return as-is
         return jsval.as_string_ptr() as *mut StringHeader;
+    } else if jsval.is_short_string() {
+        // SSO inline value — caller wants a `*mut StringHeader`, so
+        // materialize the inline bytes onto the heap. Defeats the SSO
+        // win for this value but preserves correctness on coercion
+        // paths (`String(x)`, `'' + x` via the runtime fallback, etc.)
+        // that pass the result downstream as a heap pointer.
+        return crate::string::js_string_materialize_to_heap(value);
     } else if jsval.is_bigint() {
         let ptr = jsval.as_bigint_ptr();
         if ptr.is_null() {
@@ -1261,7 +1406,7 @@ pub extern "C" fn js_is_nan(value: f64) -> f64 {
             f64::NAN
         } else {
             unsafe {
-                let len = (*ptr).length as usize;
+                let len = (*ptr).byte_len as usize;
                 let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                 let bytes = std::slice::from_raw_parts(data, len);
                 if let Ok(s) = std::str::from_utf8(bytes) {
@@ -1313,7 +1458,7 @@ pub extern "C" fn js_is_finite(value: f64) -> f64 {
             f64::NAN
         } else {
             unsafe {
-                let len = (*ptr).length as usize;
+                let len = (*ptr).byte_len as usize;
                 let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                 let bytes = std::slice::from_raw_parts(data, len);
                 if let Ok(s) = std::str::from_utf8(bytes) {
@@ -1443,7 +1588,7 @@ unsafe fn label_from_str_ptr(ptr: *const StringHeader) -> String {
     if ptr.is_null() || (ptr as usize) < 0x1000 {
         return "default".to_string();
     }
-    let len = (*ptr).length as usize;
+    let len = (*ptr).byte_len as usize;
     let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data, len);
     std::str::from_utf8(bytes).unwrap_or("default").to_string()
@@ -1462,13 +1607,16 @@ fn format_elapsed(dur: std::time::Duration) -> String {
 
 #[no_mangle]
 pub extern "C" fn js_console_time(label_ptr: *const StringHeader) {
+    // Capture wall-clock start before any string decoding or TLS overhead
+    // so the stored Instant reflects the call site, not the bookkeeping cost.
+    let start = Instant::now();
     let label = unsafe { label_from_str_ptr(label_ptr) };
     CONSOLE_TIMERS.with(|t| {
         let mut map = t.borrow_mut();
         if map.contains_key(&label) {
             eprintln!("Warning: Label '{}' already exists for console.time()", label);
         }
-        map.insert(label, Instant::now());
+        map.insert(label, start);
     });
 }
 
@@ -1573,7 +1721,7 @@ pub extern "C" fn js_console_assert(cond: f64, msg_ptr: *const StringHeader) {
         if msg_ptr.is_null() || (msg_ptr as usize) < 0x1000 {
             String::new()
         } else {
-            let len = (*msg_ptr).length as usize;
+            let len = (*msg_ptr).byte_len as usize;
             let data = (msg_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
             let bytes = std::slice::from_raw_parts(data, len);
             std::str::from_utf8(bytes).unwrap_or("").to_string()
@@ -1619,6 +1767,89 @@ pub extern "C" fn js_console_assert_spread(cond: f64, args_arr_handle: i64) {
     }
 }
 
+// === console.trace ===
+//
+// Node writes `Trace: <msg>` + a JS stack trace to **stderr**. Perry can't
+// reproduce Node's TS source positions without a source-map / DWARF pass,
+// but `std::backtrace::Backtrace::force_capture()` gives us the native
+// call stack for free — good enough to see *where* the trace was called
+// from, which is what issue #20 is actually asking for.
+#[no_mangle]
+pub extern "C" fn js_console_trace(value: f64) {
+    let jsval = JSValue::from_bits(value.to_bits());
+    if jsval.is_undefined() {
+        eprintln!("Trace");
+    } else if jsval.is_string() {
+        let ptr = jsval.as_string_ptr();
+        if ptr.is_null() {
+            eprintln!("Trace");
+        } else {
+            unsafe {
+                let len = (*ptr).byte_len as usize;
+                let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+                let bytes = std::slice::from_raw_parts(data, len);
+                match std::str::from_utf8(bytes) {
+                    Ok(s) => eprintln!("Trace: {}", s),
+                    Err(_) => eprintln!("Trace: [invalid utf8]"),
+                }
+            }
+        }
+    } else {
+        eprintln!("Trace: {}", format_jsvalue(value, 0));
+    }
+    let bt = std::backtrace::Backtrace::force_capture();
+    let rendered = format!("{}", bt);
+    // Parse the Display output into (header, continuation*) frames. The
+    // header looks like "   N: symbol" and each continuation starts with
+    // "at …". Drop frames whose header matches internal noise (the
+    // std::backtrace plumbing itself, plus `js_console_trace` — the user
+    // already sees `Trace:` above). Collapse consecutive identical headers
+    // (what you get on stripped builds, where every frame symbolicates to
+    // `__mh_execute_header`).
+    let noise = ["backtrace", "Backtrace::", "js_console_trace"];
+    let is_header = |t: &str| {
+        t.chars().next().is_some_and(|c| c.is_ascii_digit()) && t.contains(':')
+    };
+    let mut frames: Vec<(String, Vec<String>)> = Vec::new();
+    for line in rendered.lines() {
+        let t = line.trim_start();
+        if t.is_empty() || t.starts_with("note:") {
+            continue;
+        }
+        if is_header(t) {
+            let sym = t.split_once(':').map(|(_, r)| r.trim()).unwrap_or(t);
+            frames.push((sym.to_string(), Vec::new()));
+        } else if let Some(last) = frames.last_mut() {
+            last.1.push(t.to_string());
+        }
+    }
+    let mut emitted = 0usize;
+    let mut prev_sym: Option<String> = None;
+    let mut dup_run = 0usize;
+    for (sym, cont) in frames {
+        if noise.iter().any(|p| sym.contains(p)) {
+            continue;
+        }
+        if prev_sym.as_deref() == Some(sym.as_str()) {
+            dup_run += 1;
+            continue;
+        }
+        if dup_run > 0 {
+            eprintln!("        (… {} more identical frames)", dup_run);
+            dup_run = 0;
+        }
+        eprintln!("    {}: {}", emitted, sym);
+        for c in cont {
+            eprintln!("             {}", c);
+        }
+        emitted += 1;
+        prev_sym = Some(sym);
+    }
+    if dup_run > 0 {
+        eprintln!("        (… {} more identical frames)", dup_run);
+    }
+}
+
 // === console.clear ===
 //
 // Best-effort: emit ANSI clear sequence on stdout — but ONLY when stdout
@@ -1659,7 +1890,7 @@ fn format_table_cell(value: f64) -> String {
             if ptr.is_null() {
                 "''".to_string()
             } else {
-                let len = (*ptr).length as usize;
+                let len = (*ptr).byte_len as usize;
                 let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                 let bytes = std::slice::from_raw_parts(data, len);
                 let s = std::str::from_utf8(bytes).unwrap_or("[invalid utf8]");
@@ -1685,7 +1916,7 @@ fn format_table_cell(value: f64) -> String {
             } else if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
                 (n as i64).to_string()
             } else {
-                n.to_string()
+                format_finite_number_js(n)
             }
         }
     }
@@ -1700,7 +1931,7 @@ unsafe fn read_string_from_jsvalue(jsval: JSValue) -> Option<String> {
     if ptr.is_null() {
         return Some(String::new());
     }
-    let len = (*ptr).length as usize;
+    let len = (*ptr).byte_len as usize;
     let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data, len);
     Some(std::str::from_utf8(bytes).unwrap_or("[invalid utf8]").to_string())
@@ -2081,7 +2312,7 @@ fn extract_str_from_nanbox(value: f64) -> String {
     }
     unsafe {
         let header = str_ptr as *const StringHeader;
-        let len = (*header).length as usize;
+        let len = (*header).byte_len as usize;
         let data = (header as *const u8).add(std::mem::size_of::<StringHeader>());
         let bytes = std::slice::from_raw_parts(data, len);
         std::str::from_utf8(bytes).unwrap_or("").to_string()
@@ -2155,7 +2386,7 @@ pub extern "C" fn js_structured_clone(value: f64) -> f64 {
                 return value;
             }
             unsafe {
-                let len = (*str_ptr).length as usize;
+                let len = (*str_ptr).byte_len as usize;
                 let data = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                 let new_str = js_string_from_bytes(data, len as u32);
                 let new_bits = 0x7FFF_0000_0000_0000u64 | (new_str as u64 & 0x0000_FFFF_FFFF_FFFF);

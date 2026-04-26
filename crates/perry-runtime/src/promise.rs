@@ -48,9 +48,15 @@ impl Promise {
     }
 }
 
-// Global task queue for pending promise callbacks
+// Global task queue for pending promise callbacks. Must be FIFO per
+// ECMAScript microtask semantics: `Promise.resolve(1).then(...)` and
+// `Promise.resolve(2).then(...)` registered in source order must run
+// their continuations in source order (1 first, then 2). Using a
+// `Vec` with `.pop()` produces LIFO ordering, breaking every test
+// that prints inside multiple parallel promise chains.
 thread_local! {
-    static TASK_QUEUE: RefCell<Vec<(*mut Promise, f64, bool)>> = RefCell::new(Vec::new());
+    static TASK_QUEUE: RefCell<std::collections::VecDeque<(*mut Promise, f64, bool)>>
+        = RefCell::new(std::collections::VecDeque::new());
 }
 
 /// Allocate a new Promise
@@ -133,10 +139,16 @@ pub extern "C" fn js_promise_resolve(promise: *mut Promise, value: f64) {
         // Schedule callbacks
         if !(*promise).on_fulfilled.is_null() {
             TASK_QUEUE.with(|q| {
-                q.borrow_mut().push((promise, value, true));
+                q.borrow_mut().push_back((promise, value, true));
             });
         }
     }
+    // Issue #84: an `await` busy-wait that called `js_timer_tick` (or any
+    // tick fn) which then resolved this promise needs to skip the
+    // following `js_wait_for_event` sleep — otherwise it blocks for the
+    // 1 s idle cap before the loop re-checks promise state. The notify
+    // sets the flag so the immediately-following wait returns at once.
+    crate::event_pump::js_notify_main_thread();
 }
 
 /// Resolve a promise with another promise (Promise chaining/unwrapping)
@@ -221,10 +233,12 @@ pub extern "C" fn js_promise_reject(promise: *mut Promise, reason: f64) {
         // Schedule callbacks
         if !(*promise).on_rejected.is_null() {
             TASK_QUEUE.with(|q| {
-                q.borrow_mut().push((promise, reason, false));
+                q.borrow_mut().push_back((promise, reason, false));
             });
         }
     }
+    // Issue #84: see js_promise_resolve — same wake reasoning.
+    crate::event_pump::js_notify_main_thread();
 }
 
 /// Register fulfillment callback, returns a new promise for chaining
@@ -250,14 +264,14 @@ pub extern "C" fn js_promise_then(
             PromiseState::Fulfilled => {
                 if !on_fulfilled.is_null() {
                     TASK_QUEUE.with(|q| {
-                        q.borrow_mut().push((promise, (*promise).value, true));
+                        q.borrow_mut().push_back((promise, (*promise).value, true));
                     });
                 }
             }
             PromiseState::Rejected => {
                 if !on_rejected.is_null() {
                     TASK_QUEUE.with(|q| {
-                        q.borrow_mut().push((promise, (*promise).reason, false));
+                        q.borrow_mut().push_back((promise, (*promise).reason, false));
                     });
                 }
             }
@@ -315,30 +329,58 @@ pub extern "C" fn js_promise_run_microtasks() -> i32 {
 
     // Then process the task queue
     loop {
-        let task = TASK_QUEUE.with(|q| q.borrow_mut().pop());
+        let task = TASK_QUEUE.with(|q| q.borrow_mut().pop_front());
 
         match task {
             Some((promise, value, is_fulfilled)) => {
                 unsafe {
-                    let result = if is_fulfilled {
-                        let callback = (*promise).on_fulfilled;
-                        if !callback.is_null() {
-                            crate::closure::js_closure_call1(callback, value)
-                        } else {
-                            value
-                        }
+                    let callback = if is_fulfilled {
+                        (*promise).on_fulfilled
                     } else {
-                        let callback = (*promise).on_rejected;
-                        if !callback.is_null() {
-                            crate::closure::js_closure_call1(callback, value)
-                        } else {
-                            value
-                        }
+                        (*promise).on_rejected
                     };
 
-                    // Resolve the next promise in chain
-                    if !(*promise).next.is_null() {
-                        js_promise_resolve((*promise).next, result);
+                    // No callback registered → propagate the value/reason
+                    // to the next promise without invoking anything.
+                    if callback.is_null() {
+                        if !(*promise).next.is_null() {
+                            if is_fulfilled {
+                                js_promise_resolve((*promise).next, value);
+                            } else {
+                                js_promise_reject((*promise).next, value);
+                            }
+                        }
+                        ran += 1;
+                        continue;
+                    }
+
+                    // Wrap the callback in a setjmp so a `throw` inside
+                    // it rejects the next promise instead of crashing
+                    // through `print_uncaught` (TRY_DEPTH would otherwise
+                    // be 0 here — microtask runner has no surrounding
+                    // user-level try block). Same setjmp-from-Rust
+                    // pattern as `gc.rs::mark_stack_roots`.
+                    extern "C" {
+                        fn setjmp(env: *mut i32) -> i32;
+                    }
+                    let buf = crate::exception::js_try_push();
+                    let jumped = setjmp(buf);
+                    if jumped == 0 {
+                        let result = crate::closure::js_closure_call1(callback, value);
+                        crate::exception::js_try_end();
+                        if !(*promise).next.is_null() {
+                            js_promise_resolve((*promise).next, result);
+                        }
+                    } else {
+                        // Callback threw — convert to rejection of next
+                        // promise. Pull the exception value, clear it,
+                        // pop the try block (longjmp doesn't unwind it).
+                        let exc = crate::exception::js_get_exception();
+                        crate::exception::js_clear_exception();
+                        crate::exception::js_try_end();
+                        if !(*promise).next.is_null() {
+                            js_promise_reject((*promise).next, exc);
+                        }
                     }
                 }
                 ran += 1;
@@ -350,10 +392,27 @@ pub extern "C" fn js_promise_run_microtasks() -> i32 {
     ran
 }
 
-/// Create a resolved promise with the given value
+/// Create a resolved promise with the given value.
+///
+/// Matches ES spec `Promise.resolve(x)`: when `x` is itself a Promise the
+/// returned promise adopts its state instead of storing the inner Promise
+/// pointer as a plain value. This is the path async-function `return <expr>`
+/// lowers through (see `perry-codegen/src/stmt.rs::Stmt::Return`) — without
+/// the unwrap, `async function produce(): Promise<T> { return new Promise(...) }`
+/// would return a promise whose `value` is a NaN-boxed pointer to the inner
+/// Promise struct, so `await produce()` would see `typeof = 'object'` with all
+/// user fields undefined (the Promise struct's layout) before the inner's
+/// `setTimeout`/`resolve` ever fires. Closes #77.
 #[no_mangle]
 pub extern "C" fn js_promise_resolved(value: f64) -> *mut Promise {
     let promise = js_promise_new();
+    if js_value_is_promise(value) != 0 {
+        let inner = crate::value::js_nanbox_get_pointer(value) as *mut Promise;
+        if !inner.is_null() && inner != promise {
+            js_promise_resolve_with_promise(promise, inner);
+            return promise;
+        }
+    }
     js_promise_resolve(promise, value);
     promise
 }
@@ -733,17 +792,19 @@ pub extern "C" fn js_promise_all(promises_arr: *const crate::array::ArrayHeader)
     for i in 0..count {
         let promise_f64 = js_array_get_f64(promises_arr, i);
 
-        // Extract promise pointer from NaN-boxed value
-        let promise_ptr = js_nanbox_get_pointer(promise_f64) as *mut Promise;
-
-        if promise_ptr.is_null() {
-            // Not a promise - treat as already resolved value
-            // Store the value directly and decrement count
+        // Discriminate via the GC-header obj_type, not via raw pointer
+        // extraction: string/bigint NaN-boxed values produce non-null
+        // pointers from js_nanbox_get_pointer and would be passed to
+        // js_promise_then as if they were Promises.
+        if js_value_is_promise(promise_f64) == 0 {
+            // Not a promise — treat as already resolved value
             js_array_set_f64(results_arr, i, promise_f64);
             let remaining = js_array_get_f64(state_arr, 0) - 1.0;
             js_array_set_f64(state_arr, 0, remaining);
             continue;
         }
+
+        let promise_ptr = js_nanbox_get_pointer(promise_f64) as *mut Promise;
 
         // Create fulfill closure for this promise
         // Captures: [result_promise, results_arr, state_arr, index]
@@ -857,12 +918,15 @@ pub extern "C" fn js_promise_race(promises_arr: *const crate::array::ArrayHeader
     // For each promise, attach resolve/reject handlers that settle the result promise
     for i in 0..count {
         let promise_f64 = js_array_get_f64(promises_arr, i);
-        let promise_ptr = js_nanbox_get_pointer(promise_f64) as *mut Promise;
-        if promise_ptr.is_null() {
+        // Discriminate via GC-header obj_type — string/bigint NaN-boxed
+        // values would otherwise pass through pointer extraction and crash
+        // js_promise_then.
+        if js_value_is_promise(promise_f64) == 0 {
             // Non-promise value — resolve immediately with the value
             js_promise_resolve(result_promise, promise_f64);
             return result_promise;
         }
+        let promise_ptr = js_nanbox_get_pointer(promise_f64) as *mut Promise;
 
         // Check if already settled — resolve/reject immediately
         let state = unsafe { (*promise_ptr).state };
@@ -994,9 +1058,15 @@ pub extern "C" fn js_promise_all_settled(promises_arr: *const crate::array::Arra
 
     for i in 0..count {
         let promise_f64 = js_array_get_f64(promises_arr, i);
-        let promise_ptr = js_nanbox_get_pointer(promise_f64) as *mut Promise;
 
-        if promise_ptr.is_null() {
+        // Only treat as a Promise if the value is a POINTER_TAG that walks
+        // back to a GcHeader with obj_type == GC_TYPE_PROMISE. Otherwise
+        // (string, plain number, undefined, null, object, etc.) wrap the
+        // value as already-fulfilled — Promise.allSettled spec passes any
+        // non-thenable through as `{status: "fulfilled", value}`.
+        let is_promise = js_value_is_promise(promise_f64) != 0;
+
+        if !is_promise {
             // Non-promise value — wrap as fulfilled and decrement
             let wrapped = build_settled_fulfilled(promise_f64);
             js_array_set_f64(results_arr, i, wrapped);
@@ -1004,6 +1074,8 @@ pub extern "C" fn js_promise_all_settled(promises_arr: *const crate::array::Arra
             js_array_set_f64(state_arr, 0, remaining);
             continue;
         }
+
+        let promise_ptr = js_nanbox_get_pointer(promise_f64) as *mut Promise;
 
         // Fulfill: store {status:"fulfilled", value:v}
         let fulfill_closure = js_closure_alloc(promise_all_settled_fulfill_handler as *const u8, 4);
@@ -1121,9 +1193,10 @@ pub extern "C" fn js_promise_any(promises_arr: *const crate::array::ArrayHeader)
 
     for i in 0..count {
         let promise_f64 = js_array_get_f64(promises_arr, i);
-        let promise_ptr = js_nanbox_get_pointer(promise_f64) as *mut Promise;
-
-        if promise_ptr.is_null() {
+        // Discriminate via GC-header obj_type — string/bigint NaN-boxed
+        // values would otherwise pass through pointer extraction and crash
+        // js_promise_then.
+        if js_value_is_promise(promise_f64) == 0 {
             // Non-promise value — treat as fulfilled, settle immediately if not yet settled
             let already_settled = js_array_get_f64(state_arr, 1);
             if already_settled == 0.0 {
@@ -1132,6 +1205,7 @@ pub extern "C" fn js_promise_any(promises_arr: *const crate::array::ArrayHeader)
             }
             return result_promise;
         }
+        let promise_ptr = js_nanbox_get_pointer(promise_f64) as *mut Promise;
 
         let fulfill_closure = js_closure_alloc(promise_any_fulfill_handler as *const u8, 2);
         js_closure_set_capture_ptr(fulfill_closure, 0, result_promise as i64);

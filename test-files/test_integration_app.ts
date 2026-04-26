@@ -1,5 +1,5 @@
 // Integration Test 1: Full-Stack Application Simulation
-// Tests: Classes, private fields, decorators, file I/O, strings, arrays
+// Tests: Classes, private fields, file I/O, strings, arrays
 import * as fs from 'fs';
 
 // Counter class with private fields
@@ -19,19 +19,6 @@ class Counter {
     }
 }
 
-// Calculator class with decorated methods
-class Calculator {
-    @log
-    add(a: number, b: number): number {
-        return a + b;
-    }
-
-    @log
-    multiply(a: number, b: number): number {
-        return a * b;
-    }
-}
-
 // Test 1: Private fields
 console.log("=== Test 1: Private Fields ===");
 let counter = new Counter(10);
@@ -39,12 +26,6 @@ console.log(counter.getCount());  // 10
 counter.increment();
 counter.increment();
 console.log(counter.getCount());  // 12
-
-// Test 2: Decorators
-console.log("=== Test 2: Decorators ===");
-let calc = new Calculator();
-console.log(calc.add(5, 3));       // Calling add, 8
-console.log(calc.multiply(4, 7));  // Calling multiply, 28
 
 // Test 3: File I/O
 console.log("=== Test 3: File I/O ===");

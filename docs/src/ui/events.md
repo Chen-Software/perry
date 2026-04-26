@@ -4,7 +4,7 @@ Perry widgets support native event handlers for user interaction.
 
 ## onClick
 
-```typescript
+```typescript,no-test
 import { Button, Text } from "perry/ui";
 
 Button("Click me", () => {
@@ -22,7 +22,7 @@ label.setOnClick(() => {
 
 Triggered when the mouse enters or leaves a widget.
 
-```typescript
+```typescript,no-test
 import { Button } from "perry/ui";
 
 const btn = Button("Hover me", () => {});
@@ -39,7 +39,7 @@ btn.setOnHover((isHovering) => {
 
 ## onDoubleClick
 
-```typescript
+```typescript,no-test
 import { Text } from "perry/ui";
 
 const label = Text("Double-click me");
@@ -52,7 +52,7 @@ label.setOnDoubleClick(() => {
 
 Register in-app keyboard shortcuts (active when the app is focused):
 
-```typescript
+```typescript,no-test
 import { addKeyboardShortcut } from "perry/ui";
 
 // Cmd+N on macOS, Ctrl+N on other platforms
@@ -68,7 +68,7 @@ addKeyboardShortcut("s", 3, () => {
 
 Keyboard shortcuts are also supported in [menu items](menus.md):
 
-```typescript
+```typescript,no-test
 menuAddItem(menu, "New", () => newDoc(), "n");    // Cmd+N
 menuAddItem(menu, "Save As", () => saveAs(), "S"); // Cmd+Shift+S
 ```
@@ -77,7 +77,7 @@ menuAddItem(menu, "Save As", () => saveAs(), "S"); // Cmd+Shift+S
 
 Register system-wide hotkeys that work even when the app is in the background — essential for launchers, clipboard managers, and quick-access tools:
 
-```typescript
+```typescript,no-test
 import { registerGlobalHotkey } from "perry/ui";
 
 // Cmd+Space (macOS) / Ctrl+Space (Windows)
@@ -105,7 +105,7 @@ registerGlobalHotkey("v", 3, () => {
 
 ## Clipboard
 
-```typescript
+```typescript,no-test
 import { clipboardGet, clipboardSet } from "perry/ui";
 
 // Copy to clipboard
@@ -118,43 +118,12 @@ const text = clipboardGet();
 ## Complete Example
 
 ```typescript
-import { App, Text, Button, VStack, HStack, State, Spacer, registerShortcut } from "perry/ui";
-
-const lastEvent = State("No events yet");
-
-// Global shortcut
-registerShortcut("r", () => {
-  lastEvent.set("Keyboard: Cmd+R");
-});
-
-const hoverBtn = Button("Hover me", () => {});
-hoverBtn.setOnHover((h) => {
-  lastEvent.set(h ? "Mouse entered" : "Mouse left");
-});
-
-const dblLabel = Text("Double-click me");
-dblLabel.setOnDoubleClick(() => {
-  lastEvent.set("Double-clicked!");
-});
-
-App({
-  title: "Events Demo",
-  width: 400,
-  height: 300,
-  body: VStack(16, [
-    Text(`Last event: ${lastEvent.value}`),
-
-    Spacer(),
-
-    Button("Click me", () => {
-      lastEvent.set("Button clicked");
-    }),
-
-    hoverBtn,
-    dblLabel,
-  ]),
-});
+{{#include ../../examples/ui/events/complete.ts}}
 ```
+
+Verified by CI. Note that event handlers are registered via free functions
+(`widgetSetOnHover(widget, cb)`) rather than methods — the widget handle is
+opaque and perry's API is function-first throughout.
 
 ## Next Steps
 

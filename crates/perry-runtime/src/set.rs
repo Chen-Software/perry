@@ -28,7 +28,7 @@ impl Hash for JSValueKey {
             // String value: hash by content so that identical strings
             // with different pointers/tags produce the same hash.
             unsafe {
-                let len = (*ptr).length;
+                let len = (*ptr).byte_len;
                 // Use a distinct domain tag so string hashes don't collide
                 // with non-string bit patterns.
                 0xFFFF_FFFFu32.hash(state);
@@ -95,6 +95,16 @@ unsafe fn elements_ptr_mut(set: *mut SetHeader) -> *mut f64 {
     (*set).elements
 }
 
+/// SameValueZero key normalization: -0 → +0.
+/// ECMAScript Sets treat -0 and +0 as the same value (23.2.3.1). Without
+/// this, `0` (bits 0x0) and `-0` (bits 0x8000_0000_0000_0000) hash/compare
+/// as distinct. Non-number JSValues have NaN-box tags in the upper bits,
+/// so `v == 0.0` stays false for them.
+#[inline(always)]
+fn normalize_zero(value: f64) -> f64 {
+    if value == 0.0 { 0.0 } else { value }
+}
+
 /// Check if a value looks like a heap pointer (raw pointer stored in f64)
 fn looks_like_pointer(val: f64) -> bool {
     let bits = val.to_bits();
@@ -117,8 +127,8 @@ unsafe fn strings_equal(a: *const StringHeader, b: *const StringHeader) -> bool 
     if std::ptr::eq(a, b) {
         return true;
     }
-    let len_a = (*a).length;
-    let len_b = (*b).length;
+    let len_a = (*a).byte_len;
+    let len_b = (*b).byte_len;
     if len_a != len_b {
         return false;
     }
@@ -242,7 +252,7 @@ pub extern "C" fn js_set_alloc(capacity: u32) -> *mut SetHeader {
 /// Clean a set pointer that might have NaN-box tag bits
 #[inline(always)]
 fn clean_set_ptr(set: *const SetHeader) -> *const SetHeader {
-    let bits = set as usize;
+    let bits = set as u64;
     let top16 = bits >> 48;
     if top16 >= 0x7FF8 {
         if top16 == 0x7FFC || (bits & 0x0000_FFFF_FFFF_FFFF) == 0 {
@@ -266,6 +276,7 @@ pub extern "C" fn js_set_size(set: *const SetHeader) -> u32 {
 /// Returns the set pointer (always the same, stable address)
 #[no_mangle]
 pub extern "C" fn js_set_add(set: *mut SetHeader, value: f64) -> *mut SetHeader {
+    let value = normalize_zero(value);
     unsafe {
         // Check if value already exists
         let idx = find_value_index(set, value);
@@ -300,6 +311,7 @@ pub extern "C" fn js_set_add(set: *mut SetHeader, value: f64) -> *mut SetHeader 
 /// Returns 1 if found, 0 if not found
 #[no_mangle]
 pub extern "C" fn js_set_has(set: *const SetHeader, value: f64) -> i32 {
+    let value = normalize_zero(value);
     unsafe {
         if find_value_index(set, value) >= 0 { 1 } else { 0 }
     }
@@ -309,6 +321,7 @@ pub extern "C" fn js_set_has(set: *const SetHeader, value: f64) -> i32 {
 /// Returns 1 if deleted, 0 if value not found
 #[no_mangle]
 pub extern "C" fn js_set_delete(set: *mut SetHeader, value: f64) -> i32 {
+    let value = normalize_zero(value);
     unsafe {
         let idx = find_value_index(set, value);
 

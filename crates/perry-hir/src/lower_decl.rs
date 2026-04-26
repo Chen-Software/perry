@@ -4,7 +4,7 @@
 //! enum declarations, interface declarations, type alias declarations,
 //! constructors, class methods, getters, setters, and class properties.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use perry_types::{LocalId, Type};
 use swc_ecma_ast as ast;
 
@@ -14,6 +14,36 @@ use crate::lower_types::*;
 use crate::lower_patterns::*;
 use crate::destructuring::*;
 use crate::analysis::*;
+
+/// Build `if (param === undefined) { param = default; }` stmts for every
+/// param with a default value. Prepended to function/constructor bodies so
+/// cross-module callers that pad missing args with `undefined` still observe
+/// the intended default. Rest params are skipped (they're handled by the
+/// call-site array bundling, not by scalar default substitution).
+fn build_default_param_stmts(params: &[Param]) -> Vec<Stmt> {
+    let mut out: Vec<Stmt> = Vec::new();
+    for param in params {
+        if param.is_rest {
+            continue;
+        }
+        let Some(default_expr) = param.default.as_ref() else {
+            continue;
+        };
+        out.push(Stmt::If {
+            condition: Expr::Compare {
+                op: CompareOp::Eq,
+                left: Box::new(Expr::LocalGet(param.id)),
+                right: Box::new(Expr::Undefined),
+            },
+            then_branch: vec![Stmt::Expr(Expr::LocalSet(
+                param.id,
+                Box::new(default_expr.clone()),
+            ))],
+            else_branch: None,
+        });
+    }
+    out
+}
 
 /// Detect the computed key `[Symbol.iterator]` in a class method / object
 /// literal. Recognizes the standard `Symbol.iterator` form — doesn't try to
@@ -246,8 +276,13 @@ pub(crate) fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) ->
         }
     }
 
-    // Extract return type from function's type annotation (with context)
-    let return_type = fn_decl.function.return_type.as_ref()
+    // Extract return type from function's type annotation (with context).
+    // Body-based inference for unannotated functions is filled in after body
+    // lowering below, once parameters and body locals are visible to
+    // `infer_type_from_expr`. Track whether the user wrote an explicit
+    // annotation so we don't "override" an explicit `: any` with inference.
+    let has_explicit_return_annotation = fn_decl.function.return_type.is_some();
+    let mut return_type = fn_decl.function.return_type.as_ref()
         .map(|rt| extract_ts_type_with_ctx(&rt.type_ann, Some(ctx)))
         .unwrap_or(Type::Any);
 
@@ -310,6 +345,16 @@ pub(crate) fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) ->
         body = new_body;
     }
 
+    // Prepend defaulted-parameter application (see lower_constructor for the
+    // rationale). Without this, cross-module callers that pad missing args
+    // with TAG_UNDEFINED read the param as `undefined` instead of its default.
+    let default_stmts = build_default_param_stmts(&params);
+    if !default_stmts.is_empty() {
+        let mut new_body = default_stmts;
+        new_body.append(&mut body);
+        body = new_body;
+    }
+
     // After body lowering, check if any return statement returns a native instance.
     // This handles patterns like: function initDb() { const d = new Database(...); return d; }
     // where the return type annotation is `any` but the actual value is a native handle.
@@ -317,6 +362,26 @@ pub(crate) fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) ->
     if ctx.native_instances.len() > ni_start {
         if let Some(ref block) = fn_decl.function.body {
             find_native_return_in_stmts(&block.stmts, ctx, &name, ni_start);
+        }
+    }
+
+    // Body-based return-type inference: when the function has no explicit
+    // annotation, walk its return statements and unify. Enables call-site
+    // type inference for unannotated user functions and — combined with Phase 1
+    // literal-shape inference — makes `function make() { return {x:0, y:0} }`
+    // flow Point-shaped values to callers.
+    if !has_explicit_return_annotation
+        && matches!(return_type, Type::Any)
+        && !fn_decl.function.is_generator
+    {
+        if let Some(ref block) = fn_decl.function.body {
+            if let Some(inferred) = infer_body_return_type(&block.stmts, ctx) {
+                return_type = if fn_decl.function.is_async {
+                    Type::Promise(Box::new(inferred))
+                } else {
+                    inferred
+                };
+            }
         }
     }
 
@@ -351,8 +416,117 @@ pub(crate) fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) ->
     })
 }
 
+/// Refuse to lower classes that use `@decorator` syntax. Perry parses decorators
+/// into the HIR but has no codegen path — before this check they were silently
+/// dropped, producing executables where the decorator body never ran (issue #144).
+/// Walks every decoration point: the class itself, methods/accessors/private-methods,
+/// class properties, and constructor parameters (TS parameter decorators).
+fn reject_decorators(class: &ast::Class, class_name: &str) -> Result<()> {
+    if let Some(dec) = class.decorators.first() {
+        let name = decorator_name_hint(dec);
+        bail!(
+            "TypeScript decorators are not supported (found `@{name}` on class `{class_name}`). \
+             See docs/src/language/limitations.md#no-decorators. Rewrite as an explicit wrapper \
+             function or remove the annotation.",
+        );
+    }
+    for member in &class.body {
+        match member {
+            ast::ClassMember::Method(m) => {
+                if let Some(dec) = m.function.decorators.first() {
+                    let name = decorator_name_hint(dec);
+                    let key = method_key_hint(&m.key);
+                    bail!(
+                        "TypeScript decorators are not supported (found `@{name}` on method `{class_name}.{key}`). \
+                         See docs/src/language/limitations.md#no-decorators.",
+                    );
+                }
+                for param in &m.function.params {
+                    if let Some(dec) = param.decorators.first() {
+                        let name = decorator_name_hint(dec);
+                        let key = method_key_hint(&m.key);
+                        bail!(
+                            "TypeScript parameter decorators are not supported (found `@{name}` on a parameter of `{class_name}.{key}`). \
+                             See docs/src/language/limitations.md#no-decorators.",
+                        );
+                    }
+                }
+            }
+            ast::ClassMember::PrivateMethod(m) => {
+                if let Some(dec) = m.function.decorators.first() {
+                    let name = decorator_name_hint(dec);
+                    bail!(
+                        "TypeScript decorators are not supported (found `@{name}` on private method of `{class_name}`). \
+                         See docs/src/language/limitations.md#no-decorators.",
+                    );
+                }
+            }
+            ast::ClassMember::ClassProp(p) => {
+                if let Some(dec) = p.decorators.first() {
+                    let name = decorator_name_hint(dec);
+                    bail!(
+                        "TypeScript decorators are not supported (found `@{name}` on a property of `{class_name}`). \
+                         See docs/src/language/limitations.md#no-decorators.",
+                    );
+                }
+            }
+            ast::ClassMember::PrivateProp(p) => {
+                if let Some(dec) = p.decorators.first() {
+                    let name = decorator_name_hint(dec);
+                    bail!(
+                        "TypeScript decorators are not supported (found `@{name}` on a private property of `{class_name}`). \
+                         See docs/src/language/limitations.md#no-decorators.",
+                    );
+                }
+            }
+            ast::ClassMember::Constructor(c) => {
+                for param in &c.params {
+                    let decs = match param {
+                        ast::ParamOrTsParamProp::Param(p) => &p.decorators,
+                        ast::ParamOrTsParamProp::TsParamProp(tp) => &tp.decorators,
+                    };
+                    if let Some(dec) = decs.first() {
+                        let name = decorator_name_hint(dec);
+                        bail!(
+                            "TypeScript parameter decorators are not supported (found `@{name}` on a constructor parameter of `{class_name}`). \
+                             See docs/src/language/limitations.md#no-decorators.",
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn decorator_name_hint(dec: &ast::Decorator) -> String {
+    match dec.expr.as_ref() {
+        ast::Expr::Ident(i) => i.sym.to_string(),
+        ast::Expr::Call(c) => {
+            if let ast::Callee::Expr(e) = &c.callee {
+                if let ast::Expr::Ident(i) = e.as_ref() {
+                    return i.sym.to_string();
+                }
+            }
+            "<decorator>".to_string()
+        }
+        _ => "<decorator>".to_string(),
+    }
+}
+
+fn method_key_hint(key: &ast::PropName) -> String {
+    match key {
+        ast::PropName::Ident(i) => i.sym.to_string(),
+        ast::PropName::Str(s) => format!("{:?}", s.value),
+        ast::PropName::Num(n) => n.value.to_string(),
+        _ => "<method>".to_string(),
+    }
+}
+
 pub(crate) fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::ClassDecl, is_exported: bool) -> Result<Class> {
     let name = class_decl.ident.sym.to_string();
+    reject_decorators(&class_decl.class, &name)?;
     let class_id = match ctx.lookup_class(&name) {
         Some(id) => id,
         None => {
@@ -790,6 +964,22 @@ pub(crate) fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::Clas
     // Restore previous current_class
     ctx.current_class = old_class;
 
+    // Phase 4.1: register each method's and getter's return type so
+    // call-site inference (`infer_call_return_type`'s Member arm) can
+    // resolve `obj.method()` when obj's type is Type::Named(name).
+    // Feeds off Phase 4's body-based inference — any method without an
+    // explicit annotation whose body returned a known type lands here too.
+    for m in &methods {
+        if !matches!(m.return_type, Type::Any) {
+            ctx.register_class_method_return_type(name.clone(), m.name.clone(), m.return_type.clone());
+        }
+    }
+    for (prop_name, g) in &getters {
+        if !matches!(g.return_type, Type::Any) {
+            ctx.register_class_method_return_type(name.clone(), prop_name.clone(), g.return_type.clone());
+        }
+    }
+
     Ok(Class {
         id: class_id,
         name,
@@ -811,6 +1001,7 @@ pub(crate) fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::Clas
 /// Lower a class expression (ast::Class) to HIR.
 /// Used for anonymous class expressions like `new (class extends Command { ... })()`.
 pub(crate) fn lower_class_from_ast(ctx: &mut LoweringContext, class: &ast::Class, name: &str, is_exported: bool) -> Result<Class> {
+    reject_decorators(class, name)?;
     let class_id = match ctx.lookup_class(name) {
         Some(id) => id,
         None => {
@@ -997,6 +1188,19 @@ pub(crate) fn lower_class_from_ast(ctx: &mut LoweringContext, class: &ast::Class
 
     ctx.exit_type_param_scope();
     ctx.current_class = old_class;
+
+    // Phase 4.1: register method + getter return types — see the parallel
+    // site in lower_class_decl.
+    for m in &methods {
+        if !matches!(m.return_type, Type::Any) {
+            ctx.register_class_method_return_type(name.to_string(), m.name.clone(), m.return_type.clone());
+        }
+    }
+    for (prop_name, g) in &getters {
+        if !matches!(g.return_type, Type::Any) {
+            ctx.register_class_method_return_type(name.to_string(), prop_name.clone(), g.return_type.clone());
+        }
+    }
 
     Ok(Class {
         id: class_id,
@@ -1195,6 +1399,35 @@ pub(crate) fn lower_interface_decl(ctx: &mut LoweringContext, iface_decl: &ast::
     // Register interface in context
     ctx.interfaces.push((name.clone(), iface_id));
 
+    // Issue #179 typed-parse: record field names in source order so
+    // `JSON.parse<Name[]>` codegen can emit a shape hint that matches
+    // how `JSON.stringify` lays them out on the wire.
+    let source_keys: Vec<String> = properties.iter().map(|p| p.name.clone()).collect();
+    if !source_keys.is_empty() {
+        ctx.interface_source_keys.insert(name.clone(), source_keys);
+    }
+    // Also materialize an ObjectType so `resolve_typed_parse_ty` can
+    // expand `Named("Item")` → `Object{fields}` for codegen.
+    let mut obj_props: std::collections::HashMap<String, perry_types::PropertyInfo>
+        = std::collections::HashMap::new();
+    for p in &properties {
+        obj_props.insert(p.name.clone(), perry_types::PropertyInfo {
+            ty: p.ty.clone(),
+            optional: p.optional,
+            readonly: p.readonly,
+        });
+    }
+    if !obj_props.is_empty() {
+        ctx.interface_object_types.insert(
+            name.clone(),
+            perry_types::ObjectType {
+                name: Some(name.clone()),
+                properties: obj_props,
+                index_signature: None,
+            },
+        );
+    }
+
     Ok(Interface {
         id: iface_id,
         name,
@@ -1321,6 +1554,21 @@ pub(crate) fn lower_constructor(ctx: &mut LoweringContext, class_name: &str, cto
         body = synthetic_stmts;
     }
 
+    // Prepend defaulted-parameter application: for every param with a
+    // default, emit `if (param === undefined) { param = default; }` at the
+    // very top of the constructor body. Needed for cross-module `new C(...)`
+    // calls that pass fewer args than the constructor declares — the
+    // codegen call site pads missing args with TAG_UNDEFINED, so without
+    // body-side default application the param reads as `undefined`. The
+    // in-module HIR `fill_default_arguments` pass already fills the args at
+    // same-module call sites, so this check is a no-op there.
+    let default_stmts = build_default_param_stmts(&params);
+    if !default_stmts.is_empty() {
+        let mut new_body = default_stmts;
+        new_body.append(&mut body);
+        body = new_body;
+    }
+
     ctx.exit_scope(scope_mark);
     ctx.in_constructor_class = saved_ctor_class;
 
@@ -1397,8 +1645,11 @@ pub(crate) fn lower_class_method(ctx: &mut LoweringContext, method: &ast::ClassM
         });
     }
 
-    // Extract return type (with context)
-    let return_type = method.function.return_type.as_ref()
+    // Extract return type (with context). Phase 4: when the method has no
+    // explicit annotation, fall back to body-based inference after body
+    // lowering so parameters and locals are visible to `infer_type_from_expr`.
+    let has_explicit_return_annotation = method.function.return_type.is_some();
+    let mut return_type = method.function.return_type.as_ref()
         .map(|rt| extract_ts_type_with_ctx(&rt.type_ann, Some(ctx)))
         .unwrap_or(Type::Any);
 
@@ -1408,6 +1659,30 @@ pub(crate) fn lower_class_method(ctx: &mut LoweringContext, method: &ast::ClassM
     } else {
         Vec::new()
     };
+
+    // Phase 4 (expansion): body-based return-type inference for unannotated
+    // methods. Same pattern as `lower_fn_decl`: skip when annotation is
+    // present or when the method is a generator; wrap inferred type in
+    // Promise<T> for async methods. Feeds the class's `Function.return_type`
+    // which is then consumed by call-site inference at receiver.method()
+    // sites (currently limited — bare-method call-site inference isn't
+    // wired through `infer_call_return_type` yet; this commit only
+    // populates the field so class methods stop showing Type::Any when
+    // callers inspect them via receiver_class_name + class.methods lookup).
+    if !has_explicit_return_annotation
+        && matches!(return_type, Type::Any)
+        && !method.function.is_generator
+    {
+        if let Some(ref block) = method.function.body {
+            if let Some(inferred) = infer_body_return_type(&block.stmts, ctx) {
+                return_type = if method.function.is_async {
+                    Type::Promise(Box::new(inferred))
+                } else {
+                    inferred
+                };
+            }
+        }
+    }
 
     ctx.exit_scope(scope_mark);
 
@@ -1454,8 +1729,9 @@ pub(crate) fn lower_getter_method(ctx: &mut LoweringContext, method: &ast::Class
 
     // Getters have no parameters
 
-    // Extract return type
-    let return_type = method.function.return_type.as_ref()
+    // Extract return type. Phase 4: body-based inference when no annotation.
+    let has_explicit_return_annotation = method.function.return_type.is_some();
+    let mut return_type = method.function.return_type.as_ref()
         .map(|rt| extract_ts_type_with_ctx(&rt.type_ann, Some(ctx)))
         .unwrap_or(Type::Any);
 
@@ -1465,6 +1741,18 @@ pub(crate) fn lower_getter_method(ctx: &mut LoweringContext, method: &ast::Class
     } else {
         Vec::new()
     };
+
+    // Phase 4: getters can't be async/generator by JS syntax, so just the
+    // plain body-walk + unify path. Feeds `class.getters[i].1.return_type`
+    // which `receiver_class_name`-style codegen consults to pick Return
+    // types through `obj.prop` chains.
+    if !has_explicit_return_annotation && matches!(return_type, Type::Any) {
+        if let Some(ref block) = method.function.body {
+            if let Some(inferred) = infer_body_return_type(&block.stmts, ctx) {
+                return_type = inferred;
+            }
+        }
+    }
 
     ctx.exit_scope(scope_mark);
 
@@ -2721,8 +3009,45 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
             });
             ctx.pop_block_scope(for_scope_mark);
         }
-        _ => {
-            // TODO: handle more statement types
+        // Empty statement (`;`) — nothing to lower.
+        ast::Stmt::Empty(_) => {}
+        // `debugger;` is a no-op in AOT compilation.
+        ast::Stmt::Debugger(_) => {}
+        // Type-only declarations are fully erased at compile time.
+        ast::Stmt::Decl(ast::Decl::TsInterface(_))
+        | ast::Stmt::Decl(ast::Decl::TsTypeAlias(_)) => {}
+        // Body-local enum / namespace are valid TS but Perry only registers them
+        // at module scope (see lower.rs::lower_module). Silently dropping them
+        // here produced runtime ReferenceErrors at the use site instead of a
+        // compile diagnostic — fail loud so the user knows to hoist the decl.
+        ast::Stmt::Decl(ast::Decl::TsEnum(enum_decl)) => {
+            crate::lower_bail!(
+                enum_decl.span,
+                "enum declared inside a function body is not supported; declare it at module scope"
+            );
+        }
+        ast::Stmt::Decl(ast::Decl::TsModule(ts_module)) => {
+            crate::lower_bail!(
+                ts_module.span,
+                "namespace/module declared inside a function body is not supported; declare it at module scope"
+            );
+        }
+        // `with` is forbidden under TS strict-mode (the implicit default for
+        // ES modules) — Perry does not implement dynamic scope chains.
+        ast::Stmt::With(with_stmt) => {
+            crate::lower_bail!(
+                with_stmt.span,
+                "`with` statement is not supported (also forbidden in strict mode)"
+            );
+        }
+        // Final catch-all: any genuinely unexpected variant (e.g. a future
+        // swc Stmt variant we haven't enumerated) bails instead of silently
+        // dropping the statement.
+        other => {
+            return Err(anyhow!(
+                "lower_body_stmt: unhandled statement variant {:?}",
+                std::mem::discriminant(other)
+            ));
         }
     }
 

@@ -10,7 +10,7 @@ Since watchOS does not support UIKit views, Perry uses a **data-driven SwiftUI r
 - Xcode (full install) for watchOS SDK and Simulator
 - Rust watchOS targets:
   ```bash
-  rustup target add aarch64-apple-watchos aarch64-apple-watchos-sim
+  rustup target add arm64_32-apple-watchos aarch64-apple-watchos-sim
   ```
 
 ## Building for Simulator
@@ -27,7 +27,7 @@ This produces an ARM64 binary linked with `swiftc` against the watchOS Simulator
 perry compile app.ts -o app --target watchos
 ```
 
-This produces an ARM64 binary for physical Apple Watch hardware.
+This produces an arm64_32 (ILP32) binary for physical Apple Watch hardware. Apple Watch uses 32-bit pointers on 64-bit ARM.
 
 ## Running with `perry run`
 
@@ -81,7 +81,7 @@ All widgets support these styling modifiers:
 
 watchOS apps use SwiftUI's `@main App` pattern. Perry's PerryWatchApp.swift runtime handles the app lifecycle automatically:
 
-```typescript
+```typescript,no-test
 import { App, Text, VStack, Button } from "perry/ui";
 
 App({
@@ -106,7 +106,7 @@ Under the hood:
 
 Reactive state works the same as other platforms:
 
-```typescript
+```typescript,no-test
 import { App, Text, VStack, Button, State } from "perry/ui";
 
 const count = State(0);
@@ -171,12 +171,12 @@ This shares App Store Connect credentials with iOS/macOS (same team, API key, is
 
 ## Platform Detection
 
-Use `__platform__ === 5` to detect watchOS at compile time:
+Use `__platform__ === 7` to detect watchOS at compile time:
 
-```typescript
+```typescript,no-test
 declare const __platform__: number;
 
-if (__platform__ === 5) {
+if (__platform__ === 7) {
   console.log("Running on watchOS");
 }
 ```

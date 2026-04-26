@@ -37,7 +37,7 @@ unsafe fn jsvalue_to_string(value: JSValue) -> Option<String> {
     if value.is_pointer() {
         let ptr = value.as_pointer() as *const StringHeader;
         if !ptr.is_null() {
-            let len = (*ptr).length as usize;
+            let len = (*ptr).byte_len as usize;
             let data_ptr = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
             let bytes = std::slice::from_raw_parts(data_ptr, len);
             return Some(String::from_utf8_lossy(bytes).to_string());
@@ -119,7 +119,10 @@ impl SmtpTransportHandle {
 /// # Safety
 /// The config parameter must be a valid JSValue representing a config object.
 #[no_mangle]
-pub unsafe extern "C" fn js_nodemailer_create_transport(config: JSValue) -> f64 {
+pub unsafe extern "C" fn js_nodemailer_create_transport(config_f: f64) -> f64 {
+    // Take f64 at the FFI boundary to avoid SysV AMD64 ABI mismatch
+    // (see js_mysql2_create_pool for details).
+    let config = JSValue::from_bits(config_f.to_bits());
     let smtp_config = parse_smtp_config(config);
     let handle = register_handle(SmtpTransportHandle::new(smtp_config));
     handle as f64

@@ -4,13 +4,35 @@ Perry compiles TypeScript apps for Windows using the Win32 API.
 
 ## Requirements
 
-- Visual Studio Build Tools with "Desktop development with C++" workload
 - Windows 10 or later
+- A linker toolchain — either of these two options:
+
+### Option A — Lightweight (recommended, ~1.5 GB, no Visual Studio)
+
+Uses LLVM's `clang` + `lld-link` plus an xwin'd copy of the Microsoft CRT + Windows SDK libraries. No admin rights, no Visual Studio install.
+
+```powershell
+winget install LLVM.LLVM
+perry setup windows
+```
+
+`perry setup windows` downloads ~700 MB (unpacks to ~1.5 GB) at `%LOCALAPPDATA%\perry\windows-sdk` after prompting you to accept the Microsoft redistributable license. Pass `--accept-license` to skip the prompt in CI. Partial downloads resume safely on re-run.
+
+### Option B — Visual Studio (~8 GB)
+
+If you already have Visual Studio installed, add the C++ workload via the Visual Studio Installer → *Modify* → check **Desktop development with C++**. Or install standalone Build Tools:
+
+```powershell
+winget install Microsoft.VisualStudio.2022.BuildTools --override `
+  "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+```
+
+Both options produce identical binaries — Perry picks Option A when the xwin'd sysroot is present, Option B otherwise. Run `perry doctor` to see which is active.
 
 ## Building
 
 ```bash
-perry app.ts -o app.exe --target windows
+perry compile app.ts -o app.exe --target windows
 ```
 
 ## UI Toolkit

@@ -182,7 +182,7 @@ fn is_truthy_bits(bits: u64) -> bool {
         if ptr.is_null() || (ptr as usize) < 0x1000 {
             return false;
         }
-        return unsafe { (*ptr).length > 0 };
+        return unsafe { (*ptr).byte_len > 0 };
     }
     // Pointer (object/array/closure): always truthy
     if (bits & TAG_MASK) == POINTER_TAG || (bits & TAG_MASK) == BIGINT_TAG {
@@ -289,7 +289,7 @@ unsafe fn serialize_jsvalue(bits: u64) -> SerializedValue {
         if ptr.is_null() || (ptr as usize) < 0x1000 {
             return SerializedValue::String(Vec::new());
         }
-        let len = (*ptr).length as usize;
+        let len = (*ptr).byte_len as usize;
         let data_ptr = (ptr as *const u8).add(std::mem::size_of::<crate::string::StringHeader>());
         let bytes = std::slice::from_raw_parts(data_ptr, len).to_vec();
         return SerializedValue::String(bytes);
@@ -388,7 +388,7 @@ unsafe fn serialize_object(obj: *const crate::object::ObjectHeader) -> Serialize
             if key_tag == STRING_TAG {
                 let str_ptr = (key_bits & POINTER_MASK) as *const crate::string::StringHeader;
                 if !str_ptr.is_null() && (str_ptr as usize) >= 0x1000 {
-                    let len = (*str_ptr).length as usize;
+                    let len = (*str_ptr).byte_len as usize;
                     let data = (str_ptr as *const u8).add(std::mem::size_of::<crate::string::StringHeader>());
                     key_strings.push(std::slice::from_raw_parts(data, len).to_vec());
                 } else {
@@ -1065,14 +1065,20 @@ fn queue_thread_result(promise_usize: usize, result: SerializedValue) {
     // Thread results are stored in a global Mutex queue. The main thread's
     // pump function (js_thread_process_pending) drains this queue and resolves
     // the promises.
-    let mut pending = match PENDING_THREAD_RESULTS.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    pending.push(PendingThreadResult {
-        promise_ptr: promise_usize,
-        result,
-    });
+    {
+        let mut pending = match PENDING_THREAD_RESULTS.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        pending.push(PendingThreadResult {
+            promise_ptr: promise_usize,
+            result,
+        });
+    }
+    // Issue #84: wake the main thread so spawn()-returned promises
+    // resolve as soon as the OS thread finishes, not at the next
+    // event-loop quantum.
+    crate::event_pump::js_notify_main_thread();
 }
 
 /// A pending thread result waiting to be resolved on the main thread.

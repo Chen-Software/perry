@@ -5,7 +5,6 @@ pub mod crash_log;
 pub mod file_dialog;
 pub mod location;
 pub mod menu;
-#[cfg(feature = "geisterhand")]
 pub mod screenshot;
 pub mod state;
 pub mod websocket;
@@ -826,7 +825,7 @@ pub extern "C" fn perry_ui_widget_set_tooltip(handle: i64, text_ptr: i64) {
         if ptr.is_null() { return ""; }
         unsafe {
             let header = ptr as *const perry_runtime::string::StringHeader;
-            let len = (*header).length as usize;
+            let len = (*header).byte_len as usize;
             let data = ptr.add(std::mem::size_of::<perry_runtime::string::StringHeader>());
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
         }
@@ -858,16 +857,16 @@ pub extern "C" fn perry_ui_widget_set_on_double_click(handle: i64, callback: f64
     widgets::set_on_double_click(handle, callback);
 }
 
-/// Animate the opacity of a widget.
+/// Animate the opacity of a widget. `duration_secs` is in seconds.
 #[no_mangle]
-pub extern "C" fn perry_ui_widget_animate_opacity(handle: i64, target: f64, duration_ms: f64) {
-    widgets::animate_opacity(handle, target, duration_ms);
+pub extern "C" fn perry_ui_widget_animate_opacity(handle: i64, target: f64, duration_secs: f64) {
+    widgets::animate_opacity(handle, target, duration_secs);
 }
 
-/// Animate the position of a widget by delta.
+/// Animate the position of a widget by delta. `duration_secs` is in seconds.
 #[no_mangle]
-pub extern "C" fn perry_ui_widget_animate_position(handle: i64, dx: f64, dy: f64, duration_ms: f64) {
-    widgets::animate_position(handle, dx, dy, duration_ms);
+pub extern "C" fn perry_ui_widget_animate_position(handle: i64, dx: f64, dy: f64, duration_secs: f64) {
+    widgets::animate_position(handle, dx, dy, duration_secs);
 }
 
 /// Register an onChange callback for a state cell.
@@ -887,7 +886,7 @@ pub extern "C" fn perry_system_open_url(url_ptr: i64) {
         if ptr.is_null() { return ""; }
         unsafe {
             let header = ptr as *const perry_runtime::string::StringHeader;
-            let len = (*header).length as usize;
+            let len = (*header).byte_len as usize;
             let data = ptr.add(std::mem::size_of::<perry_runtime::string::StringHeader>());
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
         }
@@ -989,7 +988,7 @@ pub extern "C" fn perry_system_preferences_set(key_ptr: i64, value: f64) {
         if ptr.is_null() { return ""; }
         unsafe {
             let header = ptr as *const perry_runtime::string::StringHeader;
-            let len = (*header).length as usize;
+            let len = (*header).byte_len as usize;
             let data = ptr.add(std::mem::size_of::<perry_runtime::string::StringHeader>());
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
         }
@@ -1024,7 +1023,7 @@ pub extern "C" fn perry_system_preferences_get(key_ptr: i64) -> f64 {
         if ptr.is_null() { return ""; }
         unsafe {
             let header = ptr as *const perry_runtime::string::StringHeader;
-            let len = (*header).length as usize;
+            let len = (*header).byte_len as usize;
             let data = ptr.add(std::mem::size_of::<perry_runtime::string::StringHeader>());
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
         }
@@ -1129,7 +1128,7 @@ pub extern "C" fn perry_ui_text_set_font_family(handle: i64, family_ptr: i64) {
         if ptr.is_null() { return ""; }
         unsafe {
             let header = ptr as *const perry_runtime::string::StringHeader;
-            let len = (*header).length as usize;
+            let len = (*header).byte_len as usize;
             let data = ptr.add(std::mem::size_of::<perry_runtime::string::StringHeader>());
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
         }
@@ -1237,8 +1236,13 @@ pub extern "C" fn perry_ui_state_bind_textfield(state_handle: i64, textfield_han
 // =============================================================================
 
 #[no_mangle]
-pub extern "C" fn perry_ui_alert(_title: i64, _message: i64, _buttons: i64, _callback: f64) {
-    // iOS: UIAlertController — stub for now
+pub extern "C" fn perry_ui_alert(_title: i64, _message: i64, _buttons: f64, _callback: f64) {
+    // tvOS: UIAlertController — stub for now
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_alert_simple(_title: i64, _message: i64) {
+    // tvOS: UIAlertController — stub for now
 }
 
 // =============================================================================
@@ -1400,7 +1404,7 @@ fn keychain_str_from_header(ptr: *const u8) -> &'static str {
     if ptr.is_null() { return ""; }
     unsafe {
         let header = ptr as *const perry_runtime::string::StringHeader;
-        let len = (*header).length as usize;
+        let len = (*header).byte_len as usize;
         let data = ptr.add(std::mem::size_of::<perry_runtime::string::StringHeader>());
         std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
     }
@@ -1498,6 +1502,33 @@ pub extern "C" fn perry_system_keychain_delete(key_ptr: i64) {
 
 #[no_mangle]
 pub extern "C" fn perry_system_notification_send(_title: i64, _body: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_register_remote(_callback: f64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_receive(_callback: f64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_interval(
+    _id_ptr: i64, _title_ptr: i64, _body_ptr: i64, _seconds: f64, _repeats: f64,
+) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_calendar(
+    _id_ptr: i64, _title_ptr: i64, _body_ptr: i64, _timestamp_ms: f64,
+) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_location(
+    _id_ptr: i64, _title_ptr: i64, _body_ptr: i64, _lat: f64, _lon: f64, _radius: f64,
+) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_cancel(_id_ptr: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_tap(_callback: f64) {}
 
 #[no_mangle]
 pub extern "C" fn perry_system_get_locale() -> i64 {
@@ -1635,7 +1666,7 @@ pub extern "C" fn hone_ws_connect(url_ptr: i64) -> f64 {
         if !ptr.is_null() && url_ptr > 0x1000 {
             let header = ptr as *const perry_runtime::string::StringHeader;
             unsafe {
-                let len = (*header).length as usize;
+                let len = (*header).byte_len as usize;
                 let data = ptr.add(std::mem::size_of::<perry_runtime::string::StringHeader>());
                 if let Ok(s) = std::str::from_utf8(std::slice::from_raw_parts(data, len.min(200))) {
                     let _ = writeln!(f, "  url_str={}", s);

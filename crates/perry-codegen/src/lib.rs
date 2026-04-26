@@ -20,6 +20,7 @@ pub(crate) mod lower_string_method;
 pub(crate) mod lower_array_method;
 pub(crate) mod lower_conditional;
 pub(crate) mod stmt;
+pub(crate) mod loop_purity;
 pub(crate) mod collectors;
 pub(crate) mod boxed_vars;
 pub mod codegen;

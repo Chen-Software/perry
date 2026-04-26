@@ -77,7 +77,6 @@ pub mod widgets;
 pub mod window;
 pub mod layout;
 
-#[cfg(feature = "geisterhand")]
 pub mod screenshot;
 
 // =============================================================================
@@ -290,6 +289,10 @@ pub extern "C" fn perry_ui_lazyvstack_create(count: f64, render_closure: f64) ->
 pub extern "C" fn perry_ui_lazyvstack_update(handle: i64, count: i64) {
     widgets::lazyvstack::update(handle, count);
 }
+
+/// Advisory on Windows — eager-render path doesn't consult row_height yet.
+#[no_mangle]
+pub extern "C" fn perry_ui_lazyvstack_set_row_height(_handle: i64, _height: f64) {}
 
 // Table (stub — not yet implemented on Windows)
 #[no_mangle]
@@ -728,10 +731,19 @@ pub extern "C" fn perry_ui_save_file_dialog(callback: f64, default_name_ptr: i64
     dialog::save_file_dialog(callback, default_name_ptr as *const u8, allowed_types_ptr as *const u8);
 }
 
-/// Show an alert dialog.
+/// Show an alert dialog with custom buttons.
+/// `buttons` is a NaN-boxed JS array of string labels; callback receives index.
 #[no_mangle]
-pub extern "C" fn perry_ui_alert(title_ptr: i64, message_ptr: i64, buttons_ptr: i64, callback: f64) {
-    dialog::alert(title_ptr as *const u8, message_ptr as *const u8, buttons_ptr as *const u8, callback);
+pub extern "C" fn perry_ui_alert(title_ptr: i64, message_ptr: i64, buttons: f64, callback: f64) {
+    extern "C" { fn js_nanbox_get_pointer(value: f64) -> i64; }
+    let buttons_ptr = unsafe { js_nanbox_get_pointer(buttons) } as *const u8;
+    dialog::alert(title_ptr as *const u8, message_ptr as *const u8, buttons_ptr, callback);
+}
+
+/// Show a simple alert (title, message, OK button). Called from `alert(title, message)`.
+#[no_mangle]
+pub extern "C" fn perry_ui_alert_simple(title_ptr: i64, message_ptr: i64) {
+    dialog::alert_simple(title_ptr as *const u8, message_ptr as *const u8);
 }
 
 // =============================================================================
@@ -776,16 +788,16 @@ pub extern "C" fn perry_ui_widget_set_on_double_click(handle: i64, callback: f64
 // Animation
 // =============================================================================
 
-/// Animate opacity.
+/// Animate opacity. `duration_secs` is in seconds.
 #[no_mangle]
-pub extern "C" fn perry_ui_widget_animate_opacity(handle: i64, target: f64, duration_ms: f64) {
-    widgets::animate_opacity(handle, target, duration_ms);
+pub extern "C" fn perry_ui_widget_animate_opacity(handle: i64, target: f64, duration_secs: f64) {
+    widgets::animate_opacity(handle, target, duration_secs);
 }
 
-/// Animate position.
+/// Animate position. `duration_secs` is in seconds.
 #[no_mangle]
-pub extern "C" fn perry_ui_widget_animate_position(handle: i64, dx: f64, dy: f64, duration_ms: f64) {
-    widgets::animate_position(handle, dx, dy, duration_ms);
+pub extern "C" fn perry_ui_widget_animate_position(handle: i64, dx: f64, dy: f64, duration_secs: f64) {
+    widgets::animate_position(handle, dx, dy, duration_secs);
 }
 
 // =============================================================================
@@ -992,6 +1004,38 @@ pub extern "C" fn perry_system_keychain_delete(key_ptr: i64) {
 pub extern "C" fn perry_system_notification_send(title_ptr: i64, body_ptr: i64) {
     system::notification_send(title_ptr as *const u8, body_ptr as *const u8);
 }
+
+/// Stub: WinRT push (PushNotificationTrigger) is a separate PR (#95
+/// follow-up). Symbol exists so TS code that calls
+/// `notificationRegisterRemote` links and runs without crashing.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_register_remote(_callback: f64) {}
+
+/// Stub: see `perry_system_notification_register_remote` above.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_receive(_callback: f64) {}
+
+/// Stub: ToastNotifier.AddToSchedule wiring is a separate PR (#96 follow-up).
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_interval(
+    _id_ptr: i64, _title_ptr: i64, _body_ptr: i64, _seconds: f64, _repeats: f64,
+) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_calendar(
+    _id_ptr: i64, _title_ptr: i64, _body_ptr: i64, _timestamp_ms: f64,
+) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_location(
+    _id_ptr: i64, _title_ptr: i64, _body_ptr: i64, _lat: f64, _lon: f64, _radius: f64,
+) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_cancel(_id_ptr: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_tap(_callback: f64) {}
 
 #[no_mangle]
 pub extern "C" fn perry_system_get_locale() -> i64 {

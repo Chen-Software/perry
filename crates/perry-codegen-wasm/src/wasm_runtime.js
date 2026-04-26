@@ -112,6 +112,14 @@ globalThis.__perryToJsValue = function(nanboxedF64) { return toJsValue(nanboxedF
 globalThis.__perryFromJsValue = function(jsValue) { return fromJsValue(jsValue); };
 globalThis.__perryI64ToF64 = function(i64BigInt) { return u64ToF64(i64BigInt); };
 globalThis.__perryF64ToI64 = function(f64Val) { return f64ToU64(f64Val); };
+// BigInt-native helpers (Issue #133 item 5). Prefer these on Firefox/Safari:
+// going through f64 loses NaN-box tag payloads when the Number crosses a JS
+// function-call boundary (SpiderMonkey collapses foreign NaNs to the canonical
+// 0x7FF8_0000_0000_0000). __perry*Bits helpers skip the f64 round-trip entirely.
+// __perryJsValueToBits(v) -> BigInt (raw NaN-box bits, ready to pass to a WASM
+// i64 export). __perryBitsToJsValue(bits) -> JS value (handle, string, number, …).
+globalThis.__perryJsValueToBits = function(v) { return __jsValueToBits(v); };
+globalThis.__perryBitsToJsValue = function(bits) { return __bitsToJsValue(bits); };
 
 // Build the import object for WASM instantiation
 function buildImports() {
@@ -1398,16 +1406,22 @@ function buildImports() {
   };
 }
 
-// Wrap a JS function so it interoperates with WASM i64 params/results using f64
-// NaN-boxed values internally. Converts BigInt args from WASM to f64 and Number
-// returns from JS to BigInt by bit reinterpretation. Necessary because BigInt(NaN) throws.
+// Wrap a JS function so it interoperates with WASM i64 params/results.
+//
+// Default wrapping (used for the rt namespace): convert BigInt i64 args to f64
+// via bit-reinterpret, so legacy rt.* functions that expect NaN-boxed f64 keep
+// working. Number results are coerced back to BigInt for WASM i64 return.
+// Necessary because BigInt(NaN) throws. Escape hatch: set `fn.__rawBigint = true`
+// on the callee to skip the wrapper entirely and receive raw BigInt bits.
 function wrapForI64(fn) {
+  if (fn.__rawBigint === true) return fn;
   return function(...args) {
     const convertedArgs = args.map(a => {
       if (typeof a === 'bigint') { _u64[0] = a; return _f64[0]; }
       return a;
     });
     const result = fn.apply(this, convertedArgs);
+    if (typeof result === 'bigint') return result;
     if (typeof result === 'number') {
       if (Number.isInteger(result) && Math.abs(result) < 2147483648) return result;
       _f64[0] = result;
@@ -1417,11 +1431,37 @@ function wrapForI64(fn) {
   };
 }
 
-function wrapNamespace(ns) {
+// Wrapper for the ffi namespace: FFI imports are wasm-bindgen-generated functions
+// and similar externals that expect PLAIN JS values, not NaN-boxed f64. Decode
+// BigInt i64 args (NaN-box bits) to JS values via __bitsToJsValue before calling.
+// Fixes Issue #133 items 3/5/6: Firefox/Safari canonicalize foreign NaNs when a
+// Number crosses a JS function-call boundary, stripping STRING/POINTER/INT32 tags,
+// so bit-reinterpreting BigInt → f64 here would lose the payload. Decoding bypasses
+// the f64 round-trip entirely and also gives wasm-bindgen a plain Number for
+// INT32-tagged values (avoiding `Cannot convert BigInt value to a number`).
+function wrapFfiForI64(fn) {
+  if (fn.__rawBigint === true) return fn;
+  return function(...args) {
+    const convertedArgs = args.map(a => (typeof a === 'bigint') ? __bitsToJsValue(a) : a);
+    const result = fn.apply(this, convertedArgs);
+    if (typeof result === 'bigint') return result;
+    if (typeof result === 'number') {
+      if (Number.isInteger(result) && Math.abs(result) < 2147483648) return result;
+      _f64[0] = result;
+      return _u64[0];
+    }
+    // Non-numeric result: encode via __jsValueToBits so callers that thread results
+    // back into Perry get proper NaN-box bits.
+    if (result === undefined) return TAG_UNDEFINED;
+    return __jsValueToBits(result);
+  };
+}
+
+function wrapNamespace(ns, wrapper) {
   return new Proxy(ns, {
     get(target, prop) {
       const v = target[prop];
-      if (typeof v === 'function') return wrapForI64(v);
+      if (typeof v === 'function') return wrapper(v);
       return v;
     },
   });
@@ -1430,7 +1470,8 @@ function wrapNamespace(ns) {
 function wrapImportsForI64(imports) {
   const wrapped = {};
   for (const nsName in imports) {
-    wrapped[nsName] = wrapNamespace(imports[nsName]);
+    const wrapper = nsName === 'ffi' ? wrapFfiForI64 : wrapForI64;
+    wrapped[nsName] = wrapNamespace(imports[nsName], wrapper);
   }
   return wrapped;
 }
@@ -1480,6 +1521,29 @@ const __memDispatch = {
   math_log10: (x) => Math.log10(x),
   math_min: (a, b) => Math.min(a, b),
   math_max: (a, b) => Math.max(a, b),
+  // Trig / exp / sign / trunc / cbrt / hypot / etc. (Issue #133 item 4)
+  math_sin: (x) => Math.sin(x),
+  math_cos: (x) => Math.cos(x),
+  math_tan: (x) => Math.tan(x),
+  math_asin: (x) => Math.asin(x),
+  math_acos: (x) => Math.acos(x),
+  math_atan: (x) => Math.atan(x),
+  math_atan2: (y, x) => Math.atan2(y, x),
+  math_sinh: (x) => Math.sinh(x),
+  math_cosh: (x) => Math.cosh(x),
+  math_tanh: (x) => Math.tanh(x),
+  math_asinh: (x) => Math.asinh(x),
+  math_acosh: (x) => Math.acosh(x),
+  math_atanh: (x) => Math.atanh(x),
+  math_exp: (x) => Math.exp(x),
+  math_expm1: (x) => Math.expm1(x),
+  math_log1p: (x) => Math.log1p(x),
+  math_sign: (x) => Math.sign(x),
+  math_trunc: (x) => Math.trunc(x),
+  math_cbrt: (x) => Math.cbrt(x),
+  math_hypot: (a, b) => Math.hypot(a, b),
+  math_fround: (x) => Math.fround(x),
+  math_clz32: (x) => Math.clz32(x),
   date_now: () => Date.now(),
   js_typeof: (val) => typeof val,
   parse_int: (val) => parseInt(String(val), 10),
@@ -2066,6 +2130,7 @@ function __bitsToJsValue(bits) {
   const tag = bits >> 48n;
   if (tag === STRING_TAG) return stringTable[Number(bits & 0xFFFFFFFFn)];
   if (tag === POINTER_TAG) return handleStore.get(Number(bits & 0xFFFFFFFFn));
+  if (tag === INT32_TAG) return Number(BigInt.asIntN(32, bits & 0xFFFFFFFFn));
   _u64[0] = bits; return _f64[0];
 }
 function __jsValueToBits(v) {
@@ -2713,15 +2778,22 @@ function perry_ui_stack_set_distribution(h) { /* no-op in web */ }
 function perry_ui_widget_set_context_menu(widgetH, menuH) { /* simplified stub */ }
 
 // ---------- Animations ----------
-function perry_ui_animate_opacity(h, from, to, duration) {
+// Canonical API: animateOpacity(target, durationSecs), animatePosition(dx, dy, durationSecs).
+function perry_ui_animate_opacity(h, target, durationSecs) {
   const el = uiGet(h); if (!el) return;
-  el.style.opacity = from; el.style.transition = `opacity ${duration}ms ease`;
-  requestAnimationFrame(() => { el.style.opacity = to; });
+  const cur = el.style.opacity === "" ? "1" : el.style.opacity;
+  el.style.opacity = cur;
+  el.style.transition = `opacity ${durationSecs}s ease`;
+  requestAnimationFrame(() => { el.style.opacity = target; });
 }
-function perry_ui_animate_position(h, fromX, fromY, toX, toY, duration) {
+function perry_ui_animate_position(h, dx, dy, durationSecs) {
   const el = uiGet(h); if (!el) return;
-  el.style.transform = `translate(${fromX}px, ${fromY}px)`; el.style.transition = `transform ${duration}ms ease`;
-  requestAnimationFrame(() => { el.style.transform = `translate(${toX}px, ${toY}px)`; });
+  const m = /translate\(([-\d.]+)px,\s*([-\d.]+)px\)/.exec(el.style.transform || "");
+  const curX = m ? parseFloat(m[1]) : 0;
+  const curY = m ? parseFloat(m[2]) : 0;
+  el.style.transform = `translate(${curX}px, ${curY}px)`;
+  el.style.transition = `transform ${durationSecs}s ease`;
+  requestAnimationFrame(() => { el.style.transform = `translate(${curX + dx}px, ${curY + dy}px)`; });
 }
 
 // ---------- Events ----------
@@ -3170,6 +3242,22 @@ const __uiMethodMap = {
 
 function __classDispatch(objVal, mname, rawArgs) {
   // objVal and rawArgs are already plain JS values (decoded by __bitsToJsValue in mem_call)
+  // Primitive/built-in fast-path (Issue #133 item 1): plain strings/numbers have no
+  // __class__ and aren't in __uiMethodMap, so method calls like `str.charCodeAt(i)`
+  // previously fell through and returned undefined. Route to the native prototype.
+  if (typeof objVal === 'string') {
+    const fn = String.prototype[mname];
+    if (typeof fn === 'function') return fn.apply(objVal, rawArgs);
+  } else if (typeof objVal === 'number') {
+    const fn = Number.prototype[mname];
+    if (typeof fn === 'function') return fn.apply(objVal, rawArgs);
+  } else if (Array.isArray(objVal)) {
+    // Array methods whose JS-native impls need a plain-JS callback (not a Perry closure
+    // handle) are routed through __memDispatch before reaching here — this fallback
+    // catches methods the codegen doesn't special-case (at, findLast, flat, etc.).
+    const fn = Array.prototype[mname];
+    if (typeof fn === 'function') return fn.apply(objVal, rawArgs);
+  }
   // 1) Try class method table (for user-defined classes)
   // WASM functions use i64 (BigInt) params/returns
   if (objVal && typeof objVal === 'object' && objVal.__class__) {
@@ -3206,6 +3294,10 @@ function __bitsToJsValue(bits) {
   if (tag === POINTER_TAG) {
     const obj = handleStore.get(Number(bits & 0xFFFFFFFFn));
     return obj !== undefined ? obj : undefined;
+  }
+  if (tag === INT32_TAG) {
+    // Sign-extend low 32 bits (Issue #133 item 6)
+    return Number(BigInt.asIntN(32, bits & 0xFFFFFFFFn));
   }
   // Plain number — safe to read as f64 (not NaN-boxed)
   _u64[0] = bits;

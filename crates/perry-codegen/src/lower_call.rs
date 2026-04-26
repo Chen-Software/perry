@@ -39,6 +39,162 @@ use crate::nanbox::{double_literal, POINTER_MASK_I64};
 use crate::type_analysis::{is_array_expr, is_map_expr, is_promise_expr, is_set_expr, is_string_expr, receiver_class_name};
 use crate::types::{DOUBLE, I32, I64, I8, PTR, VOID};
 
+/// Issue #92: inline Buffer numeric reads (`buf.readInt32BE(offset)` etc.)
+/// as LLVM load + bswap + convert instead of a runtime dispatch through
+/// `js_native_call_method`. Called from the PropertyGet branch below when
+/// the receiver is a Buffer / Uint8Array and the method name matches one
+/// of the Node-style numeric read accessors. Returns `Ok(None)` when
+/// intrinsification isn't possible (the generic path then catches it) —
+/// currently that's any receiver that isn't a tracked `buffer_data_slot`.
+struct BufferNumericReadSpec {
+    width_bytes: u32,
+    swap: bool,     // BE → emit @llvm.bswap; LE → skip
+    signed: bool,   // sitofp vs uitofp (ignored for float/double)
+    is_float: bool, // true for readFloat*/readDouble*
+}
+
+fn classify_buffer_numeric_read(method: &str) -> Option<BufferNumericReadSpec> {
+    use BufferNumericReadSpec as S;
+    Some(match method {
+        "readUInt8" | "readUint8" => S { width_bytes: 1, swap: false, signed: false, is_float: false },
+        "readInt8"                => S { width_bytes: 1, swap: false, signed: true,  is_float: false },
+        "readUInt16BE" | "readUint16BE" => S { width_bytes: 2, swap: true,  signed: false, is_float: false },
+        "readUInt16LE" | "readUint16LE" => S { width_bytes: 2, swap: false, signed: false, is_float: false },
+        "readInt16BE"                   => S { width_bytes: 2, swap: true,  signed: true,  is_float: false },
+        "readInt16LE"                   => S { width_bytes: 2, swap: false, signed: true,  is_float: false },
+        "readUInt32BE" | "readUint32BE" => S { width_bytes: 4, swap: true,  signed: false, is_float: false },
+        "readUInt32LE" | "readUint32LE" => S { width_bytes: 4, swap: false, signed: false, is_float: false },
+        "readInt32BE"                   => S { width_bytes: 4, swap: true,  signed: true,  is_float: false },
+        "readInt32LE"                   => S { width_bytes: 4, swap: false, signed: true,  is_float: false },
+        "readFloatBE"                   => S { width_bytes: 4, swap: true,  signed: true,  is_float: true },
+        "readFloatLE"                   => S { width_bytes: 4, swap: false, signed: true,  is_float: true },
+        "readDoubleBE"                  => S { width_bytes: 8, swap: true,  signed: true,  is_float: true },
+        "readDoubleLE"                  => S { width_bytes: 8, swap: false, signed: true,  is_float: true },
+        _ => return None,
+    })
+}
+
+fn try_emit_buffer_read_intrinsic(
+    ctx: &mut FnCtx<'_>,
+    object: &Expr,
+    method: &str,
+    args: &[Expr],
+) -> Result<Option<String>> {
+    let spec = match classify_buffer_numeric_read(method) {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+    // Node-style readers take exactly one `offset` arg. `readUInt8(offset)`
+    // allows omitted offset but the compiler sees that as 0-arg; not our
+    // concern here — fall through to runtime which handles the default.
+    if args.len() != 1 {
+        return Ok(None);
+    }
+    // Fast path only when the receiver is a `const buf = Buffer.alloc(N)`-style
+    // local that's been registered in `buffer_data_slots` (see stmt.rs:472).
+    // Arbitrary Buffer values (function args, fields) still go through runtime.
+    let (ptr_slot, scope_idx) = match object {
+        Expr::LocalGet(id) => match ctx.buffer_data_slots.get(id).cloned() {
+            Some(s) => s,
+            None => return Ok(None),
+        },
+        _ => return Ok(None),
+    };
+    // Offset as i32 (prefer the existing i32 slot if the expr qualifies,
+    // otherwise fptosi from double).
+    let offset_is_i32 = crate::expr::can_lower_expr_as_i32(
+        &args[0],
+        &ctx.i32_counter_slots,
+        ctx.flat_const_arrays,
+        &ctx.array_row_aliases,
+        ctx.integer_locals,
+        ctx.clamp3_functions,
+        ctx.clamp_u8_functions,
+    );
+    let offset_i32 = if offset_is_i32 {
+        crate::expr::lower_expr_as_i32(ctx, &args[0])?
+    } else {
+        let d = lower_expr(ctx, &args[0])?;
+        ctx.block().fptosi(DOUBLE, &d, I32)
+    };
+    let blk = ctx.block();
+    let data_ptr = blk.load(PTR, &ptr_slot);
+    // BufferHeader {length: u32, capacity: u32} lives 8 bytes before the data.
+    let header_ptr = blk.gep(I8, &data_ptr, &[(I32, "-8")]);
+    let len_i32 = blk.load_invariant(I32, &header_ptr);
+    // Bounds check: offset + width_bytes <= length, via @llvm.assume so the
+    // branch doesn't block the LoopVectorizer (same trick as Uint8ArrayGet).
+    let end_i32 = blk.add(I32, &offset_i32, &spec.width_bytes.to_string());
+    let in_bounds = blk.icmp_ule(I32, &end_i32, &len_i32);
+    blk.emit_raw(format!("call void @llvm.assume(i1 {})", in_bounds));
+    let meta = crate::expr::buffer_alias_metadata_suffix(scope_idx);
+    let elem_ptr = blk.gep_inbounds(I8, &data_ptr, &[(I32, &offset_i32)]);
+    // Load raw bytes at the correct width.
+    let (load_ty, swap_intrinsic) = match spec.width_bytes {
+        1 => ("i8",  None),
+        2 => ("i16", Some("llvm.bswap.i16")),
+        4 => ("i32", Some("llvm.bswap.i32")),
+        8 => ("i64", Some("llvm.bswap.i64")),
+        _ => unreachable!(),
+    };
+    let raw = blk.fresh_reg();
+    blk.emit_raw(format!("{} = load {}, ptr {}{}", raw, load_ty, elem_ptr, meta));
+    // Byte-swap for BE on multi-byte widths (swap.i8 doesn't exist; width=1
+    // never has `swap=true` in the spec table anyway).
+    let swapped = match (spec.swap, swap_intrinsic) {
+        (true, Some(intr)) => {
+            let r = blk.fresh_reg();
+            blk.emit_raw(format!("{} = call {} @{}({} {})", r, load_ty, intr, load_ty, raw));
+            r
+        }
+        _ => raw,
+    };
+    // Convert to f64.
+    let result = if spec.is_float {
+        // Float/double: bitcast int bits → float bits, then fpext f32→f64 if needed.
+        let float_ty = if spec.width_bytes == 4 { "float" } else { "double" };
+        let as_float = blk.fresh_reg();
+        blk.emit_raw(format!(
+            "{} = bitcast {} {} to {}",
+            as_float, load_ty, swapped, float_ty
+        ));
+        if spec.width_bytes == 4 {
+            let extended = blk.fresh_reg();
+            blk.emit_raw(format!("{} = fpext float {} to double", extended, as_float));
+            extended
+        } else {
+            as_float
+        }
+    } else {
+        // Integer: sitofp or uitofp through at least i32. The 1- and 2-byte
+        // loads need a zext/sext to i32 first so the final fptoXi picks the
+        // right sign semantics.
+        let i32_val = match spec.width_bytes {
+            1 | 2 => {
+                if spec.signed {
+                    blk.sext(load_ty, &swapped, I32)
+                } else {
+                    blk.zext(load_ty, &swapped, I32)
+                }
+            }
+            4 => swapped,
+            8 => {
+                // Signed 8-byte reads (BigInt64) would need BigInt allocation;
+                // only reach here for width_bytes==8 when is_float, which already
+                // returned above. Defensive early-out.
+                return Ok(None);
+            }
+            _ => unreachable!(),
+        };
+        if spec.signed {
+            blk.sitofp(I32, &i32_val, DOUBLE)
+        } else {
+            blk.uitofp(I32, &i32_val, DOUBLE)
+        }
+    };
+    Ok(Some(result))
+}
+
 /// Lower a `Call` expression. Two shapes are supported:
 /// 1. `FuncRef(id)(args...)` — direct call to a user function by HIR id.
 /// 2. `console.log(expr)` where `expr` lowers to a double — emits a
@@ -173,11 +329,6 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
     // direct LLVM call to its scoped name and the system linker
     // resolves the symbol when the .o files are linked together.
     if let Expr::ExternFuncRef { name, return_type: ext_return_type, .. } = callee {
-        // Map JS global names (setTimeout, queueMicrotask, etc.) to the
-        // right runtime C functions. These aren't `js_*` prefixed in the
-        // HIR but need to call specific runtime entrypoints with the
-        // right signature. Handle them explicitly before the generic
-        // `js_*` pass-through and the import-map fallback.
         match name.as_str() {
             "setTimeout" if args.len() == 2 => {
                 let cb_box = lower_expr(ctx, &args[0])?;
@@ -215,6 +366,10 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
                 let blk = ctx.block();
                 let id_handle = unbox_to_i64(blk, &id_box);
                 blk.call_void("clearInterval", &[(I64, &id_handle)]);
+                return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
+            }
+            "gc" => {
+                ctx.block().call_void("js_gc_collect", &[]);
                 return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
             }
             _ => {}
@@ -257,63 +412,76 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
             // take a mix of i64 (pointers/handles) and f64 (floats).
             //
             // The LLVM IR declaration type determines ARM64 register
-            // placement: i64 → x-register, double → d-register. Since
-            // Perry can't know the actual C signature, we use a
-            // heuristic: if the arg expression is a VARIABLE (LocalGet,
-            // PropertyGet, etc.) that's not a literal number, assume
-            // it's an integer handle → pass as i64 via fptosi. If it's
-            // a number literal, keep as double (likely a real float
-            // like width/height/color).
+            // placement: i64 → x-register, double → d-register.
+            //
+            // When the FFI manifest (`ffi_signatures`) declares a param
+            // as `"i64"`, lower it via `fptosi` to put the value in an
+            // x-register. This is required for handle-typed params like
+            // `view: *mut EditorView` — without it the C ABI reads a
+            // garbage value out of x0/x1 since Perry put the handle in
+            // d-registers.
+            let manifest_sig = ctx.ffi_signatures.get(name).cloned();
             let mut lowered: Vec<String> = Vec::with_capacity(args.len());
             let mut arg_types: Vec<crate::types::LlvmType> = Vec::with_capacity(args.len());
-            // Determine if this function takes a handle as its first arg.
-            // Most extern C functions follow the pattern: first arg is a
-            // pointer/handle (i64), remaining args are floats (f64) or strings.
-            // Exceptions: _create functions often take all-float args.
-            let first_arg_is_handle = args.len() > 0
-                && is_integer_handle_arg(&args[0])
-                && !name.contains("_create");
-            for (i, a) in args.iter().enumerate() {
+            for (idx, a) in args.iter().enumerate() {
                 let val = lower_expr(ctx, a)?;
+                let manifest_kind: Option<&str> = manifest_sig
+                    .as_ref()
+                    .and_then(|(p, _)| p.get(idx).map(|s| s.as_str()));
                 if is_string_expr(ctx, a) {
-                    // Unbox NaN-boxed string to raw C string pointer.
                     let blk = ctx.block();
                     let raw_ptr = blk.call(I64, "js_get_string_pointer_unified", &[(DOUBLE, &val)]);
                     let ptr_val = blk.inttoptr(I64, &raw_ptr);
                     lowered.push(ptr_val);
                     arg_types.push(PTR);
-                } else if i == 0 && first_arg_is_handle {
-                    // First arg is a handle/pointer → i64 for x0.
+                } else if is_array_expr(ctx, a) {
                     let blk = ctx.block();
-                    let i64_val = blk.fptosi(DOUBLE, &val, I64);
-                    lowered.push(i64_val);
+                    let bits = blk.bitcast_double_to_i64(&val);
+                    let header_handle = blk.and(I64, &bits, POINTER_MASK_I64);
+                    let header_ptr = blk.inttoptr(I64, &header_handle);
+                    // Skip 8-byte ArrayHeader (u32 length + u32 capacity)
+                    // to reach the inline f64 data.
+                    let eight = "8".to_string();
+                    let data_ptr = blk.gep(I8, &header_ptr, &[(I64, &eight)]);
+                    lowered.push(data_ptr);
+                    arg_types.push(PTR);
+                } else if matches!(manifest_kind, Some("i64")) {
+                    // Manifest declares this param as i64 → place in
+                    // x-register. JS numbers are stored as f64 directly
+                    // (a handle of `0x305b42a0c00` is the f64 value
+                    // 13190580238336.0, not a NaN-box payload), so
+                    // truncate via `fptosi` to recover the integer.
+                    let blk = ctx.block();
+                    let i = blk.fptosi(DOUBLE, &val, I64);
+                    lowered.push(i);
                     arg_types.push(I64);
                 } else {
-                    // Float arg or subsequent args → double for d-register.
                     lowered.push(val);
                     arg_types.push(DOUBLE);
                 }
             }
             let arg_slices: Vec<(crate::types::LlvmType, &str)> =
                 arg_types.iter().zip(lowered.iter()).map(|(t, v)| (*t, v.as_str())).collect();
-            // Determine return type. If the ExternFuncRef declares
-            // return_type: String, the native function returns
-            // *const u8 (ptr in x0). If return_type: Void, no return.
-            // Otherwise (Number/Any), assume f64 (d0).
+            // Determine return type.
             //
-            // Heuristic fallback: even if declared as Number, if the
-            // function name matches a known "returns-string" pattern
-            // AND has string args, treat as ptr return. This covers
-            // native libraries like Bloom that declare string-returning
-            // functions as `number` for NaN-boxing compat.
+            // Manifest takes precedence: `"i64"` → I64 return (x0), then
+            // `sitofp` back to f64 so JS sees a normal number; `"void"` →
+            // no return; `"string"`/`"ptr"` → PTR return + nanbox.
+            //
+            // Without a manifest entry, fall back to the original
+            // heuristic on `ExternFuncRef.return_type` (Number/Void/String).
             let has_string_args = arg_types.iter().any(|t| *t == PTR);
-            let returns_string = matches!(ext_return_type, HirType::String)
-                || (has_string_args && (
+            let manifest_ret: Option<&str> = manifest_sig.as_ref().map(|(_, r)| r.as_str());
+            let returns_string = matches!(manifest_ret, Some("string") | Some("ptr"))
+                || matches!(ext_return_type, HirType::String)
+                || (manifest_ret.is_none() && has_string_args && (
                     name.contains("read_file")
                     || name.contains("clipboard_text")
                     || name.contains("file_dialog")
                 ));
-            let returns_void = matches!(ext_return_type, HirType::Void);
+            let returns_void = matches!(manifest_ret, Some("void"))
+                || (manifest_ret.is_none() && matches!(ext_return_type, HirType::Void));
+            let returns_i64 = matches!(manifest_ret, Some("i64"));
             if returns_void {
                 ctx.pending_declares
                     .push((name.clone(), crate::types::VOID, arg_types));
@@ -327,14 +495,25 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
                 let blk = ctx.block();
                 let ptr_i64 = blk.ptrtoint(&raw_ptr, I64);
                 return Ok(nanbox_string_inline(blk, &ptr_i64));
-            } else {
-                // Extern C functions return integer/pointer values in x0.
-                // Convert back to double with sitofp so Perry can use it
-                // as a regular number (e.g., a handle value).
+            } else if returns_i64 {
+                // C function returns i64 in x0 (e.g. `*mut View`
+                // handles). Declare as I64; the value comes back as a
+                // raw integer. Convert via `sitofp` so callers see a
+                // normal JS number; subsequent FFI calls that pass it
+                // back as an i64 param will truncate via `fptosi`.
                 ctx.pending_declares
                     .push((name.clone(), I64, arg_types));
                 let raw = ctx.block().call(I64, name, &arg_slices);
-                return Ok(ctx.block().sitofp(I64, &raw, DOUBLE));
+                let blk = ctx.block();
+                return Ok(blk.sitofp(I64, &raw, DOUBLE));
+            } else {
+                // Native library functions (Bloom, etc.) return f64 in
+                // the d0 register — they use the Perry double-based ABI,
+                // not a C integer ABI. Declare as DOUBLE and use the
+                // return value directly (no sitofp needed).
+                ctx.pending_declares
+                    .push((name.clone(), DOUBLE, arg_types));
+                return Ok(ctx.block().call(DOUBLE, name, &arg_slices));
             }
         };
         let fname = format!("perry_fn_{}__{}", source_prefix, name);
@@ -344,13 +523,32 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
         // this, clang errors with `use of undefined value @perry_fn_*`
         // for any cross-module call hidden inside a closure body, try
         // block, switch, etc. — the old pre-walker missed those shapes.
+        //
+        // Determine the actual param count from the imported function
+        // signature. Calls that pass fewer args than the function declares
+        // (because the trailing params have defaults) need to be padded
+        // with `undefined` so the function body sees defined values for
+        // the missing args (and can apply its defaults). Without this,
+        // the d-registers for the missing params hold stale data and
+        // the function reads garbage (e.g. alpha = -3e-5 instead of 1).
+        let target_arity = ctx
+            .imported_func_param_counts
+            .get(name)
+            .copied()
+            .unwrap_or(args.len())
+            .max(args.len());
         let param_types: Vec<crate::types::LlvmType> =
-            std::iter::repeat(DOUBLE).take(args.len()).collect();
+            std::iter::repeat(DOUBLE).take(target_arity).collect();
         ctx.pending_declares
             .push((fname.clone(), DOUBLE, param_types));
-        let mut lowered: Vec<String> = Vec::with_capacity(args.len());
+        let mut lowered: Vec<String> = Vec::with_capacity(target_arity);
         for a in args {
             lowered.push(lower_expr(ctx, a)?);
+        }
+        // Pad with TAG_UNDEFINED for the missing trailing args.
+        let undefined_lit = double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED));
+        while lowered.len() < target_arity {
+            lowered.push(undefined_lit.clone());
         }
         let arg_slices: Vec<(crate::types::LlvmType, &str)> =
             lowered.iter().map(|s| (DOUBLE, s.as_str())).collect();
@@ -895,7 +1093,29 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
         // dispatch tower when a user class happens to have a method
         // with the same name (like `SimpleLogger.log()`).
         let is_global = matches!(object.as_ref(), Expr::GlobalGet(_));
-        let needs_dynamic_dispatch = !is_global && match receiver_class_name(ctx, object) {
+        // If the receiver's static type is a well-known built-in with its own
+        // runtime method family (Buffer byte readers, Array, Map, Set, …),
+        // don't enter the user-class dispatch tower. Otherwise an imported
+        // user class that happens to declare the same method name (e.g. a
+        // BufferCursor with `readUInt8`) would be enumerated as an
+        // implementor and `buf.readUInt8(i)` would fall through to the
+        // default 0.0 case when the Buffer's class id doesn't match any
+        // tower entry.
+        let is_builtin_receiver = match receiver_class_name(ctx, object) {
+            Some(name) => matches!(
+                name.as_str(),
+                "Buffer" | "Uint8Array" | "Uint8ClampedArray"
+                    | "Int8Array" | "Int16Array" | "Uint16Array"
+                    | "Int32Array" | "Uint32Array"
+                    | "Float32Array" | "Float64Array"
+                    | "BigInt64Array" | "BigUint64Array"
+                    | "Array" | "ReadonlyArray"
+                    | "Map" | "Set" | "WeakMap" | "WeakSet"
+                    | "Promise" | "RegExp" | "Date"
+            ),
+            None => false,
+        };
+        let needs_dynamic_dispatch = !is_global && !is_builtin_receiver && match receiver_class_name(ctx, object) {
             None => true,
             Some(name) => !ctx.classes.contains_key(&name),
         };
@@ -961,8 +1181,48 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
                     }
                     phi_inputs.push((v, after_label));
                 }
+                // Default branch: receiver's class id didn't match any user
+                // class implementing `property`. Rather than returning 0.0,
+                // fall through to the runtime's `js_native_call_method` so
+                // same-named built-in methods (Buffer.readUInt8, Array.push,
+                // Map.get, …) still reach their native dispatch. Without
+                // this, a `buf.readUInt8(i)` call site ends up in the
+                // default branch and returns 0, silently corrupting reads
+                // any time a user class in scope happens to declare a
+                // method of the same name.
                 ctx.current_block = default_idx;
-                let v_def = double_literal(0.0);
+                let key_idx = ctx.strings.intern(property);
+                let entry = ctx.strings.entry(key_idx);
+                let bytes_global = format!("@{}", entry.bytes_global);
+                let name_len_str = entry.byte_len.to_string();
+                let (fb_args_ptr, fb_args_len) = if args.is_empty() {
+                    ("null".to_string(), "0".to_string())
+                } else {
+                    let n = args.len();
+                    let buf_reg = ctx.block().next_reg();
+                    ctx.block().emit_raw(format!("{} = alloca [{} x double]", buf_reg, n));
+                    for (i, a_val) in lowered_args.iter().skip(1).enumerate() {
+                        let slot = ctx.block().gep(DOUBLE, &buf_reg, &[(I64, &format!("{}", i))]);
+                        ctx.block().store(DOUBLE, a_val, &slot);
+                    }
+                    let ptr_reg = ctx.block().next_reg();
+                    ctx.block().emit_raw(format!(
+                        "{} = getelementptr [{} x double], ptr {}, i64 0, i64 0",
+                        ptr_reg, n, buf_reg
+                    ));
+                    (ptr_reg, n.to_string())
+                };
+                let v_def = ctx.block().call(
+                    DOUBLE,
+                    "js_native_call_method",
+                    &[
+                        (DOUBLE, &recv_box),
+                        (crate::types::PTR, &bytes_global),
+                        (I64, &name_len_str),
+                        (crate::types::PTR, &fb_args_ptr),
+                        (I64, &fb_args_len),
+                    ],
+                );
                 let def_label = ctx.block().label.clone();
                 ctx.block().br(&merge_label);
                 phi_inputs.push((v_def, def_label));
@@ -1193,26 +1453,16 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
                 ctx.block().call_void("js_console_group_begin", &[]);
                 return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
             }
-            // console.trace(msg) — print "Trace: <msg>" followed by a
-            // stack trace. Full stack trace requires debug info —
-            // for now print "Trace: " + message on one line.
+            // console.trace([msg]) — `js_console_trace` formats the
+            // optional message and emits a native backtrace to stderr
+            // (issue #20).
             if property == "trace" {
-                let prefix_idx = ctx.strings.intern("Trace: ");
-                let prefix_global = format!("@{}", ctx.strings.entry(prefix_idx).handle_global);
-                let blk = ctx.block();
-                let prefix_box = blk.load(DOUBLE, &prefix_global);
-                let prefix_handle = unbox_to_i64(blk, &prefix_box);
-                // Concat "Trace: " + first arg as string
-                if !args.is_empty() {
-                    let msg = lower_expr(ctx, &args[0])?;
-                    let blk = ctx.block();
-                    let msg_handle = blk.call(I64, "js_jsvalue_to_string", &[(DOUBLE, &msg)]);
-                    let combined = blk.call(I64, "js_string_concat", &[(I64, &prefix_handle), (I64, &msg_handle)]);
-                    let combined_box = nanbox_string_inline(blk, &combined);
-                    ctx.block().call_void("js_console_log_dynamic", &[(DOUBLE, &combined_box)]);
+                let val: String = if args.is_empty() {
+                    double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED))
                 } else {
-                    ctx.block().call_void("js_console_log_dynamic", &[(DOUBLE, &prefix_box)]);
-                }
+                    lower_expr(ctx, &args[0])?
+                };
+                ctx.block().call_void("js_console_trace", &[(DOUBLE, &val)]);
                 return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
             }
             // console.table(data) — dedicated table renderer.
@@ -1475,6 +1725,16 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
         let skip_native = matches!(object.as_ref(), Expr::GlobalGet(_))
             || (class_name_opt.is_some() && !is_buffer_class);
         if !skip_native {
+            // Issue #92 fast path: intrinsify Buffer numeric reads
+            // (`buf.readInt32BE(off)` etc.) when the receiver is a tracked
+            // `const buf = Buffer.alloc(N)` local. Returns Ok(Some(reg)) on
+            // success; falls through to the runtime dispatch for all other
+            // Buffer methods or untracked receivers.
+            if is_buffer_class {
+                if let Some(reg) = try_emit_buffer_read_intrinsic(ctx, object, property, args)? {
+                    return Ok(reg);
+                }
+            }
             let recv_box = lower_expr(ctx, object)?;
             let mut lowered_args: Vec<String> = Vec::with_capacity(args.len());
             for a in args {
@@ -2050,6 +2310,14 @@ pub(crate) fn lower_new(
 /// child, matching JavaScript / TypeScript class semantics where fields
 /// are initialized before user-written constructor code executes (field
 /// initializers are conceptually prepended to the constructor body).
+/// Public entry point for scalar-replacement path in stmt.rs.
+pub(crate) fn apply_field_initializers_recursive_pub(
+    ctx: &mut FnCtx<'_>,
+    class_name: &str,
+) -> Result<()> {
+    apply_field_initializers_recursive(ctx, class_name)
+}
+
 fn apply_field_initializers_recursive(
     ctx: &mut FnCtx<'_>,
     class_name: &str,
@@ -2111,6 +2379,7 @@ fn apply_field_initializers_recursive(
 pub(crate) fn lower_native_method_call(
     ctx: &mut FnCtx<'_>,
     module: &str,
+    class_name: Option<&str>,
     method: &str,
     object: Option<&Expr>,
     args: &[Expr],
@@ -2225,6 +2494,52 @@ pub(crate) fn lower_native_method_call(
         return Ok(nanbox_pointer_inline(blk, &parent_final));
     }
 
+    // perry/ui ForEach — TS shape is `ForEach(state, (i) => Widget)`. The
+    // runtime's `perry_ui_for_each_init` wants `(container, state, closure)`,
+    // so we synthesize a VStack container, call for_each_init with it, and
+    // return the container handle. Without this special case the call falls
+    // through to the generic dispatch which emits the "method 'ForEach' not
+    // in dispatch table" warning and returns 0/undefined — the outer VStack
+    // then tries to add_child with an invalid handle, AppKit silently fails
+    // to attach the window body, and the process runs but no window shows.
+    if module == "perry/ui" && method == "ForEach" && object.is_none() && args.len() == 2 {
+        ctx.pending_declares.push((
+            "perry_ui_vstack_create".to_string(),
+            I64,
+            vec![DOUBLE],
+        ));
+        ctx.pending_declares.push((
+            "perry_ui_for_each_init".to_string(),
+            crate::types::VOID,
+            vec![I64, I64, DOUBLE],
+        ));
+
+        let spacing = "8.0".to_string();
+        let blk = ctx.block();
+        let container = blk.call(I64, "perry_ui_vstack_create", &[(DOUBLE, &spacing)]);
+        let container_slot = ctx.func.alloca_entry(I64);
+        ctx.block().store(I64, &container, &container_slot);
+
+        // args[0]: State handle — NaN-boxed pointer, unbox to i64.
+        let state_box = lower_expr(ctx, &args[0])?;
+        let blk = ctx.block();
+        let state_handle = unbox_to_i64(blk, &state_box);
+
+        // args[1]: render closure — stays as a NaN-boxed f64.
+        let closure_d = lower_expr(ctx, &args[1])?;
+
+        let blk = ctx.block();
+        let container_reload = blk.load(I64, &container_slot);
+        blk.call_void(
+            "perry_ui_for_each_init",
+            &[(I64, &container_reload), (I64, &state_handle), (DOUBLE, &closure_d)],
+        );
+
+        let blk = ctx.block();
+        let container_final = blk.load(I64, &container_slot);
+        return Ok(nanbox_pointer_inline(blk, &container_final));
+    }
+
     // perry/ui Button — TS shape is `Button(label, handler)` where
     // handler is a closure. The simple positional form is what mango
     // uses. The Object-config form (`Button(label, { onPress: cb })`)
@@ -2269,6 +2584,16 @@ pub(crate) fn lower_native_method_call(
     // to the perry_ui_* runtime function and arg shape. Most setters
     // follow `(widget, …number args)` and most constructors return a
     // widget handle that gets NaN-boxed as POINTER on the way out.
+    // perry/system dispatch: audioStart, audioGetLevel, getDeviceModel, etc.
+    if module == "perry/system" && object.is_none() {
+        if method == "notificationSchedule" {
+            return lower_notification_schedule(ctx, args);
+        }
+        if let Some(sig) = perry_system_table_lookup(method) {
+            return lower_perry_ui_table_call(ctx, sig, args);
+        }
+    }
+
     if module == "perry/ui"
         && object.is_none()
         && method != "App"
@@ -2278,83 +2603,103 @@ pub(crate) fn lower_native_method_call(
         if let Some(sig) = perry_ui_table_lookup(method) {
             return lower_perry_ui_table_call(ctx, sig, args);
         }
-        // Warn at compile time so missing methods are visible instead
-        // of silently returning 0.0 (which causes null-pointer crashes
-        // when the caller expects a widget handle).
-        eprintln!("perry/ui warning: method '{}' not in dispatch table (args: {})", method, args.len());
+        // Fail fast at compile time so a missing/misspelled method
+        // surfaces as an error instead of silently returning 0.0 —
+        // which used to compile, link, and run with a zero widget
+        // handle (no window, or null-pointer crash at the caller).
+        bail!(
+            "perry/ui: '{}' is not a known function (args: {}). \
+             Check the spelling and consult types/perry/ui/index.d.ts \
+             for the supported API surface.",
+            method,
+            args.len()
+        );
     }
 
-    if module == "perry/ui" && method == "App" && object.is_none() && args.len() == 1 {
-        if let Expr::Object(props) = &args[0] {
-            let mut title_ptr: String = "0".to_string();
-            let mut width_d: String = "1024.0".to_string();
-            let mut height_d: String = "768.0".to_string();
-            let mut body_handle: String = "0".to_string();
-            let mut icon_ptr: Option<String> = None;
-            for (key, val) in props {
-                match key.as_str() {
-                    "title" => {
-                        let v = lower_expr(ctx, val)?;
-                        let blk = ctx.block();
-                        title_ptr = unbox_to_i64(blk, &v);
-                    }
-                    "width" => {
-                        width_d = lower_expr(ctx, val)?;
-                    }
-                    "height" => {
-                        height_d = lower_expr(ctx, val)?;
-                    }
-                    "body" => {
-                        let v = lower_expr(ctx, val)?;
-                        let blk = ctx.block();
-                        body_handle = unbox_to_i64(blk, &v);
-                    }
-                    "icon" => {
-                        let v = lower_expr(ctx, val)?;
-                        let blk = ctx.block();
-                        icon_ptr = Some(unbox_to_i64(blk, &v));
-                    }
-                    _ => {
-                        let _ = lower_expr(ctx, val)?;
-                    }
+    if module == "perry/ui" && method == "App" && object.is_none() {
+        if args.len() != 1 {
+            bail!(
+                "perry/ui: App(...) takes a single config object literal like \
+                 `App({{ title, width, height, body }})`, got {} argument(s). \
+                 There is no `App(title, builder)` callback form.",
+                args.len()
+            );
+        }
+        let Some(props) = extract_options_fields(ctx, &args[0]) else {
+            bail!(
+                "perry/ui: App(...) requires a config object literal. Use \
+                 `App({{ title: ..., width: ..., height: ..., body: ... }})` \
+                 (see types/perry/ui/index.d.ts)."
+            );
+        };
+        let mut title_ptr: String = "0".to_string();
+        let mut width_d: String = "1024.0".to_string();
+        let mut height_d: String = "768.0".to_string();
+        let mut body_handle: String = "0".to_string();
+        let mut icon_ptr: Option<String> = None;
+        for (key, val) in &props {
+            match key.as_str() {
+                "title" => {
+                    let v = lower_expr(ctx, val)?;
+                    let blk = ctx.block();
+                    title_ptr = unbox_to_i64(blk, &v);
+                }
+                "width" => {
+                    width_d = lower_expr(ctx, val)?;
+                }
+                "height" => {
+                    height_d = lower_expr(ctx, val)?;
+                }
+                "body" => {
+                    let v = lower_expr(ctx, val)?;
+                    let blk = ctx.block();
+                    body_handle = unbox_to_i64(blk, &v);
+                }
+                "icon" => {
+                    let v = lower_expr(ctx, val)?;
+                    let blk = ctx.block();
+                    icon_ptr = Some(unbox_to_i64(blk, &v));
+                }
+                _ => {
+                    let _ = lower_expr(ctx, val)?;
                 }
             }
-            ctx.pending_declares.push((
-                "perry_ui_app_create".to_string(),
-                I64,
-                vec![I64, DOUBLE, DOUBLE],
-            ));
-            ctx.pending_declares.push((
-                "perry_ui_app_set_icon".to_string(),
-                crate::types::VOID,
-                vec![I64],
-            ));
-            ctx.pending_declares.push((
-                "perry_ui_app_set_body".to_string(),
-                crate::types::VOID,
-                vec![I64, I64],
-            ));
-            ctx.pending_declares.push((
-                "perry_ui_app_run".to_string(),
-                crate::types::VOID,
-                vec![I64],
-            ));
-            let blk = ctx.block();
-            let app_handle = blk.call(
-                I64,
-                "perry_ui_app_create",
-                &[(I64, &title_ptr), (DOUBLE, &width_d), (DOUBLE, &height_d)],
-            );
-            if let Some(icon) = icon_ptr {
-                blk.call_void("perry_ui_app_set_icon", &[(I64, &icon)]);
-            }
-            blk.call_void(
-                "perry_ui_app_set_body",
-                &[(I64, &app_handle), (I64, &body_handle)],
-            );
-            blk.call_void("perry_ui_app_run", &[(I64, &app_handle)]);
-            return Ok(double_literal(0.0));
         }
+        ctx.pending_declares.push((
+            "perry_ui_app_create".to_string(),
+            I64,
+            vec![I64, DOUBLE, DOUBLE],
+        ));
+        ctx.pending_declares.push((
+            "perry_ui_app_set_icon".to_string(),
+            crate::types::VOID,
+            vec![I64],
+        ));
+        ctx.pending_declares.push((
+            "perry_ui_app_set_body".to_string(),
+            crate::types::VOID,
+            vec![I64, I64],
+        ));
+        ctx.pending_declares.push((
+            "perry_ui_app_run".to_string(),
+            crate::types::VOID,
+            vec![I64],
+        ));
+        let blk = ctx.block();
+        let app_handle = blk.call(
+            I64,
+            "perry_ui_app_create",
+            &[(I64, &title_ptr), (DOUBLE, &width_d), (DOUBLE, &height_d)],
+        );
+        if let Some(icon) = icon_ptr {
+            blk.call_void("perry_ui_app_set_icon", &[(I64, &icon)]);
+        }
+        blk.call_void(
+            "perry_ui_app_set_body",
+            &[(I64, &app_handle), (I64, &body_handle)],
+        );
+        blk.call_void("perry_ui_app_run", &[(I64, &app_handle)]);
+        return Ok(double_literal(0.0));
     }
 
     // fs module functions: readdirSync, statSync, mkdirSync, etc.
@@ -2408,6 +2753,90 @@ pub(crate) fn lower_native_method_call(
                 // NativeMethodCall. Warn on truly unhandled ones.
                 eprintln!("perry-codegen: unhandled fs.{}() NativeMethodCall ({})", method, args.len());
             }
+        }
+    }
+
+    // Generic native module dispatch (receiver-less): fastify, mysql2,
+    // ws, pg, ioredis, mongodb, better-sqlite3, etc. These were in the
+    // old Cranelift codegen's dispatch table but lost in the v0.5.0
+    // LLVM cutover.
+    if object.is_none() {
+        if let Some(sig) = native_module_lookup(module, false, method, class_name) {
+            // perry/thread thread-safety check: the closure passed to
+            // parallelMap / parallelFilter / spawn must not write to any
+            // variable declared outside its own body. Each worker thread
+            // gets its own deep-copied snapshot of ordinary captures, and
+            // module-level variables live in global slots that would race
+            // across workers — either way, writes are silently lost or
+            // corrupted relative to user expectations. Enforce at compile
+            // time so the docs' promise is real.
+            //
+            // Note we can't rely on the closure's `mutable_captures` field
+            // alone: the HIR filters module-level IDs out of `captures`
+            // via `filter_module_level_captures` (see lower.rs:457), so a
+            // top-level `let counter = 0; parallelMap(data, () => counter++)`
+            // ends up with `captures: [], mutable_captures: []` even though
+            // the body obviously writes to `counter`. Instead, walk the
+            // body ourselves and flag any LocalSet/Update whose target
+            // isn't a parameter or a `let` introduced inside the body.
+            if module == "perry/thread" {
+                let closure_arg = match method {
+                    "parallelMap" | "parallelFilter" => args.get(1),
+                    "spawn" => args.get(0),
+                    _ => None,
+                };
+                if let Some(callback) = closure_arg {
+                    match callback {
+                        Expr::Closure { params, body, .. } => {
+                            let mut inner_ids: std::collections::HashSet<perry_types::LocalId> =
+                                params.iter().map(|p| p.id).collect();
+                            for stmt in body {
+                                collect_closure_introduced_ids(stmt, &mut inner_ids);
+                            }
+                            let mut outer_writes: Vec<perry_types::LocalId> = Vec::new();
+                            for stmt in body {
+                                find_outer_writes_stmt(stmt, &inner_ids, &mut outer_writes);
+                            }
+                            if let Some(&first_outer) = outer_writes.first() {
+                                anyhow::bail!(
+                                    "perry/thread: closure passed to `{}` writes to outer variable (LocalId {}) — \
+                                     this is not allowed because each worker thread receives a deep-copied \
+                                     snapshot of captured values (and module-level slots are not shared across \
+                                     workers in the way ordinary TS globals appear to be), so writes would be \
+                                     silently lost or corrupted relative to user expectations. Return values \
+                                     from the closure and aggregate them on the main thread instead. \
+                                     See docs/src/threading/overview.md#no-shared-mutable-state.",
+                                    method, first_outer,
+                                );
+                            }
+                        }
+                        // Named-function callback bypass: `function worker(n) { counter++; }
+                        // parallelMap(xs, worker)` is semantically identical to the inline-
+                        // closure form we check above, but we don't have the callee's HIR
+                        // body accessible from FnCtx (only `func_names: FuncId -> String`,
+                        // not the full function table). Bail with a helpful diagnostic
+                        // pointing the user at the inline-closure workaround. Pure
+                        // function workers work fine when wrapped (`(x) => worker(x)`);
+                        // this just closes the compile-time safety bypass that silently
+                        // let outer-writing named functions through.
+                        Expr::FuncRef(_)
+                        | Expr::LocalGet(_)
+                        | Expr::ExternFuncRef { .. } => {
+                            anyhow::bail!(
+                                "perry/thread: `{}` callback must be an inline arrow/closure, not a \
+                                 named function reference. Compile-time thread-safety analysis can only \
+                                 inspect inline closures today; a named function could write to outer \
+                                 variables which would be silently lost on the deep-copy worker boundary. \
+                                 Workaround: wrap the named function in an inline closure — \
+                                 `{}(xs, (x) => myFn(x))`. See docs/src/threading/overview.md#no-shared-mutable-state.",
+                                method, method,
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            return lower_native_module_dispatch(ctx, sig, None, args);
         }
     }
 
@@ -2494,12 +2923,21 @@ pub(crate) fn lower_native_method_call(
                 }
             };
         }
-        // Unknown instance method — warn and lower args for side effects.
-        eprintln!("perry/ui warning: instance method '{}' not in dispatch table (args: {})", method, args.len());
-        for a in args {
-            let _ = lower_expr(ctx, a)?;
-        }
-        return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
+        // Unknown instance method — fail the compile. Previously this
+        // lowered the args for side effects and returned TAG_UNDEFINED,
+        // which silently swallowed styling calls like `label.setColor(...)`
+        // and `btn.setCornerRadius(...)` (see types/perry/ui/index.d.ts
+        // for the real method surface — styling uses the free-function
+        // `textSetColor(widget, r, g, b, a)` / `setCornerRadius(widget, r)`
+        // forms, not instance methods on the widget handle).
+        bail!(
+            "perry/ui: '.{}(...)' is not a known instance method (args: {}). \
+             See types/perry/ui/index.d.ts — widget styling uses free functions \
+             like `textSetFontSize(label, 24)` and `widgetSetBackgroundColor(btn, r, g, b, a)`, \
+             not instance-method setters.",
+            method,
+            args.len()
+        );
     }
 
     if module == "array" && (method == "push_single" || method == "push") {
@@ -2580,6 +3018,16 @@ pub(crate) fn lower_native_method_call(
         return Ok(blk.call(DOUBLE, "js_array_pop_f64", &[(I64, &arr_handle)]));
     }
 
+    // Generic native module dispatch (with receiver): fastify instance
+    // methods (app.get, app.listen, conn.query, etc.), mysql2, ws, pg,
+    // ioredis, mongodb, better-sqlite3, etc.
+    if let Some(sig) = native_module_lookup(module, true, method, class_name) {
+        let recv_val = lower_expr(ctx, recv)?;
+        let blk = ctx.block();
+        let handle = unbox_to_i64(blk, &recv_val);
+        return lower_native_module_dispatch(ctx, sig, Some(&handle), args);
+    }
+
     // Unknown native method: lower the receiver and args for side
     // effects (so closures inside them get auto-collected and any
     // string literals get interned), then return a sentinel. This
@@ -2622,6 +3070,220 @@ fn build_headers_from_object(
     Ok(h)
 }
 
+/// Phase 3 compat: extract `{key: value, ...}` pairs from an options
+/// argument in a form that works whether the options literal reached us
+/// as a plain `Expr::Object(props)` (pre-Phase-3 / spread/dynamic shapes)
+/// or as an `Expr::New { class_name: "__AnonShape_N", args }` (Phase 3's
+/// closed-shape synthesis path). For the anon-class form, `ctx.classes`
+/// carries the class with its synthesized constructor — we pair each
+/// constructor param name with its positional arg to recover the literal's
+/// (key, value) view.
+///
+/// Returns `None` when the expression is neither shape — callers should
+/// fall through to whatever they did before when the 2nd arg wasn't an
+/// inline object.
+pub(crate) fn extract_options_fields(
+    ctx: &FnCtx<'_>,
+    e: &Expr,
+) -> Option<Vec<(String, Expr)>> {
+    match e {
+        Expr::Object(props) => Some(props.clone()),
+        Expr::New { class_name, args, .. } if class_name.starts_with("__AnonShape_") => {
+            let class = ctx.classes.get(class_name)?;
+            let ctor = class.constructor.as_ref()?;
+            if ctor.params.len() != args.len() {
+                return None;
+            }
+            let pairs: Vec<(String, Expr)> = ctor.params.iter()
+                .zip(args.iter())
+                .map(|(param, arg)| (param.name.clone(), arg.clone()))
+                .collect();
+            Some(pairs)
+        }
+        _ => None,
+    }
+}
+
+/// Lower `notificationSchedule({ id, title, body, trigger })` (#96). Switches
+/// on `trigger.type` (which must be a string literal at the call site so we
+/// can pick the right runtime fn at compile time) and emits a flat-arg call
+/// to one of three runtime fns:
+/// - `interval` → `perry_system_notification_schedule_interval(id, title, body, seconds, repeats)`
+/// - `calendar` → `perry_system_notification_schedule_calendar(id, title, body, timestamp_ms)`
+/// - `location` → `perry_system_notification_schedule_location(id, title, body, lat, lon, radius)`
+///
+/// `repeats` is passed as a NaN-boxed JS value; the runtime calls
+/// `js_is_truthy` to coerce. Missing fields default to 0.0.
+fn lower_notification_schedule(ctx: &mut FnCtx<'_>, args: &[Expr]) -> Result<String> {
+    if args.len() != 1 {
+        bail!(
+            "notificationSchedule(...) takes one argument: \
+             {{ id, title, body, trigger }} (got {} args)",
+            args.len()
+        );
+    }
+    let Some(props) = extract_options_fields(ctx, &args[0]) else {
+        bail!(
+            "notificationSchedule(...) requires an inline object literal: \
+             {{ id: ..., title: ..., body: ..., trigger: {{ ... }} }}"
+        );
+    };
+
+    let mut id_ptr: Option<String> = None;
+    let mut title_ptr: Option<String> = None;
+    let mut body_ptr: Option<String> = None;
+    let mut trigger: Option<Vec<(String, Expr)>> = None;
+
+    for (key, val) in &props {
+        match key.as_str() {
+            "id" => {
+                let v = lower_expr(ctx, val)?;
+                let blk = ctx.block();
+                id_ptr = Some(unbox_to_i64(blk, &v));
+            }
+            "title" => {
+                let v = lower_expr(ctx, val)?;
+                let blk = ctx.block();
+                title_ptr = Some(unbox_to_i64(blk, &v));
+            }
+            "body" => {
+                let v = lower_expr(ctx, val)?;
+                let blk = ctx.block();
+                body_ptr = Some(unbox_to_i64(blk, &v));
+            }
+            "trigger" => {
+                let Some(tprops) = extract_options_fields(ctx, val) else {
+                    bail!(
+                        "notificationSchedule: `trigger` must be an inline object literal \
+                         like `{{ type: \"interval\", seconds: 60 }}`"
+                    );
+                };
+                trigger = Some(tprops);
+            }
+            _ => {
+                let _ = lower_expr(ctx, val)?;
+            }
+        }
+    }
+
+    let id_ptr = id_ptr
+        .ok_or_else(|| anyhow::anyhow!("notificationSchedule: missing required field `id`"))?;
+    let title_ptr = title_ptr
+        .ok_or_else(|| anyhow::anyhow!("notificationSchedule: missing required field `title`"))?;
+    let body_ptr = body_ptr
+        .ok_or_else(|| anyhow::anyhow!("notificationSchedule: missing required field `body`"))?;
+    let trigger = trigger
+        .ok_or_else(|| anyhow::anyhow!("notificationSchedule: missing required field `trigger`"))?;
+
+    let mut trigger_type: Option<String> = None;
+    for (k, v) in &trigger {
+        if k == "type" {
+            match v {
+                Expr::String(s) => trigger_type = Some(s.clone()),
+                _ => bail!(
+                    "notificationSchedule: `trigger.type` must be a string literal \
+                     (one of \"interval\", \"calendar\", \"location\") at the call site"
+                ),
+            }
+            break;
+        }
+    }
+    let trigger_type = trigger_type.ok_or_else(|| {
+        anyhow::anyhow!("notificationSchedule: missing required field `trigger.type`")
+    })?;
+
+    match trigger_type.as_str() {
+        "interval" => {
+            let mut seconds: String = "0.0".to_string();
+            let mut repeats: String = double_literal(f64::from_bits(crate::nanbox::TAG_FALSE));
+            for (k, v) in &trigger {
+                match k.as_str() {
+                    "type" => {}
+                    "seconds" => seconds = lower_expr(ctx, v)?,
+                    "repeats" => repeats = lower_expr(ctx, v)?,
+                    _ => { let _ = lower_expr(ctx, v)?; }
+                }
+            }
+            ctx.pending_declares.push((
+                "perry_system_notification_schedule_interval".to_string(),
+                VOID,
+                vec![I64, I64, I64, DOUBLE, DOUBLE],
+            ));
+            ctx.block().call_void(
+                "perry_system_notification_schedule_interval",
+                &[
+                    (I64, &id_ptr),
+                    (I64, &title_ptr),
+                    (I64, &body_ptr),
+                    (DOUBLE, &seconds),
+                    (DOUBLE, &repeats),
+                ],
+            );
+        }
+        "calendar" => {
+            let mut timestamp_ms: String = "0.0".to_string();
+            for (k, v) in &trigger {
+                match k.as_str() {
+                    "type" => {}
+                    "date" => timestamp_ms = lower_expr(ctx, v)?,
+                    _ => { let _ = lower_expr(ctx, v)?; }
+                }
+            }
+            ctx.pending_declares.push((
+                "perry_system_notification_schedule_calendar".to_string(),
+                VOID,
+                vec![I64, I64, I64, DOUBLE],
+            ));
+            ctx.block().call_void(
+                "perry_system_notification_schedule_calendar",
+                &[
+                    (I64, &id_ptr),
+                    (I64, &title_ptr),
+                    (I64, &body_ptr),
+                    (DOUBLE, &timestamp_ms),
+                ],
+            );
+        }
+        "location" => {
+            let mut lat: String = "0.0".to_string();
+            let mut lon: String = "0.0".to_string();
+            let mut radius: String = "0.0".to_string();
+            for (k, v) in &trigger {
+                match k.as_str() {
+                    "type" => {}
+                    "latitude" => lat = lower_expr(ctx, v)?,
+                    "longitude" => lon = lower_expr(ctx, v)?,
+                    "radius" => radius = lower_expr(ctx, v)?,
+                    _ => { let _ = lower_expr(ctx, v)?; }
+                }
+            }
+            ctx.pending_declares.push((
+                "perry_system_notification_schedule_location".to_string(),
+                VOID,
+                vec![I64, I64, I64, DOUBLE, DOUBLE, DOUBLE],
+            ));
+            ctx.block().call_void(
+                "perry_system_notification_schedule_location",
+                &[
+                    (I64, &id_ptr),
+                    (I64, &title_ptr),
+                    (I64, &body_ptr),
+                    (DOUBLE, &lat),
+                    (DOUBLE, &lon),
+                    (DOUBLE, &radius),
+                ],
+            );
+        }
+        other => bail!(
+            "notificationSchedule: unknown trigger.type \"{}\" \
+             (expected one of \"interval\", \"calendar\", \"location\")",
+            other
+        ),
+    }
+
+    Ok(double_literal(0.0))
+}
+
 /// Lower `new ClassName(args)` for the built-in Web classes that don't
 /// live in `ctx.classes`. Returns `Ok(None)` if the class isn't one we
 /// handle here (caller should fall through to the default path).
@@ -2631,6 +3293,187 @@ pub(crate) fn lower_builtin_new(
     args: &[Expr],
 ) -> Result<Option<String>> {
     match class_name {
+        // commander Command — `new Command()` allocates a real CommanderHandle
+        // via the runtime constructor so subsequent `.command(...).action(...)
+        // .parse(...)` calls operate on a registered handle. Without this,
+        // `lower_new` falls back to an empty placeholder ObjectHeader and the
+        // entire fluent chain dispatches against junk (closes #187).
+        "Command" => {
+            for a in args {
+                let _ = lower_expr(ctx, a)?;
+            }
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_commander_new", &[]);
+            return Ok(Some(nanbox_pointer_inline(blk, &handle)));
+        }
+        // events.EventEmitter — `new EventEmitter()` produces a real
+        // EventEmitterHandle so `.on(...)` / `.emit(...)` find their
+        // registered handle (NATIVE_MODULE_TABLE wires those methods
+        // through `js_event_emitter_*`). Same #187-shape bug — pre-fix
+        // every .on/.emit call dispatched against a junk pointer and
+        // silently registered nothing / fired nothing.
+        "EventEmitter" => {
+            for a in args {
+                let _ = lower_expr(ctx, a)?;
+            }
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_event_emitter_new", &[]);
+            return Ok(Some(nanbox_pointer_inline(blk, &handle)));
+        }
+        // lru-cache LRUCache — `new LRUCache({ max: N })`. Runtime takes
+        // a single `max: f64`. Extract the `max` field from the options
+        // literal (handles both raw `Expr::Object(props)` and Phase 3's
+        // `Expr::New { __AnonShape_N }` shape via `extract_options_fields`);
+        // default to 100 when no options literal is detected (matches the
+        // npm `lru-cache` library's behavior for `new LRUCache()` with
+        // missing max — it warns + falls back, we just fall back).
+        "LRUCache" => {
+            let max_val = if let Some(opts_arg) = args.first() {
+                let mut found_max: Option<String> = None;
+                if let Some(props) = extract_options_fields(ctx, opts_arg) {
+                    for (k, vexpr) in &props {
+                        if k == "max" {
+                            found_max = Some(lower_expr(ctx, vexpr)?);
+                        } else {
+                            // Lower other fields for side effects (e.g. ttl
+                            // option's setter calls).
+                            let _ = lower_expr(ctx, vexpr)?;
+                        }
+                    }
+                } else {
+                    // Non-literal arg (variable, dynamic shape) — lower for
+                    // side effects only; cannot extract max statically.
+                    let _ = lower_expr(ctx, opts_arg)?;
+                }
+                found_max.unwrap_or_else(|| "100.0".to_string())
+            } else {
+                "100.0".to_string()
+            };
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_lru_cache_new", &[(DOUBLE, &max_val)]);
+            return Ok(Some(nanbox_pointer_inline(blk, &handle)));
+        }
+        // (`WebSocketServer` is handled by an earlier branch lower in this
+        // file — pre-existing from 2026-04-14. No new branch needed here.)
+        // pg Client — `new Client(config)` matching npm pg's API: synchronous
+        // constructor that stores the config; the user calls
+        // `await client.connect()` separately to open the TCP connection.
+        // Pre-fix `new Client(config)` fell into the empty-placeholder branch
+        // and every chained method (.connect/.query/.end) dispatched against
+        // junk. The runtime's older `js_pg_connect(config) -> Promise<Handle>`
+        // (still wired as the receiver-less `pg.connect(config)` factory)
+        // combines new+connect in one step; this branch maps the npm shape
+        // through the new `js_pg_client_new` (sync, stores config) +
+        // `js_pg_client_connect` (async, opens the connection) split.
+        "Client" => {
+            let config_val = if let Some(arg) = args.first() {
+                lower_expr(ctx, arg)?
+            } else {
+                double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED))
+            };
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_pg_client_new", &[(DOUBLE, &config_val)]);
+            return Ok(Some(nanbox_pointer_inline(blk, &handle)));
+        }
+        // pg Pool — `new Pool(config)`. sqlx's `connect_lazy` makes this
+        // synchronous (no actual connections opened until first `.query()`),
+        // matching npm pg Pool's auto-connect-on-first-use semantics. The
+        // older `js_pg_create_pool` factory (returns Promise<Handle>) stays
+        // wired for `pg.Pool(config)` and similar patterns.
+        "Pool" => {
+            let config_val = if let Some(arg) = args.first() {
+                lower_expr(ctx, arg)?
+            } else {
+                double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED))
+            };
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_pg_pool_new", &[(DOUBLE, &config_val)]);
+            return Ok(Some(nanbox_pointer_inline(blk, &handle)));
+        }
+        // mongodb MongoClient — `new MongoClient(uri)` matching npm mongodb's
+        // API. URI is a string; runtime stores it and connects later via
+        // `await client.connect()`.
+        "MongoClient" => {
+            let uri_ptr = if let Some(arg) = args.first() {
+                get_raw_string_ptr(ctx, arg)?
+            } else {
+                "0".to_string()
+            };
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_mongodb_client_new", &[(I64, &uri_ptr)]);
+            return Ok(Some(nanbox_pointer_inline(blk, &handle)));
+        }
+        // ioredis Redis — `new Redis()` or `new Redis(opts)`. The runtime's
+        // `js_ioredis_new` reads connection settings from REDIS_HOST /
+        // REDIS_PORT / REDIS_PASSWORD / REDIS_TLS env vars and ignores its
+        // config arg; connection is lazy (the handle is registered immediately
+        // and the actual TCP/TLS connect runs on the first `.get`/`.set`/etc.).
+        // Pre-fix `new Redis()` fell into the empty-placeholder branch and
+        // every chained method (set/get/del/exists/incr/decr/expire/quit)
+        // dispatched against junk. The instance methods are wired in
+        // NATIVE_MODULE_TABLE for module: "ioredis"; this branch makes the
+        // ctor produce a real RedisClient handle so the dispatch lands on it.
+        "Redis" => {
+            for a in args {
+                let _ = lower_expr(ctx, a)?;
+            }
+            let blk = ctx.block();
+            // The runtime sig takes one i64 (currently *const c_void, ignored).
+            // Pass 0 — semantically "use env-var defaults".
+            let handle = blk.call(I64, "js_ioredis_new", &[(I64, "0")]);
+            return Ok(Some(nanbox_pointer_inline(blk, &handle)));
+        }
+        // async_hooks.AsyncLocalStorage — `new AsyncLocalStorage()` produces a
+        // real handle so `.run(store, cb)` / `.getStore()` / `.enterWith(store)`
+        // / `.exit(cb)` / `.disable()` find their registered store stack.
+        // Same #187-shape bug — pre-fix `new AsyncLocalStorage()` fell into the
+        // empty-placeholder branch and `.run(store, cb)` dispatched against a
+        // junk pointer (callback never fired, store never recorded).
+        "AsyncLocalStorage" => {
+            for a in args {
+                let _ = lower_expr(ctx, a)?;
+            }
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_async_local_storage_new", &[]);
+            return Ok(Some(nanbox_pointer_inline(blk, &handle)));
+        }
+        // decimal.js Decimal — `new Decimal(value)` where value is a number,
+        // string, or another Decimal. Routes through `js_decimal_coerce_to_handle`
+        // which NaN-decodes the JSValue and dispatches to `from_number` /
+        // `from_string` / passthrough for an existing Decimal handle. Without
+        // this, `new Decimal("0.1")` falls into the empty-placeholder branch
+        // and every chained method dispatches against a junk receiver.
+        "Decimal" => {
+            let val = if let Some(arg) = args.first() {
+                lower_expr(ctx, arg)?
+            } else {
+                // `new Decimal()` with no args — coerce undefined → 0.
+                double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED))
+            };
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_decimal_coerce_to_handle", &[(DOUBLE, &val)]);
+            return Ok(Some(nanbox_pointer_inline(blk, &handle)));
+        }
+        "Array" => {
+            // `new Array()` → empty array, `new Array(n)` → length-n array
+            // (zero-initialized slots), `new Array(a, b, c)` → 3-element array
+            // [a, b, c]. We handle the no-arg and single-numeric-arg cases
+            // here. Multi-arg / non-numeric single arg falls back to the
+            // generic Expr::New path.
+            let blk = ctx.block();
+            let handle = if args.is_empty() {
+                blk.call(I64, "js_array_create", &[])
+            } else if args.len() == 1 {
+                let cap = lower_expr(ctx, &args[0])?;
+                let blk = ctx.block();
+                let cap_i32 = blk.fptosi(DOUBLE, &cap, I32);
+                blk.call(I64, "js_array_alloc_with_length", &[(I32, &cap_i32)])
+            } else {
+                return Ok(None);
+            };
+            let blk = ctx.block();
+            return Ok(Some(nanbox_pointer_inline(blk, &handle)));
+        }
         "Response" => {
             // new Response(body?, init?) — init = { status?, statusText?, headers? }
             let body_ptr = if !args.is_empty() {
@@ -2645,8 +3488,8 @@ pub(crate) fn lower_builtin_new(
             let mut headers_handle = "0.0".to_string();
 
             if args.len() >= 2 {
-                if let Expr::Object(props) = &args[1] {
-                    for (k, vexpr) in props {
+                if let Some(props) = extract_options_fields(ctx, &args[1]) {
+                    for (k, vexpr) in &props {
                         match k.as_str() {
                             "status" => {
                                 status_val = lower_expr(ctx, vexpr)?;
@@ -2656,10 +3499,10 @@ pub(crate) fn lower_builtin_new(
                             }
                             "headers" => {
                                 // Inline object → build a Headers handle.
-                                // Any other expression → use as a Headers
-                                // handle (numeric f64) directly.
-                                if let Expr::Object(hprops) = vexpr {
-                                    headers_handle = build_headers_from_object(ctx, hprops)?;
+                                // Phase 3 anon-class → same via extract_options.
+                                // Other expressions → use as-is (handle f64).
+                                if let Some(hprops) = extract_options_fields(ctx, vexpr) {
+                                    headers_handle = build_headers_from_object(ctx, &hprops)?;
                                 } else {
                                     headers_handle = lower_expr(ctx, vexpr)?;
                                 }
@@ -2696,8 +3539,8 @@ pub(crate) fn lower_builtin_new(
             // handled so far; anything else falls back to empty.
             let h = ctx.block().call(DOUBLE, "js_headers_new", &[]);
             if !args.is_empty() {
-                if let Expr::Object(props) = &args[0] {
-                    for (k, vexpr) in props {
+                if let Some(props) = extract_options_fields(ctx, &args[0]) {
+                    for (k, vexpr) in &props {
                         let key_expr = Expr::String(k.clone());
                         let key_ptr = get_raw_string_ptr(ctx, &key_expr)?;
                         let val_ptr = get_raw_string_ptr(ctx, vexpr)?;
@@ -2727,8 +3570,8 @@ pub(crate) fn lower_builtin_new(
             let mut headers_handle = "0.0".to_string();
 
             if args.len() >= 2 {
-                if let Expr::Object(props) = &args[1] {
-                    for (k, vexpr) in props {
+                if let Some(props) = extract_options_fields(ctx, &args[1]) {
+                    for (k, vexpr) in &props {
                         match k.as_str() {
                             "method" => {
                                 method_ptr = get_raw_string_ptr(ctx, vexpr)?;
@@ -2737,8 +3580,8 @@ pub(crate) fn lower_builtin_new(
                                 body_ptr = get_raw_string_ptr(ctx, vexpr)?;
                             }
                             "headers" => {
-                                if let Expr::Object(hprops) = vexpr {
-                                    headers_handle = build_headers_from_object(ctx, hprops)?;
+                                if let Some(hprops) = extract_options_fields(ctx, vexpr) {
+                                    headers_handle = build_headers_from_object(ctx, &hprops)?;
                                 } else {
                                     headers_handle = lower_expr(ctx, vexpr)?;
                                 }
@@ -2820,6 +3663,24 @@ pub(crate) fn lower_builtin_new(
             // `controller.aborted`) works via js_object_get_field_by_name_f64.
             let boxed = nanbox_pointer_inline(ctx.block(), &handle);
             Ok(Some(boxed))
+        }
+
+        // new WebSocketServer({ port: N }) → js_ws_server_new(opts_f64)
+        "WebSocketServer" => {
+            // Lower the options object (first arg) as a NaN-boxed f64.
+            let opts = if !args.is_empty() {
+                lower_expr(ctx, &args[0])?
+            } else {
+                double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED))
+            };
+            ctx.pending_declares.push((
+                "js_ws_server_new".to_string(),
+                I64,
+                vec![DOUBLE],
+            ));
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_ws_server_new", &[(DOUBLE, &opts)]);
+            Ok(Some(nanbox_pointer_inline(blk, &handle)))
         }
 
         _ => Ok(None),
@@ -2967,6 +3828,40 @@ fn lower_fetch_native_method(
                     &[(I64, &url_ptr), (DOUBLE, &status)],
                 );
                 return Ok(Some(handle));
+            }
+            _ => {}
+        }
+    }
+
+    // ── axios: static method calls (axios.get/post/put/delete/patch) ──
+    // Must be before the receiver guard — these are receiver-less calls.
+    if module == "axios" && object.is_none() {
+        let url_box = if !args.is_empty() { lower_expr(ctx, &args[0])? } else {
+            double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED))
+        };
+        let blk = ctx.block();
+        let url_handle = unbox_to_i64(blk, &url_box);
+        match method {
+            "get" => {
+                let promise = blk.call(I64, "js_axios_get", &[(I64, &url_handle)]);
+                return Ok(Some(nanbox_pointer_inline(blk, &promise)));
+            }
+            "delete" => {
+                let promise = blk.call(I64, "js_axios_delete", &[(I64, &url_handle)]);
+                return Ok(Some(nanbox_pointer_inline(blk, &promise)));
+            }
+            "post" | "put" | "patch" => {
+                let body_box = if args.len() > 1 { lower_expr(ctx, &args[1])? } else {
+                    double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED))
+                };
+                let body_handle = unbox_to_i64(ctx.block(), &body_box);
+                let rt_fn = match method {
+                    "post" => "js_axios_post",
+                    "put" => "js_axios_put",
+                    _ => "js_axios_patch",
+                };
+                let promise = ctx.block().call(I64, rt_fn, &[(I64, &url_handle), (I64, &body_handle)]);
+                return Ok(Some(nanbox_pointer_inline(ctx.block(), &promise)));
             }
             _ => {}
         }
@@ -3160,6 +4055,34 @@ fn lower_fetch_native_method(
                 return Ok(Some(nanbox_pointer_inline(blk, &promise)));
             }
             _ => return Ok(None),
+        }
+    }
+
+    // ── axios: response property access (response.status, .data, .statusText, .headers) ──
+    if module == "axios" {
+        if let Some(recv) = object {
+            let recv_handle = lower_expr(ctx, recv)?;
+            let blk = ctx.block();
+            // The awaited axios response is a Handle (i64) stored in f64 bits
+            // via f64::from_bits(handle as u64). Use bitcast, not fptosi —
+            // fptosi interprets the f64 as a number (5e-324 for handle=1)
+            // and truncates to 0.
+            let h_i64 = blk.bitcast_double_to_i64(&recv_handle);
+            match method {
+                "status" => {
+                    let status = blk.call(DOUBLE, "js_axios_response_status", &[(I64, &h_i64)]);
+                    return Ok(Some(status));
+                }
+                "statusText" => {
+                    let str_ptr = blk.call(I64, "js_axios_response_status_text", &[(I64, &h_i64)]);
+                    return Ok(Some(nanbox_string_inline(blk, &str_ptr)));
+                }
+                "data" => {
+                    let str_ptr = blk.call(I64, "js_axios_response_data", &[(I64, &h_i64)]);
+                    return Ok(Some(nanbox_string_inline(blk, &str_ptr)));
+                }
+                _ => {}
+            }
         }
     }
 
@@ -3360,6 +4283,17 @@ const PERRY_UI_TABLE: &[UiSig] = &[
             args: &[UiArgKind::Widget, UiArgKind::F64, UiArgKind::F64, UiArgKind::F64, UiArgKind::F64],
             ret: UiReturnKind::Void },
 
+    // ---- LazyVStack (virtualized list) ----
+    // `LazyVStack(count, (i) => Widget)` — on macOS backed by NSTableView
+    // with lazy row rendering. The render closure is invoked only for rows
+    // currently in the visible rect.
+    UiSig { method: "LazyVStack", runtime: "perry_ui_lazyvstack_create",
+            args: &[UiArgKind::F64, UiArgKind::Closure], ret: UiReturnKind::Widget },
+    UiSig { method: "lazyvstackUpdate", runtime: "perry_ui_lazyvstack_update",
+            args: &[UiArgKind::Widget, UiArgKind::I64Raw], ret: UiReturnKind::Void },
+    UiSig { method: "lazyvstackSetRowHeight", runtime: "perry_ui_lazyvstack_set_row_height",
+            args: &[UiArgKind::Widget, UiArgKind::F64], ret: UiReturnKind::Void },
+
     // ---- State ----
     UiSig { method: "State", runtime: "perry_ui_state_create",
             args: &[UiArgKind::F64], ret: UiReturnKind::Widget },
@@ -3530,8 +4464,19 @@ const PERRY_UI_TABLE: &[UiSig] = &[
             args: &[UiArgKind::Str], ret: UiReturnKind::Void },
 
     // ---- Alert ----
-    UiSig { method: "alert", runtime: "perry_ui_alert",
+    // `alert(title, message)` dispatches to a dedicated 2-arg FFI; the prior
+    // entry pointed at the 4-arg `perry_ui_alert` symbol, which was ABI-broken
+    // (buttons/callback read from uninitialized registers, usually segfaulting
+    // inside js_array_get_length).
+    UiSig { method: "alert", runtime: "perry_ui_alert_simple",
             args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Void },
+    // `alertWithButtons(title, message, buttons, cb)` — buttons is a JS array
+    // of labels, callback receives the 0-based button index. Passed as F64
+    // because the runtime extracts the array pointer via
+    // `js_nanbox_get_pointer` just like closures.
+    UiSig { method: "alertWithButtons", runtime: "perry_ui_alert",
+            args: &[UiArgKind::Str, UiArgKind::Str, UiArgKind::F64, UiArgKind::Closure],
+            ret: UiReturnKind::Void },
 
     // ---- Window (constructor — receiver-less) ----
     UiSig { method: "Window", runtime: "perry_ui_window_create",
@@ -3600,9 +4545,25 @@ const PERRY_UI_TABLE: &[UiSig] = &[
     UiSig { method: "addKeyboardShortcut", runtime: "perry_ui_add_keyboard_shortcut",
             args: &[UiArgKind::Str, UiArgKind::Closure], ret: UiReturnKind::Void },
 
+    // ---- App lifecycle hooks ----
+    UiSig { method: "onTerminate", runtime: "perry_ui_app_on_terminate",
+            args: &[UiArgKind::Closure], ret: UiReturnKind::Void },
+    UiSig { method: "onActivate", runtime: "perry_ui_app_on_activate",
+            args: &[UiArgKind::Closure], ret: UiReturnKind::Void },
+
     // ---- App extras ----
     UiSig { method: "appSetTimer", runtime: "perry_ui_app_set_timer",
             args: &[UiArgKind::Widget, UiArgKind::F64, UiArgKind::Closure], ret: UiReturnKind::Void },
+    UiSig { method: "appSetMinSize", runtime: "perry_ui_app_set_min_size",
+            args: &[UiArgKind::Widget, UiArgKind::F64, UiArgKind::F64], ret: UiReturnKind::Void },
+    UiSig { method: "appSetMaxSize", runtime: "perry_ui_app_set_max_size",
+            args: &[UiArgKind::Widget, UiArgKind::F64, UiArgKind::F64], ret: UiReturnKind::Void },
+
+    // ---- Extra ScrollView alias (lowercase-v spelling matching the runtime FFI
+    // symbol; the runtime takes a single vertical offset, not the x/y pair
+    // declared on `scrollViewSetOffset` in index.d.ts — they coexist for now). ----
+    UiSig { method: "scrollviewSetOffset", runtime: "perry_ui_scrollview_set_offset",
+            args: &[UiArgKind::Widget, UiArgKind::F64], ret: UiReturnKind::Void },
 ];
 
 /// Instance method table for perry/ui receiver-based calls.
@@ -3664,6 +4625,26 @@ static PERRY_SYSTEM_TABLE: &[UiSig] = &[
             args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Void },
     UiSig { method: "notificationSend", runtime: "perry_system_notification_send",
             args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Void },
+    UiSig { method: "notificationRegisterRemote", runtime: "perry_system_notification_register_remote",
+            args: &[UiArgKind::Closure], ret: UiReturnKind::Void },
+    UiSig { method: "notificationOnReceive", runtime: "perry_system_notification_on_receive",
+            args: &[UiArgKind::Closure], ret: UiReturnKind::Void },
+    UiSig { method: "notificationCancel", runtime: "perry_system_notification_cancel",
+            args: &[UiArgKind::Str], ret: UiReturnKind::Void },
+    UiSig { method: "notificationOnTap", runtime: "perry_system_notification_on_tap",
+            args: &[UiArgKind::Closure], ret: UiReturnKind::Void },
+    UiSig { method: "audioStart", runtime: "perry_system_audio_start",
+            args: &[], ret: UiReturnKind::F64 },
+    UiSig { method: "audioStop", runtime: "perry_system_audio_stop",
+            args: &[], ret: UiReturnKind::Void },
+    UiSig { method: "audioGetLevel", runtime: "perry_system_audio_get_level",
+            args: &[], ret: UiReturnKind::F64 },
+    UiSig { method: "audioGetPeak", runtime: "perry_system_audio_get_peak",
+            args: &[], ret: UiReturnKind::F64 },
+    UiSig { method: "audioGetWaveform", runtime: "perry_system_audio_get_waveform",
+            args: &[UiArgKind::F64], ret: UiReturnKind::F64 },
+    UiSig { method: "getDeviceModel", runtime: "perry_system_get_device_model",
+            args: &[], ret: UiReturnKind::F64 },
 ];
 
 fn perry_system_table_lookup(method: &str) -> Option<&'static UiSig> {
@@ -3773,6 +4754,1107 @@ fn lower_perry_ui_table_call(
         UiReturnKind::Void => {
             ctx.block().call_void(sig.runtime, &arg_slices);
             Ok(double_literal(0.0))
+        }
+    }
+}
+
+// ============================================================================
+// Native stdlib module dispatch (fastify, mysql2, ws, pg, ioredis, mongodb,
+// better-sqlite3, etc.). Ported from the old Cranelift codegen's dispatch
+// table that was lost in the v0.5.0 LLVM cutover.
+// ============================================================================
+
+/// How each argument should be coerced before passing to the runtime fn.
+#[derive(Copy, Clone, Debug)]
+enum NativeArgKind {
+    /// NaN-boxed f64 — pass as-is (objects, generic JSValues).
+    F64,
+    /// NaN-boxed string → extract raw i64 pointer via js_get_string_pointer_unified.
+    /// Use for Rust signatures like `*const StringHeader`.
+    StrPtr,
+    /// NaN-boxed closure/pointer → unbox to i64 via the standard mask.
+    PtrI64,
+    /// Pass the NaN-boxed JSValue bits as-is (bitcast f64 → i64, no
+    /// unboxing). Use for Rust signatures where the function receives
+    /// `name: i64` and internally calls `string_from_nanboxed(name)` or
+    /// similar — the callee expects the full NaN-boxed value, not an
+    /// unboxed raw pointer. Common pattern in fastify context methods.
+    JsvalI64,
+}
+
+/// What the runtime function returns.
+#[derive(Copy, Clone, Debug)]
+enum NativeRetKind {
+    /// Returns i64 handle → NaN-box as POINTER.
+    Ptr,
+    /// Returns `*mut StringHeader` → NaN-box as STRING. Use for runtime
+    /// functions whose Rust signature returns a raw string pointer; the
+    /// caller (and `JSON.stringify`, string-comparison, etc.) needs the
+    /// STRING_TAG to recognize it as a string rather than a heap object.
+    Str,
+    /// Returns f64 → pass through (NaN-boxed JSValue).
+    F64,
+    /// Returns i32 → ignored, return TAG_UNDEFINED.
+    I32Void,
+    /// Returns void → return TAG_UNDEFINED.
+    Void,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct NativeModSig {
+    module: &'static str,
+    has_receiver: bool,
+    method: &'static str,
+    /// Optional class_name filter. When Some, only matches if the HIR's
+    /// class_name equals this value (e.g. "Pool" vs "Connection" for mysql2).
+    /// When None, matches regardless of class_name.
+    class_filter: Option<&'static str>,
+    runtime: &'static str,
+    args: &'static [NativeArgKind],
+    ret: NativeRetKind,
+}
+
+// Short aliases to keep the table compact without wildcard imports
+// (wildcard would clash with crate::types::* names like I64, DOUBLE).
+const NA_F64: NativeArgKind = NativeArgKind::F64;
+const NA_STR: NativeArgKind = NativeArgKind::StrPtr;
+const NA_PTR: NativeArgKind = NativeArgKind::PtrI64;
+const NA_JSV: NativeArgKind = NativeArgKind::JsvalI64;
+const NR_PTR: NativeRetKind = NativeRetKind::Ptr;
+const NR_STR: NativeRetKind = NativeRetKind::Str;
+const NR_F64: NativeRetKind = NativeRetKind::F64;
+const NR_I32: NativeRetKind = NativeRetKind::I32Void;
+const NR_VOID: NativeRetKind = NativeRetKind::Void;
+
+/// Static dispatch table for native stdlib modules. Each entry maps
+/// `(module, has_receiver, method)` → runtime function, with per-arg
+/// coercion rules and return-value boxing.
+///
+/// The receiver (when `has_receiver = true`) is always NaN-unboxed to
+/// an i64 pointer and passed as the first argument.
+const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
+    // ========== Fastify HTTP Framework ==========
+    NativeModSig { module: "fastify", has_receiver: false, method: "default",
+        class_filter: None,
+        runtime: "js_fastify_create_with_opts", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "fastify", has_receiver: true, method: "get",
+        class_filter: None,
+        runtime: "js_fastify_get", args: &[NA_STR, NA_PTR], ret: NR_I32 },
+    NativeModSig { module: "fastify", has_receiver: true, method: "post",
+        class_filter: None,
+        runtime: "js_fastify_post", args: &[NA_STR, NA_PTR], ret: NR_I32 },
+    NativeModSig { module: "fastify", has_receiver: true, method: "put",
+        class_filter: None,
+        runtime: "js_fastify_put", args: &[NA_STR, NA_PTR], ret: NR_I32 },
+    NativeModSig { module: "fastify", has_receiver: true, method: "delete",
+        class_filter: None,
+        runtime: "js_fastify_delete", args: &[NA_STR, NA_PTR], ret: NR_I32 },
+    NativeModSig { module: "fastify", has_receiver: true, method: "patch",
+        class_filter: None,
+        runtime: "js_fastify_patch", args: &[NA_STR, NA_PTR], ret: NR_I32 },
+    NativeModSig { module: "fastify", has_receiver: true, method: "head",
+        class_filter: None,
+        runtime: "js_fastify_head", args: &[NA_STR, NA_PTR], ret: NR_I32 },
+    NativeModSig { module: "fastify", has_receiver: true, method: "options",
+        class_filter: None,
+        runtime: "js_fastify_options", args: &[NA_STR, NA_PTR], ret: NR_I32 },
+    NativeModSig { module: "fastify", has_receiver: true, method: "all",
+        class_filter: None,
+        runtime: "js_fastify_all", args: &[NA_STR, NA_PTR], ret: NR_I32 },
+    NativeModSig { module: "fastify", has_receiver: true, method: "route",
+        class_filter: None,
+        runtime: "js_fastify_route", args: &[NA_STR, NA_STR, NA_PTR], ret: NR_I32 },
+    NativeModSig { module: "fastify", has_receiver: true, method: "addHook",
+        class_filter: None,
+        runtime: "js_fastify_add_hook", args: &[NA_STR, NA_PTR], ret: NR_I32 },
+    NativeModSig { module: "fastify", has_receiver: true, method: "setErrorHandler",
+        class_filter: None,
+        runtime: "js_fastify_set_error_handler", args: &[NA_PTR], ret: NR_I32 },
+    NativeModSig { module: "fastify", has_receiver: true, method: "register",
+        class_filter: None,
+        runtime: "js_fastify_register", args: &[NA_PTR, NA_F64], ret: NR_I32 },
+    NativeModSig { module: "fastify", has_receiver: true, method: "listen",
+        class_filter: None,
+        runtime: "js_fastify_listen", args: &[NA_F64, NA_PTR], ret: NR_VOID },
+    // Fastify request methods
+    NativeModSig { module: "fastify", has_receiver: true, method: "method",
+        class_filter: None,
+        runtime: "js_fastify_req_method", args: &[], ret: NR_STR },
+    NativeModSig { module: "fastify", has_receiver: true, method: "url",
+        class_filter: None,
+        runtime: "js_fastify_req_url", args: &[], ret: NR_STR },
+    NativeModSig { module: "fastify", has_receiver: true, method: "params",
+        class_filter: None,
+        // Returns the parsed path-params object (e.g. `{id: "42"}` for /users/:id),
+        // not the raw JSON string — `request.params.id` must be the value, not
+        // undefined. `js_fastify_req_params` (string) is still available via
+        // the lower-level FFI but isn't reachable from TypeScript.
+        runtime: "js_fastify_req_params_object", args: &[], ret: NR_F64 },
+    NativeModSig { module: "fastify", has_receiver: true, method: "param",
+        class_filter: None,
+        runtime: "js_fastify_req_param", args: &[NA_JSV], ret: NR_STR },
+    NativeModSig { module: "fastify", has_receiver: true, method: "query",
+        class_filter: None,
+        runtime: "js_fastify_req_query_object", args: &[], ret: NR_F64 },
+    NativeModSig { module: "fastify", has_receiver: true, method: "rawBody",
+        class_filter: None,
+        runtime: "js_fastify_req_body", args: &[], ret: NR_STR },
+    NativeModSig { module: "fastify", has_receiver: true, method: "headers",
+        class_filter: None,
+        runtime: "js_fastify_req_headers", args: &[], ret: NR_PTR },
+    NativeModSig { module: "fastify", has_receiver: true, method: "header",
+        class_filter: None,
+        runtime: "js_fastify_req_header", args: &[NA_JSV], ret: NR_STR },
+    NativeModSig { module: "fastify", has_receiver: true, method: "user",
+        class_filter: None,
+        runtime: "js_fastify_req_get_user_data", args: &[], ret: NR_F64 },
+    // Fastify reply methods
+    NativeModSig { module: "fastify", has_receiver: true, method: "status",
+        class_filter: None,
+        runtime: "js_fastify_reply_status", args: &[NA_F64], ret: NR_PTR },
+    // `reply.code(N)` is an alias for `reply.status(N)` in npm Fastify. Without
+    // this row, `reply.code(201)` silently no-op'd and the HTTP status stayed 200.
+    NativeModSig { module: "fastify", has_receiver: true, method: "code",
+        class_filter: None,
+        runtime: "js_fastify_reply_status", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "fastify", has_receiver: true, method: "send",
+        class_filter: None,
+        runtime: "js_fastify_reply_send", args: &[NA_F64], ret: NR_I32 },
+    // Fastify context methods (Hono-style)
+    NativeModSig { module: "fastify", has_receiver: true, method: "text",
+        class_filter: None,
+        runtime: "js_fastify_ctx_text", args: &[NA_JSV, NA_F64], ret: NR_F64 },
+    NativeModSig { module: "fastify", has_receiver: true, method: "html",
+        class_filter: None,
+        runtime: "js_fastify_ctx_html", args: &[NA_JSV, NA_F64], ret: NR_F64 },
+    NativeModSig { module: "fastify", has_receiver: true, method: "redirect",
+        class_filter: None,
+        runtime: "js_fastify_ctx_redirect", args: &[NA_JSV, NA_F64], ret: NR_F64 },
+    NativeModSig { module: "fastify", has_receiver: true, method: "json",
+        class_filter: None,
+        runtime: "js_fastify_ctx_json", args: &[NA_F64, NA_F64], ret: NR_F64 },
+    NativeModSig { module: "fastify", has_receiver: true, method: "body",
+        class_filter: None,
+        runtime: "js_fastify_req_json", args: &[], ret: NR_F64 },
+
+    // ========== MySQL2 ==========
+    NativeModSig { module: "mysql2", has_receiver: false, method: "createConnection",
+        class_filter: None,
+        runtime: "js_mysql2_create_connection", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "mysql2", has_receiver: false, method: "createPool",
+        class_filter: None,
+        runtime: "js_mysql2_create_pool", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "mysql2/promise", has_receiver: false, method: "createConnection",
+        class_filter: None,
+        runtime: "js_mysql2_create_connection", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "mysql2/promise", has_receiver: false, method: "createPool",
+        class_filter: None,
+        runtime: "js_mysql2_create_pool", args: &[NA_F64], ret: NR_PTR },
+    // mysql2 Pool-specific methods (class_filter: Some("Pool"))
+    NativeModSig { module: "mysql2", has_receiver: true, method: "query",
+        class_filter: Some("Pool"),
+        runtime: "js_mysql2_pool_query", args: &[NA_STR, NA_PTR], ret: NR_PTR },
+    NativeModSig { module: "mysql2", has_receiver: true, method: "execute",
+        class_filter: Some("Pool"),
+        runtime: "js_mysql2_pool_execute", args: &[NA_STR, NA_PTR], ret: NR_PTR },
+    NativeModSig { module: "mysql2", has_receiver: true, method: "end",
+        class_filter: Some("Pool"),
+        runtime: "js_mysql2_pool_end", args: &[], ret: NR_PTR },
+    NativeModSig { module: "mysql2/promise", has_receiver: true, method: "query",
+        class_filter: Some("Pool"),
+        runtime: "js_mysql2_pool_query", args: &[NA_STR, NA_PTR], ret: NR_PTR },
+    NativeModSig { module: "mysql2/promise", has_receiver: true, method: "execute",
+        class_filter: Some("Pool"),
+        runtime: "js_mysql2_pool_execute", args: &[NA_STR, NA_PTR], ret: NR_PTR },
+    NativeModSig { module: "mysql2/promise", has_receiver: true, method: "end",
+        class_filter: Some("Pool"),
+        runtime: "js_mysql2_pool_end", args: &[], ret: NR_PTR },
+    // mysql2 PoolConnection-specific methods
+    NativeModSig { module: "mysql2", has_receiver: true, method: "query",
+        class_filter: Some("PoolConnection"),
+        runtime: "js_mysql2_pool_connection_query", args: &[NA_STR, NA_PTR], ret: NR_PTR },
+    NativeModSig { module: "mysql2", has_receiver: true, method: "execute",
+        class_filter: Some("PoolConnection"),
+        runtime: "js_mysql2_pool_connection_execute", args: &[NA_STR, NA_PTR], ret: NR_PTR },
+    NativeModSig { module: "mysql2/promise", has_receiver: true, method: "query",
+        class_filter: Some("PoolConnection"),
+        runtime: "js_mysql2_pool_connection_query", args: &[NA_STR, NA_PTR], ret: NR_PTR },
+    NativeModSig { module: "mysql2/promise", has_receiver: true, method: "execute",
+        class_filter: Some("PoolConnection"),
+        runtime: "js_mysql2_pool_connection_execute", args: &[NA_STR, NA_PTR], ret: NR_PTR },
+    // mysql2 generic instance methods (Connection fallback, class_filter: None)
+    NativeModSig { module: "mysql2", has_receiver: true, method: "query",
+        class_filter: None,
+        runtime: "js_mysql2_connection_query", args: &[NA_STR, NA_PTR], ret: NR_PTR },
+    NativeModSig { module: "mysql2", has_receiver: true, method: "execute",
+        class_filter: None,
+        runtime: "js_mysql2_connection_execute", args: &[NA_STR, NA_PTR], ret: NR_PTR },
+    NativeModSig { module: "mysql2", has_receiver: true, method: "end",
+        class_filter: None,
+        runtime: "js_mysql2_connection_end", args: &[], ret: NR_PTR },
+    NativeModSig { module: "mysql2", has_receiver: true, method: "getConnection",
+        class_filter: None,
+        runtime: "js_mysql2_pool_get_connection", args: &[], ret: NR_PTR },
+    NativeModSig { module: "mysql2", has_receiver: true, method: "release",
+        class_filter: None,
+        runtime: "js_mysql2_pool_connection_release", args: &[], ret: NR_VOID },
+    NativeModSig { module: "mysql2", has_receiver: true, method: "beginTransaction",
+        class_filter: None,
+        runtime: "js_mysql2_connection_begin_transaction", args: &[], ret: NR_PTR },
+    NativeModSig { module: "mysql2", has_receiver: true, method: "commit",
+        class_filter: None,
+        runtime: "js_mysql2_connection_commit", args: &[], ret: NR_PTR },
+    NativeModSig { module: "mysql2", has_receiver: true, method: "rollback",
+        class_filter: None,
+        runtime: "js_mysql2_connection_rollback", args: &[], ret: NR_PTR },
+    NativeModSig { module: "mysql2/promise", has_receiver: true, method: "query",
+        class_filter: None,
+        runtime: "js_mysql2_connection_query", args: &[NA_STR, NA_PTR], ret: NR_PTR },
+    NativeModSig { module: "mysql2/promise", has_receiver: true, method: "execute",
+        class_filter: None,
+        runtime: "js_mysql2_connection_execute", args: &[NA_STR, NA_PTR], ret: NR_PTR },
+    NativeModSig { module: "mysql2/promise", has_receiver: true, method: "end",
+        class_filter: None,
+        runtime: "js_mysql2_connection_end", args: &[], ret: NR_PTR },
+    NativeModSig { module: "mysql2/promise", has_receiver: true, method: "getConnection",
+        class_filter: None,
+        runtime: "js_mysql2_pool_get_connection", args: &[], ret: NR_PTR },
+    NativeModSig { module: "mysql2/promise", has_receiver: true, method: "release",
+        class_filter: None,
+        runtime: "js_mysql2_pool_connection_release", args: &[], ret: NR_VOID },
+    NativeModSig { module: "mysql2/promise", has_receiver: true, method: "beginTransaction",
+        class_filter: None,
+        runtime: "js_mysql2_connection_begin_transaction", args: &[], ret: NR_PTR },
+    NativeModSig { module: "mysql2/promise", has_receiver: true, method: "commit",
+        class_filter: None,
+        runtime: "js_mysql2_connection_commit", args: &[], ret: NR_PTR },
+    NativeModSig { module: "mysql2/promise", has_receiver: true, method: "rollback",
+        class_filter: None,
+        runtime: "js_mysql2_connection_rollback", args: &[], ret: NR_PTR },
+
+    // ========== PostgreSQL (pg) ==========
+    // `new Client(config)` and `new Pool(config)` are dispatched by
+    // `lower_builtin_new` (sync constructors that produce real handles).
+    // The factory-style entries below stay wired for `pg.connect(config)` /
+    // `pg.Pool(config)` patterns that some npm code uses.
+    NativeModSig { module: "pg", has_receiver: false, method: "connect",
+        class_filter: None,
+        runtime: "js_pg_connect", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "pg", has_receiver: false, method: "Pool",
+        class_filter: None,
+        runtime: "js_pg_create_pool", args: &[NA_F64], ret: NR_PTR },
+    // `client.connect()` — async, opens the TCP connection on a handle that
+    // `new Client(config)` previously created in the pre-connect state.
+    // No-op if the handle was already connected (e.g. came from the
+    // older `pg.connect(config)` factory). Class-filtered to Client so
+    // `pool.connect()` (which has different semantics — checkout a pooled
+    // connection — not yet implemented) doesn't accidentally land here.
+    NativeModSig { module: "pg", has_receiver: true, method: "connect",
+        class_filter: Some("Client"),
+        runtime: "js_pg_client_connect", args: &[], ret: NR_PTR },
+    // Pool-specific query/end — different runtime fns from the Client paths.
+    // Pre-existing dispatch was unfiltered and routed both Pool and Client
+    // through the Client query/end fns (latent bug: pool.query() against a
+    // Pool handle would fail because js_pg_client_query expects a Connection
+    // handle). Class-filtered Pool rows take precedence over the unfiltered
+    // Client/default rows below thanks to native_module_lookup's two-pass
+    // search (exact class_filter match first, then None fallback).
+    NativeModSig { module: "pg", has_receiver: true, method: "query",
+        class_filter: Some("Pool"),
+        runtime: "js_pg_pool_query", args: &[NA_STR, NA_PTR], ret: NR_PTR },
+    NativeModSig { module: "pg", has_receiver: true, method: "end",
+        class_filter: Some("Pool"),
+        runtime: "js_pg_pool_end", args: &[], ret: NR_PTR },
+    NativeModSig { module: "pg", has_receiver: true, method: "query",
+        class_filter: None,
+        runtime: "js_pg_client_query", args: &[NA_STR, NA_PTR], ret: NR_PTR },
+    NativeModSig { module: "pg", has_receiver: true, method: "end",
+        class_filter: None,
+        runtime: "js_pg_client_end", args: &[], ret: NR_PTR },
+
+    // ========== ioredis ==========
+    // NB: every row was previously emitting `js_redis_*` symbols which don't
+    // exist in perry-stdlib (the actual fns are `js_ioredis_*`). The bug was
+    // dormant because pre-#187 no codepath could land on a real Redis handle
+    // — `new Redis()` fell into the empty-placeholder branch in lower_new and
+    // every method dispatched against junk. With the v0.5.262 ctor branch
+    // making the receiver real, these rows have to point at the actual
+    // runtime symbols. Fixed throughout below.
+    NativeModSig { module: "ioredis", has_receiver: false, method: "createClient",
+        class_filter: None,
+        // npm `redis`'s createClient(opts) and ioredis's `new Redis(opts)` are
+        // shape-compatible (both produce a client; opts is host/port/etc.).
+        // js_ioredis_new ignores its arg and reads env vars — same behavior.
+        runtime: "js_ioredis_new", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "ioredis", has_receiver: true, method: "set",
+        class_filter: None,
+        runtime: "js_ioredis_set", args: &[NA_STR, NA_STR], ret: NR_PTR },
+    NativeModSig { module: "ioredis", has_receiver: true, method: "get",
+        class_filter: None,
+        runtime: "js_ioredis_get", args: &[NA_STR], ret: NR_PTR },
+    NativeModSig { module: "ioredis", has_receiver: true, method: "del",
+        class_filter: None,
+        runtime: "js_ioredis_del", args: &[NA_STR], ret: NR_PTR },
+    NativeModSig { module: "ioredis", has_receiver: true, method: "exists",
+        class_filter: None,
+        runtime: "js_ioredis_exists", args: &[NA_STR], ret: NR_PTR },
+    NativeModSig { module: "ioredis", has_receiver: true, method: "incr",
+        class_filter: None,
+        runtime: "js_ioredis_incr", args: &[NA_STR], ret: NR_PTR },
+    NativeModSig { module: "ioredis", has_receiver: true, method: "decr",
+        class_filter: None,
+        runtime: "js_ioredis_decr", args: &[NA_STR], ret: NR_PTR },
+    NativeModSig { module: "ioredis", has_receiver: true, method: "expire",
+        class_filter: None,
+        runtime: "js_ioredis_expire", args: &[NA_STR, NA_F64], ret: NR_PTR },
+    NativeModSig { module: "ioredis", has_receiver: true, method: "quit",
+        class_filter: None,
+        runtime: "js_ioredis_quit", args: &[], ret: NR_PTR },
+
+    // ========== MongoDB ==========
+    // `new MongoClient(uri)` is dispatched by `lower_builtin_new` (sync ctor
+    // that stores the URI). `client.connect()` opens the connection on the
+    // pre-connect handle. The receiver-less factory `mongodb.connect(uri)`
+    // (combines new+connect, returns Promise<Handle>) stays wired below.
+    NativeModSig { module: "mongodb", has_receiver: false, method: "connect",
+        class_filter: None,
+        runtime: "js_mongodb_connect", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "mongodb", has_receiver: true, method: "connect",
+        class_filter: None,
+        runtime: "js_mongodb_client_connect", args: &[], ret: NR_PTR },
+    // Symbol-name fix: every row below previously emitted a stripped-name
+    // form (`js_mongodb_db`, `js_mongodb_insert_one`, etc.) but the actual
+    // stdlib functions carry a `_client_` / `_db_` / `_collection_` infix
+    // (`js_mongodb_client_db`, `js_mongodb_collection_insert_one`, ...).
+    // Pre-#187 nobody hit it because `new MongoClient()` produced a junk
+    // handle and method calls against it never linked the symbols. With the
+    // v0.5.270-era ctor making the receiver real, these dispatch rows now
+    // actually link — so they have to point at the real functions. Same
+    // family as the v0.5.270 ioredis row fix.
+    NativeModSig { module: "mongodb", has_receiver: true, method: "db",
+        class_filter: None,
+        runtime: "js_mongodb_client_db", args: &[NA_STR], ret: NR_PTR },
+    NativeModSig { module: "mongodb", has_receiver: true, method: "collection",
+        class_filter: None,
+        runtime: "js_mongodb_db_collection", args: &[NA_STR], ret: NR_PTR },
+    // `_value` wrapper variants — every collection method that accepts an
+    // object/filter arg goes through a wrapper that JSON-stringifies the
+    // NaN-boxed JSValue (NA_F64) before forwarding to the existing
+    // JSON-string-taking runtime fn. Without the wrapper, codegen passed
+    // the JSValue f64 bits directly into a fn signed to receive a
+    // *const StringHeader — every doc/filter looked like garbage and the
+    // user saw "Invalid document" / "Invalid JSON".
+    NativeModSig { module: "mongodb", has_receiver: true, method: "insertOne",
+        class_filter: None,
+        runtime: "js_mongodb_collection_insert_one_value", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "mongodb", has_receiver: true, method: "insertMany",
+        class_filter: None,
+        runtime: "js_mongodb_collection_insert_many_value", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "mongodb", has_receiver: true, method: "find",
+        class_filter: None,
+        runtime: "js_mongodb_collection_find_value", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "mongodb", has_receiver: true, method: "findOne",
+        class_filter: None,
+        runtime: "js_mongodb_collection_find_one_value", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "mongodb", has_receiver: true, method: "updateOne",
+        class_filter: None,
+        runtime: "js_mongodb_collection_update_one_value", args: &[NA_F64, NA_F64], ret: NR_PTR },
+    NativeModSig { module: "mongodb", has_receiver: true, method: "updateMany",
+        class_filter: None,
+        runtime: "js_mongodb_collection_update_many_value", args: &[NA_F64, NA_F64], ret: NR_PTR },
+    NativeModSig { module: "mongodb", has_receiver: true, method: "deleteOne",
+        class_filter: None,
+        runtime: "js_mongodb_collection_delete_one_value", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "mongodb", has_receiver: true, method: "deleteMany",
+        class_filter: None,
+        runtime: "js_mongodb_collection_delete_many_value", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "mongodb", has_receiver: true, method: "countDocuments",
+        class_filter: None,
+        runtime: "js_mongodb_collection_count_value", args: &[NA_F64], ret: NR_PTR },
+    // aggregate / createIndex / toArray runtime functions don't exist in
+    // perry-stdlib yet — listed as commented-out so the dispatch table
+    // doesn't reference undefined symbols. User code calling these methods
+    // falls through to the unknown-method sentinel returning TAG_UNDEFINED;
+    // that's better than a hard link failure for code that happens to
+    // import mongodb but doesn't call the methods.
+    //   NativeModSig { module: "mongodb", method: "aggregate",   ... },
+    //   NativeModSig { module: "mongodb", method: "createIndex", ... },
+    //   NativeModSig { module: "mongodb", method: "toArray",     ... },
+    NativeModSig { module: "mongodb", has_receiver: true, method: "close",
+        class_filter: None,
+        runtime: "js_mongodb_client_close", args: &[], ret: NR_PTR },
+
+    // ========== better-sqlite3 ==========
+    NativeModSig { module: "better-sqlite3", has_receiver: false, method: "default",
+        class_filter: None,
+        runtime: "js_sqlite_open", args: &[NA_STR], ret: NR_PTR },
+    NativeModSig { module: "better-sqlite3", has_receiver: true, method: "prepare",
+        class_filter: None,
+        runtime: "js_sqlite_prepare", args: &[NA_STR], ret: NR_PTR },
+    NativeModSig { module: "better-sqlite3", has_receiver: true, method: "run",
+        class_filter: None,
+        runtime: "js_sqlite_stmt_run", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "better-sqlite3", has_receiver: true, method: "get",
+        class_filter: None,
+        runtime: "js_sqlite_stmt_get", args: &[NA_F64], ret: NR_F64 },
+    NativeModSig { module: "better-sqlite3", has_receiver: true, method: "all",
+        class_filter: None,
+        runtime: "js_sqlite_stmt_all", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "better-sqlite3", has_receiver: true, method: "exec",
+        class_filter: None,
+        runtime: "js_sqlite_exec", args: &[NA_STR], ret: NR_VOID },
+    NativeModSig { module: "better-sqlite3", has_receiver: true, method: "close",
+        class_filter: None,
+        runtime: "js_sqlite_close", args: &[], ret: NR_VOID },
+
+    // ========== WebSocket (ws) ==========
+    NativeModSig { module: "ws", has_receiver: false, method: "Server",
+        class_filter: None,
+        runtime: "js_ws_server_new", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "ws", has_receiver: false, method: "WebSocket",
+        class_filter: None,
+        runtime: "js_ws_connect", args: &[NA_STR], ret: NR_PTR },
+    NativeModSig { module: "ws", has_receiver: true, method: "on",
+        class_filter: None,
+        runtime: "js_ws_on", args: &[NA_STR, NA_PTR], ret: NR_I32 },
+    NativeModSig { module: "ws", has_receiver: true, method: "send",
+        class_filter: None,
+        runtime: "js_ws_send", args: &[NA_STR], ret: NR_VOID },
+    NativeModSig { module: "ws", has_receiver: true, method: "close",
+        class_filter: None,
+        runtime: "js_ws_close", args: &[], ret: NR_VOID },
+    // Server-side helpers — the user receives a client handle as a plain
+    // f64 number from `wss.on('connection', (handle) => …)`, then passes
+    // it back to these free functions to write/close that specific peer.
+    // Without these entries the receiver-less call falls through to the
+    // silent stub a few hundred lines down, evaluates the args for side
+    // effects, and returns TAG_UNDEFINED — so frames silently never ship
+    // (issue #136).
+    NativeModSig { module: "ws", has_receiver: false, method: "sendToClient",
+        class_filter: None,
+        runtime: "js_ws_send_to_client", args: &[NA_F64, NA_STR], ret: NR_VOID },
+    NativeModSig { module: "ws", has_receiver: false, method: "closeClient",
+        class_filter: None,
+        runtime: "js_ws_close_client", args: &[NA_F64], ret: NR_VOID },
+
+    // ========== Raw TCP sockets (net) + TLS ==========
+    // Factory: `net.createConnection(host, port)` returns a Socket handle.
+    // HIR lowering at crates/perry-hir/src/lower.rs registers the return
+    // value as class "Socket" so subsequent methods dispatch via the
+    // class_filter entries below.
+    NativeModSig { module: "net", has_receiver: false, method: "createConnection",
+        class_filter: None,
+        runtime: "js_net_socket_connect", args: &[NA_STR, NA_F64], ret: NR_PTR },
+    NativeModSig { module: "net", has_receiver: true, method: "write",
+        class_filter: Some("Socket"),
+        runtime: "js_net_socket_write", args: &[NA_PTR], ret: NR_VOID },
+    NativeModSig { module: "net", has_receiver: true, method: "end",
+        class_filter: Some("Socket"),
+        runtime: "js_net_socket_end", args: &[], ret: NR_VOID },
+    NativeModSig { module: "net", has_receiver: true, method: "destroy",
+        class_filter: Some("Socket"),
+        runtime: "js_net_socket_destroy", args: &[], ret: NR_VOID },
+    NativeModSig { module: "net", has_receiver: true, method: "on",
+        class_filter: Some("Socket"),
+        runtime: "js_net_socket_on", args: &[NA_STR, NA_PTR], ret: NR_VOID },
+    // upgradeToTLS returns a Promise (handle pointer) — await it to wait
+    // for the TLS handshake before sending anything over the upgraded stream.
+    // upgradeToTLS(servername, verify): verify is 0/1 (number, not bool).
+    // verify=1 uses the system trust store + hostname check (sslmode=verify-full);
+    // verify=0 accepts any cert (sslmode=require, for local self-signed DBs).
+    NativeModSig { module: "net", has_receiver: true, method: "upgradeToTLS",
+        class_filter: Some("Socket"),
+        runtime: "js_net_socket_upgrade_tls", args: &[NA_STR, NA_F64], ret: NR_PTR },
+
+    // Factory: `tls.connect(host, port, servername, verify)` opens plain TCP
+    // then runs a full TLS handshake before firing 'connect'. Returns a Socket
+    // handle that behaves identically to one produced by net.createConnection
+    // (same write/end/destroy/on surface).
+    NativeModSig { module: "tls", has_receiver: false, method: "connect",
+        class_filter: None,
+        runtime: "js_tls_connect", args: &[NA_STR, NA_F64, NA_STR, NA_F64], ret: NR_PTR },
+
+    // ========== Events ==========
+    NativeModSig { module: "events", has_receiver: false, method: "EventEmitter",
+        class_filter: None,
+        runtime: "js_event_emitter_new", args: &[], ret: NR_PTR },
+    NativeModSig { module: "events", has_receiver: true, method: "on",
+        class_filter: None,
+        runtime: "js_event_emitter_on", args: &[NA_STR, NA_PTR], ret: NR_PTR },
+    NativeModSig { module: "events", has_receiver: true, method: "emit",
+        class_filter: None,
+        runtime: "js_event_emitter_emit", args: &[NA_STR, NA_F64], ret: NR_F64 },
+    NativeModSig { module: "events", has_receiver: true, method: "removeListener",
+        class_filter: None,
+        runtime: "js_event_emitter_remove_listener", args: &[NA_STR, NA_PTR], ret: NR_PTR },
+    NativeModSig { module: "events", has_receiver: true, method: "removeAllListeners",
+        class_filter: None,
+        runtime: "js_event_emitter_remove_all_listeners", args: &[NA_STR], ret: NR_PTR },
+
+    // ========== LRU Cache ==========
+    NativeModSig { module: "lru-cache", has_receiver: false, method: "default",
+        class_filter: None,
+        runtime: "js_lru_cache_new", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "lru-cache", has_receiver: true, method: "get",
+        class_filter: None,
+        runtime: "js_lru_cache_get", args: &[NA_F64], ret: NR_F64 },
+    NativeModSig { module: "lru-cache", has_receiver: true, method: "set",
+        class_filter: None,
+        runtime: "js_lru_cache_set", args: &[NA_F64, NA_F64], ret: NR_PTR },
+    NativeModSig { module: "lru-cache", has_receiver: true, method: "has",
+        class_filter: None,
+        runtime: "js_lru_cache_has", args: &[NA_F64], ret: NR_F64 },
+    NativeModSig { module: "lru-cache", has_receiver: true, method: "delete",
+        class_filter: None,
+        runtime: "js_lru_cache_delete", args: &[NA_F64], ret: NR_F64 },
+    NativeModSig { module: "lru-cache", has_receiver: true, method: "clear",
+        class_filter: None,
+        runtime: "js_lru_cache_clear", args: &[], ret: NR_VOID },
+    NativeModSig { module: "lru-cache", has_receiver: true, method: "size",
+        class_filter: None,
+        runtime: "js_lru_cache_size", args: &[], ret: NR_F64 },
+
+    // ========== commander (CLI parsing) ==========
+    // `new Command()` is dispatched separately by `lower_builtin_new` so it
+    // produces a real CommanderHandle instead of an empty placeholder. The
+    // entries below cover the fluent chain methods + the parse() entry that
+    // actually reads argv and fires the registered .action() callback.
+    NativeModSig { module: "commander", has_receiver: true, method: "name",
+        class_filter: None,
+        runtime: "js_commander_name", args: &[NA_STR], ret: NR_PTR },
+    NativeModSig { module: "commander", has_receiver: true, method: "description",
+        class_filter: None,
+        runtime: "js_commander_description", args: &[NA_STR], ret: NR_PTR },
+    NativeModSig { module: "commander", has_receiver: true, method: "version",
+        class_filter: None,
+        runtime: "js_commander_version", args: &[NA_STR], ret: NR_PTR },
+    NativeModSig { module: "commander", has_receiver: true, method: "command",
+        class_filter: None,
+        runtime: "js_commander_command", args: &[NA_STR], ret: NR_PTR },
+    NativeModSig { module: "commander", has_receiver: true, method: "option",
+        class_filter: None,
+        runtime: "js_commander_option", args: &[NA_STR, NA_STR, NA_STR], ret: NR_PTR },
+    NativeModSig { module: "commander", has_receiver: true, method: "requiredOption",
+        class_filter: None,
+        runtime: "js_commander_required_option", args: &[NA_STR, NA_STR, NA_STR], ret: NR_PTR },
+    // .action(cb) — NA_PTR coerces the NaN-boxed closure to its raw i64
+    // pointer so the runtime can call back through `js_closure_call1`.
+    NativeModSig { module: "commander", has_receiver: true, method: "action",
+        class_filter: None,
+        runtime: "js_commander_action", args: &[NA_PTR], ret: NR_PTR },
+    // .parse(argv) — runtime reads std::env::args() directly; user-provided
+    // argv expression evaluates for side effects but is not forwarded.
+    // NA_F64 keeps the LLVM call signature aligned with the runtime decl
+    // (`(I64, DOUBLE) -> I64`).
+    NativeModSig { module: "commander", has_receiver: true, method: "parse",
+        class_filter: None,
+        runtime: "js_commander_parse", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "commander", has_receiver: true, method: "opts",
+        class_filter: None,
+        runtime: "js_commander_opts", args: &[], ret: NR_PTR },
+
+    // ========== async_hooks.AsyncLocalStorage ==========
+    // `new AsyncLocalStorage()` is dispatched by `lower_builtin_new`; the rows
+    // below cover the instance methods. `run(store, cb)` and `exit(cb)` need
+    // the closure pointer arg coerced via NA_PTR (the runtime function takes
+    // it as a raw `i64` ClosureHeader pointer + invokes `js_closure_call0`
+    // internally). Pre-fix every method silently no-op'd through the
+    // unknown-method sentinel.
+    NativeModSig { module: "async_hooks", has_receiver: true, method: "run",
+        class_filter: None,
+        runtime: "js_async_local_storage_run", args: &[NA_F64, NA_PTR], ret: NR_F64 },
+    NativeModSig { module: "async_hooks", has_receiver: true, method: "getStore",
+        class_filter: None,
+        runtime: "js_async_local_storage_get_store", args: &[], ret: NR_F64 },
+    NativeModSig { module: "async_hooks", has_receiver: true, method: "enterWith",
+        class_filter: None,
+        runtime: "js_async_local_storage_enter_with", args: &[NA_F64], ret: NR_VOID },
+    NativeModSig { module: "async_hooks", has_receiver: true, method: "exit",
+        class_filter: None,
+        runtime: "js_async_local_storage_exit", args: &[NA_PTR], ret: NR_F64 },
+    NativeModSig { module: "async_hooks", has_receiver: true, method: "disable",
+        class_filter: None,
+        runtime: "js_async_local_storage_disable", args: &[], ret: NR_VOID },
+
+    // ========== decimal.js (arbitrary-precision math) ==========
+    // `new Decimal(value)` is dispatched by `lower_builtin_new` (calls
+    // `js_decimal_coerce_to_handle` to handle string/number/Decimal args).
+    // The instance methods below all operate on a registered DecimalHandle.
+    // Binary-op wrappers (`*_value`) coerce the second arg via the same
+    // helper so `a.plus(2)` and `a.plus("0.1")` work as well as `a.plus(b)`.
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "plus",
+        class_filter: None,
+        runtime: "js_decimal_plus_value", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "minus",
+        class_filter: None,
+        runtime: "js_decimal_minus_value", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "times",
+        class_filter: None,
+        runtime: "js_decimal_times_value", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "div",
+        class_filter: None,
+        runtime: "js_decimal_div_value", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "mod",
+        class_filter: None,
+        runtime: "js_decimal_mod_value", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "pow",
+        class_filter: None,
+        runtime: "js_decimal_pow", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "sqrt",
+        class_filter: None,
+        runtime: "js_decimal_sqrt", args: &[], ret: NR_PTR },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "abs",
+        class_filter: None,
+        runtime: "js_decimal_abs", args: &[], ret: NR_PTR },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "neg",
+        class_filter: None,
+        runtime: "js_decimal_neg", args: &[], ret: NR_PTR },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "round",
+        class_filter: None,
+        runtime: "js_decimal_round", args: &[], ret: NR_PTR },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "floor",
+        class_filter: None,
+        runtime: "js_decimal_floor", args: &[], ret: NR_PTR },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "ceil",
+        class_filter: None,
+        runtime: "js_decimal_ceil", args: &[], ret: NR_PTR },
+    // Formatting — return strings (NR_STR NaN-boxes the *StringHeader).
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "toFixed",
+        class_filter: None,
+        runtime: "js_decimal_to_fixed", args: &[NA_F64], ret: NR_STR },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "toString",
+        class_filter: None,
+        runtime: "js_decimal_to_string", args: &[], ret: NR_STR },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "toNumber",
+        class_filter: None,
+        runtime: "js_decimal_to_number", args: &[], ret: NR_F64 },
+    // `valueOf()` is what JS uses for implicit number coercion (e.g. `+a`,
+    // `a < 5`); decimal.js documents it as an alias for toNumber.
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "valueOf",
+        class_filter: None,
+        runtime: "js_decimal_to_number", args: &[], ret: NR_F64 },
+    // Comparisons — `*_value` wrappers coerce rhs so a.eq(0) works.
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "eq",
+        class_filter: None,
+        runtime: "js_decimal_eq_value", args: &[NA_F64], ret: NR_F64 },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "lt",
+        class_filter: None,
+        runtime: "js_decimal_lt_value", args: &[NA_F64], ret: NR_F64 },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "lte",
+        class_filter: None,
+        runtime: "js_decimal_lte_value", args: &[NA_F64], ret: NR_F64 },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "gt",
+        class_filter: None,
+        runtime: "js_decimal_gt_value", args: &[NA_F64], ret: NR_F64 },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "gte",
+        class_filter: None,
+        runtime: "js_decimal_gte_value", args: &[NA_F64], ret: NR_F64 },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "cmp",
+        class_filter: None,
+        runtime: "js_decimal_cmp_value", args: &[NA_F64], ret: NR_F64 },
+    // Predicates — return booleans encoded as f64 (TAG_TRUE / TAG_FALSE).
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "isZero",
+        class_filter: None,
+        runtime: "js_decimal_is_zero", args: &[], ret: NR_F64 },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "isPositive",
+        class_filter: None,
+        runtime: "js_decimal_is_positive", args: &[], ret: NR_F64 },
+    NativeModSig { module: "decimal.js", has_receiver: true, method: "isNegative",
+        class_filter: None,
+        runtime: "js_decimal_is_negative", args: &[], ret: NR_F64 },
+
+    // ========== uuid ==========
+    NativeModSig { module: "uuid", has_receiver: false, method: "v4",
+        class_filter: None,
+        runtime: "js_uuid_v4", args: &[], ret: NR_PTR },
+    NativeModSig { module: "uuid", has_receiver: false, method: "v1",
+        class_filter: None,
+        runtime: "js_uuid_v1", args: &[], ret: NR_PTR },
+    NativeModSig { module: "uuid", has_receiver: false, method: "v7",
+        class_filter: None,
+        runtime: "js_uuid_v7", args: &[], ret: NR_PTR },
+    NativeModSig { module: "uuid", has_receiver: false, method: "validate",
+        class_filter: None,
+        runtime: "js_uuid_validate", args: &[NA_F64], ret: NR_F64 },
+
+    // ========== jsonwebtoken ==========
+    NativeModSig { module: "jsonwebtoken", has_receiver: false, method: "sign",
+        class_filter: None,
+        runtime: "js_jwt_sign", args: &[NA_F64, NA_F64, NA_F64], ret: NR_PTR },
+    NativeModSig { module: "jsonwebtoken", has_receiver: false, method: "verify",
+        class_filter: None,
+        runtime: "js_jwt_verify", args: &[NA_F64, NA_F64], ret: NR_F64 },
+    NativeModSig { module: "jsonwebtoken", has_receiver: false, method: "decode",
+        class_filter: None,
+        runtime: "js_jwt_decode", args: &[NA_F64], ret: NR_F64 },
+
+    // ========== nodemailer ==========
+    NativeModSig { module: "nodemailer", has_receiver: false, method: "createTransport",
+        class_filter: None,
+        runtime: "js_nodemailer_create_transport", args: &[NA_PTR], ret: NR_F64 },
+    NativeModSig { module: "nodemailer", has_receiver: true, method: "sendMail",
+        class_filter: None,
+        runtime: "js_nodemailer_send_mail", args: &[NA_PTR], ret: NR_PTR },
+    NativeModSig { module: "nodemailer", has_receiver: true, method: "verify",
+        class_filter: None,
+        runtime: "js_nodemailer_verify", args: &[], ret: NR_PTR },
+
+    // ========== dotenv ==========
+    NativeModSig { module: "dotenv", has_receiver: false, method: "config",
+        class_filter: None,
+        runtime: "js_dotenv_config", args: &[], ret: NR_F64 },
+
+    // ========== nanoid ==========
+    NativeModSig { module: "nanoid", has_receiver: false, method: "nanoid",
+        class_filter: None,
+        runtime: "js_nanoid", args: &[], ret: NR_PTR },
+
+    // ========== slugify ==========
+    NativeModSig { module: "slugify", has_receiver: false, method: "slugify",
+        class_filter: None,
+        runtime: "js_slugify", args: &[NA_STR], ret: NR_PTR },
+
+    // ========== validator ==========
+    NativeModSig { module: "validator", has_receiver: false, method: "isEmail",
+        class_filter: None,
+        runtime: "js_validator_is_email", args: &[NA_STR], ret: NR_F64 },
+    NativeModSig { module: "validator", has_receiver: false, method: "isURL",
+        class_filter: None,
+        runtime: "js_validator_is_url", args: &[NA_STR], ret: NR_F64 },
+    NativeModSig { module: "validator", has_receiver: false, method: "isUUID",
+        class_filter: None,
+        runtime: "js_validator_is_uuid", args: &[NA_STR], ret: NR_F64 },
+    NativeModSig { module: "validator", has_receiver: false, method: "isJSON",
+        class_filter: None,
+        runtime: "js_validator_is_json", args: &[NA_STR], ret: NR_F64 },
+    NativeModSig { module: "validator", has_receiver: false, method: "isEmpty",
+        class_filter: None,
+        runtime: "js_validator_is_empty", args: &[NA_STR], ret: NR_F64 },
+
+    // ========== exponential-backoff ==========
+    NativeModSig { module: "exponential-backoff", has_receiver: false, method: "backOff",
+        class_filter: None,
+        runtime: "backOff", args: &[NA_PTR, NA_F64], ret: NR_PTR },
+
+    // ========== argon2 ==========
+    NativeModSig { module: "argon2", has_receiver: false, method: "hash",
+        class_filter: None,
+        runtime: "js_argon2_hash", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "argon2", has_receiver: false, method: "verify",
+        class_filter: None,
+        runtime: "js_argon2_verify", args: &[NA_F64, NA_F64], ret: NR_PTR },
+
+    // ========== bcrypt ==========
+    NativeModSig { module: "bcrypt", has_receiver: false, method: "hash",
+        class_filter: None,
+        runtime: "js_bcrypt_hash", args: &[NA_F64, NA_F64], ret: NR_PTR },
+    NativeModSig { module: "bcrypt", has_receiver: false, method: "compare",
+        class_filter: None,
+        runtime: "js_bcrypt_compare", args: &[NA_F64, NA_F64], ret: NR_PTR },
+
+    // ========== perry/thread (parallelMap, parallelFilter, spawn) ==========
+    // Runtime expects both args as NaN-boxed f64 values and returns the same
+    // — no unboxing/reboxing needed on either side. Closure is a POINTER_TAG'd
+    // ClosureHeader; the runtime reads `func_ptr` and calls it per element.
+    NativeModSig { module: "perry/thread", has_receiver: false, method: "parallelMap",
+        class_filter: None,
+        runtime: "js_thread_parallel_map", args: &[NA_F64, NA_F64], ret: NR_F64 },
+    NativeModSig { module: "perry/thread", has_receiver: false, method: "parallelFilter",
+        class_filter: None,
+        runtime: "js_thread_parallel_filter", args: &[NA_F64, NA_F64], ret: NR_F64 },
+    NativeModSig { module: "perry/thread", has_receiver: false, method: "spawn",
+        class_filter: None,
+        runtime: "js_thread_spawn", args: &[NA_F64], ret: NR_F64 },
+];
+
+/// Walk a statement to collect LocalIds declared inside a closure body —
+/// `Stmt::Let` and `Stmt::For` init `let`s. Used by the perry/thread
+/// thread-safety check to distinguish inner locals (safe to write) from
+/// captures (unsafe). Recurses into nested control-flow but deliberately
+/// NOT into nested closures: those have their own inner-id set.
+fn collect_closure_introduced_ids(
+    stmt: &perry_hir::Stmt,
+    out: &mut std::collections::HashSet<perry_types::LocalId>,
+) {
+    use perry_hir::Stmt;
+    match stmt {
+        Stmt::Let { id, .. } => { out.insert(*id); }
+        Stmt::If { then_branch, else_branch, .. } => {
+            for s in then_branch { collect_closure_introduced_ids(s, out); }
+            if let Some(eb) = else_branch {
+                for s in eb { collect_closure_introduced_ids(s, out); }
+            }
+        }
+        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
+            for s in body { collect_closure_introduced_ids(s, out); }
+        }
+        Stmt::For { init, body, .. } => {
+            if let Some(init_stmt) = init.as_ref() {
+                collect_closure_introduced_ids(init_stmt, out);
+            }
+            for s in body { collect_closure_introduced_ids(s, out); }
+        }
+        Stmt::Try { body, catch, finally } => {
+            for s in body { collect_closure_introduced_ids(s, out); }
+            if let Some(cc) = catch {
+                if let Some((id, _)) = &cc.param { out.insert(*id); }
+                for s in &cc.body { collect_closure_introduced_ids(s, out); }
+            }
+            if let Some(fb) = finally {
+                for s in fb { collect_closure_introduced_ids(s, out); }
+            }
+        }
+        Stmt::Switch { cases, .. } => {
+            for case in cases {
+                for s in &case.body { collect_closure_introduced_ids(s, out); }
+            }
+        }
+        Stmt::Labeled { body, .. } => collect_closure_introduced_ids(body, out),
+        _ => {} // Expr, Return, Throw, Break, Continue, LabeledBreak/Continue — don't declare locals
+    }
+}
+
+/// Walk a statement looking for LocalSet / Update whose target LocalId is
+/// NOT in `inner_ids` — i.e. the closure is writing to a captured or
+/// module-level variable. Does NOT recurse into nested Closure expressions
+/// (those are a separate scope with their own check when they're passed to
+/// a threading primitive).
+fn find_outer_writes_stmt(
+    stmt: &perry_hir::Stmt,
+    inner_ids: &std::collections::HashSet<perry_types::LocalId>,
+    out: &mut Vec<perry_types::LocalId>,
+) {
+    use perry_hir::Stmt;
+    match stmt {
+        Stmt::Let { init, .. } => {
+            if let Some(expr) = init { find_outer_writes_expr(expr, inner_ids, out); }
+        }
+        Stmt::Expr(e) | Stmt::Return(Some(e)) | Stmt::Throw(e) => {
+            find_outer_writes_expr(e, inner_ids, out);
+        }
+        Stmt::Return(None) | Stmt::Break | Stmt::Continue
+        | Stmt::LabeledBreak(_) | Stmt::LabeledContinue(_) => {}
+        Stmt::If { condition, then_branch, else_branch } => {
+            find_outer_writes_expr(condition, inner_ids, out);
+            for s in then_branch { find_outer_writes_stmt(s, inner_ids, out); }
+            if let Some(eb) = else_branch {
+                for s in eb { find_outer_writes_stmt(s, inner_ids, out); }
+            }
+        }
+        Stmt::While { condition, body } => {
+            find_outer_writes_expr(condition, inner_ids, out);
+            for s in body { find_outer_writes_stmt(s, inner_ids, out); }
+        }
+        Stmt::DoWhile { condition, body } => {
+            for s in body { find_outer_writes_stmt(s, inner_ids, out); }
+            find_outer_writes_expr(condition, inner_ids, out);
+        }
+        Stmt::For { init, condition, update, body } => {
+            if let Some(init_stmt) = init.as_ref() {
+                find_outer_writes_stmt(init_stmt, inner_ids, out);
+            }
+            if let Some(c) = condition { find_outer_writes_expr(c, inner_ids, out); }
+            if let Some(u) = update { find_outer_writes_expr(u, inner_ids, out); }
+            for s in body { find_outer_writes_stmt(s, inner_ids, out); }
+        }
+        Stmt::Try { body, catch, finally } => {
+            for s in body { find_outer_writes_stmt(s, inner_ids, out); }
+            if let Some(cc) = catch {
+                for s in &cc.body { find_outer_writes_stmt(s, inner_ids, out); }
+            }
+            if let Some(fb) = finally {
+                for s in fb { find_outer_writes_stmt(s, inner_ids, out); }
+            }
+        }
+        Stmt::Switch { discriminant, cases } => {
+            find_outer_writes_expr(discriminant, inner_ids, out);
+            for case in cases {
+                if let Some(val) = &case.test {
+                    find_outer_writes_expr(val, inner_ids, out);
+                }
+                for s in &case.body { find_outer_writes_stmt(s, inner_ids, out); }
+            }
+        }
+        Stmt::Labeled { body, .. } => find_outer_writes_stmt(body, inner_ids, out),
+    }
+}
+
+fn find_outer_writes_expr(
+    expr: &perry_hir::Expr,
+    inner_ids: &std::collections::HashSet<perry_types::LocalId>,
+    out: &mut Vec<perry_types::LocalId>,
+) {
+    use perry_hir::Expr;
+    match expr {
+        Expr::LocalSet(id, val) => {
+            if !inner_ids.contains(id) { out.push(*id); }
+            find_outer_writes_expr(val, inner_ids, out);
+        }
+        Expr::Update { id, .. } => {
+            if !inner_ids.contains(id) { out.push(*id); }
+        }
+        Expr::Closure { .. } => {
+            // Stop at nested closure boundary — it has its own scope and
+            // will be checked separately if it's the one being passed to
+            // a threading primitive.
+        }
+        Expr::Binary { left, right, .. } => {
+            find_outer_writes_expr(left, inner_ids, out);
+            find_outer_writes_expr(right, inner_ids, out);
+        }
+        Expr::Call { callee, args, .. } => {
+            find_outer_writes_expr(callee, inner_ids, out);
+            for a in args { find_outer_writes_expr(a, inner_ids, out); }
+        }
+        Expr::NativeMethodCall { object, args, .. } => {
+            if let Some(o) = object { find_outer_writes_expr(o, inner_ids, out); }
+            for a in args { find_outer_writes_expr(a, inner_ids, out); }
+        }
+        Expr::PropertyGet { object, .. } => {
+            find_outer_writes_expr(object, inner_ids, out);
+        }
+        Expr::IndexGet { object, index } => {
+            find_outer_writes_expr(object, inner_ids, out);
+            find_outer_writes_expr(index, inner_ids, out);
+        }
+        Expr::Array(elems) => for e in elems { find_outer_writes_expr(e, inner_ids, out); }
+        Expr::Conditional { condition, then_expr, else_expr } => {
+            find_outer_writes_expr(condition, inner_ids, out);
+            find_outer_writes_expr(then_expr, inner_ids, out);
+            find_outer_writes_expr(else_expr, inner_ids, out);
+        }
+        _ => {} // Literals, LocalGet, GlobalGet, etc. — no writes
+    }
+}
+
+/// Look up a native module method in the static dispatch table.
+/// Entries with `class_filter: Some("Pool")` only match when
+/// `class_name == Some("Pool")`; entries with `class_filter: None`
+/// match any class_name. More-specific entries (with class_filter)
+/// are checked first.
+fn native_module_lookup(module: &str, has_receiver: bool, method: &str, class_name: Option<&str>) -> Option<&'static NativeModSig> {
+    // First pass: look for an exact class_filter match.
+    let exact = NATIVE_MODULE_TABLE.iter().find(|sig| {
+        sig.module == module && sig.has_receiver == has_receiver && sig.method == method
+            && sig.class_filter.is_some() && sig.class_filter == class_name
+    });
+    if exact.is_some() {
+        return exact;
+    }
+    // Second pass: generic (class_filter == None) entries.
+    NATIVE_MODULE_TABLE.iter().find(|sig| {
+        sig.module == module && sig.has_receiver == has_receiver && sig.method == method
+            && sig.class_filter.is_none()
+    })
+}
+
+/// Lower a native module call through the dispatch table.
+/// For receiver-less calls, `recv_i64` should be None.
+/// For instance method calls, `recv_i64` should be Some(handle_i64_ssa).
+fn lower_native_module_dispatch(
+    ctx: &mut FnCtx<'_>,
+    sig: &NativeModSig,
+    recv_i64: Option<&str>,
+    args: &[Expr],
+) -> Result<String> {
+    // Build the LLVM arg list: receiver handle (if any) + coerced args.
+    let mut llvm_args: Vec<(crate::types::LlvmType, String)> = Vec::new();
+    let mut arg_types: Vec<crate::types::LlvmType> = Vec::new();
+
+    // Receiver handle
+    if let Some(handle) = recv_i64 {
+        llvm_args.push((I64, handle.to_string()));
+        arg_types.push(I64);
+    }
+
+    // Coerce each arg per the sig's coercion rules.
+    // If more args are passed than the sig declares, pass extras as F64.
+    for (i, arg) in args.iter().enumerate() {
+        let kind = sig.args.get(i).copied().unwrap_or(NativeArgKind::F64);
+        let lowered = lower_expr(ctx, arg)?;
+        match kind {
+            NativeArgKind::F64 => {
+                llvm_args.push((DOUBLE, lowered));
+                arg_types.push(DOUBLE);
+            }
+            NativeArgKind::StrPtr => {
+                let blk = ctx.block();
+                let ptr = blk.call(I64, "js_get_string_pointer_unified", &[(DOUBLE, &lowered)]);
+                llvm_args.push((I64, ptr));
+                arg_types.push(I64);
+            }
+            NativeArgKind::PtrI64 => {
+                let blk = ctx.block();
+                let handle = unbox_to_i64(blk, &lowered);
+                llvm_args.push((I64, handle));
+                arg_types.push(I64);
+            }
+            NativeArgKind::JsvalI64 => {
+                // Bitcast the NaN-boxed f64 to i64 without unboxing —
+                // the callee will interpret the raw bits.
+                let blk = ctx.block();
+                let bits = blk.bitcast_double_to_i64(&lowered);
+                llvm_args.push((I64, bits));
+                arg_types.push(I64);
+            }
+        }
+    }
+    // If fewer args than sig expects, pad with undefined / 0.
+    for i in args.len()..sig.args.len() {
+        match sig.args[i] {
+            NativeArgKind::F64 => {
+                llvm_args.push((DOUBLE, double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED))));
+                arg_types.push(DOUBLE);
+            }
+            NativeArgKind::StrPtr | NativeArgKind::PtrI64 | NativeArgKind::JsvalI64 => {
+                llvm_args.push((I64, "0".to_string()));
+                arg_types.push(I64);
+            }
+        }
+    }
+
+    // Determine return type for the declare
+    let ret_type = match sig.ret {
+        NativeRetKind::Ptr | NativeRetKind::Str => I64,
+        NativeRetKind::F64 => DOUBLE,
+        NativeRetKind::I32Void => I32,
+        NativeRetKind::Void => crate::types::VOID,
+    };
+
+    ctx.pending_declares.push((sig.runtime.to_string(), ret_type, arg_types));
+
+    let arg_slices: Vec<(crate::types::LlvmType, &str)> =
+        llvm_args.iter().map(|(t, s)| (*t, s.as_str())).collect();
+
+    match sig.ret {
+        NativeRetKind::Ptr => {
+            let blk = ctx.block();
+            let raw = blk.call(I64, sig.runtime, &arg_slices);
+            Ok(nanbox_pointer_inline(blk, &raw))
+        }
+        NativeRetKind::Str => {
+            // Returned raw *mut StringHeader — NaN-box with STRING_TAG so
+            // downstream string ops (JSON.stringify, ===, .length) work.
+            // Null pointer (header value 0) is returned as TAG_NULL so
+            // `request.header('missing')` reads as `null` instead of a
+            // dangling string pointer.
+            let blk = ctx.block();
+            let raw = blk.call(I64, sig.runtime, &arg_slices);
+            let is_null = blk.icmp_eq(I64, &raw, "0");
+            let boxed = nanbox_string_inline(blk, &raw);
+            let null_val = double_literal(f64::from_bits(crate::nanbox::TAG_NULL));
+            Ok(blk.select(crate::types::I1, &is_null, DOUBLE, &null_val, &boxed))
+        }
+        NativeRetKind::F64 => {
+            Ok(ctx.block().call(DOUBLE, sig.runtime, &arg_slices))
+        }
+        NativeRetKind::I32Void => {
+            let _discard = ctx.block().call(I32, sig.runtime, &arg_slices);
+            Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
+        }
+        NativeRetKind::Void => {
+            ctx.block().call_void(sig.runtime, &arg_slices);
+            Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
         }
     }
 }

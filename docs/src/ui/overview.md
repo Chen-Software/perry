@@ -5,27 +5,27 @@ Perry's `perry/ui` module lets you build native desktop and mobile apps with dec
 ## Quick Start
 
 ```typescript
-import { App, Text, VStack } from "perry/ui";
-
-App({
-  title: "My App",
-  width: 400,
-  height: 300,
-  body: VStack(16, [
-    Text("Hello from Perry!"),
-  ]),
-});
+{{#include ../../examples/ui/overview/quickstart.ts}}
 ```
 
 ```bash
 perry app.ts -o app && ./app
 ```
 
+## Mental Model
+
+Perry's UI follows the same model as SwiftUI and Flutter: you compose native widgets using stack-based layout containers (`VStack`, `HStack`, `ZStack`), control alignment and distribution, and style widgets directly via method calls. If you're coming from web development, the key shift is:
+
+- **Layout** is controlled by stack alignment, distribution, and spacers — not CSS properties. See [Layout](layout.md).
+- **Styling** is applied directly to widgets — not through stylesheets. See [Styling](styling.md).
+- **Absolute positioning** uses overlays (`widgetAddOverlay` + `widgetSetOverlayFrame`) — not `position: absolute/relative`.
+- **Design tokens** come from the `perry-styling` package. See [Theming](theming.md).
+
 ## App Lifecycle
 
 Every Perry UI app starts with `App()`:
 
-```typescript
+```typescript,no-test
 import { App, VStack, Text } from "perry/ui";
 
 App({
@@ -57,7 +57,7 @@ See [Multi-Window](multi-window.md) for full documentation on window properties.
 
 ### Lifecycle Hooks
 
-```typescript
+```typescript,no-test
 import { App, onActivate, onTerminate } from "perry/ui";
 
 onActivate(() => {
@@ -75,7 +75,7 @@ App({ title: "My App", width: 800, height: 600, body: /* ... */ });
 
 Perry UIs are built as a tree of widgets:
 
-```typescript
+```typescript,no-test
 import { App, Text, Button, VStack, HStack } from "perry/ui";
 
 App({
@@ -99,7 +99,7 @@ Widgets are created by calling their constructor functions. Layout containers (`
 
 Under the hood, each widget is a handle — a small integer that references a native platform object. When you call `Text("hello")`, Perry creates a native `NSTextField` (macOS), `UILabel` (iOS), `GtkLabel` (Linux), or `<span>` (web) and returns a handle you can use to modify it.
 
-```typescript
+```typescript,no-test
 const label = Text("Hello");
 label.setFontSize(18);        // Modifies the native widget
 label.setColor("#FF0000");     // Through the handle
@@ -109,7 +109,7 @@ label.setColor("#FF0000");     // Through the handle
 
 All UI functions are imported from `perry/ui`:
 
-```typescript
+```typescript,no-test
 import {
   // App lifecycle
   App, onActivate, onTerminate,
@@ -121,6 +121,12 @@ import {
   // Layout
   VStack, HStack, ZStack, ScrollView, Spacer, Divider,
   NavigationStack, LazyVStack, Form, Section,
+  VStackWithInsets, HStackWithInsets, SplitView, splitViewAddChild,
+
+  // Layout control
+  stackSetAlignment, stackSetDistribution, stackSetDetachesHidden,
+  widgetMatchParentWidth, widgetMatchParentHeight, widgetSetHugging,
+  widgetAddOverlay, widgetSetOverlayFrame,
 
   // State
   State, ForEach,

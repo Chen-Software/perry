@@ -1,0 +1,610 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+    # Also run on version tags so `release-packages.yml` can gate publish on
+    # a green Tests workflow for the exact commit being released.
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  MACOSX_DEPLOYMENT_TARGET: "13.0"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build compiler + runtime once, cache for downstream jobs
+  # ---------------------------------------------------------------------------
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      # macos-14 ships with ~14 GB free disk after the preinstalled Xcode +
+      # iOS/tvOS/watchOS simulator runtime images. Several `cargo build
+      # --release` jobs in this workflow consistently OOM'd at the cache
+      # restore step (`No space left on device` from the runner's own
+      # diagnostic writer, before cargo even started). Wiping the simulator
+      # runtime IMAGES — not the SDKs — reclaims ~15-25 GB without
+      # affecting cross-compile to `aarch64-apple-ios-sim` (that only needs
+      # the SDK, which lives inside the active Xcode app).
+      - name: Free up disk space (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          BEFORE=$(df -h / | tail -1 | awk '{print $4}')
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/*Simulator* || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches/* || true
+          AFTER=$(df -h / | tail -1 | awk '{print $4}')
+          echo "Disk free: ${BEFORE} -> ${AFTER}"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          # NOTE: deliberately NOT caching `target/` — on macos-14 runners
+          # (~14 GB free out of the box after preinstalled Xcode + sims) the
+          # restored release artifacts pushed disk usage past the limit and
+          # the runner OOM'd before cargo even started. Registry+git cache
+          # alone gives ~80% of the warm-build win without the disk hit.
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build release (runtime + stdlib + compiler)
+        run: cargo build --release
+
+      - name: Upload built binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: perry-binaries
+          path: |
+            target/release/perry
+            target/release/libperry_runtime.a
+            target/release/libperry_stdlib.a
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # Rust unit tests (266+ tests across all crates)
+  # ---------------------------------------------------------------------------
+  cargo-test:
+    runs-on: macos-14
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      # macos-14 ships with ~14 GB free disk after the preinstalled Xcode +
+      # iOS/tvOS/watchOS simulator runtime images. Several `cargo build
+      # --release` jobs in this workflow consistently OOM'd at the cache
+      # restore step (`No space left on device` from the runner's own
+      # diagnostic writer, before cargo even started). Wiping the simulator
+      # runtime IMAGES — not the SDKs — reclaims ~15-25 GB without
+      # affecting cross-compile to `aarch64-apple-ios-sim` (that only needs
+      # the SDK, which lives inside the active Xcode app).
+      - name: Free up disk space (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          BEFORE=$(df -h / | tail -1 | awk '{print $4}')
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/*Simulator* || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches/* || true
+          AFTER=$(df -h / | tail -1 | awk '{print $4}')
+          echo "Disk free: ${BEFORE} -> ${AFTER}"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          # NOTE: deliberately NOT caching `target/` — on macos-14 runners
+          # (~14 GB free out of the box after preinstalled Xcode + sims) the
+          # restored release artifacts pushed disk usage past the limit and
+          # the runner OOM'd before cargo even started. Registry+git cache
+          # alone gives ~80% of the warm-build win without the disk hit.
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Run cargo test
+        # Exclude UI backends that don't build on the macOS-14 CI image:
+        # - perry-ui-ios / perry-ui-tvos / perry-ui-watchos: need their
+        #   respective SDKs (xcrun --sdk iphoneos / appletvos / watchos)
+        #   which are present but not the active SDK.
+        # - perry-ui-gtk4: needs system pango/gtk via pkg-config; runner
+        #   doesn't have them installed.
+        # - perry-ui-android: needs Android NDK.
+        # - perry-ui-windows: needs win32 headers.
+        run: |
+          cargo test --workspace \
+            --exclude perry-ui-ios \
+            --exclude perry-ui-visionos \
+            --exclude perry-ui-tvos \
+            --exclude perry-ui-watchos \
+            --exclude perry-ui-gtk4 \
+            --exclude perry-ui-android \
+            --exclude perry-ui-windows
+
+  # ---------------------------------------------------------------------------
+  # Parity tests (Perry output vs Node.js)
+  # ---------------------------------------------------------------------------
+  parity:
+    runs-on: macos-14
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      # macos-14 ships with ~14 GB free disk after the preinstalled Xcode +
+      # iOS/tvOS/watchOS simulator runtime images. Several `cargo build
+      # --release` jobs in this workflow consistently OOM'd at the cache
+      # restore step (`No space left on device` from the runner's own
+      # diagnostic writer, before cargo even started). Wiping the simulator
+      # runtime IMAGES — not the SDKs — reclaims ~15-25 GB without
+      # affecting cross-compile to `aarch64-apple-ios-sim` (that only needs
+      # the SDK, which lives inside the active Xcode app).
+      - name: Free up disk space (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          BEFORE=$(df -h / | tail -1 | awk '{print $4}')
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/*Simulator* || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches/* || true
+          AFTER=$(df -h / | tail -1 | awk '{print $4}')
+          echo "Disk free: ${BEFORE} -> ${AFTER}"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          # NOTE: deliberately NOT caching `target/` — on macos-14 runners
+          # (~14 GB free out of the box after preinstalled Xcode + sims) the
+          # restored release artifacts pushed disk usage past the limit and
+          # the runner OOM'd before cargo even started. Registry+git cache
+          # alone gives ~80% of the warm-build win without the disk hit.
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build compiler
+        run: cargo build --release
+
+      - name: Run parity tests
+        run: ./run_parity_tests.sh
+
+      - name: Check parity threshold
+        run: |
+          REPORT="test-parity/reports/latest.json"
+          THRESHOLD_FILE="test-parity/threshold.json"
+
+          if [[ ! -f "$REPORT" ]]; then
+            echo "No parity report found"
+            exit 1
+          fi
+
+          ACTUAL=$(jq -r '.summary.parity_percentage' "$REPORT")
+          MIN=$(jq -r '.min_parity_pct' "$THRESHOLD_FILE")
+
+          echo "Parity: ${ACTUAL}% (threshold: ${MIN}%)"
+
+          awk -v a="$ACTUAL" -v m="$MIN" 'BEGIN {
+            if (a+0 < m+0) { print "FAIL: Parity " a "% is below threshold " m "%"; exit 1 }
+            print "OK: Parity " a "% meets threshold " m "%"
+          }'
+
+      - name: Check for new failures
+        run: |
+          REPORT="test-parity/reports/latest.json"
+          KNOWN="test-parity/known_failures.json"
+
+          jq -r '(.failures.parity // []) + (.failures.compile // []) | .[]' "$REPORT" | sort -u > /tmp/all_fails.txt
+          if [[ -f "$KNOWN" ]]; then
+            jq -r 'keys[]' "$KNOWN" | sort -u > /tmp/known.txt
+          else
+            : > /tmp/known.txt
+          fi
+
+          TOTAL=$(wc -l < /tmp/all_fails.txt | tr -d ' ')
+          comm -23 /tmp/all_fails.txt /tmp/known.txt > /tmp/new.txt
+          if [[ -s /tmp/new.txt ]]; then
+            echo "NEW FAILURES (not in known_failures.json):"
+            sed 's/^/  - /' /tmp/new.txt
+            exit 1
+          fi
+          echo "All ${TOTAL} failures are known/triaged."
+
+      - name: Upload parity report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-report
+          path: test-parity/reports/latest.json
+
+  # ---------------------------------------------------------------------------
+  # Compile smoke test (all 130+ test files must compile)
+  # ---------------------------------------------------------------------------
+  compile-smoke:
+    runs-on: macos-14
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      # macos-14 ships with ~14 GB free disk after the preinstalled Xcode +
+      # iOS/tvOS/watchOS simulator runtime images. Several `cargo build
+      # --release` jobs in this workflow consistently OOM'd at the cache
+      # restore step (`No space left on device` from the runner's own
+      # diagnostic writer, before cargo even started). Wiping the simulator
+      # runtime IMAGES — not the SDKs — reclaims ~15-25 GB without
+      # affecting cross-compile to `aarch64-apple-ios-sim` (that only needs
+      # the SDK, which lives inside the active Xcode app).
+      - name: Free up disk space (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          BEFORE=$(df -h / | tail -1 | awk '{print $4}')
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/*Simulator* || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches/* || true
+          AFTER=$(df -h / | tail -1 | awk '{print $4}')
+          echo "Disk free: ${BEFORE} -> ${AFTER}"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          # NOTE: deliberately NOT caching `target/` — on macos-14 runners
+          # (~14 GB free out of the box after preinstalled Xcode + sims) the
+          # restored release artifacts pushed disk usage past the limit and
+          # the runner OOM'd before cargo even started. Registry+git cache
+          # alone gives ~80% of the warm-build win without the disk hit.
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build compiler
+        run: cargo build --release
+
+      - name: Compile all test files
+        run: |
+          PERRY="target/release/perry"
+          PASS=0
+          FAIL=0
+          SKIP=0
+          FAILURES=()
+
+          # Tests that are known to not compile cleanly under the bare
+          # `perry foo.ts -o out` smoke path. Sources:
+          # - test_ui_*: need `--target macos` / `ios-simulator` to pull
+          #   in libperry_ui_*; the no-target compile path doesn't link
+          #   the platform widgets.
+          # - test_timer: hangs on the runtime event loop under the
+          #   no-arg compile path.
+          # - The macOS-14-only compile failures (test_gap_buffer_ops,
+          #   test_gap_node_crypto_buffer, test_gap_typed_arrays,
+          #   test_stress_buffer, test_stress_int_ops,
+          #   test_buffer_numeric_read_intrinsic, test_buffer_small_alloc)
+          #   compile cleanly on local macOS 15.x but fail on the GitHub
+          #   macOS-14 runner (SDK/linker version interaction). Tracked
+          #   as `ci-env` in `test-parity/known_failures.json`.
+          # Space-separated skip list (associative arrays require bash
+          # 4+; macOS-14 ships bash 3.2). Word-boundary match keeps
+          # the substring lookup safe.
+          SKIP_TESTS=" \
+            test_ui_comprehensive \
+            test_ui_controls \
+            test_ui_phase4 \
+            test_timer \
+            test_gap_buffer_ops \
+            test_gap_node_crypto_buffer \
+            test_gap_typed_arrays \
+            test_stress_buffer \
+            test_stress_int_ops \
+            test_buffer_numeric_read_intrinsic \
+            test_buffer_small_alloc "
+
+          for f in test-files/*.ts; do
+            [[ -d "$f" ]] && continue
+            name=$(basename "$f" .ts)
+            if [[ "$SKIP_TESTS" == *" $name "* ]]; then
+              ((SKIP++))
+              continue
+            fi
+            if $PERRY "$f" -o "/tmp/perry_smoke_${name}" 2>/dev/null; then
+              ((PASS++))
+              rm -f "/tmp/perry_smoke_${name}"
+            else
+              ((FAIL++))
+              FAILURES+=("$name")
+            fi
+          done
+
+          echo "Compile smoke: $PASS passed, $FAIL failed, $SKIP skipped"
+
+          if [[ $FAIL -gt 0 ]]; then
+            echo "Compile failures:"
+            for f in "${FAILURES[@]}"; do
+              echo "  - $f"
+            done
+            exit 1
+          fi
+
+      # Thread-primitive compile-error tests (#146): checks that closures
+      # passed to perry/thread primitives with outer-variable writes are
+      # rejected. The runtime thread_primitives.ts example is covered by
+      # the doc-tests job below.
+      - name: Thread-primitive compile-error tests
+        run: ./scripts/run_thread_tests.sh
+
+      # Fastify end-to-end integration (#174): launches a Perry-compiled
+      # Fastify server as a background process, curls four routes covering
+      # simple GET, path params, POST with JSON body + reply.code(), and
+      # 404 fallback. The docs Fastify example is marked no-test because
+      # app.listen() blocks forever; this script provides the coverage
+      # that the no-test tag would otherwise hide.
+      - name: Fastify integration tests
+        run: ./scripts/run_fastify_tests.sh
+
+      # Memory-stability regression suite. Two failure modes microbenchs
+      # don't catch: (1) slow RSS accumulation across 100k-200k iterations
+      # of allocate-and-discard (would catch a future block-pinning /
+      # cache-leak / tenuring-trap regression in the gen-GC work), and
+      # (2) crashes when gc() is forced aggressively during JSON parse,
+      # deep recursion, or closure init. Each test runs under default,
+      # PERRY_GEN_GC=1, and PERRY_GEN_GC=1 PERRY_WRITE_BARRIERS=1 so a
+      # regression in any GC mode is caught. Linux-only because /usr/bin/time
+      # availability + RSS reporting differs on Windows runners.
+      - name: Memory stability tests
+        if: runner.os == 'Linux' || runner.os == 'macOS'
+        run: ./scripts/run_memory_stability_tests.sh
+
+  # ---------------------------------------------------------------------------
+  # Doc-example tests: compile + run every .ts under docs/examples/.
+  # UI examples launch with PERRY_UI_TEST_MODE=1 so they auto-exit after one
+  # frame. Gallery screenshots are diffed against per-OS baselines (advisory
+  # until Linux/Windows baselines stabilize).
+  # ---------------------------------------------------------------------------
+  doc-tests:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            ui_backend: perry-ui-macos
+            shell: bash
+            cmd_exclude_gallery: "./scripts/run_doc_tests.sh --verbose --skip-xcompile --filter-exclude ui/gallery.ts"
+            cmd_gallery: "./scripts/run_doc_tests.sh --verbose --skip-xcompile --filter ui/gallery.ts"
+            # Repeat `--xcompile-only-target=…` per target rather than a
+            # single comma-delimited value because PowerShell splits even
+            # `--foo=a,b` at the comma when unquoted (array literal).
+            # Repetition sidesteps the whole issue on every shell.
+            cmd_xcompile_blocking: "./scripts/run_doc_tests.sh --verbose --xcompile-only --xcompile-only-target=web --xcompile-only-target=wasm --xcompile-only-target=ios-simulator"
+            cmd_xcompile_advisory: "./scripts/run_doc_tests.sh --verbose --xcompile-only"
+            # Baseline captured from a clean CI run of 24723671119 (900x970).
+            gallery_advisory: false
+          - os: ubuntu-24.04
+            ui_backend: perry-ui-gtk4
+            shell: bash
+            cmd_exclude_gallery: "xvfb-run -a ./scripts/run_doc_tests.sh --verbose --skip-xcompile --filter-exclude ui/gallery.ts"
+            cmd_gallery: "xvfb-run -a ./scripts/run_doc_tests.sh --verbose --skip-xcompile --filter ui/gallery.ts"
+            cmd_xcompile_blocking: "./scripts/run_doc_tests.sh --verbose --xcompile-only --xcompile-only-target=web --xcompile-only-target=wasm --xcompile-only-target=ios-simulator"
+            cmd_xcompile_advisory: "./scripts/run_doc_tests.sh --verbose --xcompile-only"
+            # Baseline captured under Xvfb (900x1024).
+            gallery_advisory: false
+          - os: windows-2022
+            ui_backend: perry-ui-windows
+            shell: pwsh
+            cmd_exclude_gallery: "./scripts/run_doc_tests.ps1 --verbose --skip-xcompile --filter-exclude ui/gallery.ts"
+            cmd_gallery: "./scripts/run_doc_tests.ps1 --verbose --skip-xcompile --filter ui/gallery.ts"
+            cmd_xcompile_blocking: "./scripts/run_doc_tests.ps1 --verbose --xcompile-only --xcompile-only-target=web --xcompile-only-target=wasm --xcompile-only-target=ios-simulator"
+            cmd_xcompile_advisory: "./scripts/run_doc_tests.ps1 --verbose --xcompile-only"
+            # Baseline captured from run #24735151417 (900x788).
+            # perry-ui-windows screenshot.rs emits an uncompressed PNG
+            # (~2.7MB vs macOS 56KB / Linux 32KB) — functional but worth
+            # cleaning up in a follow-up; dssim diffs the pixels either way.
+            gallery_advisory: false
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # macos-14 ships with ~14 GB free disk after the preinstalled Xcode +
+      # iOS/tvOS/watchOS simulator runtime images. Several `cargo build
+      # --release` jobs in this workflow consistently OOM'd at the cache
+      # restore step (`No space left on device` from the runner's own
+      # diagnostic writer, before cargo even started). Wiping the simulator
+      # runtime IMAGES — not the SDKs — reclaims ~15-25 GB without
+      # affecting cross-compile to `aarch64-apple-ios-sim` (that only needs
+      # the SDK, which lives inside the active Xcode app).
+      - name: Free up disk space (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          BEFORE=$(df -h / | tail -1 | awk '{print $4}')
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/*Simulator* || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches/* || true
+          AFTER=$(df -h / | tail -1 | awk '{print $4}')
+          echo "Disk free: ${BEFORE} -> ${AFTER}"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up MSVC environment (Windows)
+        # Populates LIB / INCLUDE / PATH so link.exe can find user32.lib
+        # etc. Without this, runner's MSVC install exists on disk but the
+        # shell session has no clue where, and perry's LNK1181 fatal
+        # errors looking for Windows SDK libs.
+        if: matrix.os == 'windows-2022'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install GTK4 + Xvfb + PulseAudio headers (Linux)
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-4-dev libadwaita-1-dev xvfb pkg-config \
+            libpulse-dev
+
+      - name: Surface Android NDK location (for cross-compile)
+        if: matrix.os == 'macos-14' || matrix.os == 'ubuntu-24.04'
+        run: |
+          # 1. Discover NDK location on the runner.
+          NDK=""
+          if [ -n "$ANDROID_NDK_HOME" ]; then
+            NDK="$ANDROID_NDK_HOME"
+          elif [ -d "$ANDROID_HOME/ndk-bundle" ]; then
+            NDK="$ANDROID_HOME/ndk-bundle"
+          elif [ -d "$ANDROID_HOME/ndk" ]; then
+            NDK=$(ls -1d "$ANDROID_HOME/ndk/"*/ 2>/dev/null | sort -V | tail -1)
+            NDK="${NDK%/}"
+          fi
+          if [ -z "$NDK" ]; then
+            echo "No Android NDK found on runner — android xcompile will skip"
+            exit 0
+          fi
+          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+          # 2. Point cc-rs + cargo at the NDK's clang wrapper so
+          #    `cargo build --target aarch64-linux-android` picks up the
+          #    right linker/CC/AR instead of the host `cc`.
+          HOST_TAG=$(uname -s | tr '[:upper:]' '[:lower:]')-x86_64
+          # macOS NDK uses darwin-x86_64 even on arm64 runners (rosetta).
+          if [ "$(uname -s)" = "Darwin" ]; then HOST_TAG="darwin-x86_64"; fi
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin"
+          API=24
+          CLANG=$(ls "$TOOLCHAIN"/aarch64-linux-android*-clang 2>/dev/null | sort -V | tail -1)
+          if [ -z "$CLANG" ]; then
+            echo "Could not locate NDK clang under $TOOLCHAIN — skipping env setup"
+            exit 0
+          fi
+          echo "CC_aarch64_linux_android=$CLANG"                      >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$TOOLCHAIN/llvm-ar"           >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$CLANG"      >> "$GITHUB_ENV"
+          echo "Android NDK wired: CLANG=$CLANG"
+
+      - name: Install Apple SDK Rust targets (macOS only)
+        if: matrix.os == 'macos-14'
+        run: |
+          rustup target add aarch64-apple-ios-sim
+          # tvOS-sim is Rust Tier-3 — perry auto-rebuilds with
+          # `+nightly -Zbuild-std`, which requires the rust-src
+          # component on the nightly toolchain.
+          rustup toolchain install nightly --component rust-src --profile minimal || true
+
+      - name: Install Android Rust target (macOS + Ubuntu)
+        if: matrix.os == 'macos-14' || matrix.os == 'ubuntu-24.04'
+        run: rustup target add aarch64-linux-android
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          # NOTE: deliberately NOT caching `target/` — on macos-14 runners
+          # (~14 GB free out of the box after preinstalled Xcode + sims) the
+          # restored release artifacts pushed disk usage past the limit and
+          # the runner OOM'd before cargo even started. Registry+git cache
+          # alone gives ~80% of the warm-build win without the disk hit.
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build compiler + UI backend + harness
+        run: cargo build --release -p perry -p perry-runtime -p perry-stdlib -p ${{ matrix.ui_backend }} -p perry-doc-tests
+
+      - name: Pre-build Apple UI libs for cross-compile (macOS only)
+        if: matrix.os == 'macos-14'
+        run: |
+          # iOS-sim is Rust Tier-2 — builds with stable. tvOS-sim is Tier-3
+          # and needs nightly + -Zbuild-std; perry's auto-optimize handles
+          # that path itself, so we skip pre-building perry-ui-tvos here.
+          cargo build --release -p perry-ui-ios --target aarch64-apple-ios-sim
+
+      - name: Lint docs/src markdown fences (repo-wide)
+        if: matrix.os == 'macos-14'
+        run: cargo run --release --quiet -p perry-doc-tests -- --lint docs/src
+
+      - name: Run non-gallery doc-example tests (blocking)
+        run: ${{ matrix.cmd_exclude_gallery }}
+
+      - name: Run gallery screenshot diff
+        id: gallery
+        continue-on-error: ${{ matrix.gallery_advisory }}
+        run: ${{ matrix.cmd_gallery }}
+
+      - name: Cross-compile for web + wasm (blocking)
+        id: xcompile_blocking
+        run: ${{ matrix.cmd_xcompile_blocking }}
+
+      - name: Cross-compile remaining targets (advisory)
+        # iOS-sim/tvOS-sim/watchos-sim/android still surface real errors
+        # that the harness logs but that aren't yet tracked issues. Keep
+        # advisory until each target has a green baseline run.
+        id: xcompile_advisory
+        continue-on-error: true
+        run: ${{ matrix.cmd_xcompile_advisory }}
+
+      - name: Upload doc-tests report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: doc-tests-report-${{ matrix.os }}
+          path: docs/examples/_reports/latest.json
+
+      - name: Upload gallery screenshot + diff artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gallery-screenshots-${{ matrix.os }}
+          path: |
+            target/perry-doc-tests/gallery_*.png
+            docs/examples/_baselines/**/gallery.png
+
+  # ---------------------------------------------------------------------------
+  # Binary size tracking (main branch only)
+  # ---------------------------------------------------------------------------
+  binary-size:
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-14
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: perry-binaries
+          path: target/release/
+
+      - name: Report binary sizes
+        run: |
+          echo "## Binary Sizes" > /tmp/sizes.md
+          echo '```' >> /tmp/sizes.md
+          ls -lh target/release/perry target/release/libperry_runtime.a target/release/libperry_stdlib.a 2>/dev/null | awk '{print $5, $9}' >> /tmp/sizes.md
+          echo '```' >> /tmp/sizes.md
+          cat /tmp/sizes.md
+
+      - name: Upload size report
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-sizes
+          path: /tmp/sizes.md

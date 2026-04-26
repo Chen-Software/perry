@@ -77,13 +77,24 @@ pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirT
         Expr::StringSplit { .. } => Some(HirType::Array(Box::new(HirType::String))),
         // Set.values() / Set.keys() → iterable, but Array.from wraps it
         // into an Array. Without an Array.from wrap, it's still iterable.
-        Expr::SetNewFromArray(_) => Some(HirType::Named("Set".into())),
-        Expr::MapNewFromArray(_) | Expr::MapNew => Some(HirType::Named("Map".into())),
+        // Set/Map constructors refine to `Generic { base, type_args: [] }` —
+        // `is_set_expr` / `is_map_expr` check `base == "Set" / "Map"` on the
+        // Generic variant, so `Named("Set")` here used to silently miss the
+        // fast path and `s.has(v)` returned undefined.
+        Expr::SetNewFromArray(_) | Expr::SetNew => Some(HirType::Generic {
+            base: "Set".into(),
+            type_args: Vec::new(),
+        }),
+        Expr::MapNewFromArray(_) | Expr::MapNew => Some(HirType::Generic {
+            base: "Map".into(),
+            type_args: Vec::new(),
+        }),
         // Object.keys() always returns string handles.
         Expr::ObjectKeys(_) => Some(HirType::Array(Box::new(HirType::String))),
         Expr::ObjectGetOwnPropertyNames(_) => Some(HirType::Array(Box::new(HirType::String))),
         Expr::ObjectGetOwnPropertySymbols(_) => Some(HirType::Array(Box::new(HirType::Any))),
         Expr::String(_)
+        | Expr::WtfString(_)
         | Expr::ArrayJoin { .. }
         | Expr::StringCoerce(_)
         | Expr::StringFromCodePoint(_)
@@ -132,17 +143,20 @@ pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirT
         // refined to String, charCodeAt hits the inline string fast
         // path that calls `js_string_char_code_at`.
         Expr::Atob(_) | Expr::Btoa(_) => Some(HirType::String),
-        // fs.readFileSync returns a NaN-boxed string. Without this,
-        // `const text = readFileSync(path); text.split('\n')` routes
-        // .split() through the generic method dispatcher instead of
-        // the string fast path.
-        Expr::FsReadFileSync(_) | Expr::FsReadFileBinary(_) => Some(HirType::String),
+        // fs.readFileSync(path, 'utf8') returns a NaN-boxed string;
+        // fs.readFileSync(path) (no encoding, lowered to FsReadFileBinary)
+        // returns a Buffer. Refining the string variant lets `.split()`
+        // / `.length` / etc. take the string fast path. The Buffer variant
+        // dispatches through the POINTER_TAG path with BUFFER_REGISTRY.
+        Expr::FsReadFileSync(_) => Some(HirType::String),
         // `process.hrtime.bigint()` returns a BigInt value. Refining the
         // local type lets `hr2 >= hr1` route through the BigInt compare
         // fast path (`js_bigint_cmp`) instead of fcmp-on-NaN.
         Expr::ProcessHrtimeBigint => Some(HirType::BigInt),
         // `BigInt(x)` / `0n` literal via StringCoerce paths.
-        Expr::BigInt(_) => Some(HirType::BigInt),
+        // `BigInt('123')` lowers to BigIntCoerce; refine so `const x = BigInt(str)`
+        // gets local type BigInt and `x === y` routes through js_bigint_cmp.
+        Expr::BigInt(_) | Expr::BigIntCoerce(_) => Some(HirType::BigInt),
         // `let l = new ClassName<...>()` — refine to Named(ClassName)
         // so subsequent `l.method()` dispatch goes through the class
         // method registry instead of the universal fallback. This is
@@ -376,10 +390,35 @@ pub(crate) fn compute_auto_captures(
 pub(crate) fn is_bigint_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
     match e {
         Expr::BigInt(_) => true,
+        // `BigInt(x)` always returns a bigint.
+        Expr::BigIntCoerce(_) => true,
         Expr::LocalGet(id) => matches!(
             ctx.local_types.get(id),
             Some(HirType::BigInt)
         ),
+        // Nested bigint arithmetic — `(n * 10n) + d` must see the
+        // inner `n * 10n` as bigint so the outer `+` routes through
+        // the bigint dispatch instead of the float fallback.
+        Expr::Binary { op, left, right } => {
+            matches!(
+                op,
+                BinaryOp::Add
+                    | BinaryOp::Sub
+                    | BinaryOp::Mul
+                    | BinaryOp::Div
+                    | BinaryOp::Mod
+                    // Bitwise ops on bigints produce bigints — include
+                    // them so `(a * prime) & mask64` where both operands
+                    // are bigint stays bigint-typed all the way up the
+                    // chain. Without this the outer `&` falls through to
+                    // the i32 ToInt32 path and returns 0 (closes #39).
+                    | BinaryOp::BitAnd
+                    | BinaryOp::BitOr
+                    | BinaryOp::BitXor
+                    | BinaryOp::Shl
+                    | BinaryOp::Shr
+            ) && (is_bigint_expr(ctx, left) || is_bigint_expr(ctx, right))
+        }
         _ => false,
     }
 }
@@ -601,7 +640,7 @@ pub(crate) fn is_map_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
 /// the string path when the value might actually be a number.
 pub(crate) fn is_definitely_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
     match e {
-        Expr::String(_) => true,
+        Expr::String(_) | Expr::WtfString(_) => true,
         Expr::LocalGet(id) => {
             matches!(ctx.local_types.get(id), Some(HirType::String))
         }
@@ -669,7 +708,7 @@ pub(crate) fn is_definitely_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
 
 pub(crate) fn is_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
     match e {
-        Expr::String(_) => true,
+        Expr::String(_) | Expr::WtfString(_) => true,
         Expr::LocalGet(id) => {
             match ctx.local_types.get(id) {
                 Some(HirType::String) => true,
@@ -1055,7 +1094,15 @@ pub(crate) fn is_array_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
 pub(crate) fn static_type_of(ctx: &FnCtx<'_>, e: &Expr) -> Option<HirType> {
     match e {
         Expr::Array(_) => Some(HirType::Array(Box::new(HirType::Any))),
-        Expr::String(_) => Some(HirType::String),
+        // Built-in `new Array(...)` produces a real array, not a generic
+        // class instance. Without this, the receiver of any chained
+        // `.fill()` / `.push()` / `.length` would not be recognized by
+        // `is_array_expr`, falling out of the array method dispatch
+        // and crashing.
+        Expr::New { class_name, .. } if class_name == "Array" => {
+            Some(HirType::Array(Box::new(HirType::Any)))
+        }
+        Expr::String(_) | Expr::WtfString(_) => Some(HirType::String),
         Expr::Number(_) | Expr::Integer(_) => Some(HirType::Number),
         Expr::Bool(_) => Some(HirType::Boolean),
         Expr::LocalGet(id) => ctx.local_types.get(id).cloned(),

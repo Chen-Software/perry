@@ -51,10 +51,12 @@ struct FetchResponse {
 
 /// Helper to extract string from StringHeader pointer
 unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
-    if ptr.is_null() {
+    // NaN-boxed TAG_UNDEFINED (0x7FFC_0000_0000_0001) unboxes to 0x1
+    // after POINTER_MASK. Treat any pointer below page size as invalid.
+    if ptr.is_null() || (ptr as usize) < 0x1000 {
         return None;
     }
-    let len = (*ptr).length as usize;
+    let len = (*ptr).byte_len as usize;
     let data_ptr = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data_ptr, len);
     std::str::from_utf8(bytes).ok().map(|s| s.to_string())
