@@ -8598,8 +8598,10 @@ pub fn run_with_parse_cache(
 
     // Strip debug symbols from the final binary (reduces size significantly)
     // Skip for iOS/Android cross-compilation — host strip can't handle foreign architectures
+    // Skip for watchOS — bundling above already moved exe_path into the .app
     // Skip when PERRY_DEBUG_SYMBOLS=1 is set — keep symbols for crash debugging
-    if !is_dylib && !is_ios && !is_visionos && !is_tvos && target.as_deref() != Some("android")
+    if !is_dylib && !is_ios && !is_visionos && !is_tvos && !is_watchos
+        && target.as_deref() != Some("android")
         && std::env::var("PERRY_DEBUG_SYMBOLS").is_err() {
         if ctx.needs_plugins {
             // When plugins are enabled, use strip -x to keep exported symbols

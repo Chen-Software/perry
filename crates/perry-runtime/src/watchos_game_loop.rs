@@ -30,15 +30,38 @@ extern "C" {
 
     /// Provided by native libraries (e.g., Bloom Engine) to register ObjC classes
     /// (like a custom WKApplicationDelegate) before WKApplicationMain starts.
+    /// Has a weak no-op default below — native lib's strong definition wins.
     fn perry_register_native_classes();
 
     /// Called when the window/root view becomes available. Native libraries
     /// implement this to create their Metal view and wgpu surface. Passed
     /// NULL on watchOS because there's no UIWindowScene equivalent — the
     /// native lib is expected to resolve the active WKApplication and
-    /// root controller itself.
+    /// root controller itself. Has a weak no-op default below — native
+    /// lib's strong definition wins.
     fn perry_scene_will_connect(scene: *const c_void);
 }
+
+// Weak no-op fallbacks. The native lib's strong definitions take precedence
+// at link time on Mach-O — so users who plumb in a Bloom-style native lib
+// override these with their real CAMetalLayer setup. With no native lib the
+// build still succeeds (and runs to a black screen) instead of failing with
+// "Undefined symbols: _perry_register_native_classes / _perry_scene_will_connect".
+// arm64 `ret` is a single instruction; the params on the C side are c_void
+// pointers we never read.
+core::arch::global_asm!(
+    ".globl _perry_register_native_classes",
+    ".weak_definition _perry_register_native_classes",
+    ".p2align 2",
+    "_perry_register_native_classes:",
+    "    ret",
+    "",
+    ".globl _perry_scene_will_connect",
+    ".weak_definition _perry_scene_will_connect",
+    ".p2align 2",
+    "_perry_scene_will_connect:",
+    "    ret",
+);
 
 /// App delegate — calls `perry_scene_will_connect(NULL)` on launch so
 /// native libs can set up their Metal view without owning the delegate.
