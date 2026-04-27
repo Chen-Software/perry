@@ -115,6 +115,32 @@ func benchAccumulate() {
 	fmt.Printf("  checksum: %.0f\n", sum)
 }
 
+// Data-dependent loop with sequential multiply-carry. Sibling to
+// benchLoopOverhead but genuinely non-foldable: array reads + a
+// multiplicative carry through `sum` defeat any IV-simplify or
+// reassoc the Go compiler might attempt. (Go's compiler does not
+// have a fast-math flag; this loop runs identically with or without
+// optimization in stock Go.)
+func benchLoopDataDependent() {
+	const N = 64
+	const ITERATIONS = 100_000_000
+	seed := uint64(42)
+	x := make([]float64, N)
+	for i := 0; i < N; i++ {
+		seed = (seed*1103515245 + 12345) & 0x7FFFFFFF
+		// [0.5, 1.0): contracts to a bounded fixed point. See bench.rs.
+		x[i] = 0.5 + (float64(seed)/2_147_483_647.0)*0.5
+	}
+	start := time.Now()
+	sum := 1.0
+	for i := 0; i < ITERATIONS; i++ {
+		sum = sum*x[i&(N-1)] + x[(i*7)&(N-1)]
+	}
+	elapsed := time.Since(start).Milliseconds()
+	fmt.Printf("loop_data_dependent:%d\n", elapsed)
+	fmt.Printf("  checksum: %.6f\n", sum)
+}
+
 func main() {
 	benchFibonacci()
 	benchLoopOverhead()
@@ -124,4 +150,5 @@ func main() {
 	benchObjectCreate()
 	benchNestedLoops()
 	benchAccumulate()
+	benchLoopDataDependent()
 }

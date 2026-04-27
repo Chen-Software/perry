@@ -976,6 +976,54 @@ pub fn fix_cross_module_native_instances(
         }
     }
 
+    // Variable-to-variable propagation: `let sock: Socket = plainSock` —
+    // run a fixed-point scan so each rebind of an already-tracked native
+    // instance keeps the dispatch information. Without this, a typed
+    // ident-rebind drops the (module, class) tag and `sock.on(...)`
+    // falls through to typed-interface dispatch on the small handle.
+    {
+        let mut changed = true;
+        while changed {
+            changed = false;
+            // Init block
+            for stmt in &module.init {
+                if scan_for_ident_init_propagation(stmt, &mut local_native_instances, &mut local_id_native_instances) {
+                    changed = true;
+                }
+            }
+            for func in &module.functions {
+                for stmt in &func.body {
+                    if scan_for_ident_init_propagation(stmt, &mut local_native_instances, &mut local_id_native_instances) {
+                        changed = true;
+                    }
+                }
+            }
+            for class in &module.classes {
+                if let Some(ctor) = &class.constructor {
+                    for stmt in &ctor.body {
+                        if scan_for_ident_init_propagation(stmt, &mut local_native_instances, &mut local_id_native_instances) {
+                            changed = true;
+                        }
+                    }
+                }
+                for method in &class.methods {
+                    for stmt in &method.body {
+                        if scan_for_ident_init_propagation(stmt, &mut local_native_instances, &mut local_id_native_instances) {
+                            changed = true;
+                        }
+                    }
+                }
+                for method in &class.static_methods {
+                    for stmt in &method.body {
+                        if scan_for_ident_init_propagation(stmt, &mut local_native_instances, &mut local_id_native_instances) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if local_native_instances.is_empty() && local_id_native_instances.is_empty() {
         return;
     }
@@ -1091,6 +1139,104 @@ fn scan_for_native_func_returns(
         }
         _ => {}
     }
+}
+
+/// Scan a statement (recursively) for `let x = y` patterns where `y` is
+/// already a known native instance. When found, propagate the (module,
+/// class) tag to `x` so its later `.on(...) / .write(...)` dispatches go
+/// to the native runtime instead of the typed-interface fallback.
+///
+/// Returns `true` when at least one new propagation happened — the caller
+/// fixes a point by re-running until stable.
+fn scan_for_ident_init_propagation(
+    stmt: &Stmt,
+    local_native_instances: &mut HashMap<String, (String, String)>,
+    local_id_native_instances: &mut HashMap<perry_types::LocalId, (String, String)>,
+) -> bool {
+    let mut changed = false;
+    match stmt {
+        Stmt::Let { id, name, init, .. } => {
+            if let Some(init_expr) = init {
+                if let Some((module, class)) = lookup_native_from_init_ident(init_expr, local_native_instances, local_id_native_instances) {
+                    let info = (module, class);
+                    if local_native_instances.insert(name.clone(), info.clone()).is_none() {
+                        changed = true;
+                    }
+                    if local_id_native_instances.insert(*id, info).is_none() {
+                        changed = true;
+                    }
+                }
+            }
+        }
+        Stmt::If { then_branch, else_branch, .. } => {
+            for s in then_branch {
+                if scan_for_ident_init_propagation(s, local_native_instances, local_id_native_instances) {
+                    changed = true;
+                }
+            }
+            if let Some(else_stmts) = else_branch {
+                for s in else_stmts {
+                    if scan_for_ident_init_propagation(s, local_native_instances, local_id_native_instances) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+        Stmt::While { body, .. } | Stmt::For { body, .. } => {
+            for s in body {
+                if scan_for_ident_init_propagation(s, local_native_instances, local_id_native_instances) {
+                    changed = true;
+                }
+            }
+        }
+        Stmt::Try { body, catch, finally } => {
+            for s in body {
+                if scan_for_ident_init_propagation(s, local_native_instances, local_id_native_instances) {
+                    changed = true;
+                }
+            }
+            if let Some(catch_block) = catch {
+                for s in &catch_block.body {
+                    if scan_for_ident_init_propagation(s, local_native_instances, local_id_native_instances) {
+                        changed = true;
+                    }
+                }
+            }
+            if let Some(finally_stmts) = finally {
+                for s in finally_stmts {
+                    if scan_for_ident_init_propagation(s, local_native_instances, local_id_native_instances) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+        Stmt::Switch { cases, .. } => {
+            for case in cases {
+                for s in &case.body {
+                    if scan_for_ident_init_propagation(s, local_native_instances, local_id_native_instances) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    changed
+}
+
+/// If the init expression resolves to a known native instance via a
+/// LocalGet (HIR's representation of an ident reference), return its
+/// (module, class). TS type casts are stripped at lowering time, so we
+/// only need to inspect LocalGet here.
+fn lookup_native_from_init_ident(
+    expr: &Expr,
+    _local_native_instances: &HashMap<String, (String, String)>,
+    local_id_native_instances: &HashMap<perry_types::LocalId, (String, String)>,
+) -> Option<(String, String)> {
+    if let Expr::LocalGet(id) = expr {
+        return local_id_native_instances.get(id).cloned();
+    }
+    None
 }
 
 /// Walk an expression for nested closures and scan their bodies. Catches

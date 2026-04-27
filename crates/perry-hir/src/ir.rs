@@ -14,12 +14,15 @@ pub const TYPED_ARRAY_KIND_INT32: u8 = 4;
 pub const TYPED_ARRAY_KIND_UINT32: u8 = 5;
 pub const TYPED_ARRAY_KIND_FLOAT32: u8 = 6;
 pub const TYPED_ARRAY_KIND_FLOAT64: u8 = 7;
+/// Uint8ClampedArray: 1-byte elements, stores via ToUint8Clamp (not truncate-wrap).
+pub const TYPED_ARRAY_KIND_UINT8_CLAMPED: u8 = 8;
 
 /// Map a class name (e.g. "Int32Array") to its `TYPED_ARRAY_KIND_*` tag.
 pub fn typed_array_kind_for_name(name: &str) -> Option<u8> {
     match name {
         "Int8Array" => Some(TYPED_ARRAY_KIND_INT8),
-        "Uint8Array" | "Uint8ClampedArray" => Some(TYPED_ARRAY_KIND_UINT8),
+        "Uint8Array" => Some(TYPED_ARRAY_KIND_UINT8),
+        "Uint8ClampedArray" => Some(TYPED_ARRAY_KIND_UINT8_CLAMPED),
         "Int16Array" => Some(TYPED_ARRAY_KIND_INT16),
         "Uint16Array" => Some(TYPED_ARRAY_KIND_UINT16),
         "Int32Array" => Some(TYPED_ARRAY_KIND_INT32),
@@ -38,8 +41,17 @@ pub const NATIVE_MODULES: &[&str] = &[
     "pg",
     "uuid",
     "bcrypt",
-    // Note: ioredis NOT in NATIVE_MODULES - native class tracking happens via class name detection
-    // in lower.rs. Adding it here would make imports skip JS module loading.
+    // ioredis is now in NATIVE_MODULES — the prior workaround (class-name-only
+    // tracking in lower.rs:910) was needed when `import { Redis } from 'ioredis'`
+    // was expected to fall through to a JS interpreter, but Perry's native Rust
+    // ioredis impl is the canonical path and the JS fallback path no longer
+    // runs anything. Keeping it out of NATIVE_MODULES forced `requires_stdlib`
+    // to return false, which made `Linking (runtime-only)` skip the stdlib
+    // archive — every direct `js_ioredis_*` reference (e.g. from the new
+    // `lower_builtin_new` "Redis" branch below) link-failed with `Undefined
+    // symbols: _js_ioredis_new`. Listing it here lets the linker pull in
+    // perry-stdlib (gated on the `database-redis` feature via stdlib_features.rs).
+    "ioredis",
     "axios",
     "node-fetch",
     "ws",
@@ -80,6 +92,17 @@ pub const NATIVE_MODULES: &[&str] = &[
     "decimal.js",
     "bignumber.js",
     "exponential-backoff",
+    // Lodash utility functions (named import form: import { chunk } from 'lodash')
+    "lodash",
+    // Date/time libraries
+    "dayjs",
+    "moment",
+    // Image processing
+    "sharp",
+    // HTML parsing
+    "cheerio",
+    // Job scheduling (npm 'cron' package; 'node-cron' is a separate alias below)
+    "cron",
     // HTTP framework
     "fastify",
     // Node.js built-in modules
@@ -763,6 +786,10 @@ pub enum Expr {
     Integer(i64), // Integer literal that fits in i64 (for optimization)
     BigInt(String), // Store as string to preserve precision
     String(String),
+    /// String literal containing WTF-8 bytes (lone surrogates U+D800..U+DFFF).
+    /// Raw WTF-8 bytes — cannot be represented as a valid Rust String.
+    /// Lowers to js_string_from_wtf8_bytes at runtime.
+    WtfString(Vec<u8>),
     /// Localizable string — resolved at compile time from locale files.
     /// The string_idx indexes into the global i18n string table (2D: [locale][key]).
     /// For parameterized strings like "Hello, {name}!", params contains the values to interpolate.
@@ -1123,6 +1150,22 @@ pub enum Expr {
 
     // JSON operations
     JsonParse(Box<Expr>),                // JSON.parse(string) -> value
+    /// `JSON.parse<T>(string)` with a compile-time type argument
+    /// (issue #179 tier 1 via typed-parse plan). The `ty` carries the
+    /// expected shape so codegen can emit a specialized parse call.
+    /// `ordered_keys`, when present, is the field list in SOURCE order
+    /// (as declared in the TypeScript interface/type literal) —
+    /// preserved from the AST because `ObjectType::properties` is a
+    /// HashMap that loses insertion order. Codegen uses this to emit
+    /// the shape hint in an order that matches how JSON.stringify
+    /// output typically lays out fields (declaration order), so the
+    /// per-field fast path in `parse_object_shaped` actually hits.
+    /// Semantically identical to `JsonParse` (the `<T>` is fully
+    /// erased at runtime — Node-compatible); Perry may opt into a
+    /// faster specialized path per shape. Falls back to the generic
+    /// parser transparently if the input doesn't match the declared
+    /// shape.
+    JsonParseTyped { text: Box<Expr>, ty: Type, ordered_keys: Option<Vec<String>> },
     JsonParseReviver { text: Box<Expr>, reviver: Box<Expr> },
     JsonParseWithReviver(Box<Expr>, Box<Expr>),
     JsonStringify(Box<Expr>),            // JSON.stringify(value) -> string

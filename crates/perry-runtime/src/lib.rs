@@ -24,6 +24,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 pub mod value;
 pub mod gc;
 pub mod arena;
+pub mod color_parse;
 pub mod object;
 pub mod array;
 pub mod map;
@@ -58,6 +59,7 @@ pub mod child_process;
 // in-tree code references it.
 // pub mod net;
 pub mod json;
+pub mod json_tape;
 pub mod i18n;
 pub mod weakref;
 pub mod static_plugins;

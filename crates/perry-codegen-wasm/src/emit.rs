@@ -334,7 +334,33 @@ fn map_ui_method(method: &str, class_name: Option<&str>) -> &'static str {
         "setFrame" | "set_frame" => "perry_ui_set_frame",
         "setCornerRadius" | "set_corner_radius" => "perry_ui_set_corner_radius",
         "setBorder" | "set_border" => "perry_ui_set_border",
-        "setOpacity" | "set_opacity" => "perry_ui_set_opacity",
+        // Apple-style split setters (issue #185 Phase B closure). Map
+        // both to the new joint-state JS functions in wasm_runtime.js
+        // that cache (color, width) and re-emit `el.style.border`.
+        "widgetSetBorderColor" => "perry_ui_widget_set_border_color",
+        "widgetSetBorderWidth" => "perry_ui_widget_set_border_width",
+        // Issue #185 Phase B closure 11 — Web aliases that bring the
+        // matrix Web column to full wired-on-non-Stub parity. Each
+        // routes to an existing JS function (most simply reusing the
+        // generic widget setters that already do the same DOM work).
+        "widgetSetBackgroundGradient" => "perry_ui_widget_set_background_gradient",
+        "textSetSelectable" => "perry_ui_text_set_selectable",
+        // textfield-specific setters reuse the generic ones — DOM
+        // <input> takes the same `el.style.*` props as a generic
+        // element.
+        "textfieldSetBackgroundColor" => "perry_ui_set_background",
+        "textfieldSetTextColor" => "perry_ui_set_foreground",
+        "textfieldSetFontSize" => "perry_ui_set_font_size",
+        "textfieldSetBorderless" => "perry_ui_textfield_set_borderless",
+        "stackSetAlignment" => "perry_ui_stack_set_alignment",
+        // Text decoration (issue #185 Phase B). 0=none, 1=underline,
+        // 2=strikethrough on the canonical FFI; CSS-side translates.
+        "textSetDecoration" | "text_set_decoration" => "perry_ui_text_set_decoration",
+        // Drop shadow (issue #185 Phase B closure 2). Mirrors the
+        // canonical Apple-side name so the matrix has a single FFI
+        // symbol per row. JS runtime maps to `el.style.boxShadow`.
+        "widgetSetShadow" | "set_shadow" => "perry_ui_widget_set_shadow",
+        "setOpacity" | "set_opacity" | "widgetSetOpacity" => "perry_ui_set_opacity",
         "setEnabled" | "set_enabled" => "perry_ui_set_enabled",
         "setTooltip" | "set_tooltip" => "perry_ui_set_tooltip",
         "setControlSize" | "set_control_size" => "perry_ui_set_control_size",
@@ -413,6 +439,17 @@ fn map_ui_method(method: &str, class_name: Option<&str>) -> &'static str {
         "pickerAddItem" => "perry_ui_picker_add_item",
         "pickerSetSelected" => "perry_ui_picker_set_selected",
         "pickerGetSelected" => "perry_ui_picker_get_selected",
+        // Camera (issue #191) — Web has no live-camera FFI yet, so the
+        // wasm_runtime.js stubs return 0 / -1. The dispatch entries here
+        // exist so user code calling `CameraView()` from a browser build
+        // resolves rather than throwing "perry_ui_unknown".
+        "CameraView" | "camera_create" => "perry_ui_camera_create",
+        "cameraStart" => "perry_ui_camera_start",
+        "cameraStop" => "perry_ui_camera_stop",
+        "cameraFreeze" => "perry_ui_camera_freeze",
+        "cameraUnfreeze" => "perry_ui_camera_unfreeze",
+        "cameraSampleColor" => "perry_ui_camera_sample_color",
+        "cameraSetOnTap" => "perry_ui_camera_set_on_tap",
         // Image
         "imageSetSize" => "perry_ui_image_set_size",
         "imageSetTint" => "perry_ui_image_set_tint",
@@ -3742,14 +3779,20 @@ impl<'a> FuncEmitCtx<'a> {
             Stmt::For { init, condition, update, body } => {
                 // <init>
                 // block $break
-                //   loop $continue
+                //   loop $loop_top
                 //     <condition>
-                //     is_truthy ; i32.eqz ; br_if $break
-                //     <body>
+                //     is_truthy ; i32.eqz ; br_if $break   (rel=1, loop is directly inside block)
+                //     block $body_end                       ← continue targets this block's exit
+                //       <body>                             ← continue: br(rel) exits $body_end
+                //     end                                  ← fall through to update
                 //     <update> ; drop
-                //     br $continue
+                //     br 0                                 ← restart $loop_top (rel=0)
                 //   end
                 // end
+                //
+                // Wrapping the body in $body_end ensures `continue` falls through to
+                // the update expression before restarting, fixing the iterator-stuck
+                // bug when `continue` fires inside an if/else chain (issue #137).
                 if let Some(init_stmt) = init {
                     self.emit_stmt(func, init_stmt, in_returning_func);
                 }
@@ -3761,6 +3804,20 @@ impl<'a> FuncEmitCtx<'a> {
 
                 func.instruction(&Instruction::Loop(wasm_encoder::BlockType::Empty));
                 self.block_depth += 1;
+                // block_depth is now the loop's depth; Br(0) here restarts the loop.
+
+                if let Some(cond) = condition {
+                    self.emit_frame_begin(func, 1);
+                    self.emit_store_arg(func, 0, cond);
+                    self.emit_memcall_i32(func, "is_truthy", 1);
+                    func.instruction(&Instruction::I32Eqz);
+                    // loop is directly inside block, so break is always 1 level up
+                    func.instruction(&Instruction::BrIf(1));
+                }
+
+                // Inner block: continue targets this block's exit, then update runs.
+                func.instruction(&Instruction::Block(wasm_encoder::BlockType::Empty));
+                self.block_depth += 1;
                 let continue_d = self.block_depth;
                 self.loop_depth.push(continue_d);
 
@@ -3769,17 +3826,15 @@ impl<'a> FuncEmitCtx<'a> {
                     true
                 } else { false };
 
-                if let Some(cond) = condition {
-                    self.emit_frame_begin(func, 1);
-                    self.emit_store_arg(func, 0, cond);
-                    self.emit_memcall_i32(func, "is_truthy", 1);
-                    func.instruction(&Instruction::I32Eqz);
-                    func.instruction(&Instruction::BrIf(1));
-                }
-
                 for s in body {
                     self.emit_stmt(func, s, in_returning_func);
                 }
+
+                // Close inner body block; continue lands here, then falls to update.
+                if label_pushed { self.label_stack.pop(); }
+                self.loop_depth.pop();
+                self.block_depth -= 1;
+                func.instruction(&Instruction::End);
 
                 if let Some(upd) = update {
                     self.emit_expr(func, upd);
@@ -3788,12 +3843,11 @@ impl<'a> FuncEmitCtx<'a> {
                     }
                 }
 
+                // Restart loop (block_depth == loop's depth, so rel=0).
                 func.instruction(&Instruction::Br(0));
                 self.block_depth -= 1;
                 func.instruction(&Instruction::End);
 
-                if label_pushed { self.label_stack.pop(); }
-                self.loop_depth.pop();
                 self.break_depth.pop();
                 self.block_depth -= 1;
                 func.instruction(&Instruction::End);
@@ -4284,10 +4338,19 @@ impl<'a> FuncEmitCtx<'a> {
                 match callee.as_ref() {
                     Expr::FuncRef(id) => {
                         if let Some(&idx) = self.emitter.func_map.get(id) {
-                            // Pad missing arguments with TAG_UNDEFINED (for optional params)
+                            // Reconcile source arg count with callee arity. JS semantics
+                            // allow a call to pass any number of args, but WASM `call`
+                            // consumes exactly the declared param count. Pad up with
+                            // `undefined` for missing optional args and drop excess
+                            // evaluated args from the top of the operand stack, which
+                            // would otherwise accumulate past the call and trip the
+                            // validator at the enclosing `end` (#183).
                             if let Some(&expected) = self.emitter.func_param_counts.get(&idx) {
                                 for _ in args.len()..expected {
                                     func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
+                                }
+                                for _ in expected..args.len() {
+                                    func.instruction(&Instruction::Drop);
                                 }
                             }
                             func.instruction(&Instruction::Call(idx));
@@ -4305,12 +4368,16 @@ impl<'a> FuncEmitCtx<'a> {
                         }
                     }
                     Expr::ExternFuncRef { name, return_type, .. } => {
-                        // Cross-module or FFI function call — look up by name
+                        // Cross-module or FFI function call — look up by name.
+                        // See FuncRef arm above for why both pad-up and drop-excess
+                        // are required (#183).
                         if let Some(&idx) = self.emitter.func_name_map.get(name) {
-                            // Pad missing arguments with TAG_UNDEFINED (for optional params)
                             if let Some(&expected) = self.emitter.func_param_counts.get(&idx) {
                                 for _ in args.len()..expected {
                                     func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
+                                }
+                                for _ in expected..args.len() {
+                                    func.instruction(&Instruction::Drop);
                                 }
                             }
                             func.instruction(&Instruction::Call(idx));
@@ -5816,11 +5883,17 @@ impl<'a> FuncEmitCtx<'a> {
                     for arg in args {
                         self.emit_expr(func, arg);
                     }
-                    // Pad missing arguments with TAG_UNDEFINED
+                    // Keep the operand stack aligned with the ctor's arity: pad
+                    // missing optional args with `undefined`, and drop excess
+                    // evaluated args so they don't outlive the `call` and
+                    // accumulate on the enclosing block's stack (#183).
                     if let Some(&expected) = self.emitter.func_param_counts.get(&ctor_idx) {
                         let provided = args.len() + 1;
                         for _ in provided..expected {
                             func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
+                        }
+                        for _ in expected..provided {
+                            func.instruction(&Instruction::Drop);
                         }
                     }
                     func.instruction(&Instruction::Call(ctor_idx));
@@ -5865,6 +5938,9 @@ impl<'a> FuncEmitCtx<'a> {
                                 let provided = args.len() + 1;
                                 for _ in provided..expected {
                                     func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
+                                }
+                                for _ in expected..provided {
+                                    func.instruction(&Instruction::Drop);
                                 }
                             }
                             func.instruction(&Instruction::Call(ctor_idx));
@@ -5939,9 +6015,19 @@ impl<'a> FuncEmitCtx<'a> {
                 // Try to call compiled static method directly
                 if let Some(statics) = self.emitter.class_static_map.get(class_name.as_str()) {
                     if let Some(&static_idx) = statics.get(method_name.as_str()) {
-                        // Direct call to compiled static method (no this param)
+                        // Direct call to compiled static method (no this param).
+                        // Same arity reconciliation as FuncRef/ExternFuncRef arms
+                        // (#183): pad-up for missing args, drop-excess for extras.
                         for arg in args {
                             self.emit_expr(func, arg);
+                        }
+                        if let Some(&expected) = self.emitter.func_param_counts.get(&static_idx) {
+                            for _ in args.len()..expected {
+                                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
+                            }
+                            for _ in expected..args.len() {
+                                func.instruction(&Instruction::Drop);
+                            }
                         }
                         func.instruction(&Instruction::Call(static_idx));
                         return;

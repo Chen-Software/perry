@@ -244,8 +244,9 @@ pub extern "C" fn perry_ui_toggle_create(label_ptr: i64, on_change: f64) -> i64 
 
 /// Create a Slider.
 #[no_mangle]
-pub extern "C" fn perry_ui_slider_create(min: f64, max: f64, initial: f64, on_change: f64) -> i64 {
-    widgets::slider::create(min, max, initial, on_change)
+pub extern "C" fn perry_ui_slider_create(min: f64, max: f64, on_change: f64) -> i64 {
+    // Codegen emits 3-arg `Slider(min, max, onChange)`; default initial=min.
+    widgets::slider::create(min, max, min, on_change)
 }
 
 /// Create a ScrollView.
@@ -453,6 +454,14 @@ pub extern "C" fn perry_ui_text_set_selectable(handle: i64, selectable: f64) {
     widgets::text::set_selectable(handle, selectable != 0.0);
 }
 
+/// Set text decoration (issue #185 Phase B closure). Currently
+/// stub-with-state on Windows; see `widgets::text::set_decoration`
+/// for rationale.
+#[no_mangle]
+pub extern "C" fn perry_ui_text_set_decoration(handle: i64, decoration: i64) {
+    widgets::text::set_decoration(handle, decoration);
+}
+
 /// Set the font family.
 #[no_mangle]
 pub extern "C" fn perry_ui_text_set_font_family(handle: i64, family_ptr: i64) {
@@ -557,6 +566,41 @@ pub extern "C" fn perry_ui_widget_set_corner_radius(handle: i64, radius: f64) {
     widgets::set_corner_radius(handle, radius);
 }
 
+/// Set drop shadow on a widget (issue #185 Phase B closure).
+///
+/// Currently a stub-with-state: params are stored in `SHADOW_PARAMS`
+/// but no paint pass consumes them yet. Real Windows shadows need
+/// either DirectComposition or a custom WM_PAINT pass — separate
+/// follow-up. The matrix marks Windows as `Stub` for this prop so
+/// users know the symbol resolves but rendering is deferred.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_shadow(
+    handle: i64,
+    r: f64, g: f64, b: f64, a: f64,
+    blur: f64, offset_x: f64, offset_y: f64,
+) {
+    widgets::set_shadow(handle, r, g, b, a, blur, offset_x, offset_y);
+}
+
+/// Set static opacity on a widget (issue #185 Phase B closure).
+/// Currently stub-with-state; see `widgets::set_opacity` for rationale.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_opacity(handle: i64, opacity: f64) {
+    widgets::set_opacity(handle, opacity);
+}
+
+/// Set border color (issue #185 Phase B closure). Stub-with-state.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_border_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    widgets::set_border_color(handle, r, g, b, a);
+}
+
+/// Set border width (issue #185 Phase B closure). Stub-with-state.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_border_width(handle: i64, width: f64) {
+    widgets::set_border_width(handle, width);
+}
+
 /// Set context menu on a widget.
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_set_context_menu(widget_handle: i64, menu_handle: i64) {
@@ -627,6 +671,19 @@ pub extern "C" fn perry_ui_canvas_stroke(handle: i64, r: f64, g: f64, b: f64, a:
 pub extern "C" fn perry_ui_canvas_fill_gradient(handle: i64, r1: f64, g1: f64, b1: f64, a1: f64, r2: f64, g2: f64, b2: f64, a2: f64, direction: f64) {
     widgets::canvas::fill_gradient(handle, r1, g1, b1, a1, r2, g2, b2, a2, direction);
 }
+
+#[no_mangle] pub extern "C" fn perry_ui_canvas_set_fill_color(_h: i64, _r: f64, _g: f64, _b: f64, _a: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_set_stroke_color(_h: i64, _r: f64, _g: f64, _b: f64, _a: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_set_line_width(_h: i64, _w: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_fill_rect(_h: i64, _x: f64, _y: f64, _w: f64, _ht: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_stroke_rect(_h: i64, _x: f64, _y: f64, _w: f64, _ht: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_clear_rect(h: i64, _x: f64, _y: f64, _w: f64, _ht: f64) { widgets::canvas::clear(h); }
+#[no_mangle] pub extern "C" fn perry_ui_canvas_arc(_h: i64, _x: f64, _y: f64, _r: f64, _sa: f64, _ea: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_close_path(_h: i64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_fill(_h: i64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_stroke_path(_h: i64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_fill_text(_h: i64, _ptr: i64, _x: f64, _y: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_set_font(_h: i64, _ptr: i64) {}
 
 // =============================================================================
 // Menu
@@ -1004,6 +1061,44 @@ pub extern "C" fn perry_system_keychain_delete(key_ptr: i64) {
 pub extern "C" fn perry_system_notification_send(title_ptr: i64, body_ptr: i64) {
     system::notification_send(title_ptr as *const u8, body_ptr as *const u8);
 }
+
+/// Stub: WinRT push (PushNotificationTrigger) is a separate PR (#95
+/// follow-up). Symbol exists so TS code that calls
+/// `notificationRegisterRemote` links and runs without crashing.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_register_remote(_callback: f64) {}
+
+/// Stub: see `perry_system_notification_register_remote` above.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_receive(_callback: f64) {}
+
+/// Stub (#98): WNS background delivery isn't wired here yet (separate from
+/// the toast pipeline). Symbol exists so cross-platform user code linking
+/// against perry-ui-windows resolves cleanly. Callback is silently dropped.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_background_receive(_callback: f64) {}
+
+/// Stub: ToastNotifier.AddToSchedule wiring is a separate PR (#96 follow-up).
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_interval(
+    _id_ptr: i64, _title_ptr: i64, _body_ptr: i64, _seconds: f64, _repeats: f64,
+) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_calendar(
+    _id_ptr: i64, _title_ptr: i64, _body_ptr: i64, _timestamp_ms: f64,
+) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_location(
+    _id_ptr: i64, _title_ptr: i64, _body_ptr: i64, _lat: f64, _lon: f64, _radius: f64,
+) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_cancel(_id_ptr: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_tap(_callback: f64) {}
 
 #[no_mangle]
 pub extern "C" fn perry_system_get_locale() -> i64 {
@@ -1406,6 +1501,32 @@ pub extern "C" fn hone_lsp_send(_handle: i64, _msg: i64) {}
 
 #[no_mangle]
 pub extern "C" fn hone_lsp_stop(_handle: i64) {}
+
+// --- Camera stubs (issue #191) ---
+// Real implementations live in `perry-ui-ios` and `perry-ui-android`. The
+// Windows backend doesn't have a camera capture pipeline yet; these no-ops
+// let user code that targets multiple platforms link cleanly.
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_create() -> i64 { 0 }
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_start(_handle: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_stop(_handle: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_freeze(_handle: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_unfreeze(_handle: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_sample_color(_x: f64, _y: f64) -> f64 { -1.0 }
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_set_on_tap(_handle: i64, _callback: f64) {}
 
 // Override setjmp with a no-op stub that always returns 0.
 // Perry's try/catch uses setjmp/longjmp but since we make readFileSync

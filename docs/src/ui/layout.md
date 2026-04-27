@@ -1,116 +1,80 @@
 # Layout
 
-Perry provides layout containers that arrange child widgets using the platform's native layout system.
+Perry provides layout containers that arrange child widgets using the
+platform's native layout system. Every snippet below is excerpted from
+[`docs/examples/ui/layout/snippets.ts`](../../examples/ui/layout/snippets.ts) —
+CI compiles and runs it on every PR.
+
+Layout helpers are free functions: `widgetAddChild(parent, child)`,
+`stackSetAlignment(stack, value)`, `widgetSetEdgeInsets(w, top, left, bottom,
+right)`, etc. Stack constructors take a numeric spacing followed by a child
+array; everything else (alignment, distribution, padding, sizing) is applied
+post-construction via the free functions on the widget handle.
 
 ## VStack
 
 Arranges children vertically (top to bottom).
 
-```typescript,no-test
-import { VStack, Text, Button } from "perry/ui";
-
-VStack(16, [
-  Text("First"),
-  Text("Second"),
-  Text("Third"),
-]);
+```typescript
+{{#include ../../examples/ui/layout/snippets.ts:vstack}}
 ```
 
-`VStack(spacing, children)` — the first argument is the gap in points between children.
-
-**Methods:**
-- `setPadding(padding: number)` — Set padding around all edges
-- `setSpacing(spacing: number)` — Set spacing between children
+`VStack(spacing, children)` — the first argument is the gap in points between
+children.
 
 ## HStack
 
 Arranges children horizontally (left to right).
 
-```typescript,no-test
-import { HStack, Text, Button, Spacer } from "perry/ui";
-
-HStack(8, [
-  Button("Cancel", () => {}),
-  Spacer(),
-  Button("OK", () => {}),
-]);
+```typescript
+{{#include ../../examples/ui/layout/snippets.ts:hstack}}
 ```
-
-`HStack(spacing, children)` — the first argument is the gap in points between children.
 
 ## ZStack
 
-Layers children on top of each other (back to front).
+Layers children on top of each other (back to front). `ZStack()` takes no
+constructor children — populate it with `widgetAddChild`:
 
-```typescript,no-test
-import { ZStack, Text, Image } from "perry/ui";
-
-ZStack(0, [
-  Image("background.png"),
-  Text("Overlay text"),
-]);
+```typescript
+{{#include ../../examples/ui/layout/snippets.ts:zstack}}
 ```
 
 ## ScrollView
 
-A scrollable container.
+A scrollable container. Built empty, then filled via `scrollviewSetChild`:
 
-```typescript,no-test
-import { ScrollView, VStack, Text } from "perry/ui";
-
-ScrollView(
-  VStack(
-    8,
-    Array.from({ length: 100 }, (_, i) => Text(`Row ${i}`))
-  )
-);
+```typescript
+{{#include ../../examples/ui/layout/snippets.ts:scrollview}}
 ```
-
-**Methods:**
-- `setRefreshControl(callback: () => void)` — Add pull-to-refresh (calls callback on pull)
-- `endRefreshing()` — Stop the refresh indicator
 
 ## LazyVStack
 
-A vertically scrolling list that lazily renders items. More efficient than `ScrollView` + `VStack` for large lists.
+A vertically scrolling list that lazily renders items. More efficient than
+`ScrollView` + `VStack` for thousands of rows — on macOS this is backed by
+`NSTableView` so only rows in the visible rect are realized.
 
-```typescript,no-test
-import { LazyVStack, Text } from "perry/ui";
-
-LazyVStack(1000, (index) => {
-  return Text(`Row ${index}`);
-});
+```typescript
+{{#include ../../examples/ui/layout/snippets.ts:lazyvstack}}
 ```
 
-## NavigationStack
+When the underlying data changes, call `lazyvstackUpdate(handle, newCount)` to
+refresh. Override the default 44pt row height with `lazyvstackSetRowHeight`.
 
-A navigation container that supports push/pop navigation.
+## NavStack
 
-```typescript,no-test
-import { NavigationStack, VStack, Text, Button } from "perry/ui";
+A navigation container that supports push/pop navigation. Push a new view
+with `navstackPush(stack, view, title)`; pop with `navstackPop(stack)`:
 
-NavigationStack(
-  VStack(16, [
-    Text("Home Screen"),
-    Button("Go to Details", () => {
-      // Push a new view
-    }),
-  ])
-);
+```typescript
+{{#include ../../examples/ui/layout/snippets.ts:navstack}}
 ```
 
 ## Spacer
 
 A flexible space that expands to fill available room.
 
-```typescript,no-test
-import { HStack, Text, Spacer } from "perry/ui";
-
-HStack(8, [
-  Text("Left"),
-  Spacer(),
-  Text("Right"),
-]);
+```typescript
+{{#include ../../examples/ui/layout/snippets.ts:spacer}}
 ```
 
 Use `Spacer()` inside `HStack` or `VStack` to push widgets apart.
@@ -119,19 +83,13 @@ Use `Spacer()` inside `HStack` or `VStack` to push widgets apart.
 
 A visual separator line.
 
-```typescript,no-test
-import { VStack, Text, Divider } from "perry/ui";
-
-VStack(12, [
-  Text("Section 1"),
-  Divider(),
-  Text("Section 2"),
-]);
+```typescript
+{{#include ../../examples/ui/layout/snippets.ts:divider}}
 ```
 
 ## Nesting Layouts
 
-Layouts can be nested freely. This example is verified by CI:
+Layouts can be nested freely. This complete example is verified by CI:
 
 ```typescript
 {{#include ../../examples/ui/layout/nesting.ts}}
@@ -139,37 +97,26 @@ Layouts can be nested freely. This example is verified by CI:
 
 ## Child Management
 
-Containers support dynamic child management:
+Containers support dynamic child management via free functions:
 
-```typescript,no-test
-const stack = VStack(16, []);
-// Add children dynamically
-stack.addChild(Text("New child"));
-stack.addChildAt(0, Text("Prepended"));
-stack.removeChild(someWidget);
-stack.reorderChild(widget, 2);
-stack.clearChildren();
+```typescript
+{{#include ../../examples/ui/layout/snippets.ts:child-management}}
 ```
 
-**Methods:**
-- `addChild(widget)` — Append a child widget
-- `addChildAt(index, widget)` — Insert a child at a specific position
-- `removeChild(widget)` — Remove a child widget
-- `reorderChild(widget, newIndex)` — Move a child to a new position
-- `clearChildren()` — Remove all children
+| Function | Description |
+|----------|-------------|
+| `widgetAddChild(parent, child)` | Append a child widget |
+| `widgetAddChildAt(parent, child, index)` | Insert a child at a specific position |
+| `widgetRemoveChild(parent, child)` | Remove a specific child |
+| `widgetReorderChild(widget, fromIndex, toIndex)` | Move a child to a new position |
+| `widgetClearChildren(widget)` | Remove all children |
 
 ## Stack Alignment
 
 Control how children are aligned within a stack using `stackSetAlignment`:
 
-```typescript,no-test
-import { VStack, Text, stackSetAlignment } from "perry/ui";
-
-const centered = VStack(16, [
-  Text("Centered"),
-  Text("Content"),
-]);
-stackSetAlignment(centered, 9); // CenterX
+```typescript
+{{#include ../../examples/ui/layout/snippets.ts:alignment}}
 ```
 
 **VStack alignment** (cross-axis = horizontal):
@@ -192,14 +139,8 @@ stackSetAlignment(centered, 9); // CenterX
 
 Control how children share space within a stack using `stackSetDistribution`:
 
-```typescript,no-test
-import { HStack, Button, stackSetDistribution } from "perry/ui";
-
-const buttons = HStack(8, [
-  Button("Cancel", () => {}),
-  Button("OK", () => {}),
-]);
-stackSetDistribution(buttons, 1); // FillEqually — both buttons get equal width
+```typescript
+{{#include ../../examples/ui/layout/snippets.ts:distribution}}
 ```
 
 | Value | Name | Behavior |
@@ -214,13 +155,8 @@ stackSetDistribution(buttons, 1); // FillEqually — both buttons get equal widt
 
 Pin a child's edges to its parent container:
 
-```typescript,no-test
-import { VStack, Text, widgetMatchParentWidth } from "perry/ui";
-
-const banner = Text("Full width banner");
-widgetMatchParentWidth(banner);
-
-VStack(16, [banner, Text("Normal width")]);
+```typescript
+{{#include ../../examples/ui/layout/snippets.ts:fill-parent}}
 ```
 
 - `widgetMatchParentWidth(widget)` — stretch to fill parent's width
@@ -230,133 +166,81 @@ VStack(16, [banner, Text("Normal width")]);
 
 Control whether a widget resists being stretched beyond its intrinsic size:
 
-```typescript,no-test
-import { VStack, Text, widgetSetHugging } from "perry/ui";
-
-const label = Text("I stay small");
-widgetSetHugging(label, 750); // High priority — resist stretching
-
-const filler = Text("I stretch");
-widgetSetHugging(filler, 1); // Low priority — stretch to fill
+```typescript
+{{#include ../../examples/ui/layout/snippets.ts:hugging}}
 ```
 
-- **High priority** (250-750+): widget resists stretching, stays at its natural size
-- **Low priority** (1-249): widget stretches to fill available space
+- **High priority** (250–750+): widget resists stretching, stays at its natural size
+- **Low priority** (1–249): widget stretches to fill available space
 
 ## Overlay Positioning
 
 For absolute positioning, add overlay children to any container:
 
-```typescript,no-test
-import { VStack, Text, widgetAddOverlay, widgetSetOverlayFrame } from "perry/ui";
-
-const container = VStack(16, [Text("Main content")]);
-
-const badge = Text("3");
-badge.setCornerRadius(10);
-badge.setBackgroundColor("#FF3B30");
-
-widgetAddOverlay(container, badge);
-widgetSetOverlayFrame(badge, 280, 10, 20, 20); // x, y, width, height
+```typescript
+{{#include ../../examples/ui/layout/snippets.ts:overlay}}
 ```
 
-Overlay children are positioned absolutely relative to their parent — similar to CSS `position: absolute`.
+Overlay children are positioned absolutely relative to their parent — similar
+to CSS `position: absolute`.
 
 ## Split Views
 
 Create resizable split panes for sidebar layouts:
 
-```typescript,no-test
-import { SplitView, splitViewAddChild, VStack, Text } from "perry/ui";
-
-const split = SplitView();
-
-const sidebar = VStack(8, [Text("Navigation"), Text("Item 1"), Text("Item 2")]);
-const content = VStack(16, [Text("Main Content")]);
-
-splitViewAddChild(split, sidebar);
-splitViewAddChild(split, content);
+```typescript
+{{#include ../../examples/ui/layout/snippets.ts:split-view}}
 ```
 
-The user can drag the divider to resize panes. On macOS this maps to `NSSplitView`.
+The user can drag the divider to resize panes. On macOS this maps to
+`NSSplitView`.
 
 ## Stacks with Built-in Padding
 
-Create a stack with padding in a single call:
+Create a stack with padding in a single call. The order is **top, left,
+bottom, right** (CSS-shorthand-style), not top/right/bottom/left:
 
-```typescript,no-test
-import { VStackWithInsets, HStackWithInsets, Text, widgetAddChild } from "perry/ui";
-
-// VStackWithInsets(spacing, top, right, bottom, left)
-const card = VStackWithInsets(12, 16, 16, 16, 16);
-widgetAddChild(card, Text("Padded content"));
-widgetAddChild(card, Text("More content"));
+```typescript
+{{#include ../../examples/ui/layout/snippets.ts:insets-stack}}
 ```
 
-Equivalent to creating a stack and then calling `setEdgeInsets`, but more concise. Children are added via `widgetAddChild` instead of the constructor array.
+`HStackWithInsets(spacing, top, left, bottom, right)` is the horizontal
+counterpart. Equivalent to creating a stack and then calling
+`widgetSetEdgeInsets`, but more concise. Children are added via
+`widgetAddChild` rather than the constructor array.
 
 ## Detaching Hidden Views
 
 By default, hidden children still occupy space in a stack. To collapse them:
 
-```typescript,no-test
-import { VStack, Text, widgetSetHidden, stackSetDetachesHidden } from "perry/ui";
-
-const stack = VStack(8, [Text("Always visible"), Text("Sometimes hidden")]);
-stackSetDetachesHidden(stack, 1); // Hidden children leave no gap
+```typescript
+{{#include ../../examples/ui/layout/snippets.ts:detaches-hidden}}
 ```
 
 ## Common Layout Patterns
 
 ### Centered content
 
-```typescript,no-test
-const page = VStack(16, [Text("Title"), Text("Subtitle")]);
-stackSetAlignment(page, 9); // CenterX
+```typescript
+{{#include ../../examples/ui/layout/snippets.ts:pattern-centered}}
 ```
 
-### Sidebar + content
+### Search row that fills the width
 
-```typescript,no-test
-const split = SplitView();
-splitViewAddChild(split, sidebar);
-splitViewAddChild(split, content);
-```
-
-### Equal-width button row
-
-```typescript,no-test
-const row = HStack(8, [Button("Cancel", onCancel), Button("OK", onOK)]);
-stackSetDistribution(row, 1); // FillEqually
-```
-
-### Full-width child in a stack
-
-```typescript,no-test
-const input = TextField("Search...", onChange);
-widgetMatchParentWidth(input);
-VStack(12, [input, results]);
+```typescript
+{{#include ../../examples/ui/layout/snippets.ts:pattern-search-row}}
 ```
 
 ### Floating badge / overlay
 
-```typescript,no-test
-const icon = Image("bell.png");
-const badge = Text("3");
-widgetAddOverlay(icon, badge);
-widgetSetOverlayFrame(badge, 20, -5, 16, 16);
+```typescript
+{{#include ../../examples/ui/layout/snippets.ts:pattern-floating-badge}}
 ```
 
-### Toolbar with spacer
+### Toolbar with spacers
 
-```typescript,no-test
-HStack(8, [
-  Button("Back", goBack),
-  Spacer(),
-  Text("Page Title"),
-  Spacer(),
-  Button("Settings", openSettings),
-]);
+```typescript
+{{#include ../../examples/ui/layout/snippets.ts:pattern-toolbar}}
 ```
 
 ## Next Steps

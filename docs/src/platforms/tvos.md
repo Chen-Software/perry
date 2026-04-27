@@ -65,9 +65,11 @@ tvOS uses a **focus-based navigation model** instead of direct touch. The Siri R
 
 ## Game Engine Support
 
-tvOS is particularly well-suited for game engines. When using a native library like [Bloom](https://bloomengine.dev), the game engine handles its own windowing, rendering, and input:
+tvOS is particularly well-suited for game engines. When using a native library like [Bloom](https://bloomengine.dev), the game engine handles its own windowing, rendering, and input.
 
-```typescript,no-test
+> **Status:** illustrative only — Bloom is an external native library (see [bloomengine.dev](https://bloomengine.dev)). The snippet below is left as `,no-test` because it depends on Bloom's `.a`/`.so` being available at link time; the doc-tests harness compiles every other snippet on this page.
+
+```text
 import { initWindow, windowShouldClose, beginDrawing, endDrawing,
          clearBackground, isGamepadButtonDown, Colors } from "bloom";
 
@@ -103,17 +105,8 @@ Extended game controllers (MFi, PlayStation, Xbox) are fully supported with all 
 
 tvOS apps use `UIApplicationMain` with the same lifecycle as iOS. When using `perry/ui`:
 
-```typescript,no-test
-import { App, Text, VStack } from "perry/ui";
-
-App({
-  title: "My TV App",
-  width: 1920,
-  height: 1080,
-  body: VStack(16, [
-    Text("Hello, Apple TV!"),
-  ]),
-});
+```typescript
+{{#include ../../examples/platforms/ui/tvos_app.ts:tvos-app}}
 ```
 
 When using a game engine with `--features ios-game-loop`, the runtime starts `UIApplicationMain` on the main thread and runs your game code on a dedicated game thread.
@@ -132,12 +125,8 @@ deployment_target = "17.0"
 
 Use `__platform__ === 6` to detect tvOS at compile time:
 
-```typescript,no-test
-declare const __platform__: number;
-
-if (__platform__ === 6) {
-  console.log("Running on tvOS");
-}
+```typescript
+{{#include ../../examples/platforms/platform_detect.ts:tvos-detect}}
 ```
 
 ## App Bundle

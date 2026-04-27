@@ -68,9 +68,9 @@ for test_file in "$TEST_DIR"/*.ts; do
     fi
 
     # Compile the test (suppress warnings)
-    if ! cargo run --quiet -- "$test_file" -o "$output_file" 2>/dev/null; then
+    if ! cargo run --quiet --bin perry -- "$test_file" -o "$output_file" 2>/dev/null; then
         # Try again to get error message
-        compile_output=$(cargo run --quiet -- "$test_file" -o "$output_file" 2>&1 | grep -i "error" | head -3)
+        compile_output=$(cargo run --quiet --bin perry -- "$test_file" -o "$output_file" 2>&1 | grep -i "error" | head -3)
         echo -e "${RED}FAIL${NC}  $test_name (compile error)"
         if [[ -n "$compile_output" ]]; then
             echo "       $compile_output"

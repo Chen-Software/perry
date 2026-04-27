@@ -730,6 +730,7 @@ fn collect_closures_in_expr(
         // Reflect.* and other iterator/json wrappers — can carry callbacks.
         Expr::IteratorToArray(o) | Expr::ArrayIsArray(o) => walk(o, seen, out),
         Expr::JsonStringify(o) | Expr::JsonParse(o) => walk(o, seen, out),
+        Expr::JsonParseTyped { text, .. } => walk(text, seen, out),
         Expr::JsonStringifyPretty { value, replacer, space } => {
             walk(value, seen, out);
             if let Some(r) = replacer { walk(r, seen, out); }
@@ -917,6 +918,7 @@ fn collect_ref_ids_in_expr(e: &perry_hir::Expr, out: &mut HashSet<u32>) {
         | Expr::MathMaxSpread(operand) => {
             walk(operand, out);
         }
+        Expr::JsonParseTyped { text, .. } => walk(text, out),
         Expr::Call { callee, args, .. } => {
             walk(callee, out);
             for a in args {
@@ -1307,6 +1309,96 @@ fn is_clamp_call(e: &perry_hir::Expr, clamp_fn_ids: &HashSet<u32>) -> bool {
 /// `arr[(i|0)]`, `buf[k*4+j]` all mark their inner locals. Walker stops at
 /// closure boundaries since captured locals can't use the i32 slot anyway
 /// (boxed-capture path goes through `js_box_get`/`js_box_set`).
+/// Gen-GC Phase A sub-phase 3: walk the function body + params
+/// and return a map of `LocalId → slot_index` for every local
+/// whose HIR type *might hold a heap pointer* at runtime.
+///
+/// These are the locals that need to be reported to the GC tracer
+/// via the shadow stack once sub-phase 4 lands (tracer integration).
+/// The slot index is assigned in scan order (params first, then
+/// `Stmt::Let` declarations in body order) so the count returned
+/// equals `slot_map.len()`.
+///
+/// Types considered pointer-possible:
+///   String, Array, Tuple, Object, Named, Promise, Function,
+///   BigInt, Any, Unknown.
+///
+/// Non-pointer (never tracked): Number, Int32, Boolean, Null, Void,
+/// Symbol, Never, TypeVar.
+pub(crate) fn collect_pointer_typed_locals(
+    params: &[perry_hir::Param],
+    stmts: &[perry_hir::Stmt],
+) -> std::collections::HashMap<u32, u32> {
+    use perry_hir::Stmt;
+    use perry_types::Type;
+    fn is_ptr_typed(ty: &Type) -> bool {
+        matches!(
+            ty,
+            Type::String
+                | Type::Array(_)
+                | Type::Tuple(_)
+                | Type::Object(_)
+                | Type::Named(_)
+                | Type::Promise(_)
+                | Type::Function(_)
+                | Type::BigInt
+                | Type::Any
+                | Type::Unknown
+        ) || matches!(ty, Type::Union(variants) if variants.iter().any(is_ptr_typed))
+    }
+    let mut out = std::collections::HashMap::new();
+    let mut next_slot: u32 = 0;
+    for p in params {
+        if is_ptr_typed(&p.ty) {
+            out.insert(p.id, next_slot);
+            next_slot += 1;
+        }
+    }
+    fn walk(stmts: &[Stmt], out: &mut std::collections::HashMap<u32, u32>, next_slot: &mut u32) {
+        for s in stmts {
+            match s {
+                Stmt::Let { id, ty, .. } if is_ptr_typed(ty) => {
+                    out.insert(*id, *next_slot);
+                    *next_slot += 1;
+                }
+                Stmt::If { then_branch, else_branch, .. } => {
+                    walk(then_branch, out, next_slot);
+                    if let Some(eb) = else_branch { walk(eb, out, next_slot); }
+                }
+                Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
+                    walk(body, out, next_slot);
+                }
+                Stmt::For { init, body, .. } => {
+                    if let Some(i) = init {
+                        walk(std::slice::from_ref(i.as_ref()), out, next_slot);
+                    }
+                    walk(body, out, next_slot);
+                }
+                Stmt::Try { body, catch, finally } => {
+                    walk(body, out, next_slot);
+                    if let Some(c) = catch {
+                        if let Some((id, _)) = &c.param {
+                            // Catch parameter is implicitly bound;
+                            // treat as Any (pointer-possible).
+                            out.insert(*id, *next_slot);
+                            *next_slot += 1;
+                        }
+                        walk(&c.body, out, next_slot);
+                    }
+                    if let Some(fb) = finally { walk(fb, out, next_slot); }
+                }
+                Stmt::Switch { cases, .. } => {
+                    for c in cases { walk(&c.body, out, next_slot); }
+                }
+                Stmt::Labeled { body, .. } => walk(std::slice::from_ref(body.as_ref()), out, next_slot),
+                _ => {}
+            }
+        }
+    }
+    walk(stmts, &mut out, &mut next_slot);
+    out
+}
+
 pub(crate) fn collect_index_used_locals(stmts: &[perry_hir::Stmt]) -> HashSet<u32> {
     let mut out: HashSet<u32> = HashSet::new();
     walk_index_uses_in_stmts(stmts, &mut out);
@@ -2032,6 +2124,7 @@ fn collect_localset_ids_in_expr_filtered(
         | Expr::MathMaxSpread(operand) => {
             walk(operand, out);
         }
+        Expr::JsonParseTyped { text, .. } => walk(text, out),
         Expr::Call { callee, args, .. } => {
             walk(callee, out);
             for a in args {
@@ -2906,6 +2999,9 @@ fn check_escapes_in_expr(
         | Expr::ProcessNextTick(operand) | Expr::ArrayIsArray(operand) => {
             check_escapes_in_expr(operand, candidates, classes, escaped);
         }
+        Expr::JsonParseTyped { text, .. } => {
+            check_escapes_in_expr(text, candidates, classes, escaped);
+        }
         Expr::Conditional { condition, then_expr, else_expr } => {
             check_escapes_in_expr(condition, candidates, classes, escaped);
             check_escapes_in_expr(then_expr, candidates, classes, escaped);
@@ -3350,19 +3446,42 @@ fn expr_contains_local_get(e: &perry_hir::Expr, target_id: u32) -> bool {
 /// Conservative catch-all: walk the expression and mark any candidate
 /// local referenced via LocalGet as escaped. Used for Expr variants we
 /// haven't explicitly enumerated in check_escapes_in_expr.
+///
+/// **Safety note (issue #150):** `collect_ref_ids_in_expr` has a silent
+/// `_ => {}` fallthrough for unenumerated HIR variants. That means for
+/// variants like `ObjectGetOwnPropertyDescriptor(LocalGet(p), key)` — which
+/// is an identity-observing operation that should escape `p` — the collector
+/// returns an empty set, and `p` ends up scalar-replaced while an external
+/// runtime function (`js_object_get_own_property_descriptor`) tries to
+/// dereference its dummy alloca slot. Since we can't enumerate every HIR
+/// variant that might embed a LocalGet, we conservatively mark EVERY
+/// candidate as escaped whenever this catch-all fires. The cost is losing
+/// scalar replacement in functions that happen to contain an un-enumerated
+/// variant anywhere; the safety is not silently miscompiling identity-
+/// observing code. This mirrors the `check_object_literal_escapes_in_expr`
+/// catch-all at line ~4148 which already does exactly this for object
+/// literal candidates.
 fn mark_all_candidate_refs_in_expr(
     e: &perry_hir::Expr,
     candidates: &std::collections::HashMap<u32, String>,
     escaped: &mut HashSet<u32>,
 ) {
-    use perry_hir::Expr;
-    // Use the existing ref-id collector to find all local references
+    // First pass: walk what collect_ref_ids_in_expr knows about — these are
+    // the references we can prove exist.
     let mut refs: HashSet<u32> = HashSet::new();
     collect_ref_ids_in_expr(e, &mut refs);
     for id in refs {
         if candidates.contains_key(&id) {
             escaped.insert(id);
         }
+    }
+    // Second pass: conservative fallback. We're in the check_escapes_in_expr
+    // catch-all, meaning `e` is some HIR variant not explicitly enumerated
+    // there. The collector above may have silently skipped unknown
+    // sub-variants, so we must assume any candidate in scope could be
+    // referenced transitively. Mark them all escaped.
+    for id in candidates.keys() {
+        escaped.insert(*id);
     }
 }
 

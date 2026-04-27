@@ -247,8 +247,11 @@ pub extern "C" fn perry_ui_toggle_create(label_ptr: i64, on_change: f64) -> i64 
 
 /// Create a Slider.
 #[no_mangle]
-pub extern "C" fn perry_ui_slider_create(min: f64, max: f64, initial: f64, on_change: f64) -> i64 {
-    widgets::slider::create(min, max, initial, on_change)
+pub extern "C" fn perry_ui_slider_create(min: f64, max: f64, on_change: f64) -> i64 {
+    // Codegen emits 3-arg `Slider(min, max, onChange)` per the TS surface.
+    // Default initial value to `min` so users get a valid widget without
+    // a 4th NaN-from-uninitialized-register arg corrupting GtkAdjustment.
+    widgets::slider::create(min, max, min, on_change)
 }
 
 /// Create a ScrollView.
@@ -279,6 +282,21 @@ pub extern "C" fn perry_ui_section_create(title_ptr: i64) -> i64 {
 #[no_mangle]
 pub extern "C" fn perry_ui_zstack_create() -> i64 {
     widgets::zstack::create()
+}
+
+/// Create a SplitView (horizontal split-pane). Mirrors macOS
+/// `perry_ui_splitview_create` (`NSSplitView`). On GTK4 backed by
+/// `gtk::Paned` — supports exactly 2 children (vs N on macOS).
+#[no_mangle]
+pub extern "C" fn perry_ui_splitview_create(left_width: f64) -> i64 {
+    widgets::splitview::create(left_width)
+}
+
+/// Add a child to a SplitView. First call → start child, second →
+/// end child, third+ → no-op + warning (GTK4 `Paned` cap).
+#[no_mangle]
+pub extern "C" fn perry_ui_splitview_add_child(parent: i64, child: i64, index: f64) {
+    widgets::splitview::add_child(parent, child, index as i64);
 }
 
 /// Create a LazyVStack.
@@ -344,6 +362,36 @@ pub extern "C" fn perry_ui_widget_add_child_at(parent_handle: i64, child_handle:
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_clear_children(handle: i64) {
     widgets::clear_children(handle);
+}
+
+/// Remove a single child from its parent. Mirrors macOS
+/// `perry_ui_widget_remove_child` (NSView `removeFromSuperview`).
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_remove_child(parent_handle: i64, child_handle: i64) {
+    widgets::remove_child(parent_handle, child_handle);
+}
+
+/// Reorder a child within its parent by positional index. Mirrors macOS
+/// `perry_ui_widget_reorder_child` — args are f64 to match the macOS
+/// signature, internally cast to i64.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_reorder_child(parent_handle: i64, from_index: f64, to_index: f64) {
+    widgets::reorder_child(parent_handle, from_index as i64, to_index as i64);
+}
+
+/// Add an overlay child on top of a parent. Mirrors macOS
+/// `perry_ui_widget_add_overlay`. On GTK4 the parent must be an `Overlay`
+/// (i.e. a `ZStack`) for the overlay to truly float above siblings.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_add_overlay(parent_handle: i64, child_handle: i64) {
+    widgets::add_overlay(parent_handle, child_handle);
+}
+
+/// Position + size an overlay child. Mirrors macOS
+/// `perry_ui_widget_set_overlay_frame` (CGRect on a subview).
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_overlay_frame(handle: i64, x: f64, y: f64, w: f64, h: f64) {
+    widgets::set_overlay_frame(handle, x, y, w, h);
 }
 
 // =============================================================================
@@ -454,6 +502,13 @@ pub extern "C" fn perry_ui_text_set_wraps(handle: i64, max_width: f64) {
     widgets::text::set_wraps(handle, max_width);
 }
 
+/// Set text decoration on a Text widget (issue #185 Phase B).
+/// `decoration`: 0=none, 1=underline, 2=strikethrough.
+#[no_mangle]
+pub extern "C" fn perry_ui_text_set_decoration(handle: i64, decoration: i64) {
+    widgets::text::set_decoration(handle, decoration);
+}
+
 /// Set whether text is selectable.
 #[no_mangle]
 pub extern "C" fn perry_ui_text_set_selectable(handle: i64, selectable: f64) {
@@ -486,6 +541,18 @@ pub extern "C" fn perry_ui_button_set_title(handle: i64, title_ptr: i64) {
 #[no_mangle]
 pub extern "C" fn perry_ui_button_set_text_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
     widgets::button::set_text_color(handle, r, g, b, a);
+}
+
+/// Set the tint color of a button's image/icon.
+#[no_mangle]
+pub extern "C" fn perry_ui_button_set_content_tint_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    widgets::button::set_content_tint_color(handle, r, g, b, a);
+}
+
+/// Set the position of the image relative to the label on a button.
+#[no_mangle]
+pub extern "C" fn perry_ui_button_set_image_position(handle: i64, position: i64) {
+    widgets::button::set_image_position(handle, position);
 }
 
 // =============================================================================
@@ -552,6 +619,35 @@ pub extern "C" fn perry_ui_widget_set_background_gradient(handle: i64, r1: f64, 
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_set_corner_radius(handle: i64, radius: f64) {
     widgets::set_corner_radius(handle, radius);
+}
+
+/// Set drop shadow on a widget via CSS `box-shadow` (issue #185 Phase B).
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_shadow(
+    handle: i64,
+    r: f64, g: f64, b: f64, a: f64,
+    blur: f64, offset_x: f64, offset_y: f64,
+) {
+    widgets::set_shadow(handle, r, g, b, a, blur, offset_x, offset_y);
+}
+
+/// Set opacity on any widget (issue #185 Phase B). GTK4 has a built-in
+/// `Widget::set_opacity` so this is a one-line passthrough.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_opacity(handle: i64, opacity: f64) {
+    widgets::set_opacity(handle, opacity);
+}
+
+/// Set border color (issue #185 Phase B). Joint state with set_border_width.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_border_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    widgets::set_border_color(handle, r, g, b, a);
+}
+
+/// Set border width (issue #185 Phase B). Joint state with set_border_color.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_border_width(handle: i64, width: f64) {
+    widgets::set_border_width(handle, width);
 }
 
 /// Set context menu on a widget.
@@ -623,6 +719,20 @@ pub extern "C" fn perry_ui_canvas_stroke(handle: i64, r: f64, g: f64, b: f64, a:
 pub extern "C" fn perry_ui_canvas_fill_gradient(handle: i64, r1: f64, g1: f64, b1: f64, a1: f64, r2: f64, g2: f64, b2: f64, a2: f64, direction: f64) {
     widgets::canvas::fill_gradient(handle, r1, g1, b1, a1, r2, g2, b2, a2, direction);
 }
+
+// Stateful 2D-context API stubs (full implementation tracked in perry-ui-test as `U`).
+#[no_mangle] pub extern "C" fn perry_ui_canvas_set_fill_color(_h: i64, _r: f64, _g: f64, _b: f64, _a: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_set_stroke_color(_h: i64, _r: f64, _g: f64, _b: f64, _a: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_set_line_width(_h: i64, _w: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_fill_rect(_h: i64, _x: f64, _y: f64, _w: f64, _ht: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_stroke_rect(_h: i64, _x: f64, _y: f64, _w: f64, _ht: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_clear_rect(h: i64, _x: f64, _y: f64, _w: f64, _ht: f64) { widgets::canvas::clear(h); }
+#[no_mangle] pub extern "C" fn perry_ui_canvas_arc(_h: i64, _x: f64, _y: f64, _r: f64, _sa: f64, _ea: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_close_path(_h: i64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_fill(_h: i64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_stroke_path(_h: i64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_fill_text(_h: i64, _ptr: i64, _x: f64, _y: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_set_font(_h: i64, _ptr: i64) {}
 
 // =============================================================================
 // Menu
@@ -714,6 +824,12 @@ pub extern "C" fn perry_ui_open_file_dialog(callback: f64) {
     file_dialog::open_dialog(callback);
 }
 
+/// Open a folder picker. Mirrors macOS `perry_ui_open_folder_dialog`.
+#[no_mangle]
+pub extern "C" fn perry_ui_open_folder_dialog(callback: f64) {
+    file_dialog::open_folder_dialog(callback);
+}
+
 /// Open a save file dialog.
 #[no_mangle]
 pub extern "C" fn perry_ui_save_file_dialog(callback: f64, default_name_ptr: i64, allowed_types_ptr: i64) {
@@ -766,6 +882,12 @@ pub extern "C" fn perry_system_get_app_icon(path_ptr: i64) -> i64 {
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_set_on_hover(handle: i64, callback: f64) {
     widgets::set_on_hover(handle, callback);
+}
+
+/// Set a single-click callback.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_on_click(handle: i64, callback: f64) {
+    widgets::set_on_click(handle, callback);
 }
 
 /// Set a double-click callback.
@@ -874,6 +996,12 @@ pub extern "C" fn perry_ui_stack_set_distribution(handle: i64, distribution: f64
 #[no_mangle]
 pub extern "C" fn perry_ui_stack_set_alignment(handle: i64, alignment: f64) {
     widgets::set_alignment(handle, alignment as i64);
+}
+
+/// GTK4 already excludes non-visible children from layout — this is a no-op stub.
+#[no_mangle]
+pub extern "C" fn perry_ui_stack_set_detaches_hidden(handle: i64, flag: i64) {
+    widgets::set_detaches_hidden(handle, flag != 0);
 }
 
 /// Set the application icon.
@@ -1102,6 +1230,45 @@ pub extern "C" fn perry_system_notification_send(title_ptr: i64, body_ptr: i64) 
     system::notification_send(title_ptr as *const u8, body_ptr as *const u8);
 }
 
+/// Stub: GTK4 has no remote-push pipeline. Symbol exists so TS code that
+/// calls `notificationRegisterRemote` links and runs without crashing — the
+/// callback simply never fires.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_register_remote(_callback: f64) {}
+
+/// Stub: see `perry_system_notification_register_remote` above.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_receive(_callback: f64) {}
+
+/// Stub (#98): GTK4 has no equivalent of FCM/APNs background delivery; the
+/// symbol exists so cross-platform user code linking against perry-ui-gtk4
+/// resolves cleanly. Callback is silently dropped.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_background_receive(_callback: f64) {}
+
+/// Stub: GTK4 has no scheduled-notification pipeline; GLib timer + glib
+/// notification re-emit would be best-effort and is out of scope for #96.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_interval(
+    _id_ptr: i64, _title_ptr: i64, _body_ptr: i64, _seconds: f64, _repeats: f64,
+) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_calendar(
+    _id_ptr: i64, _title_ptr: i64, _body_ptr: i64, _timestamp_ms: f64,
+) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_location(
+    _id_ptr: i64, _title_ptr: i64, _body_ptr: i64, _lat: f64, _lon: f64, _radius: f64,
+) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_cancel(_id_ptr: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_tap(_callback: f64) {}
+
 #[no_mangle]
 pub extern "C" fn perry_system_get_locale() -> i64 {
     extern "C" { fn js_string_from_bytes(ptr: *const u8, len: i64) -> *const u8; }
@@ -1242,3 +1409,29 @@ pub extern "C" fn __wrapper_hone_get_documents_dir(_closure_ptr: i64) -> f64 {
 pub extern "C" fn __wrapper_hone_get_app_files_dir(_closure_ptr: i64) -> f64 {
     nanbox_static_str(b"")
 }
+
+// --- Camera stubs (issue #191) ---
+// Real implementations live in `perry-ui-ios` and `perry-ui-android`. On
+// Linux, integrating GStreamer / V4L2 for live preview is a separate scope;
+// these no-ops let user code that targets multiple platforms link cleanly.
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_create() -> i64 { 0 }
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_start(_handle: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_stop(_handle: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_freeze(_handle: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_unfreeze(_handle: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_sample_color(_x: f64, _y: f64) -> f64 { -1.0 }
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_set_on_tap(_handle: i64, _callback: f64) {}

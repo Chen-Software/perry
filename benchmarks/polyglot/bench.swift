@@ -107,6 +107,30 @@ func benchAccumulate() {
     print("  checksum: \(Int(sum))")
 }
 
+// Data-dependent loop with sequential multiply-carry. Sibling to
+// benchLoopOverhead but genuinely non-foldable: array reads + a
+// multiplicative carry through `sum` defeat reassoc, IV-simplify,
+// and the vectorizer.
+func benchLoopDataDependent() {
+    let N = 64
+    let ITERATIONS = 100_000_000
+    var seed: UInt64 = 42
+    var x = [Double](repeating: 0.0, count: N)
+    for i in 0..<N {
+        seed = (seed &* 1103515245 &+ 12345) & 0x7FFFFFFF
+        // [0.5, 1.0): contracts to a bounded fixed point. See bench.rs.
+        x[i] = 0.5 + (Double(seed) / 2_147_483_647.0) * 0.5
+    }
+    let start = CFAbsoluteTimeGetCurrent()
+    var sum: Double = 1.0
+    for i in 0..<ITERATIONS {
+        sum = sum * x[i & (N - 1)] + x[(i &* 7) & (N - 1)]
+    }
+    let elapsed = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
+    print("loop_data_dependent:\(elapsed)")
+    print("  checksum: \(sum)")
+}
+
 benchFibonacci()
 benchLoopOverhead()
 benchArrayWrite()
@@ -115,3 +139,4 @@ benchMathIntensive()
 benchObjectCreate()
 benchNestedLoops()
 benchAccumulate()
+benchLoopDataDependent()

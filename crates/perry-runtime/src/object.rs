@@ -1139,10 +1139,16 @@ pub extern "C" fn js_build_class_keys_array(
     let keys_bytes = unsafe { std::slice::from_raw_parts(packed_keys, packed_keys_len as usize) };
     let keys: Vec<&[u8]> = keys_bytes.split(|&b| b == 0).filter(|s| !s.is_empty()).collect();
     let num_keys = keys.len();
-    let arr = crate::array::js_array_alloc_with_length(num_keys as u32);
+    // Issue #179: the keys_array and its string elements are shape-cache
+    // resident for the program's lifetime (anchored by
+    // `scan_shape_cache_roots`). Route them through the longlived arena
+    // so general-arena block 0 doesn't get pinned by the first `new C()`
+    // in a loop, which cascaded via block-persistence into every
+    // subsequent iteration's allocations.
+    let arr = crate::array::js_array_alloc_with_length_longlived(num_keys as u32);
     let elements_ptr = unsafe { (arr as *mut u8).add(8) as *mut f64 };
     for (i, key_bytes) in keys.iter().enumerate() {
-        let str_ptr = crate::string::js_string_from_bytes(
+        let str_ptr = crate::string::js_string_from_bytes_longlived(
             key_bytes.as_ptr(),
             key_bytes.len() as u32,
         );
@@ -1207,10 +1213,12 @@ pub extern "C" fn js_object_alloc_class_with_keys(
         let keys_bytes = unsafe { std::slice::from_raw_parts(packed_keys, packed_keys_len as usize) };
         let keys: Vec<&[u8]> = keys_bytes.split(|&b| b == 0).filter(|s| !s.is_empty()).collect();
         let num_keys = keys.len();
-        let arr = crate::array::js_array_alloc_with_length(num_keys as u32);
+        // Issue #179: shape-cache keys_array lives in the longlived arena
+        // (see `js_build_class_keys_array` for the rationale).
+        let arr = crate::array::js_array_alloc_with_length_longlived(num_keys as u32);
         let elements_ptr = unsafe { (arr as *mut u8).add(8) as *mut f64 };
         for (i, key_bytes) in keys.iter().enumerate() {
-            let str_ptr = crate::string::js_string_from_bytes(
+            let str_ptr = crate::string::js_string_from_bytes_longlived(
                 key_bytes.as_ptr(), key_bytes.len() as u32,
             );
             let nanboxed = f64::from_bits(
@@ -1266,10 +1274,11 @@ pub extern "C" fn js_object_alloc_with_shape(
         let keys_bytes = unsafe { std::slice::from_raw_parts(packed_keys, packed_keys_len as usize) };
         let keys: Vec<&[u8]> = keys_bytes.split(|&b| b == 0).filter(|s| !s.is_empty()).collect();
         let num_keys = keys.len();
-        let arr = crate::array::js_array_alloc_with_length(num_keys as u32);
+        // Issue #179: shape-cache keys_array lives in the longlived arena.
+        let arr = crate::array::js_array_alloc_with_length_longlived(num_keys as u32);
         let elements_ptr = unsafe { (arr as *mut u8).add(8) as *mut f64 };
         for (i, key_bytes) in keys.iter().enumerate() {
-            let str_ptr = crate::string::js_string_from_bytes(
+            let str_ptr = crate::string::js_string_from_bytes_longlived(
                 key_bytes.as_ptr(), key_bytes.len() as u32,
             );
             let nanboxed = f64::from_bits(
@@ -1784,6 +1793,33 @@ pub extern "C" fn js_object_has_property(obj: f64, key: f64) -> f64 {
 /// Returns the field value or undefined if the key is not found
 #[no_mangle]
 pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *const crate::StringHeader) -> JSValue {
+    // SSO property access (v0.5.213 Step 1 gate). The codegen inline
+    // `.length` path routes SHORT_STRING_TAG receivers here because
+    // it doesn't yet know about the SSO tag. Handle `.length` by
+    // reading the length byte directly from the NaN-box payload.
+    // Other property accesses on an SSO string (e.g. `.charAt` via
+    // `[0]`, `.slice`) aren't yet routed here — handled by the
+    // string method dispatch in a future migration step; today they
+    // fall through to "undefined" which matches the behavior for
+    // string-valued property access on untyped locals in general.
+    {
+        let obj_bits = obj as u64;
+        if (obj_bits & crate::value::TAG_MASK) == crate::value::SHORT_STRING_TAG {
+            if !key.is_null() {
+                unsafe {
+                    let key_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+                    let key_len = (*key).byte_len as usize;
+                    let key_bytes = std::slice::from_raw_parts(key_ptr, key_len);
+                    if key_bytes == b"length" {
+                        let len = (obj_bits & crate::value::SHORT_STRING_LEN_MASK)
+                            >> crate::value::SHORT_STRING_LEN_SHIFT;
+                        return JSValue::number(len as f64);
+                    }
+                }
+            }
+            return JSValue::undefined();
+        }
+    }
     // Strip NaN-boxing tags if present (defensive: handle POINTER_TAG, UNDEFINED, NULL, etc.)
     let obj = {
         let bits = obj as u64;
@@ -1931,6 +1967,28 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
                 }
             }
             return JSValue::undefined();
+        }
+        // Issue #179 Phase 2: lazy array dispatch. `.length` returns
+        // cached_length without materializing; any other property
+        // access force-materializes (via the call into the generic
+        // array path, which goes through `clean_arr_ptr` and hits
+        // the lazy branch there).
+        if gc_type == crate::gc::GC_TYPE_LAZY_ARRAY {
+            if !key.is_null() {
+                let key_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+                let key_len = (*key).byte_len as usize;
+                let key_bytes = std::slice::from_raw_parts(key_ptr, key_len);
+                if key_bytes == b"length" {
+                    let arr = obj as *const crate::array::ArrayHeader;
+                    return JSValue::number(crate::array::js_array_length(arr) as f64);
+                }
+            }
+            // Any other property access force-materializes, then
+            // re-enters via the materialized ArrayHeader pointer.
+            let materialized = crate::json_tape::force_materialize_lazy(
+                obj as *mut crate::json_tape::LazyArrayHeader,
+            );
+            return js_object_get_field_by_name(materialized as *const ObjectHeader, key);
         }
         // Strings: handle `.length` so `(x as string).length` on an
         // unknown-typed local (TypeScript `as` casts are erased in
@@ -2188,6 +2246,16 @@ pub extern "C" fn js_object_get_field_ic_miss(
     key: *const crate::StringHeader,
     cache: *mut [i64; 2],
 ) -> f64 {
+    // SSO receiver — never cacheable. Route through the SSO-aware
+    // `js_object_get_field_by_name` which handles `.length` inline
+    // and returns undefined for other keys.
+    if !key.is_null() {
+        let obj_bits = obj as u64;
+        if (obj_bits & crate::value::TAG_MASK) == crate::value::SHORT_STRING_TAG {
+            let v = js_object_get_field_by_name(obj, key);
+            return f64::from_bits(v.bits());
+        }
+    }
     if obj.is_null() || (obj as usize) < 0x10000 || key.is_null() {
         return f64::from_bits(crate::value::TAG_UNDEFINED);
     }
@@ -2795,10 +2863,16 @@ pub extern "C" fn js_instanceof(value: f64, class_id: u32) -> f64 {
     const CLASS_ID_SET: u32 = 0xFFFF0023;
     if class_id == CLASS_ID_DATE {
         // A Perry Date is a raw f64 timestamp (no NaN-box tag, real f64).
-        // Accept any finite number that's not NaN. This is approximate
-        // but matches the only way Date values flow through Perry.
+        // Distinguishing it from a regular number requires a side-channel:
+        // `js_date_new(...)` registers the f64 bits in DATE_REGISTRY, and
+        // here we consult that registry. Without the registry, every finite
+        // number would match (the prior "approximate" rule), which made
+        // `100 instanceof Date` true and broke the BSON encoder's typed
+        // dispatch (`if (value instanceof Date) … else if (typeof v === 'number') …`).
         if !value.is_nan() && value.is_finite() {
-            return true_val;
+            if crate::date::is_registered_date_bits(value.to_bits()) {
+                return true_val;
+            }
         }
         return false_val;
     }
@@ -2832,7 +2906,9 @@ pub extern "C" fn js_instanceof(value: f64, class_id: u32) -> f64 {
 
     // Array — Perry arrays are heap allocations with `GC_TYPE_ARRAY` in
     // their gc_header (one byte at obj-8). Pointer can arrive NaN-boxed
-    // (POINTER_TAG) or as a raw bitcast f64; handle both.
+    // (POINTER_TAG) or as a raw bitcast f64; handle both. Lazy arrays
+    // (Phase 5 JSON.parse result) are also arrays from the user's
+    // perspective — must return true without force-materializing.
     const CLASS_ID_ARRAY: u32 = 0xFFFF0024;
     if class_id == CLASS_ID_ARRAY {
         let addr = if jsval.is_pointer() {
@@ -2844,7 +2920,10 @@ pub extern "C" fn js_instanceof(value: f64, class_id: u32) -> f64 {
         if addr != 0 && addr >= crate::gc::GC_HEADER_SIZE {
             let gc_header = (addr - crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
             unsafe {
-                if (*gc_header).obj_type == crate::gc::GC_TYPE_ARRAY {
+                let obj_type = (*gc_header).obj_type;
+                if obj_type == crate::gc::GC_TYPE_ARRAY
+                    || obj_type == crate::gc::GC_TYPE_LAZY_ARRAY
+                {
                     return true_val;
                 }
             }
@@ -4211,9 +4290,43 @@ unsafe fn dispatch_bigint_binary_method(
             let result = crate::bigint::js_bigint_cmp(a, b);
             return result as f64;
         }
-        "fromTwos" | "toTwos" => {
-            // TODO: implement proper two's complement conversion
-            return f64::from_bits(JSValue::bigint_ptr(a as *mut crate::bigint::BigIntHeader).bits());
+        "fromTwos" => {
+            // bn.js: interpret `a` as the unsigned encoding of a signed
+            // `width`-bit integer in two's complement. If bit (width-1) of
+            // `a` is set the result is `a - 2^width`; otherwise return `a`.
+            // `width` arrives in `b` (already a BigInt — see top of fn).
+            let width = if b.is_null() { 0u64 } else { (*b).limbs[0] };
+            let max_bits = (crate::bigint::BIGINT_LIMBS * 64) as u64;
+            if width == 0 || width > max_bits {
+                return f64::from_bits(JSValue::bigint_ptr(a as *mut crate::bigint::BigIntHeader).bits());
+            }
+            let bit = (width - 1) as usize;
+            let high_bit_set = ((*a).limbs[bit / 64] >> (bit % 64)) & 1 == 1;
+            if !high_bit_set {
+                return f64::from_bits(JSValue::bigint_ptr(a as *mut crate::bigint::BigIntHeader).bits());
+            }
+            let one = crate::bigint::js_bigint_from_u64(1);
+            let two_pow = crate::bigint::js_bigint_shl(one, b);
+            let result = crate::bigint::js_bigint_sub(a, two_pow);
+            return f64::from_bits(JSValue::bigint_ptr(result).bits());
+        }
+        "toTwos" => {
+            // bn.js: convert to `width`-bit two's complement encoding. If `a`
+            // is negative the result is `a + 2^width` (mod 2^width);
+            // otherwise return `a` unchanged. bn.js does not mask
+            // non-negative inputs to `width` bits, so neither do we.
+            let width = if b.is_null() { 0u64 } else { (*b).limbs[0] };
+            let max_bits = (crate::bigint::BIGINT_LIMBS * 64) as u64;
+            if width == 0 || width > max_bits {
+                return f64::from_bits(JSValue::bigint_ptr(a as *mut crate::bigint::BigIntHeader).bits());
+            }
+            if crate::bigint::js_bigint_is_negative(a) == 0 {
+                return f64::from_bits(JSValue::bigint_ptr(a as *mut crate::bigint::BigIntHeader).bits());
+            }
+            let one = crate::bigint::js_bigint_from_u64(1);
+            let two_pow = crate::bigint::js_bigint_shl(one, b);
+            let result = crate::bigint::js_bigint_add(a, two_pow);
+            return f64::from_bits(JSValue::bigint_ptr(result).bits());
         }
         _ => {
             return f64::from_bits(crate::value::TAG_UNDEFINED);

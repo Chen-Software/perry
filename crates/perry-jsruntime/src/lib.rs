@@ -167,14 +167,9 @@ where
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_runtime_init() {
-        js_runtime_init();
-        // Should not panic on double init
-        js_runtime_init();
-    }
-}
+// No tests in this module — `interop::tests::test_runtime_init` covers single-init.
+// A separate test that called `js_runtime_init()` here used to live in lib.rs, but on Linux
+// it segfaulted under `cargo test -p perry-jsruntime --lib`: deno_core/V8 don't tolerate a
+// second `JsRuntime::new()` in the same process across cargo's per-test worker threads
+// (see #196). The double-init tolerance the old test claimed to verify is trivially provided
+// by the `if opt.is_none()` guard in `ensure_runtime_initialized` above.

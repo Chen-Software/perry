@@ -81,20 +81,8 @@ All widgets support these styling modifiers:
 
 watchOS apps use SwiftUI's `@main App` pattern. Perry's PerryWatchApp.swift runtime handles the app lifecycle automatically:
 
-```typescript,no-test
-import { App, Text, VStack, Button } from "perry/ui";
-
-App({
-  title: "My Watch App",
-  width: 200,
-  height: 200,
-  body: VStack(8, [
-    Text("Hello, Apple Watch!"),
-    Button("Tap me", () => {
-      console.log("Button tapped!");
-    }),
-  ]),
-});
+```typescript
+{{#include ../../examples/platforms/ui/watchos_app.ts:watchos-app}}
 ```
 
 Under the hood:
@@ -106,22 +94,8 @@ Under the hood:
 
 Reactive state works the same as other platforms:
 
-```typescript,no-test
-import { App, Text, VStack, Button, State } from "perry/ui";
-
-const count = State(0);
-
-App({
-  title: "Counter",
-  width: 200,
-  height: 200,
-  body: VStack(8, [
-    Text(`Count: ${count.value}`),
-    Button("+1", () => {
-      count.set(count.value + 1);
-    }),
-  ]),
-});
+```typescript
+{{#include ../../examples/platforms/ui/counter_app.ts:counter}}
 ```
 
 When `state.set()` is called, the tree version increments and SwiftUI re-renders the affected views automatically.
@@ -171,14 +145,10 @@ This shares App Store Connect credentials with iOS/macOS (same team, API key, is
 
 ## Platform Detection
 
-Use `__platform__ === 5` to detect watchOS at compile time:
+Use `__platform__ === 7` to detect watchOS at compile time:
 
-```typescript,no-test
-declare const __platform__: number;
-
-if (__platform__ === 5) {
-  console.log("Running on watchOS");
-}
+```typescript
+{{#include ../../examples/platforms/platform_detect.ts:watchos-detect}}
 ```
 
 ## watchOS Widgets (WidgetKit)

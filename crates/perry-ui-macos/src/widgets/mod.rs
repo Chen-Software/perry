@@ -724,6 +724,48 @@ pub fn set_border_width(handle: i64, width: f64) {
     }
 }
 
+/// Set a drop shadow on any widget via its layer.
+///
+/// `(r, g, b, a)` is the shadow color (0.0–1.0); `a` is folded into
+/// `setShadowOpacity:` because CALayer treats `shadowColor` as opaque
+/// regardless of the CGColor's alpha. `blur` is `setShadowRadius:`.
+/// `(offset_x, offset_y)` is `setShadowOffset:` — note CALayer uses
+/// CGSize{width = x, height = y} where positive y is **downward** on
+/// macOS (matches HTML's `box-shadow: x y blur color`). Setting blur
+/// to 0 with a non-zero offset gives a hard shadow; setting all of
+/// blur + offset_x + offset_y to 0 effectively clears the shadow.
+pub fn set_shadow(
+    handle: i64,
+    r: f64, g: f64, b: f64, a: f64,
+    blur: f64, offset_x: f64, offset_y: f64,
+) {
+    if let Some(view) = get_widget(handle) {
+        unsafe {
+            let _: () = objc2::msg_send![&*view, setWantsLayer: true];
+            let layer: *mut AnyObject = objc2::msg_send![&*view, layer];
+            if !layer.is_null() {
+                // Color: opaque CGColor; alpha rides on shadowOpacity.
+                let cg_color = CGColorCreateGenericRGB(r, g, b, 1.0);
+                let _: () = objc2::msg_send![layer, setShadowColor: cg_color];
+                CGColorRelease(cg_color);
+                let _: () = objc2::msg_send![layer, setShadowOpacity: a as f32];
+                let _: () = objc2::msg_send![layer, setShadowRadius: blur];
+                // CGSize is {f64 width, f64 height}; objc2_core_foundation
+                // already provides this layout-compatible struct.
+                let offset = objc2_core_foundation::CGSize::new(offset_x, offset_y);
+                let _: () = objc2::msg_send![layer, setShadowOffset: offset];
+                // CALayer shadows are clipped by `masksToBounds`. iOS
+                // sets this in its mirror impl; the macOS version was
+                // missing it — the bug visible in
+                // `docs/examples/ui/styling/visual_test.ts` section 4
+                // before this fix landed (FFI args correct per the IR
+                // dump but no visible shadow).
+                let _: () = objc2::msg_send![layer, setMasksToBounds: false];
+            }
+        }
+    }
+}
+
 /// Set edge insets (internal padding) on an NSStackView widget.
 /// No-op for non-stack widgets.
 pub fn set_edge_insets(handle: i64, top: f64, left: f64, bottom: f64, right: f64) {

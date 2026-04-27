@@ -144,6 +144,11 @@ normalize_output() {
         sed -E 's/^false$/0/' | \
         # Normalize floating point precision (keep 10 decimal places)
         sed -E 's/([0-9]+\.[0-9]{10})[0-9]+/\1/g' | \
+        # Normalize console.time/timeLog/timeEnd output: the elapsed value
+        # will always differ between Node.js (JIT) and Perry (native LLVM).
+        # Strip the numeric portion, keeping only label and unit so both
+        # sides compare as "label: <timer>".
+        sed -E 's/^([^:]+): [0-9]+(\.[0-9]+)?(ms|s)$/\1: <timer>/g' | \
         # Remove trailing empty lines
         sed -e :a -e '/^\n*$/{$d;N;ba' -e '}'
 }
@@ -210,7 +215,7 @@ for test_file in "$TEST_DIR"/*.ts; do
     echo "$node_output" > "$node_output_file"
 
     # Compile with Perry
-    compile_output=$(cargo run --quiet -- $BACKEND_FLAG "$test_file" -o "$perry_binary" 2>&1)
+    compile_output=$(cargo run --quiet --bin perry -- $BACKEND_FLAG "$test_file" -o "$perry_binary" 2>&1)
     compile_exit=$?
 
     if [[ $compile_exit -ne 0 ]]; then

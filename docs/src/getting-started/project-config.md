@@ -128,11 +128,8 @@ Configure a native splash screen for iOS and Android. The splash screen appears 
 
 Perry natively supports many popular npm packages without any configuration:
 
-```typescript,no-test
-import fastify from "fastify";
-import mysql from "mysql2/promise";
-import Redis from "ioredis";
-import bcrypt from "bcrypt";
+```typescript
+{{#include ../../examples/getting-started/npm_packages.ts}}
 ```
 
 These are compiled to native code using Perry's built-in implementations. See [Standard Library](../stdlib/overview.md) for the full list.

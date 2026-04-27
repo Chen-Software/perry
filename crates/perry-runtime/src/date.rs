@@ -3,7 +3,31 @@
 //! Provides JavaScript Date functionality using system time.
 //! Dates are represented internally as i64 timestamps (milliseconds since Unix epoch).
 
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+thread_local! {
+    /// Bit patterns of f64 values that came from a `new Date(...)` constructor
+    /// (or `Date.now()` / a Date method). `instanceof Date` consults this set
+    /// — without it, every finite number would match because Perry stores
+    /// Date as a raw f64 timestamp with no tag.
+    ///
+    /// False positives are possible (a regular number equal to a registered
+    /// Date timestamp), but in practice the set is small and dominated by
+    /// recently-minted Date timestamps.
+    static DATE_REGISTRY: RefCell<HashSet<u64>> = RefCell::new(HashSet::new());
+}
+
+/// Mark `bits` as a Date so future `instanceof Date` checks can recognize it.
+pub fn register_date_bits(bits: u64) {
+    DATE_REGISTRY.with(|r| { r.borrow_mut().insert(bits); });
+}
+
+/// True when `bits` were previously registered as a Date.
+pub fn is_registered_date_bits(bits: u64) -> bool {
+    DATE_REGISTRY.with(|r| r.borrow().contains(&bits))
+}
 
 /// Convert a UTC timestamp (seconds) to local-time components.
 /// Returns (year, month [1-12], day, hour, minute, second, tz_offset_seconds).
@@ -87,12 +111,15 @@ pub extern "C" fn js_performance_now() -> f64 {
 /// Create a new Date from current time, returning timestamp in milliseconds
 #[no_mangle]
 pub extern "C" fn js_date_new() -> f64 {
-    js_date_now()
+    let v = js_date_now();
+    register_date_bits(v.to_bits());
+    v
 }
 
 /// Create a new Date from a timestamp (milliseconds since epoch)
 #[no_mangle]
 pub extern "C" fn js_date_new_from_timestamp(timestamp: f64) -> f64 {
+    register_date_bits(timestamp.to_bits());
     timestamp
 }
 
@@ -103,26 +130,31 @@ pub extern "C" fn js_date_new_from_timestamp(timestamp: f64) -> f64 {
 pub extern "C" fn js_date_new_from_value(value: f64) -> f64 {
     let bits = value.to_bits();
     let tag = (bits >> 48) & 0xFFFF;
-    if tag == 0x7FFF {
+    let result = if tag == 0x7FFF {
         // NaN-boxed string — extract pointer and parse
         let ptr = (bits & 0x0000_FFFF_FFFF_FFFF) as *const crate::StringHeader;
         if ptr.is_null() || (ptr as usize) < 0x1000 {
-            return f64::NAN;
-        }
-        unsafe {
-            let len = (*ptr).byte_len as usize;
-            let data = (ptr as *const u8).add(std::mem::size_of::<crate::StringHeader>());
-            let bytes = std::slice::from_raw_parts(data, len);
-            if let Ok(s) = std::str::from_utf8(bytes) {
-                parse_date_string(s)
-            } else {
-                f64::NAN
+            f64::NAN
+        } else {
+            unsafe {
+                let len = (*ptr).byte_len as usize;
+                let data = (ptr as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+                let bytes = std::slice::from_raw_parts(data, len);
+                if let Ok(s) = std::str::from_utf8(bytes) {
+                    parse_date_string(s)
+                } else {
+                    f64::NAN
+                }
             }
         }
     } else {
         // Numeric timestamp
         value
+    };
+    if !result.is_nan() {
+        register_date_bits(result.to_bits());
     }
+    result
 }
 
 /// Parse a date string into a millisecond timestamp.

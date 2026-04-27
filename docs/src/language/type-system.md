@@ -6,11 +6,8 @@ Perry erases types at compile time, similar to how `tsc` removes type annotation
 
 Perry infers types from expressions without requiring annotations:
 
-```typescript,no-test
-let x = 5;           // inferred as number
-let s = "hello";     // inferred as string
-let b = true;        // inferred as boolean
-let arr = [1, 2, 3]; // inferred as number[]
+```typescript
+{{#include ../../examples/language/type_system.ts:inference-basics}}
 ```
 
 Inference works through:
@@ -20,43 +17,24 @@ Inference works through:
 - **Method returns**: `"hello".trim()` → `string`, `[1,2].length` → `number`
 - **Function returns**: user-defined function return types are propagated to callers
 
-```typescript,no-test
-function double(n: number): number {
-  return n * 2;
-}
-let result = double(5); // inferred as number
+```typescript
+{{#include ../../examples/language/type_system.ts:inference-function}}
 ```
 
 ## Type Annotations
 
 Standard TypeScript annotations work:
 
-```typescript,no-test
-let name: string = "Perry";
-let count: number = 0;
-let items: string[] = [];
-
-function greet(name: string): string {
-  return `Hello, ${name}`;
-}
-
-interface Config {
-  port: number;
-  host: string;
-}
+```typescript
+{{#include ../../examples/language/type_system.ts:annotations}}
 ```
 
 ## Utility Types
 
 Common TypeScript utility types are erased at compile time (they don't affect code generation):
 
-```typescript,no-test
-type Partial<T> = { [P in keyof T]?: T[P] };
-type Pick<T, K> = { [P in K]: T[P] };
-type Record<K, V> = { [P in K]: V };
-type Omit<T, K> = Pick<T, Exclude<keyof T, K>>;
-type ReturnType<T> = /* ... */;
-type Readonly<T> = { readonly [P in keyof T]: T[P] };
+```typescript
+{{#include ../../examples/language/type_system.ts:utility-types}}
 ```
 
 These are all recognized and erased — they won't cause compilation errors.
@@ -65,19 +43,8 @@ These are all recognized and erased — they won't cause compilation errors.
 
 Generic type parameters are erased:
 
-```typescript,no-test
-function identity<T>(value: T): T {
-  return value;
-}
-
-class Box<T> {
-  value: T;
-  constructor(value: T) {
-    this.value = value;
-  }
-}
-
-const box = new Box<number>(42);
+```typescript
+{{#include ../../examples/language/type_system.ts:generics}}
 ```
 
 At runtime, all values are NaN-boxed — the generic parameter doesn't affect code generation.
@@ -98,30 +65,16 @@ Without `--type-check`, Perry relies on its own inference engine, which handles 
 
 Union types are recognized syntactically but don't affect code generation:
 
-```typescript,no-test
-type StringOrNumber = string | number;
-
-function process(value: StringOrNumber) {
-  if (typeof value === "string") {
-    console.log(value.toUpperCase());
-  } else {
-    console.log(value + 1);
-  }
-}
+```typescript
+{{#include ../../examples/language/type_system.ts:union-narrowing}}
 ```
 
 Use `typeof` checks for runtime type narrowing.
 
 ## Type Guards
 
-```typescript,no-test
-function isString(value: any): value is string {
-  return typeof value === "string";
-}
-
-if (isString(x)) {
-  console.log(x.toUpperCase());
-}
+```typescript
+{{#include ../../examples/language/type_system.ts:type-guards}}
 ```
 
 The `value is string` annotation is erased, but the `typeof` check works at runtime.

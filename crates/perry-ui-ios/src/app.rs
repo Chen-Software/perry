@@ -84,8 +84,73 @@ define_class!(
     impl PerryAppDelegate {
         #[unsafe(method(application:didFinishLaunchingWithOptions:))]
         fn did_finish_launching(&self, _application: &AnyObject, _options: *const AnyObject) -> bool {
-            // Window creation is handled by PerrySceneDelegate
+            // Window creation is handled by PerrySceneDelegate.
+            // Fire notification auth prompt once here so notificationSend() doesn't
+            // re-prompt on every call (per #94).
+            crate::notifications::request_authorization();
             true
+        }
+
+        /// APNs handed us a device token (#95). Hex-format it and call the
+        /// closure passed to `notificationRegisterRemote`.
+        #[unsafe(method(application:didRegisterForRemoteNotificationsWithDeviceToken:))]
+        fn did_register_for_remote_notifications(
+            &self,
+            _app: &AnyObject,
+            device_token: &AnyObject,
+        ) {
+            unsafe {
+                crate::notifications::dispatch_device_token(
+                    device_token as *const _ as *mut AnyObject,
+                );
+            }
+        }
+
+        /// APNs rejected the registration. Logged to stderr.
+        #[unsafe(method(application:didFailToRegisterForRemoteNotificationsWithError:))]
+        fn did_fail_to_register_for_remote_notifications(
+            &self,
+            _app: &AnyObject,
+            error: &AnyObject,
+        ) {
+            unsafe {
+                crate::notifications::dispatch_registration_failure(
+                    error as *const _ as *mut AnyObject,
+                );
+            }
+        }
+
+        /// Foreground remote-notification payload.
+        #[unsafe(method(application:didReceiveRemoteNotification:))]
+        fn did_receive_remote_notification(
+            &self,
+            _app: &AnyObject,
+            user_info: &AnyObject,
+        ) {
+            unsafe {
+                crate::notifications::dispatch_remote_payload(
+                    user_info as *const _ as *mut AnyObject,
+                );
+            }
+        }
+
+        /// Background remote-notification payload (#98). UIKit always passes
+        /// a non-null completion handler block; we forward it to the
+        /// notifications module so the user's returned Promise can gate the
+        /// `UIBackgroundFetchResult` signal.
+        #[unsafe(method(application:didReceiveRemoteNotification:fetchCompletionHandler:))]
+        fn did_receive_remote_notification_with_completion(
+            &self,
+            _app: &AnyObject,
+            user_info: &AnyObject,
+            completion: *mut AnyObject,
+        ) {
+            unsafe {
+                crate::notifications::dispatch_remote_payload_with_completion(
+                    user_info as *const _ as *mut AnyObject,
+                    completion,
+                );
+            }
         }
     }
 );
@@ -418,7 +483,7 @@ thread_local! {
 }
 
 extern "C" {
-    fn js_stdlib_process_pending();
+    fn js_run_stdlib_pump();
     fn js_promise_run_microtasks() -> i32;
     fn js_nanbox_get_pointer(value: f64) -> i64;
     fn js_closure_call0(closure: *const u8) -> f64;
@@ -517,7 +582,7 @@ define_class!(
         fn timer_fired(&self, _sender: &AnyObject) {
             // Drain resolved promises, then run microtasks (.then callbacks)
             unsafe {
-                js_stdlib_process_pending();
+                js_run_stdlib_pump();
                 js_promise_run_microtasks();
             }
 
@@ -756,7 +821,7 @@ unsafe fn find_first_responder(view: *const AnyObject) -> *const AnyObject {
 }
 
 /// Set a recurring timer. interval_ms is in milliseconds.
-/// The timer calls js_stdlib_process_pending() then invokes the callback.
+/// The timer calls js_run_stdlib_pump() then invokes the callback.
 pub fn set_timer(interval_ms: f64, callback: f64) {
     let interval_secs = interval_ms / 1000.0;
 

@@ -272,12 +272,12 @@ function perry_ui_toggle_create(label, callback) {
     return wrapWidget(allocHandle(wrapper));
 }
 
-function perry_ui_slider_create(min, max, initial, callback) {
+function perry_ui_slider_create(min, max, callback) {
     const el = document.createElement("input");
     el.type = "range";
     el.min = min;
     el.max = max;
-    el.value = initial;
+    el.value = min; // codegen emits 3-arg Slider(min, max, onChange); default initial=min
     el.step = "any";
     if (typeof callback === "function") {
         el.addEventListener("input", () => callback(parseFloat(el.value)));

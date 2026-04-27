@@ -25,6 +25,36 @@ export interface WidgetMethods {
 /** Opaque handle to a native UI widget. */
 export type Widget = number & WidgetMethods & { readonly [__widget]: void };
 
+/**
+ * 2D drawing methods available on a Canvas handle. Mirrors the stateful
+ * HTML5 Canvas 2D context API. Color state is set with `setFillColor` /
+ * `setStrokeColor` / `setLineWidth` before issuing draw calls.
+ *
+ * Native platform support: stubs exist on all targets; GTK4, Android, and
+ * Windows have the path/gradient primitives. Full rasterization of the
+ * stateful API is tracked in perry-ui-test (`U` → in progress).
+ */
+export interface CanvasMethods {
+    setFillColor(r: number, g: number, b: number, a: number): void;
+    setStrokeColor(r: number, g: number, b: number, a: number): void;
+    setLineWidth(width: number): void;
+    fillRect(x: number, y: number, width: number, height: number): void;
+    strokeRect(x: number, y: number, width: number, height: number): void;
+    clearRect(x: number, y: number, width: number, height: number): void;
+    beginPath(): void;
+    moveTo(x: number, y: number): void;
+    lineTo(x: number, y: number): void;
+    arc(x: number, y: number, radius: number, startAngle: number, endAngle: number): void;
+    closePath(): void;
+    fill(): void;
+    stroke(): void;
+    fillText(text: string, x: number, y: number): void;
+    setFont(spec: string): void;
+}
+
+/** Opaque handle to a Canvas widget. Extends Widget with 2D drawing methods. */
+export type Canvas = Widget & CanvasMethods;
+
 /** Reactive state container. Generic over the value type it holds. */
 export interface State<T = number> {
     /** Current value of the state. */
@@ -41,6 +71,114 @@ export interface Window {
     setBody(body: Widget): void;
     setSize(width: number, height: number): void;
     onFocusLost(callback: () => void): void;
+}
+
+/**
+ * RGBA color in 0..=1 floats.
+ *
+ * The FFI surface uses 4-float colors throughout (`(r, g, b, a)`), and the
+ * `style: { ... }` API of issue #185 will accept these objects directly.
+ * The string forms (CSS hex / rgb / hsl / named colors) are parsed by
+ * `parseColor` from the `perry-styling` companion package.
+ */
+export interface PerryColor {
+    r: number;
+    g: number;
+    b: number;
+    a?: number;
+}
+
+/**
+ * Cross-platform style descriptor for issue #185 Phase C.
+ *
+ * **Status:** Type surface only — the inline `Button("Save", onPress, { style })`
+ * codegen pass is in development. Right now use the individual setters
+ * (`widgetSetBackgroundColor`, `widgetSetBorderColor`, `setCornerRadius`,
+ * etc.) and pass `StyleProps` shapes around as plain typed objects for
+ * IDE autocomplete and future-compatibility — the same prop names map
+ * 1:1 to setters, so code authored against `StyleProps` today will keep
+ * working once the inline syntax lands.
+ *
+ * Every prop here is currently wired on macOS / iOS / tvOS / visionOS /
+ * watchOS / Android / Web; GTK4 has 4 gaps (issue #202) and Windows has
+ * 5 deferred-paint stubs (shadow, opacity, borders, text decoration —
+ * tracked in `crates/perry-ui/src/styling_matrix.rs`).
+ *
+ * Color values currently accept either a raw `PerryColor` object or a
+ * CSS string (hex / rgb / hsl / named) — string parsing happens at
+ * widget-construction time via `parseColor`.
+ */
+export interface StyleProps {
+    /** Solid background color. Maps to `widgetSetBackgroundColor`. */
+    backgroundColor?: string | PerryColor;
+
+    /** Foreground / text color. Maps to `textSetColor` (text widgets) or
+     *  `buttonSetTextColor` (buttons). */
+    color?: string | PerryColor;
+
+    /** Border color. Maps to `widgetSetBorderColor`. Joint state with
+     *  `borderWidth` — sets a default 1px width if width isn't also
+     *  provided, so a single setter still produces a visible border. */
+    borderColor?: string | PerryColor;
+
+    /** Border width in pixels. Maps to `widgetSetBorderWidth`. Joint
+     *  state with `borderColor`. */
+    borderWidth?: number;
+
+    /** Corner radius in pixels. Maps to `setCornerRadius`. */
+    borderRadius?: number;
+
+    /** Padding. A single number applies to all four sides; an object
+     *  picks per-side (top / right / bottom / left). Maps to
+     *  `widgetSetEdgeInsets`. */
+    padding?: number | {
+        top?: number;
+        right?: number;
+        bottom?: number;
+        left?: number;
+    };
+
+    /** Font size in points. Maps to `textSetFontSize`. */
+    fontSize?: number;
+
+    /** Font weight (numeric, e.g. 400 = regular, 700 = bold). Maps to
+     *  `textSetFontWeight`. */
+    fontWeight?: number;
+
+    /** Font family name (e.g. "Menlo", "system", "monospaced"). Maps to
+     *  `textSetFontFamily`. */
+    fontFamily?: string;
+
+    /** Opacity in 0.0..=1.0. Maps to `widgetSetOpacity`. */
+    opacity?: number;
+
+    /** Drop shadow. Maps to `widgetSetShadow`. `offset.y` is positive
+     *  downward, matching CSS `box-shadow` and CALayer semantics. */
+    shadow?: {
+        color?: string | PerryColor;
+        blur?: number;
+        offsetX?: number;
+        offsetY?: number;
+    };
+
+    /** Text decoration. Maps to `textSetDecoration`. */
+    textDecoration?: "none" | "underline" | "strikethrough";
+
+    /** Linear gradient. Maps to `widgetSetBackgroundGradient`. */
+    gradient?: {
+        angle: number;
+        stops: Array<string | PerryColor>;
+    };
+
+    /** Whether the widget is hidden from layout. Maps to `widgetSetHidden`. */
+    hidden?: boolean;
+
+    /** Whether the widget accepts user interaction. Maps to
+     *  `widgetSetEnabled`. */
+    enabled?: boolean;
+
+    /** Hover tooltip text. Maps to `widgetSetTooltip`. */
+    tooltip?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -99,6 +237,13 @@ export function ProgressView(): Widget;
 
 /** Depth stack (overlapping children). */
 export function ZStack(): Widget;
+
+/**
+ * 2D drawing canvas. Returns a Canvas handle with drawing methods.
+ * Compile-and-link supported on all native targets; visual rendering of the
+ * stateful color/path API is tracked in perry-ui-test.
+ */
+export function Canvas(width: number, height: number): Canvas;
 
 /** Dropdown picker. */
 export function Picker(onChange: (index: number) => void): Widget;
@@ -174,6 +319,13 @@ export function textSetFontWeight(widget: Widget, size: number, weight: number):
 export function textSetFontFamily(widget: Widget, family: string): void;
 export function textSetWraps(widget: Widget, maxWidth: number): void;
 export function textSetSelectable(widget: Widget, selectable: number): void;
+/**
+ * Set text decoration on a Text widget (issue #185 Phase B).
+ * `decoration`: 0 = none, 1 = underline, 2 = strikethrough.
+ * Wired on every backend except Windows, which stores the value but
+ * doesn't yet rebuild HFONTs to apply it visually.
+ */
+export function textSetDecoration(widget: Widget, decoration: number): void;
 
 // ---------------------------------------------------------------------------
 // Button setters
@@ -215,6 +367,20 @@ export function widgetSetControlSize(widget: Widget, size: number): void;
 export function widgetSetEdgeInsets(widget: Widget, top: number, left: number, bottom: number, right: number): void;
 export function widgetSetBorderColor(widget: Widget, r: number, g: number, b: number, a: number): void;
 export function widgetSetBorderWidth(widget: Widget, width: number): void;
+/**
+ * Set a drop shadow on a widget. (r, g, b, a) is the shadow color in 0–1
+ * — alpha rides on the layer's shadowOpacity so a non-1 alpha doesn't
+ * double-multiply via the color's alpha. `blur` is the shadow radius.
+ * `(offsetX, offsetY)` is the shadow offset, with positive y = downward
+ * (matches HTML `box-shadow: x y blur color`). Issue #185 Phase B —
+ * currently wired on macOS / iOS / tvOS / visionOS / watchOS; Android,
+ * GTK4, Windows, Web closures coming next.
+ */
+export function widgetSetShadow(
+    widget: Widget,
+    r: number, g: number, b: number, a: number,
+    blur: number, offsetX: number, offsetY: number
+): void;
 export function widgetSetContextMenu(widget: Widget, menu: Widget): void;
 export function widgetAddOverlay(widget: Widget, overlay: Widget): void;
 export function widgetSetOverlayFrame(widget: Widget, x: number, y: number, width: number, height: number): void;
@@ -333,6 +499,94 @@ export function tabbarAddTab(tabBar: Widget, title: string, content: Widget): vo
 export function tabbarSetSelected(tabBar: Widget, index: number): void;
 
 // ---------------------------------------------------------------------------
+// Table (issue #192)
+// ---------------------------------------------------------------------------
+
+/**
+ * Multi-column scrollable table. Real implementation lives on **macOS**
+ * (`NSTableView` + `NSScrollView`); the **Web** target uses an HTML
+ * `<table>`. Other targets (iOS, Android, Linux/GTK4, Windows, tvOS,
+ * visionOS, watchOS) link no-op stubs so cross-platform code compiles
+ * everywhere — the table renders nothing and `tableGetSelectedRow`
+ * returns `-1`.
+ *
+ * The render callback receives `(row, col)` and must return a `Widget`
+ * (typically `Text(...)`). The runtime resolves the returned handle as
+ * the cell view, which lets cells render images, stacks, or composites
+ * — not just plain strings.
+ *
+ * Compare with `LazyVStack` (`Layout`) which is single-column but works
+ * on every native target today.
+ */
+export function Table(rowCount: number, colCount: number, renderCell: (row: number, col: number) => Widget): Widget;
+
+/** Set the header title of column `col` (0-based). */
+export function tableSetColumnHeader(table: Widget, col: number, title: string): void;
+
+/** Set the pixel width of column `col` (0-based). */
+export function tableSetColumnWidth(table: Widget, col: number, width: number): void;
+
+/** Update the total row count and reload the visible cells. */
+export function tableUpdateRowCount(table: Widget, count: number): void;
+
+/** Register a row-select callback. The callback receives the 0-based row index. */
+export function tableSetOnRowSelect(table: Widget, callback: (row: number) => void): void;
+
+/** Return the index of the currently selected row, or `-1` if none. */
+export function tableGetSelectedRow(table: Widget): number;
+
+// ---------------------------------------------------------------------------
+// Camera (issue #191)
+// ---------------------------------------------------------------------------
+
+/**
+ * Live camera preview widget. Real capture is implemented on **iOS**
+ * (AVCaptureSession) and **Android** (Camera2). Other targets (macOS,
+ * Linux/GTK4, Windows, Web) link no-op stubs so cross-platform code
+ * compiles everywhere; on those targets `cameraSampleColor` returns `-1`
+ * and the start/stop/freeze setters are no-ops.
+ *
+ * The camera does not start automatically — call `cameraStart()` to begin
+ * capture. On iOS, the camera permission dialog is shown automatically on
+ * first use.
+ */
+export function CameraView(): Widget;
+
+/** Start the live camera feed. */
+export function cameraStart(camera: Widget): void;
+
+/** Stop the camera feed and release the capture session. */
+export function cameraStop(camera: Widget): void;
+
+/** Pause the live preview while keeping the capture session active. */
+export function cameraFreeze(camera: Widget): void;
+
+/** Resume the live preview after a freeze. */
+export function cameraUnfreeze(camera: Widget): void;
+
+/**
+ * Sample the pixel color at normalized coordinates (`x`, `y` in 0–1).
+ * Returns packed RGB as a number — `r * 65536 + g * 256 + b` — or `-1` if
+ * no frame is available. The color is averaged over a 5x5 pixel region
+ * around the sample point for noise reduction.
+ *
+ * To extract individual channels:
+ * ```text
+ * const r = Math.floor(rgb / 65536);
+ * const g = Math.floor((rgb % 65536) / 256);
+ * const b = Math.floor(rgb % 256);
+ * ```
+ */
+export function cameraSampleColor(x: number, y: number): number;
+
+/**
+ * Register a tap handler on the camera view. The callback receives the
+ * normalized coordinates of the tap location, which can be passed
+ * directly to `cameraSampleColor()`.
+ */
+export function cameraSetOnTap(camera: Widget, callback: (x: number, y: number) => void): void;
+
+// ---------------------------------------------------------------------------
 // Sheet
 // ---------------------------------------------------------------------------
 
@@ -392,7 +646,21 @@ export function pollOpenFile(): string;
 // Keyboard shortcuts
 // ---------------------------------------------------------------------------
 
-export function addKeyboardShortcut(key: string, callback: () => void): void;
+/**
+ * Register a keyboard shortcut that fires `callback` when pressed.
+ *
+ * `modifiers` is a bitfield: `1 = Cmd` (Ctrl on Linux/Windows), `2 = Shift`,
+ * `4 = Option/Alt`, `8 = Control`. Combine with bitwise OR — e.g. Cmd+Shift+S
+ * is `1 | 2` (= `3`). Pass `0` for an unmodified key.
+ *
+ * Must be called before `App({...})` — registrations are buffered and
+ * installed when the menu bar is created.
+ */
+export function addKeyboardShortcut(
+    key: string,
+    modifiers: number,
+    callback: () => void,
+): void;
 
 // ---------------------------------------------------------------------------
 // App lifecycle hooks

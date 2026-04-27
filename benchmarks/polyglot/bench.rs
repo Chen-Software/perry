@@ -112,6 +112,79 @@ fn bench_accumulate() {
     println!("  checksum: {:.0}", sum);
 }
 
+fn bench_loop_data_dependent() {
+    // Verified non-foldable on rustc 1.94.1 stable as of 2026-04-25.
+    // `rustc -O -C codegen-units=1 --emit=asm bench.rs` produces this
+    // exact loop body (label LBB5_41 in the dump):
+    //
+    //     LBB5_41:
+    //       and  x9,  x8, #0x3f            // i & 63
+    //       lsl  w10, w8, #3               // i*8
+    //       sub  w10, w10, w8              // i*8 - i = i*7
+    //       add  x8,  x8, #1               // i++
+    //       and  x10, x10, #0x3f           // (i*7) & 63
+    //       ldr  d1,  [x19, x9,  lsl #3]   // load x[i & 63]
+    //       fmul d0,  d0, d1               // sum *= x[i & 63]
+    //       ldr  d1,  [x19, x10, lsl #3]   // load x[(i*7) & 63]
+    //       fadd d0,  d0, d1               // sum += x[(i*7) & 63]
+    //       cmp  x8,  x22                  // i < ITERATIONS?
+    //       b.ne LBB5_41
+    //
+    // Scalar loop with two array loads, one fmul, one fadd, sequential
+    // carry through d0 (sum). Not vectorized, not unrolled, not folded.
+    // The sequential dependency on `sum` defeats both reassoc and the
+    // vectorizer; the array reads defeat constant propagation past the
+    // loop boundary.
+    //
+    // FP-contract caveat (matters for cross-language comparison): the
+    // expression `sum * a + b` can be lowered as either two instructions
+    // (fmul + fadd, 2 IEEE-754 roundings) or a single fused FMADDD
+    // (one rounding). The fused form has shorter per-iteration latency
+    // (~4 cycles vs ~6-8 on Apple silicon) and changes the result by at
+    // most 0.5 ULP per iteration. LLVM's default does NOT contract —
+    // observable: rustc 1.94.1 default `-O` emits the fmul+fadd shape
+    // shown above, and `-C target-cpu=native` does not change this.
+    // Apple Clang `-O2+` (and therefore Apple `g++ -O3`) DOES contract
+    // to FMADDD by default — verified by running `g++ -O3 bench.cpp`
+    // and inspecting the loop body. Go always contracts. Swift `-O`,
+    // V8 (Node), JSC (Bun), Java HotSpot without `-XX:+UseFMA`, and
+    // Perry's default codegen all stay in the no-contract pack. So
+    // the kernel divides the field into two clusters: FMA-contract
+    // (~128 ms here: Go, Apple Clang -O3) and no-contract (~225 ms:
+    // Rust, Swift, Perry, Node, Bun, Java). Both clusters preserve
+    // the dependency chain on `sum`; the win is one ISA-level fusion,
+    // not a fold or a vectorize.
+    //
+    // This is the honest companion to bench_loop_overhead. Where
+    // loop_overhead measures whether the compiler applied
+    // reassoc + IV-simplify to a trivially-foldable accumulator
+    // (a flag-aggressiveness probe), this one forces the compiler
+    // to actually execute work — and surfaces FP-contract as a
+    // secondary axis of the same flag-posture story.
+    const N: usize = 64;
+    const ITERATIONS: u64 = 100_000_000;
+    let mut seed: u64 = 42;
+    let mut x = vec![0.0_f64; N];
+    for i in 0..N {
+        seed = seed.wrapping_mul(1103515245).wrapping_add(12345) & 0x7FFF_FFFF;
+        // Range [0.5, 1.0): every multiplicand x < 1 so the
+        // multiplicative chain strictly contracts to a bounded
+        // fixed point. Values centered on 1.0 (e.g. [0.99, 1.01])
+        // overflow to Infinity because tiny mean-drift compounds
+        // geometrically over 100M iterations.
+        x[i] = 0.5 + (seed as f64 / 2_147_483_647.0) * 0.5;
+    }
+    let start = Instant::now();
+    let mut sum: f64 = 1.0;
+    for i in 0..ITERATIONS {
+        let i_us = i as usize;
+        sum = sum * x[i_us & (N - 1)] + x[(i_us * 7) & (N - 1)];
+    }
+    let elapsed = start.elapsed().as_millis();
+    println!("loop_data_dependent:{}", elapsed);
+    println!("  checksum: {:.6}", sum);
+}
+
 fn main() {
     bench_fibonacci();
     bench_loop_overhead();
@@ -121,4 +194,5 @@ fn main() {
     bench_object_create();
     bench_nested_loops();
     bench_accumulate();
+    bench_loop_data_dependent();
 }

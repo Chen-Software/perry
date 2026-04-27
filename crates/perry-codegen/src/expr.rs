@@ -292,6 +292,23 @@ pub(crate) struct FnCtx<'a> {
     /// Imported function return types, keyed by local function name.
     /// Used for type-aware dispatch on cross-module call results.
     pub imported_func_return_types: &'a std::collections::HashMap<String, perry_types::Type>,
+    /// FFI manifest: `name → (param_kinds, return_kind)` from
+    /// `package.json` `nativeLibrary.functions`. Each kind is a string like
+    /// `"i64"`, `"f64"`, `"void"`, `"string"`, or `"ptr"`. `lower_call` consults
+    /// this at native-library call sites so handle-returning functions
+    /// (`*mut View`-typed C entries) declare an `i64` LLVM return type that
+    /// reads the C ABI's `x0` register. Without it, the call defaults to
+    /// `double` (reads `d0`) and observes 0 instead of the real handle.
+    pub ffi_signatures: &'a std::collections::HashMap<String, (Vec<String>, String)>,
+    /// Number of currently-open `try { ... }` blocks at the current
+    /// lowering position. Incremented before lowering a try body,
+    /// decremented after. `Stmt::Return` emits `js_try_end()` this many
+    /// times before the actual `ret` so the runtime's TRY_DEPTH counter
+    /// stays balanced — without this, an early `return` inside a try
+    /// body leaks one slot in the runtime's setjmp jump-buffer table
+    /// per call. Once 128 leaks accumulate the runtime panics with
+    /// "Try block nesting too deep".
+    pub try_depth: usize,
 
     /// Cross-module function declarations to add to `LlModule` after
     /// lowering finishes. Each entry is `(llvm_name, return_type, param_types)`.
@@ -319,6 +336,13 @@ pub(crate) struct FnCtx<'a> {
     /// LLVM's SCEV hoists the conversions. Turned factorial
     /// (`sum += i % 1000` in a 100M loop) from 1550ms → ~150ms on ARM.
     pub integer_locals: &'a std::collections::HashSet<u32>,
+    /// Gen-GC Phase A sub-phase 3a: pointer-typed local → shadow-
+    /// frame slot index. Empty when `PERRY_SHADOW_STACK` is off.
+    /// Sub-phase 3b uses this map at `Stmt::Let` / `LocalSet`
+    /// lowering sites to emit `js_shadow_slot_set(idx, bits)` so
+    /// the frame reflects the live pointer state at the following
+    /// safepoint. Today — just tracked, not consumed.
+    pub shadow_slot_map: std::collections::HashMap<u32, u32>,
 
     /// Cached pointer to this function's `InlineArenaState` slot —
     /// allocated lazily on the first `new ClassName()` site that uses
@@ -517,6 +541,15 @@ pub(crate) struct FnCtx<'a> {
     /// global [2 x i64] zeroinitializer` for each entry.
     pub ic_globals: Vec<String>,
 
+    /// Issue #179 typed-parse: raw rodata globals emitted by
+    /// `JsonParseTyped` codegen. Each entry is the full LLVM IR line
+    /// `@<name> = private unnamed_addr constant [N x i8] c"..."` to
+    /// append after the function finishes. Mirrors the `ic_globals`
+    /// drain pattern. Also: counter for unique names at each call
+    /// site in this function.
+    pub typed_parse_rodata: Vec<String>,
+    pub typed_parse_counter: u32,
+
     /// (Issue #50) Per-function row aliases. When a function declares
     /// `let krow = X[i]` where `X` is in `flat_const_arrays`, this map
     /// records `krow_id → (X_id, <cloned row_index expr>)`. The
@@ -598,6 +631,24 @@ impl<'a> FnCtx<'a> {
 
 /// Lower an expression to a raw LLVM `double` value. Returns the string form
 /// of the value (either a `%rN` register or a literal like `42.0`).
+/// Gen-GC Phase C2 helper: emit `js_write_barrier(parent_bits,
+/// child_bits)` after a heap-store site when `PERRY_WRITE_BARRIERS=1`.
+/// `parent_bits` and `child_bits` are SSA names already bitcast to
+/// i64. No-op when the gate is off — branchless at codegen time
+/// because the env var is read once, OnceLock-cached.
+///
+/// Called from every emit site that writes a child value into a
+/// heap-allocated parent: PropertySet, IndexSet (array element +
+/// object key), class field set fast path, closure capture set
+/// (boxed + non-boxed), array push, etc.
+fn emit_write_barrier(ctx: &mut FnCtx<'_>, parent_bits: &str, child_bits: &str) {
+    if !crate::codegen::write_barriers_enabled() { return; }
+    ctx.block().call_void(
+        "js_write_barrier",
+        &[(I64, parent_bits), (I64, child_bits)],
+    );
+}
+
 pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
     match expr {
         // -------- Literals --------
@@ -647,6 +698,16 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             // across the call to `ctx.block()` (which mutably borrows
             // `ctx.func`, distinct from `ctx.strings` but the borrow checker
             // sees `entry` as borrowing `ctx`).
+            let handle_global = format!("@{}", entry.handle_global);
+            Ok(ctx.block().load(DOUBLE, &handle_global))
+        }
+
+        // WTF-8 string literals (contain lone surrogates U+D800..U+DFFF).
+        // Same hoisting strategy as Expr::String, but initialized via
+        // js_string_from_wtf8_bytes which sets STRING_FLAG_HAS_LONE_SURROGATES.
+        Expr::WtfString(bytes) => {
+            let idx = ctx.strings.intern_wtf8(bytes);
+            let entry = ctx.strings.entry(idx);
             let handle_global = format!("@{}", entry.handle_global);
             Ok(ctx.block().load(DOUBLE, &handle_global))
         }
@@ -800,11 +861,17 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     );
                     let box_ptr = blk.bitcast_double_to_i64(&cap_dbl);
                     blk.call_void("js_box_set", &[(I64, &box_ptr), (DOUBLE, &v)]);
+                    // Gen-GC Phase C2: barrier — box is the parent.
+                    let v_bits = ctx.block().bitcast_double_to_i64(&v);
+                    emit_write_barrier(ctx, &box_ptr, &v_bits);
                 } else {
                     ctx.block().call_void(
                         "js_closure_set_capture_f64",
                         &[(I64, &closure_ptr), (I32, &idx_str), (DOUBLE, &v)],
                     );
+                    // Gen-GC Phase C2: barrier — closure is the parent.
+                    let v_bits = ctx.block().bitcast_double_to_i64(&v);
+                    emit_write_barrier(ctx, &closure_ptr, &v_bits);
                 }
             } else if ctx.boxed_vars.contains(id) && !ctx.module_globals.contains_key(id) {
                 // Box path — only for non-global locals. Module globals
@@ -820,6 +887,17 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 }
             } else if let Some(slot) = ctx.locals.get(id).cloned() {
                 ctx.block().store(DOUBLE, &v, &slot);
+                // Gen-GC Phase A sub-phase 3b: mirror pointer-typed
+                // writes into the shadow frame. See stmt.rs::Let
+                // for the allocation-site mirror; LocalSet is the
+                // reassignment-site mirror.
+                if let Some(&slot_idx) = ctx.shadow_slot_map.get(id) {
+                    let v_i64 = ctx.block().bitcast_double_to_i64(&v);
+                    ctx.block().call_void(
+                        "js_shadow_slot_set",
+                        &[(I32, &slot_idx.to_string()), (I64, &v_i64)],
+                    );
+                }
                 // Mirror to the parallel i32 slot allocated for int32-stable
                 // locals (issue #48). Without this, the i32 slot would go
                 // stale on every `sum = (sum + i) | 0` write.
@@ -1414,8 +1492,12 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 let l = lower_expr(ctx, left)?;
                 let r = lower_expr(ctx, right)?;
                 let blk = ctx.block();
-                let l_handle = unbox_to_i64(blk, &l);
-                let r_handle = unbox_to_i64(blk, &r);
+                // Issue #214: SSO-safe unbox — the inline mask returns
+                // garbage for SHORT_STRING_TAG values (e.g. SSO results
+                // from `JSON.parse('["hello"]')[0]`), causing
+                // `js_string_equals` to deref the inline payload bytes.
+                let l_handle = unbox_str_handle(blk, &l);
+                let r_handle = unbox_str_handle(blk, &r);
                 let i32_eq = blk.call(I32, "js_string_equals", &[(I64, &l_handle), (I64, &r_handle)]);
                 let bit = blk.icmp_ne(I32, &i32_eq, "0");
                 let bit_final = if matches!(op, CompareOp::Ne | CompareOp::LooseNe) {
@@ -1441,8 +1523,9 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 let l = lower_expr(ctx, left)?;
                 let r = lower_expr(ctx, right)?;
                 let blk = ctx.block();
-                let l_handle = unbox_to_i64(blk, &l);
-                let r_handle = unbox_to_i64(blk, &r);
+                // Issue #214: SSO-safe unbox.
+                let l_handle = unbox_str_handle(blk, &l);
+                let r_handle = unbox_str_handle(blk, &r);
                 let cmp_i32 = blk.call(
                     I32,
                     "js_string_compare",
@@ -1677,12 +1760,58 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                         let blk = ctx.block();
                         let arr_bits = blk.bitcast_double_to_i64(&arr_box);
                         let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
-                        let idx_i64 = blk.zext(I32, &idx_i32, I64);
-                        let byte_offset = blk.shl(I64, &idx_i64, "3");
-                        let with_header = blk.add(I64, &byte_offset, "8");
-                        let element_addr = blk.add(I64, &arr_handle, &with_header);
-                        let element_ptr = blk.inttoptr(I64, &element_addr);
-                        return Ok(blk.load(DOUBLE, &element_ptr));
+
+                        // Issue #179 Phase 3: lazy-array guard on the
+                        // bounded-index fast path. Same story as the
+                        // generic path above — a LazyArrayHeader has
+                        // unrelated bytes at `arr + 8 + idx*8`, so we
+                        // need to route through the slow path when
+                        // the receiver is lazy. Branchy here but the
+                        // branch is almost always trivially
+                        // well-predicted (same array for the loop's
+                        // duration; LLVM can often hoist the check).
+                        let gc_type_addr = blk.sub(I64, &arr_handle, "8");
+                        let gc_type_ptr = blk.inttoptr(I64, &gc_type_addr);
+                        let gc_type = blk.load(I8, &gc_type_ptr);
+                        let is_lazy = blk.icmp_eq(I8, &gc_type, "9");
+
+                        let lazy_idx = ctx.new_block("bidx.lazy");
+                        let fast_idx = ctx.new_block("bidx.fast");
+                        let merge_idx = ctx.new_block("bidx.merge");
+                        let lazy_label = ctx.block_label(lazy_idx);
+                        let fast_label = ctx.block_label(fast_idx);
+                        let merge_label = ctx.block_label(merge_idx);
+                        ctx.block().cond_br(&is_lazy, &lazy_label, &fast_label);
+
+                        ctx.current_block = lazy_idx;
+                        let lazy_blk = ctx.block();
+                        let lazy_val = lazy_blk.call(
+                            DOUBLE,
+                            "js_array_get_f64",
+                            &[(I64, &arr_handle), (I32, &idx_i32)],
+                        );
+                        let lazy_end_label = lazy_blk.label.clone();
+                        lazy_blk.br(&merge_label);
+
+                        ctx.current_block = fast_idx;
+                        let fast_blk = ctx.block();
+                        let idx_i64 = fast_blk.zext(I32, &idx_i32, I64);
+                        let byte_offset = fast_blk.shl(I64, &idx_i64, "3");
+                        let with_header = fast_blk.add(I64, &byte_offset, "8");
+                        let element_addr = fast_blk.add(I64, &arr_handle, &with_header);
+                        let element_ptr = fast_blk.inttoptr(I64, &element_addr);
+                        let fast_val = fast_blk.load(DOUBLE, &element_ptr);
+                        let fast_end_label = fast_blk.label.clone();
+                        fast_blk.br(&merge_label);
+
+                        ctx.current_block = merge_idx;
+                        return Ok(ctx.block().phi(
+                            DOUBLE,
+                            &[
+                                (&fast_val, &fast_end_label),
+                                (&lazy_val, &lazy_end_label),
+                            ],
+                        ));
                     }
                 }
 
@@ -1692,17 +1821,61 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 let arr_bits = blk.bitcast_double_to_i64(&arr_box);
                 let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
                 let idx_i32 = blk.fptosi(DOUBLE, &idx_double, I32);
-                // Bounds check: load length (null-guarded).
-                let len_i32 = blk.safe_load_i32_from_ptr(&arr_handle);
-                let in_bounds = blk.icmp_ult(I32, &idx_i32, &len_i32);
+
+                // Issue #179 Phase 3: lazy-array guard on the inline
+                // IndexGet path. A `LazyArrayHeader` lives at the
+                // same pointer but has (magic, root_idx, tape_len,
+                // blob_str, materialized) after offset 0's
+                // `cached_length`, NOT element f64s. Reading `arr +
+                // 8 + idx*8` on a lazy value returns garbage. Check
+                // `GcHeader::obj_type` at `arr - 8` before the
+                // element load; if it's `GC_TYPE_LAZY_ARRAY` (9),
+                // route through `js_array_get_f64` which funnels
+                // every access through `clean_arr_ptr` —
+                // `clean_arr_ptr` force-materializes lazy values
+                // idempotently and returns the `ArrayHeader`-backed
+                // tree. Adds 2 instructions (sub + load i8) + one
+                // comparison + one branch on the fast path; the cost
+                // is in the same order as the existing null-guard
+                // and tag checks.
+                let gc_type_addr = blk.sub(I64, &arr_handle, "8");
+                let gc_type_ptr = blk.inttoptr(I64, &gc_type_addr);
+                let gc_type = blk.load(I8, &gc_type_ptr);
+                let is_lazy = blk.icmp_eq(I8, &gc_type, "9"); // GC_TYPE_LAZY_ARRAY
+
+                let lazy_idx = ctx.new_block("arr.lazy");
+                let fast_idx = ctx.new_block("arr.fast");
+                let merge_idx = ctx.new_block("arr.merge");
+                let lazy_label = ctx.block_label(lazy_idx);
+                let fast_label = ctx.block_label(fast_idx);
+                let merge_label = ctx.block_label(merge_idx);
+                ctx.block().cond_br(&is_lazy, &lazy_label, &fast_label);
+
+                // Lazy branch: js_array_get_f64 → clean_arr_ptr →
+                // force_materialize_lazy → element load on the
+                // materialized tree. Subsequent calls hit the
+                // cached `materialized` pointer — O(1) after the
+                // first access.
+                ctx.current_block = lazy_idx;
+                let lazy_blk = ctx.block();
+                let lazy_val = lazy_blk.call(
+                    DOUBLE,
+                    "js_array_get_f64",
+                    &[(I64, &arr_handle), (I32, &idx_i32)],
+                );
+                let lazy_end_label = lazy_blk.label.clone();
+                lazy_blk.br(&merge_label);
+
+                // Fast branch: unchanged inline load with bounds check.
+                ctx.current_block = fast_idx;
+                let fast_blk = ctx.block();
+                let len_i32 = fast_blk.safe_load_i32_from_ptr(&arr_handle);
+                let in_bounds = fast_blk.icmp_ult(I32, &idx_i32, &len_i32);
                 let ok_idx = ctx.new_block("arr.ok");
                 let oob_idx = ctx.new_block("arr.oob");
-                let merge_idx = ctx.new_block("arr.merge");
                 let ok_label = ctx.block_label(ok_idx);
                 let oob_label = ctx.block_label(oob_idx);
-                let merge_label = ctx.block_label(merge_idx);
                 ctx.block().cond_br(&in_bounds, &ok_label, &oob_label);
-                // In-bounds: inline element load.
                 ctx.current_block = ok_idx;
                 let blk = ctx.block();
                 let idx_i64 = blk.zext(I32, &idx_i32, I64);
@@ -1713,17 +1886,19 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 let val = blk.load(DOUBLE, &element_ptr);
                 let ok_end_label = ctx.block().label.clone();
                 ctx.block().br(&merge_label);
-                // OOB: return TAG_UNDEFINED.
                 ctx.current_block = oob_idx;
                 let undef_bits = crate::nanbox::i64_literal(crate::nanbox::TAG_UNDEFINED);
                 let undef_val = ctx.block().bitcast_i64_to_double(&undef_bits);
                 let oob_end_label = ctx.block().label.clone();
                 ctx.block().br(&merge_label);
-                // Merge with phi.
                 ctx.current_block = merge_idx;
                 return Ok(ctx.block().phi(
                     DOUBLE,
-                    &[(&val, &ok_end_label), (&undef_val, &oob_end_label)],
+                    &[
+                        (&val, &ok_end_label),
+                        (&undef_val, &oob_end_label),
+                        (&lazy_val, &lazy_end_label),
+                    ],
                 ));
             }
             // Generic dynamic object access: stringify the index (no-op
@@ -1814,14 +1989,62 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let str_end_lbl = ctx.block().label.clone();
             ctx.block().br(&merge_lbl);
             // Numeric key → inline array-style read (offset 8+idx*8).
+            // Note: this path is semantically wrong for TypedArrays (variable
+            // element sizes) but is load-bearing for Object-with-numeric-keys
+            // (constMap[idx] = value) whose property storage happens to share
+            // this offset scheme. Typed-array numeric indexing uses a
+            // dedicated HIR path (TypedArrayGet / TypedArraySet); keep this
+            // inline read for the generic Object fallback to avoid regressing
+            // test_edge_enums_const / test_edge_iteration.
+            //
+            // Issue #179 Phase 3: if the receiver turns out to be a
+            // lazy JSON-parse array (obj_type == GC_TYPE_LAZY_ARRAY),
+            // reading `obj + 8 + idx*8` returns LazyArrayHeader
+            // fields (root_idx, tape_len, ...) as if they were element
+            // f64s. Same runtime obj_type guard as the typed-array
+            // IndexGet path: route through `js_array_get_f64` →
+            // `clean_arr_ptr` → `force_materialize_lazy` on lazy.
             ctx.current_block = num_idx;
             let idx_i32 = ctx.block().fptosi(DOUBLE, &idx_box, I32);
+            let lazy_gc_type_addr = ctx.block().sub(I64, &obj_handle, "8");
+            let lazy_gc_type_ptr = ctx.block().inttoptr(I64, &lazy_gc_type_addr);
+            let lazy_gc_type = ctx.block().load(I8, &lazy_gc_type_ptr);
+            let is_lazy = ctx.block().icmp_eq(I8, &lazy_gc_type, "9"); // GC_TYPE_LAZY_ARRAY
+            let num_lazy_idx = ctx.new_block("iget.num.lazy");
+            let num_fast_idx = ctx.new_block("iget.num.fast");
+            let num_inner_merge_idx = ctx.new_block("iget.num.merge");
+            let num_lazy_lbl = ctx.block_label(num_lazy_idx);
+            let num_fast_lbl = ctx.block_label(num_fast_idx);
+            let num_inner_merge_lbl = ctx.block_label(num_inner_merge_idx);
+            ctx.block().cond_br(&is_lazy, &num_lazy_lbl, &num_fast_lbl);
+
+            ctx.current_block = num_lazy_idx;
+            let v_num_lazy = ctx.block().call(
+                DOUBLE,
+                "js_array_get_f64",
+                &[(I64, &obj_handle), (I32, &idx_i32)],
+            );
+            let num_lazy_end_lbl = ctx.block().label.clone();
+            ctx.block().br(&num_inner_merge_lbl);
+
+            ctx.current_block = num_fast_idx;
             let idx_i64 = ctx.block().zext(I32, &idx_i32, I64);
             let byte_off = ctx.block().shl(I64, &idx_i64, "3");
             let with_hdr = ctx.block().add(I64, &byte_off, "8");
             let elem_addr = ctx.block().add(I64, &obj_handle, &with_hdr);
             let elem_ptr = ctx.block().inttoptr(I64, &elem_addr);
-            let v_num = ctx.block().load(DOUBLE, &elem_ptr);
+            let v_num_fast = ctx.block().load(DOUBLE, &elem_ptr);
+            let num_fast_end_lbl = ctx.block().label.clone();
+            ctx.block().br(&num_inner_merge_lbl);
+
+            ctx.current_block = num_inner_merge_idx;
+            let v_num = ctx.block().phi(
+                DOUBLE,
+                &[
+                    (&v_num_lazy, &num_lazy_end_lbl),
+                    (&v_num_fast, &num_fast_end_lbl),
+                ],
+            );
             let num_end_lbl = ctx.block().label.clone();
             ctx.block().br(&merge_lbl);
             // Merge.
@@ -1956,6 +2179,15 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let recv_tag = blk.lshr(I64, &recv_bits, "48");
             let recv_tag_masked = blk.and(I64, &recv_tag, "65533"); // 0xFFFD
             let handle_ok = blk.icmp_eq(I64, &recv_tag_masked, "32765"); // 0x7FFD
+            // SSO receivers fail this guard → route to slow path
+            // `js_value_length_f64` which has an SSO branch (reads
+            // length from the tag byte, no heap access). Accepting
+            // SSO here is safe because the fast path's
+            // `safe_load_i32_from_ptr(&recv_handle)` would read
+            // arbitrary bytes at the SSO "pointer" address, but
+            // the subsequent phi feeds the slow-path result when
+            // handle_ok is false — so SSO flow is correct via the
+            // slow path already, no widening needed.
 
             let check_gc_idx = ctx.new_block("plen.check_gc");
             let fast_idx = ctx.new_block("plen.fast");
@@ -2111,6 +2343,9 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                             "js_array_set_f64",
                             &[(I64, &arr_handle), (I32, &idx_i32), (DOUBLE, &val_double)],
                         );
+                        // Gen-GC Phase C2: write barrier on array element store.
+                        let val_bits = ctx.block().bitcast_double_to_i64(&val_double);
+                        emit_write_barrier(ctx, &arr_bits, &val_bits);
                     }
                 } else {
                     let blk = ctx.block();
@@ -2121,6 +2356,9 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                         "js_array_set_f64",
                         &[(I64, &arr_handle), (I32, &idx_i32), (DOUBLE, &val_double)],
                     );
+                    // Gen-GC Phase C2: write barrier on array element store.
+                    let val_bits = ctx.block().bitcast_double_to_i64(&val_double);
+                    emit_write_barrier(ctx, &arr_bits, &val_bits);
                 }
                 return Ok(val_double);
             }
@@ -2140,6 +2378,9 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     "js_object_set_field_by_name",
                     &[(I64, &obj_handle), (I64, &key_raw), (DOUBLE, &val_double)],
                 );
+                // Gen-GC Phase C2: write barrier on object key store.
+                let val_bits = ctx.block().bitcast_double_to_i64(&val_double);
+                emit_write_barrier(ctx, &obj_bits, &val_bits);
                 return Ok(val_double);
             }
             if is_string_expr(ctx, index) {
@@ -2147,12 +2388,16 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 let key_box = lower_expr(ctx, index)?;
                 let val_double = lower_expr(ctx, value)?;
                 let blk = ctx.block();
-                let obj_handle = unbox_to_i64(blk, &obj_box);
+                let obj_bits = blk.bitcast_double_to_i64(&obj_box);
+                let obj_handle = blk.and(I64, &obj_bits, POINTER_MASK_I64);
                 let key_handle = unbox_to_i64(blk, &key_box);
                 blk.call_void(
                     "js_object_set_field_by_name",
                     &[(I64, &obj_handle), (I64, &key_handle), (DOUBLE, &val_double)],
                 );
+                // Gen-GC Phase C2: write barrier on string-keyed obj write.
+                let val_bits = ctx.block().bitcast_double_to_i64(&val_double);
+                emit_write_barrier(ctx, &obj_bits, &val_bits);
                 return Ok(val_double);
             }
             // Fallback with runtime STRING_TAG check, matching IndexGet.
@@ -2209,6 +2454,11 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             );
             ctx.block().br(&merge_lbl);
             // Numeric key → inline array-style write (offset 8+idx*8).
+            // See IndexGet comment above: this fallback is wrong for TypedArray
+            // element sizes but is load-bearing for Object-with-numeric-keys
+            // storage, so we preserve the pre-#157 inline scheme here. Typed-
+            // array writes go through TypedArraySet which stores via
+            // `js_typed_array_set` with the correct per-kind width.
             ctx.current_block = num_set;
             {
                 let blk = ctx.block();
@@ -2308,6 +2558,10 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 "js_object_set_field_by_name",
                 &[(I64, &obj_handle), (I64, &key_raw), (DOUBLE, &val_double)],
             );
+            // Gen-GC Phase C2 (per docs/generational-gc-plan.md §C):
+            // see emit_write_barrier — gated PERRY_WRITE_BARRIERS=1.
+            let val_bits = ctx.block().bitcast_double_to_i64(&val_double);
+            emit_write_barrier(ctx, &obj_bits, &val_bits);
             Ok(val_double)
         }
 
@@ -2481,14 +2735,34 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             // Tag check is platform-independent: same two LLVM ops
             // (`lshr` + `and`) + one `icmp`, branch-predicted taken.
             let obj_tag = ctx.block().lshr(I64, &obj_bits, "48");
+            // SSO receiver fast path (Step 1.5 of SSO migration).
+            // SHORT_STRING_TAG = 0x7FF9 can't pass the POINTER/STRING
+            // check (its masked tag is 0x7FF9, not 0x7FFD) and we
+            // can't widen the mask because the PIC fast path's
+            // `*(obj_handle + 16)` would read arbitrary memory from
+            // the SSO data bits. Instead: check SSO explicitly first,
+            // route to a dedicated block that calls the SSO-aware
+            // `js_object_get_field_by_name_f64` runtime entry (which
+            // handles `.length` directly from the NaN-box length
+            // byte and returns `undefined` for other keys).
+            let is_sso = ctx.block().icmp_eq(I64, &obj_tag, "32761"); // 0x7FF9
             let obj_tag_masked = ctx.block().and(I64, &obj_tag, "65533"); // 0xFFFD
             let is_valid = ctx.block().icmp_eq(I64, &obj_tag_masked, "32765"); // 0x7FFD
+            let sso_idx = ctx.new_block("pget.recv_sso");
             let pic_idx = ctx.new_block("pget.recv_ok");
             let invalid_idx = ctx.new_block("pget.recv_bad");
             let final_merge_idx = ctx.new_block("pget.recv_merge");
+            let sso_label = ctx.block_label(sso_idx);
             let pic_label = ctx.block_label(pic_idx);
             let invalid_label = ctx.block_label(invalid_idx);
             let final_merge_label = ctx.block_label(final_merge_idx);
+            // Two-step branch: first check SSO, then check
+            // pointer-validity. Both inverse branches land on
+            // `invalid_idx` except when we dispatch through SSO.
+            let pic_or_invalid_idx = ctx.new_block("pget.check_ptr");
+            let pic_or_invalid_label = ctx.block_label(pic_or_invalid_idx);
+            ctx.block().cond_br(&is_sso, &sso_label, &pic_or_invalid_label);
+            ctx.current_block = pic_or_invalid_idx;
             ctx.block().cond_br(&is_valid, &pic_label, &invalid_label);
 
             ctx.current_block = pic_idx;
@@ -2594,12 +2868,30 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let invalid_end_label = ctx.block().label.clone();
             ctx.block().br(&final_merge_label);
 
-            // Outer merge joins the PIC result with the invalid-receiver
-            // undefined.
+            // SSO receiver: dispatch directly to the runtime by-name
+            // helper, which reads `.length` inline from the NaN-box
+            // payload and returns `undefined` for other keys. Bypasses
+            // the PIC entirely (PIC would read garbage memory). The
+            // key handle has already been extracted above.
+            ctx.current_block = sso_idx;
+            let sso_val = ctx.block().call(
+                DOUBLE,
+                "js_object_get_field_by_name_f64",
+                &[(I64, &obj_bits), (I64, &key_handle)],
+            );
+            let sso_end_label = ctx.block().label.clone();
+            ctx.block().br(&final_merge_label);
+
+            // Outer merge joins PIC result + invalid-receiver undefined
+            // + SSO result.
             ctx.current_block = final_merge_idx;
             Ok(ctx.block().phi(
                 DOUBLE,
-                &[(&pic_val, &pic_end_label), (&undef_val, &invalid_end_label)],
+                &[
+                    (&pic_val, &pic_end_label),
+                    (&undef_val, &invalid_end_label),
+                    (&sso_val, &sso_end_label),
+                ],
             ))
         }
 
@@ -3800,29 +4092,22 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(ctx.block().call(DOUBLE, &fn_name, &arg_slices))
         }
 
-        // -------- fs.readFileBuffer(path) / fs.readFileSync(path) -> Buffer --------
-        // Calls js_fs_read_file_binary(path: f64) -> i64 (raw *BufferHeader),
-        // then bitcasts the raw pointer directly to f64 WITHOUT NaN-boxing
-        // The runtime's
-        // `js_console_log_dynamic` → `format_jsvalue` path detects raw buffer
-        // pointers via the thread-local BUFFER_REGISTRY and formats them as
-        // `<Buffer xx xx ...>`. Buffer methods (`.length`, `.toString`, etc.)
-        // also flow through the raw-pointer fallback.
+        // -------- fs.readFileSync(path) -> Buffer (no encoding) --------
+        // Node returns a Buffer when no encoding is supplied; mirror that.
+        // js_fs_read_file_binary returns a raw *mut BufferHeader registered
+        // in BUFFER_REGISTRY; NaN-box with POINTER_TAG so downstream
+        // console.log / .toString / .length / .[i] dispatch consult the
+        // registry and format the value as `<Buffer xx xx ...>` (or the
+        // appropriate Buffer behaviour for each method).
         Expr::FsReadFileBinary(path) => {
-            // Use js_fs_read_file_sync (returns StringHeader*) instead of
-            // js_fs_read_file_binary (returns BufferHeader*). StringHeader
-            // is 12 bytes (length, capacity, refcount) while BufferHeader
-            // is 8 bytes (length, capacity). Treating a Buffer pointer as
-            // a String skips 4 bytes of data (offset 12 vs 8), causing
-            // "sidebarLocation" to become "barLocation".
             let path_box = lower_expr(ctx, path)?;
             let blk = ctx.block();
-            let str_handle = blk.call(
+            let buf_handle = blk.call(
                 I64,
-                "js_fs_read_file_sync",
+                "js_fs_read_file_binary",
                 &[(DOUBLE, &path_box)],
             );
-            Ok(nanbox_string_inline(blk, &str_handle))
+            Ok(nanbox_pointer_inline(blk, &buf_handle))
         }
 
         // -------- instanceof --------
@@ -4340,6 +4625,73 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let result_i64 = blk.call(I64, "js_json_parse", &[(I64, &s_handle)]);
             Ok(blk.bitcast_i64_to_double(&result_i64))
         }
+        // Issue #179 typed-parse, Step 1b: when `<T>` is
+        // `Array<Object{fields}>`, emit a packed-keys rodata constant
+        // and route through `js_json_parse_typed_array`. Any other
+        // shape (or unresolved Named type) falls through to the
+        // generic `js_json_parse`. Runtime semantics identical either
+        // way — the typed variant is a pure perf specialization.
+        Expr::JsonParseTyped { text, ty, ordered_keys } => {
+            let packed = extract_array_of_object_shape(ty, ordered_keys.as_deref());
+            let s_box = lower_expr(ctx, text)?;
+            let blk = ctx.block();
+            let s_handle = unbox_to_i64(blk, &s_box);
+            let result_i64 = match packed {
+                Some((packed_bytes, field_count)) if field_count > 0 => {
+                    // Emit a per-call-site rodata constant. The IR
+                    // byte-escape format matches what
+                    // `add_named_string_constant` produces elsewhere.
+                    let idx = ctx.typed_parse_counter;
+                    ctx.typed_parse_counter += 1;
+                    let gname = format!("perry_typed_parse_keys_{}", idx);
+                    let bytes_len = packed_bytes.len();
+                    let mut lit = String::with_capacity(bytes_len + 8);
+                    lit.push('c');
+                    lit.push('"');
+                    for &b in &packed_bytes {
+                        if (32..127).contains(&b) && b != b'"' && b != b'\\' {
+                            lit.push(b as char);
+                        } else {
+                            lit.push('\\');
+                            lit.push_str(&format!("{:02X}", b));
+                        }
+                    }
+                    lit.push('"');
+                    ctx.typed_parse_rodata.push(format!(
+                        "@{} = private unnamed_addr constant [{} x i8] {}",
+                        gname, bytes_len, lit
+                    ));
+                    // Convert `ptr @global` to i64 so it matches the
+                    // runtime fn's ABI (which takes `i64` for the
+                    // packed-keys pointer — same convention as other
+                    // runtime calls).
+                    let blk = ctx.block();
+                    let ptr_reg = blk.fresh_reg();
+                    blk.emit_raw(format!(
+                        "{} = ptrtoint ptr @{} to i64",
+                        ptr_reg, gname
+                    ));
+                    let len_lit = format!("{}", bytes_len);
+                    let fc_lit = format!("{}", field_count);
+                    blk.call(
+                        I64,
+                        "js_json_parse_typed_array",
+                        &[
+                            (I64, &s_handle),
+                            (I64, &ptr_reg),
+                            (I32, &len_lit),
+                            (I32, &fc_lit),
+                        ],
+                    )
+                }
+                _ => {
+                    // Fall through to generic parse for unhandled shapes.
+                    blk.call(I64, "js_json_parse", &[(I64, &s_handle)])
+                }
+            };
+            let blk = ctx.block();
+            Ok(blk.bitcast_i64_to_double(&result_i64))
+        }
         Expr::JsonParseReviver { text, reviver } => {
             let s_box = lower_expr(ctx, text)?;
             let r_box = lower_expr(ctx, reviver)?;
@@ -4767,11 +5119,12 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         }
 
         // `new Int32Array([1,2,3])` etc. — generic typed array constructor.
-        // Routes through `js_typed_array_new_from_array(kind, arr_handle)` for
-        // the array-from form, or `js_typed_array_new_empty(kind, length)`
-        // for the no-arg / numeric-length form. Result is a raw pointer
-        // bitcast to f64 (no NaN-box tag) — the runtime formatter and
-        // `js_array_*` dispatch helpers detect it via TYPED_ARRAY_REGISTRY.
+        // Routes through `js_typed_array_new_empty(kind, length)` for
+        // compile-time-constant numeric lengths, or `js_typed_array_new(kind, val)`
+        // for runtime-dispatched arguments (which inspects the NaN-box tag to
+        // distinguish a numeric length from a source-array pointer).
+        // Result is a raw pointer bitcast to f64 (no NaN-box tag) — the runtime
+        // formatter and `js_array_*` dispatch helpers detect it via TYPED_ARRAY_REGISTRY.
         Expr::TypedArrayNew { kind, arg } => {
             let kind_str = (*kind as i32).to_string();
             match arg {
@@ -4784,20 +5137,43 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     );
                     Ok(ctx.block().bitcast_i64_to_double(&p))
                 }
-                Some(arg_expr) => {
-                    // We always treat the single argument as an array literal
-                    // / array-typed expression — the test cases pass an inline
-                    // array literal `[1, 2, 3]`.
-                    let arr_box = lower_expr(ctx, arg_expr)?;
-                    let blk = ctx.block();
-                    let arr_handle = unbox_to_i64(blk, &arr_box);
-                    let p = blk.call(
-                        I64,
-                        "js_typed_array_new_from_array",
-                        &[(I32, &kind_str), (I64, &arr_handle)],
-                    );
-                    Ok(blk.bitcast_i64_to_double(&p))
-                }
+                Some(arg_expr) => match arg_expr.as_ref() {
+                    // Literal integer length: `new Int32Array(3)`.
+                    Expr::Integer(n) => {
+                        let len_str = (*n as i32).max(0).to_string();
+                        let p = ctx.block().call(
+                            I64,
+                            "js_typed_array_new_empty",
+                            &[(I32, &kind_str), (I32, &len_str)],
+                        );
+                        Ok(ctx.block().bitcast_i64_to_double(&p))
+                    }
+                    // Literal float that is a non-negative integer: `new Int32Array(3.0)`.
+                    Expr::Number(f)
+                        if f.fract() == 0.0 && *f >= 0.0 && *f < (i32::MAX as f64) =>
+                    {
+                        let len_str = (*f as i32).to_string();
+                        let p = ctx.block().call(
+                            I64,
+                            "js_typed_array_new_empty",
+                            &[(I32, &kind_str), (I32, &len_str)],
+                        );
+                        Ok(ctx.block().bitcast_i64_to_double(&p))
+                    }
+                    // Non-literal: dispatch at runtime based on the NaN-box tag.
+                    // `js_typed_array_new` detects POINTER_TAG → copy from array,
+                    // INT32_TAG / plain double → use as length.
+                    _ => {
+                        let val_box = lower_expr(ctx, arg_expr)?;
+                        let blk = ctx.block();
+                        let p = blk.call(
+                            I64,
+                            "js_typed_array_new",
+                            &[(I32, &kind_str), (DOUBLE, &val_box)],
+                        );
+                        Ok(blk.bitcast_i64_to_double(&p))
+                    }
+                },
             }
         }
 
@@ -5044,6 +5420,10 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         }
 
         // -------- arr.indexOf(value) -> number --------
+        // Issue #214: route through `_jsvalue` so string elements
+        // match by content (handles SSO + heap-string mixed arrays).
+        // Mirrors the `includes` arm + the `lower_array_method::indexOf`
+        // arm.
         Expr::ArrayIndexOf { array, value } => {
             let arr_box = lower_expr(ctx, array)?;
             let v = lower_expr(ctx, value)?;
@@ -5051,7 +5431,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let arr_handle = unbox_to_i64(blk, &arr_box);
             let i32_v = blk.call(
                 I32,
-                "js_array_indexOf_f64",
+                "js_array_indexOf_jsvalue",
                 &[(I64, &arr_handle), (DOUBLE, &v)],
             );
             Ok(blk.sitofp(I32, &i32_v, DOUBLE))
@@ -5155,9 +5535,9 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
         }
 
-        // -------- performance.now() — use date.now() as a stand-in --------
+        // -------- performance.now() — sub-millisecond resolution --------
         Expr::PerformanceNow => {
-            Ok(ctx.block().call(DOUBLE, "js_date_now", &[]))
+            Ok(ctx.block().call(DOUBLE, "js_performance_now", &[]))
         }
 
         // -------- Object.getOwnPropertyNames(obj) --------
@@ -5412,15 +5792,30 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let v = lower_expr(ctx, o)?;
             Ok(ctx.block().call(DOUBLE, "js_math_tanh", &[(DOUBLE, &v)]))
         }
-        // tan/asin/acos/atan: still stubs returning input (runtime has
-        // no wrappers yet, no LLVM intrinsics for these).
-        Expr::MathTan(o)
-        | Expr::MathAsin(o)
-        | Expr::MathAcos(o)
-        | Expr::MathAtan(o) => lower_expr(ctx, o),
+        Expr::MathTan(o) => {
+            let v = lower_expr(ctx, o)?;
+            Ok(ctx.block().call(DOUBLE, "js_math_tan", &[(DOUBLE, &v)]))
+        }
+        Expr::MathAsin(o) => {
+            let v = lower_expr(ctx, o)?;
+            Ok(ctx.block().call(DOUBLE, "js_math_asin", &[(DOUBLE, &v)]))
+        }
+        Expr::MathAcos(o) => {
+            let v = lower_expr(ctx, o)?;
+            Ok(ctx.block().call(DOUBLE, "js_math_acos", &[(DOUBLE, &v)]))
+        }
+        Expr::MathAtan(o) => {
+            let v = lower_expr(ctx, o)?;
+            Ok(ctx.block().call(DOUBLE, "js_math_atan", &[(DOUBLE, &v)]))
+        }
         Expr::MathAtan2(y, x) => {
-            let _ = lower_expr(ctx, y)?;
-            lower_expr(ctx, x)
+            let y_v = lower_expr(ctx, y)?;
+            let x_v = lower_expr(ctx, x)?;
+            Ok(ctx.block().call(
+                DOUBLE,
+                "js_math_atan2",
+                &[(DOUBLE, &y_v), (DOUBLE, &x_v)],
+            ))
         }
 
         // -------- String.fromCharCode(code) --------
@@ -5841,15 +6236,42 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(ctx.block().call(DOUBLE, "js_date_set_utc_month", &[(DOUBLE, &d), (DOUBLE, &v)]))
         }
         Expr::ArrayIsArray(o) => {
-            // Compile-time check: emit TAG_TRUE if the operand is
-            // statically an array, else TAG_FALSE. NaN-boxed booleans
-            // so console.log prints "true"/"false".
-            let _ = lower_expr(ctx, o)?;
+            // Fast path: static type is definitively array → emit
+            // TAG_TRUE at compile time. Slow path: indeterminate
+            // type (Any / Unknown / no annotation) → emit runtime
+            // call to `js_array_is_array`, which correctly handles
+            // JSON.parse results, closure-captured values, function
+            // returns typed `any`, and lazy arrays
+            // (GC_TYPE_LAZY_ARRAY). Emitting TAG_FALSE as a compile-
+            // time constant (the previous behavior) was wrong
+            // whenever the operand's static type was Any: the user's
+            // `Array.isArray(JSON.parse("[...]"))` would always
+            // return false despite being a real array at runtime.
+            let v = lower_expr(ctx, o)?;
             if is_array_expr(ctx, o) {
-                Ok(double_literal(f64::from_bits(crate::nanbox::TAG_TRUE)))
-            } else {
-                Ok(double_literal(f64::from_bits(crate::nanbox::TAG_FALSE)))
+                return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_TRUE)));
             }
+            if let Some(ty) = crate::type_analysis::static_type_of(ctx, o) {
+                // Definitively not an array: emit TAG_FALSE. Leaves
+                // numeric / string / boolean literals and known
+                // object-class instances on the fast path.
+                let definitely_not_array = matches!(
+                    ty,
+                    perry_types::Type::Number
+                        | perry_types::Type::Int32
+                        | perry_types::Type::String
+                        | perry_types::Type::Boolean
+                        | perry_types::Type::Null
+                        | perry_types::Type::Void
+                        | perry_types::Type::BigInt
+                        | perry_types::Type::Symbol
+                );
+                if definitely_not_array {
+                    return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_FALSE)));
+                }
+            }
+            // Indeterminate — dispatch to runtime.
+            Ok(ctx.block().call(DOUBLE, "js_array_is_array", &[(DOUBLE, &v)]))
         }
 
         // -------- new AggregateError(errors, message) --------
@@ -6203,6 +6625,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 .call(I32, "js_value_is_promise", &[(DOUBLE, &promise_box)]);
             let is_promise_bool = ctx.block().icmp_ne(I32, &is_promise_i32, "0");
 
+            let drain_once_idx = ctx.new_block("await.drain_once");
             let check_idx = ctx.new_block("await.check");
             let wait_idx = ctx.new_block("await.wait");
             let settled_idx = ctx.new_block("await.settled");
@@ -6210,6 +6633,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let done_idx = ctx.new_block("await.done");
             let merge_idx = ctx.new_block("await.merge");
 
+            let drain_once_label = ctx.block_label(drain_once_idx);
             let check_label = ctx.block_label(check_idx);
             let wait_label = ctx.block_label(wait_idx);
             let settled_label = ctx.block_label(settled_idx);
@@ -6217,7 +6641,17 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let done_label = ctx.block_label(done_idx);
             let merge_label = ctx.block_label(merge_idx);
 
-            ctx.block().cond_br(&is_promise_bool, &check_label, &merge_label);
+            ctx.block().cond_br(&is_promise_bool, &drain_once_label, &merge_label);
+
+            // === drain_once ===
+            // Flush queueMicrotask callbacks before the first state check.
+            // When the promise is already settled (e.g. `await Promise.resolve()`)
+            // the wait loop below is never entered, so microtasks queued before
+            // this await would never fire. One drain here covers that path;
+            // the wait loop covers all subsequent ticks for pending promises.
+            ctx.current_block = drain_once_idx;
+            ctx.block().call_void("js_drain_queued_microtasks", &[]);
+            ctx.block().br(&check_label);
 
             // === check ===
             // Unbox the promise in each block that uses it — LLVM's
@@ -7833,6 +8267,12 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(nanbox_pointer_inline(ctx.block(), &bits))
         }
 
+        Expr::FsRmRecursive(path) => {
+            let p = lower_expr(ctx, path)?;
+            let _ = ctx.block().call(I32, "js_fs_rm_recursive", &[(DOUBLE, &p)]);
+            Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
+        }
+
         // -------- Unsupported (clear error) --------
         other => bail!(
             "perry-codegen Phase 2: expression {} not yet supported",
@@ -7846,7 +8286,15 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
 /// for integer-arithmetic hot paths — saving 5 instructions per bitwise op.
 fn is_known_finite(ctx: &FnCtx<'_>, e: &Expr) -> bool {
     match e {
-        Expr::Integer(_) | Expr::Number(_) => true,
+        Expr::Integer(_) => true,
+        // Number literals can be NaN or ±Infinity (e.g., `Number(NaN)`,
+        // `Number(f64::INFINITY)`). Inspect the value: only true f64
+        // finites can use the toint32_fast path. Without this check
+        // `(NaN) | 0` and `(Infinity) | 0` hit fast-path `fptosi NaN`,
+        // which is poison in LLVM and produced subnormal-double output
+        // (which downstream code interpreted as a NaN-boxed string with
+        // STRING_TAG bits, leading to garbled `console.log` output).
+        Expr::Number(n) => n.is_finite(),
         Expr::LocalGet(id) => ctx.integer_locals.contains(id),
         Expr::Update { id, .. } => ctx.integer_locals.contains(id),
         Expr::Uint8ArrayGet { .. } | Expr::BufferIndexGet { .. } => true,
@@ -8154,6 +8602,28 @@ pub(crate) fn buffer_alias_metadata_suffix(scope_idx: u32) -> String {
 pub(crate) fn unbox_to_i64(blk: &mut LlBlock, boxed: &str) -> String {
     let bits = blk.bitcast_double_to_i64(boxed);
     blk.and(I64, &bits, POINTER_MASK_I64)
+}
+
+/// SSO-safe variant of `unbox_to_i64` for NaN-boxed string operands.
+///
+/// The plain `unbox_to_i64(bitcast double → i64; and POINTER_MASK_I64)`
+/// pattern returns the lower 48 bits, which is the correct
+/// `*StringHeader` for heap strings (STRING_TAG = 0x7FFF) but is
+/// **garbage** for short-string-optimization (SSO) values
+/// (SHORT_STRING_TAG = 0x7FF9), whose lower 48 bits encode the inline
+/// length + bytes. Any consumer that dereferences the result —
+/// `js_string_concat`, `js_string_equals`, `js_string_to_lower_case`,
+/// the on-the-wire StringHeader length field, etc. — segfaults at a
+/// pseudo-random address built from the inline payload bytes.
+///
+/// Issue #214: `string[]` element loads (e.g. `JSON.parse('["hello"]')[0]`)
+/// returned SSO bits, then `arr[0] + "x"` / `arr[0] === "hello"` /
+/// `arr[0].toUpperCase()` segfaulted on the inline mask. This helper
+/// routes through `js_get_string_pointer_unified`, which materializes
+/// SSO values to a real heap StringHeader (one allocation per SSO unbox)
+/// while preserving the heap-string fast path internally.
+pub(crate) fn unbox_str_handle(blk: &mut LlBlock, boxed: &str) -> String {
+    blk.call(I64, "js_get_string_pointer_unified", &[(DOUBLE, boxed)])
 }
 
 /// Lower one of the scalar URL getters (`url.href`, `url.pathname`, …).
@@ -8587,6 +9057,16 @@ fn lower_index_set_fast(
     }
 
     ctx.current_block = merge_idx;
+    // Gen-GC Phase C2: write barrier on the array element store.
+    // Both fast and slow paths funnel here. We use `arr_handle`
+    // (already in scope) as the parent. Note: post-realloc, the
+    // local slot has been updated with the new pointer; the
+    // barrier sees the OLD `arr_handle` which is fine for Phase C
+    // — the new pointer points into the same arena, same gen-flag
+    // status, and the parent is what we record (not the new
+    // location).
+    let val_bits = ctx.block().bitcast_double_to_i64(val_double);
+    emit_write_barrier(ctx, &arr_handle, &val_bits);
     Ok(())
 }
 
@@ -8603,4 +9083,67 @@ pub(crate) fn variant_name(e: &Expr) -> String {
         .find(|c: char| c == ' ' || c == '(' || c == '{')
         .unwrap_or(dbg.len());
     dbg[..end].to_string()
+}
+
+/// Issue #179 typed-parse, Step 1b codegen helper.
+///
+/// Given the `ty` from `JsonParseTyped`, return the packed-keys bytes
+/// and field count if `ty` is `Array<Object>` with a declared field
+/// list we can specialize on. Returns `None` otherwise — caller falls
+/// through to the generic `js_json_parse`.
+///
+/// Packed format matches `js_build_class_keys_array`: null-separated
+/// UTF-8 field names, trailing `\0` optional. Only primitive/leaf
+/// field types are allowed in the MVP (number, string, boolean,
+/// bigint, null, number-or-string unions) — nested objects and arrays
+/// inside a record still parse through the generic path, which is fine:
+/// the outer record is still pre-shaped, and nested values go through
+/// `parse_value_generic` inside `parse_object_shaped`.
+pub(crate) fn extract_array_of_object_shape(
+    ty: &perry_types::Type,
+    ordered_keys: Option<&[String]>,
+) -> Option<(Vec<u8>, u32)> {
+    use perry_types::Type;
+    let elem = match ty {
+        Type::Array(inner) => &**inner,
+        Type::Generic { base, type_args } if base == "Array" && type_args.len() == 1 => {
+            &type_args[0]
+        }
+        _ => return None,
+    };
+    let obj = match elem {
+        Type::Object(o) => o,
+        _ => return None,
+    };
+    if obj.properties.is_empty() {
+        return None;
+    }
+    // Prefer the AST-source order (matches typical JSON.stringify
+    // output layout — enables the fast-path per-field compare in
+    // `parse_object_shaped`). Fall back to alphabetical if unavailable.
+    // Runtime correctness is order-independent either way — the slow
+    // path handles mismatches.
+    let keys: Vec<String> = if let Some(ord) = ordered_keys {
+        // Filter to only keys that are actually in the ObjectType
+        // properties (defensive against AST/type mismatch).
+        ord.iter()
+            .filter(|k| obj.properties.contains_key(k.as_str()))
+            .cloned()
+            .collect()
+    } else {
+        let mut v: Vec<String> = obj.properties.keys().cloned().collect();
+        v.sort();
+        v
+    };
+    if keys.is_empty() {
+        return None;
+    }
+    let mut packed: Vec<u8> = Vec::new();
+    for (i, k) in keys.iter().enumerate() {
+        if i > 0 {
+            packed.push(0);
+        }
+        packed.extend_from_slice(k.as_bytes());
+    }
+    Some((packed, keys.len() as u32))
 }

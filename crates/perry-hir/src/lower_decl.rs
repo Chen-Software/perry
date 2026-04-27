@@ -60,8 +60,9 @@ pub(crate) fn is_symbol_iterator_key(expr: &ast::Expr) -> bool {
 
 /// Detect the computed key `[Symbol.<well-known>]` in a class method (static
 /// method, getter, regular method). Returns the short well-known name
-/// ("toPrimitive", "hasInstance", "toStringTag", "iterator", "asyncIterator")
-/// if the expression matches `Symbol.X` for a supported well-known.
+/// ("toPrimitive", "hasInstance", "toStringTag", "iterator", "asyncIterator",
+/// "dispose", "asyncDispose") if the expression matches `Symbol.X` for a
+/// supported well-known.
 pub(crate) fn symbol_well_known_key(expr: &ast::Expr) -> Option<&'static str> {
     if let ast::Expr::Member(member) = expr {
         if let (ast::Expr::Ident(obj), ast::MemberProp::Ident(prop)) = (member.obj.as_ref(), &member.prop) {
@@ -74,6 +75,8 @@ pub(crate) fn symbol_well_known_key(expr: &ast::Expr) -> Option<&'static str> {
                 "toStringTag" => Some("toStringTag"),
                 "iterator" => Some("iterator"),
                 "asyncIterator" => Some("asyncIterator"),
+                "dispose" => Some("dispose"),
+                "asyncDispose" => Some("asyncDispose"),
                 _ => None,
             };
         }
@@ -279,7 +282,9 @@ pub(crate) fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) ->
     // Extract return type from function's type annotation (with context).
     // Body-based inference for unannotated functions is filled in after body
     // lowering below, once parameters and body locals are visible to
-    // `infer_type_from_expr`.
+    // `infer_type_from_expr`. Track whether the user wrote an explicit
+    // annotation so we don't "override" an explicit `: any` with inference.
+    let has_explicit_return_annotation = fn_decl.function.return_type.is_some();
     let mut return_type = fn_decl.function.return_type.as_ref()
         .map(|rt| extract_ts_type_with_ctx(&rt.type_ann, Some(ctx)))
         .unwrap_or(Type::Any);
@@ -368,7 +373,10 @@ pub(crate) fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) ->
     // type inference for unannotated user functions and — combined with Phase 1
     // literal-shape inference — makes `function make() { return {x:0, y:0} }`
     // flow Point-shaped values to callers.
-    if matches!(return_type, Type::Any) && !fn_decl.function.is_generator {
+    if !has_explicit_return_annotation
+        && matches!(return_type, Type::Any)
+        && !fn_decl.function.is_generator
+    {
         if let Some(ref block) = fn_decl.function.body {
             if let Some(inferred) = infer_body_return_type(&block.stmts, ctx) {
                 return_type = if fn_decl.function.is_async {
@@ -691,9 +699,28 @@ pub(crate) fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::Clas
                                 ctx.pending_functions.push(top_fn);
                                 continue;
                             }
-                            // Other well-known (toPrimitive, asyncIterator)
-                            // on a class: not yet implemented, skip.
-                            continue;
+                            // `[Symbol.dispose]()` / `[Symbol.asyncDispose]()`:
+                            // ES2024 explicit-resource-management dispose hooks.
+                            // Rename the method to a stable string-keyed name so
+                            // the using-block desugarer can call it via plain
+                            // method dispatch (`obj.__perry_dispose__()` /
+                            // `obj.__perry_async_dispose__()`). Falls through to
+                            // the regular method-pushing path below with the
+                            // renamed key.
+                            if (wk == "dispose" || wk == "asyncDispose")
+                                && !method.is_static
+                                && matches!(method.kind, ast::MethodKind::Method)
+                            {
+                                if wk == "asyncDispose" {
+                                    "__perry_async_dispose__".to_string()
+                                } else {
+                                    "__perry_dispose__".to_string()
+                                }
+                            } else {
+                                // Other well-known (toPrimitive, asyncIterator)
+                                // on a class: not yet implemented, skip.
+                                continue;
+                            }
                         } else {
                             continue;
                         }
@@ -714,6 +741,16 @@ pub(crate) fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::Clas
                     }
                     ast::MethodKind::Method => {
                         let mut func = lower_class_method(ctx, method)?;
+                        // Issue #212 fixed the broader class-method-captures-
+                        // outer-fn-local codegen gap, so the dispose family no
+                        // longer needs a silent-drop fallback — the same
+                        // hidden-field rewrite that lets `log() { captured.push(...) }`
+                        // work also lets `[Symbol.dispose]() { disposed.push(...) }`
+                        // work. The pre-fix gate at this site (`scope_depth > 0
+                        // && method_body_captures_outer(...)` → `continue`) was
+                        // removed in v0.5.319. See the v0.5.317 entry for the
+                        // history and `test_issue_154_using_dispose.ts` for the
+                        // regression test.
                         // `*[Symbol.iterator]()` — lift to a top-level
                         // generator function with `this` as an explicit
                         // first parameter. The generator transform
@@ -959,6 +996,288 @@ pub(crate) fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::Clas
     // Restore previous current_class
     ctx.current_class = old_class;
 
+    // Issue #212: classes nested inside a function may have method bodies
+    // that reference enclosing-fn locals. Walk every instance member
+    // (methods, getters, setters, constructor) and union the captured
+    // outer-scope LocalIds. Then:
+    //   1. Add a hidden `__perry_cap_<outer_id>` instance field per
+    //      captured outer id. The field name is keyed off the outer id so
+    //      every method/ctor agrees on which field reads which capture,
+    //      independent of the per-method fresh ids below.
+    //   2. For each method/getter/setter, allocate a FRESH method-local
+    //      LocalId per captured outer id, rewrite the body's
+    //      `LocalGet(outer_id)` / `LocalSet(outer_id, _)` / nested-closure
+    //      `captures: [outer_id]` to use the fresh id, and prepend
+    //      `Stmt::Let { id: fresh_id, init: PropertyGet(This,
+    //      "__perry_cap_<outer_id>") }`. Per-method fresh ids are
+    //      essential — the boxed-vars analysis at codegen time runs
+    //      module-wide on a single global LocalId space; a `Stmt::Let
+    //      { id: outer_id }` inside a method that has a closure mutating
+    //      the captured value would mark `outer_id` as boxed *globally*,
+    //      which then makes the outer fn's plain (non-boxed) read of
+    //      `outer_id` segfault on a `js_box_get` of a non-box pointer.
+    //   3. Extend (or synthesize) the constructor: append a param with a
+    //      FRESH ctor-local LocalId per captured outer id, prepend
+    //      `this.__perry_cap_<outer_id> = LocalGet(fresh_ctor_id)`, and
+    //      rewrite the user-written ctor body's `LocalGet(outer_id)` to
+    //      use the fresh ctor id (same boxed-vars-isolation reason as
+    //      methods). For derived classes, the assignment is placed after
+    //      the first `super()` call so `this` is initialized first.
+    //   4. Register the class in `ctx.class_captures` keyed by
+    //      `outer_id`; `Expr::New { class_name }` looks this up and
+    //      appends `LocalGet(outer_id)` per captured outer id at every
+    //      construction site (the outer scope's actual id, since we're
+    //      lowering inside it).
+    //
+    // Static methods aren't included because they have no `this` to read
+    // captures from — if a static method body references an outer local,
+    // the original codegen error fires (out of scope for #212).
+    //
+    // Mutation note: `LocalSet(outer_id, ...)` inside a method writes
+    // only to the method-local fresh-id slot, not back to the outer
+    // scope. This diverges from JS for primitive captures with
+    // reassignment. The common case — closure over a reference type
+    // (`array.push`, `obj.x = ...`) — works because both the
+    // method-local copy and the outer binding hold the same reference.
+    let module_level_ids = ctx.module_level_ids.clone();
+    let outer_scope_ids: std::collections::HashSet<LocalId> = ctx.locals.iter()
+        .map(|(_, id, _)| *id)
+        .collect();
+    let mut union_captures: std::collections::BTreeSet<LocalId> = std::collections::BTreeSet::new();
+    for m in &methods {
+        for id in collect_method_captures(m, &outer_scope_ids, &module_level_ids) {
+            union_captures.insert(id);
+        }
+    }
+    for (_, g) in &getters {
+        for id in collect_method_captures(g, &outer_scope_ids, &module_level_ids) {
+            union_captures.insert(id);
+        }
+    }
+    for (_, s) in &setters {
+        for id in collect_method_captures(s, &outer_scope_ids, &module_level_ids) {
+            union_captures.insert(id);
+        }
+    }
+    if let Some(ref ctor) = constructor {
+        for id in collect_method_captures(ctor, &outer_scope_ids, &module_level_ids) {
+            union_captures.insert(id);
+        }
+    }
+    // Inherited captures: if this class extends a parent that registered
+    // captures, the parent's instance methods read from
+    // `this.__perry_cap_<inherited_id>` fields the parent ctor would have
+    // initialized. With our synthesized constructor on this child class,
+    // the parent ctor is no longer called automatically (lower_new only
+    // walks parents when the child has *no* own constructor). Union the
+    // parent's captures into our captures_vec so the child's synthesized
+    // ctor takes the inherited capture as a param too — and the
+    // `Expr::New { class_name: <child> }` site appends `LocalGet(id)`
+    // for every captured id (own + inherited). The fields themselves are
+    // still deduplicated below — the child only declares the OWN-not-
+    // inherited subset, so a single keys-array entry exists per capture.
+    if let Some(ref pname) = extends_name {
+        if let Some(parent_caps) = ctx.lookup_class_captures(pname) {
+            for id in parent_caps {
+                union_captures.insert(*id);
+            }
+        }
+    }
+    let captures_vec: Vec<LocalId> = union_captures.into_iter().collect();
+
+    if !captures_vec.is_empty() {
+        // Walk the parent chain to find which `__perry_cap_<id>` fields
+        // are already declared by an ancestor. Inherited fields share the
+        // same instance slot via the runtime's by-name lookup; declaring
+        // them again here would leave two same-named entries in the keys
+        // array at different offsets and the parent's method body would
+        // read the parent's index while the child's ctor wrote to the
+        // child's index — the inherited-class-with-shared-capture case.
+        // Parent classes also synthesize a constructor that takes the
+        // capture as a param, so the child's constructor needs to
+        // forward inherited capture args to `super(...)` rather than
+        // store them itself.
+        let mut inherited_cap_field_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if let Some(ref pname) = extends_name {
+            if let Some(parent_fields) = ctx.lookup_class_field_names(pname) {
+                for f in parent_fields {
+                    if f.starts_with("__perry_cap_") {
+                        inherited_cap_field_names.insert(f.clone());
+                    }
+                }
+            }
+        }
+        let inherited_cap_ids: std::collections::HashSet<LocalId> = captures_vec.iter()
+            .copied()
+            .filter(|cid| inherited_cap_field_names.contains(&format!("__perry_cap_{}", cid)))
+            .collect();
+
+        // 1. Hidden fields keyed by outer id, skipping inherited.
+        for &cid in &captures_vec {
+            if inherited_cap_ids.contains(&cid) {
+                continue;
+            }
+            fields.push(ClassField {
+                name: format!("__perry_cap_{}", cid),
+                ty: Type::Any,
+                init: None,
+                is_private: false,
+                is_readonly: false,
+            });
+        }
+        if let Some(existing) = ctx.lookup_class_field_names(&name) {
+            let mut updated: Vec<String> = existing.to_vec();
+            for &cid in &captures_vec {
+                let field_name = format!("__perry_cap_{}", cid);
+                if !updated.contains(&field_name) {
+                    updated.push(field_name);
+                }
+            }
+            ctx.register_class_field_names(name.clone(), updated);
+        }
+
+        // Look up the outer-scope type for each captured id so the
+        // rebind let can preserve typed-array fast paths (`out.length`,
+        // `out[i]`, etc.). Without this the rebind defaults to
+        // `Type::Any`, the codegen `local_types` map records the rebind
+        // as Any, and `out.length` on a `string[]` capture falls off the
+        // typed-array fast path into generic object-field-by-name dispatch
+        // — which on an array silently returns undefined or crashes.
+        let captured_outer_types: std::collections::HashMap<LocalId, Type> = captures_vec.iter()
+            .map(|&cid| {
+                let ty = ctx.locals.iter()
+                    .rev()
+                    .find(|(_, id, _)| *id == cid)
+                    .map(|(_, _, t)| t.clone())
+                    .unwrap_or(Type::Any);
+                (cid, ty)
+            })
+            .collect();
+
+        // Field-propagation map keyed by OUTER ids. Every `LocalSet(outer_id, v)`
+        // and `Expr::Update { id: outer_id, .. }` at a top-level expression
+        // position inside a method body is rewritten to also propagate the
+        // new value to `this.__perry_cap_<id>`. Without this, a setter
+        // writing to a captured primitive (`set value(v) { stored = v; }`)
+        // would only update the method-local rebind slot, and the next
+        // getter call would re-read the field's stale snapshot. The
+        // propagation only fires at top-level positions (statement-level
+        // expression, return value, condition); nested captured writes
+        // like `(stored = v).toString()` only update the local — rare
+        // enough to defer to a follow-up.
+        let field_propagation: std::collections::HashMap<LocalId, String> = captures_vec.iter()
+            .map(|&cid| (cid, format!("__perry_cap_{}", cid)))
+            .collect();
+
+        // Helper closure: build a fresh-id map for one function's body,
+        // rewrite the body refs (with field-write propagation), and
+        // prepend the rebinding lets.
+        let rewrite_method_body = |ctx: &mut LoweringContext,
+                                   body: &mut Vec<Stmt>| {
+            let mut id_map: std::collections::HashMap<LocalId, LocalId> = std::collections::HashMap::new();
+            let mut prologue: Vec<Stmt> = Vec::new();
+            for &outer_id in &captures_vec {
+                let new_id = ctx.fresh_local();
+                id_map.insert(outer_id, new_id);
+                let ty = captured_outer_types.get(&outer_id).cloned().unwrap_or(Type::Any);
+                prologue.push(Stmt::Let {
+                    id: new_id,
+                    name: format!("__perry_cap_{}", outer_id),
+                    ty,
+                    mutable: true,
+                    init: Some(Expr::PropertyGet {
+                        object: Box::new(Expr::This),
+                        property: format!("__perry_cap_{}", outer_id),
+                    }),
+                });
+            }
+            // Rewrite first (so closure captures lists pick up the new ids
+            // at the same time as the body's refs), then prepend the let.
+            crate::analysis::remap_local_ids_in_stmts_with_field_propagation(
+                body, &id_map, &field_propagation,
+            );
+            prologue.append(body);
+            *body = prologue;
+        };
+
+        // 2. Methods / getters / setters.
+        for m in methods.iter_mut() {
+            rewrite_method_body(ctx, &mut m.body);
+        }
+        for (_, g) in getters.iter_mut() {
+            rewrite_method_body(ctx, &mut g.body);
+        }
+        for (_, s) in setters.iter_mut() {
+            rewrite_method_body(ctx, &mut s.body);
+        }
+
+        // 3. Constructor.
+        let mut ctor = constructor.unwrap_or_else(|| Function {
+            id: ctx.fresh_func(),
+            name: format!("{}::constructor", name),
+            type_params: Vec::new(),
+            params: Vec::new(),
+            return_type: Type::Void,
+            body: Vec::new(),
+            is_async: false,
+            is_generator: false,
+            is_exported: false,
+            captures: Vec::new(),
+            decorators: Vec::new(),
+        });
+        let mut ctor_id_map: std::collections::HashMap<LocalId, LocalId> = std::collections::HashMap::new();
+        let mut assignment_stmts: Vec<Stmt> = Vec::with_capacity(captures_vec.len());
+        for &outer_id in &captures_vec {
+            let fresh_param_id = ctx.fresh_local();
+            ctor_id_map.insert(outer_id, fresh_param_id);
+            let ty = captured_outer_types.get(&outer_id).cloned().unwrap_or(Type::Any);
+            ctor.params.push(Param {
+                id: fresh_param_id,
+                name: format!("__perry_cap_{}", outer_id),
+                ty,
+                default: None,
+                is_rest: false,
+            });
+            assignment_stmts.push(Stmt::Expr(Expr::PropertySet {
+                object: Box::new(Expr::This),
+                property: format!("__perry_cap_{}", outer_id),
+                value: Box::new(Expr::LocalGet(fresh_param_id)),
+            }));
+        }
+        // Rewrite user-written ctor body BEFORE inserting the assignment
+        // stmts (which already reference the fresh ids directly).
+        crate::analysis::remap_local_ids_in_stmts(&mut ctor.body, &ctor_id_map);
+        let super_pos = ctor.body.iter().position(|s| {
+            matches!(s, Stmt::Expr(Expr::SuperCall(_)))
+        });
+        let insert_at = super_pos.map(|p| p + 1).unwrap_or(0);
+        for (i, stmt) in assignment_stmts.into_iter().enumerate() {
+            ctor.body.insert(insert_at + i, stmt);
+        }
+        constructor = Some(ctor);
+
+        // 4. Register so `Expr::New { class_name }` appends
+        //    `LocalGet(outer_id)` per captured outer id at every
+        //    construction site.
+        ctx.register_class_captures(name.clone(), captures_vec);
+    }
+
+    // Phase 4.1: register each method's and getter's return type so
+    // call-site inference (`infer_call_return_type`'s Member arm) can
+    // resolve `obj.method()` when obj's type is Type::Named(name).
+    // Feeds off Phase 4's body-based inference — any method without an
+    // explicit annotation whose body returned a known type lands here too.
+    for m in &methods {
+        if !matches!(m.return_type, Type::Any) {
+            ctx.register_class_method_return_type(name.clone(), m.name.clone(), m.return_type.clone());
+        }
+    }
+    for (prop_name, g) in &getters {
+        if !matches!(g.return_type, Type::Any) {
+            ctx.register_class_method_return_type(name.clone(), prop_name.clone(), g.return_type.clone());
+        }
+    }
+
     Ok(Class {
         id: class_id,
         name,
@@ -1168,6 +1487,19 @@ pub(crate) fn lower_class_from_ast(ctx: &mut LoweringContext, class: &ast::Class
     ctx.exit_type_param_scope();
     ctx.current_class = old_class;
 
+    // Phase 4.1: register method + getter return types — see the parallel
+    // site in lower_class_decl.
+    for m in &methods {
+        if !matches!(m.return_type, Type::Any) {
+            ctx.register_class_method_return_type(name.to_string(), m.name.clone(), m.return_type.clone());
+        }
+    }
+    for (prop_name, g) in &getters {
+        if !matches!(g.return_type, Type::Any) {
+            ctx.register_class_method_return_type(name.to_string(), prop_name.clone(), g.return_type.clone());
+        }
+    }
+
     Ok(Class {
         id: class_id,
         name: name.to_string(),
@@ -1365,6 +1697,35 @@ pub(crate) fn lower_interface_decl(ctx: &mut LoweringContext, iface_decl: &ast::
     // Register interface in context
     ctx.interfaces.push((name.clone(), iface_id));
 
+    // Issue #179 typed-parse: record field names in source order so
+    // `JSON.parse<Name[]>` codegen can emit a shape hint that matches
+    // how `JSON.stringify` lays them out on the wire.
+    let source_keys: Vec<String> = properties.iter().map(|p| p.name.clone()).collect();
+    if !source_keys.is_empty() {
+        ctx.interface_source_keys.insert(name.clone(), source_keys);
+    }
+    // Also materialize an ObjectType so `resolve_typed_parse_ty` can
+    // expand `Named("Item")` → `Object{fields}` for codegen.
+    let mut obj_props: std::collections::HashMap<String, perry_types::PropertyInfo>
+        = std::collections::HashMap::new();
+    for p in &properties {
+        obj_props.insert(p.name.clone(), perry_types::PropertyInfo {
+            ty: p.ty.clone(),
+            optional: p.optional,
+            readonly: p.readonly,
+        });
+    }
+    if !obj_props.is_empty() {
+        ctx.interface_object_types.insert(
+            name.clone(),
+            perry_types::ObjectType {
+                name: Some(name.clone()),
+                properties: obj_props,
+                index_signature: None,
+            },
+        );
+    }
+
     Ok(Interface {
         id: iface_id,
         name,
@@ -1524,6 +1885,136 @@ pub(crate) fn lower_constructor(ctx: &mut LoweringContext, class_name: &str, cto
     })
 }
 
+/// Issue #212: list outer-scope LocalIds referenced by a method/getter/
+/// setter/constructor body. An id is "captured" when it's referenced inside
+/// the body (or any nested closure inside the body — `collect_local_refs_*`
+/// descends), but isn't one of the function's own params, isn't `this`, and
+/// wasn't declared inside the body itself. Module-level ids are excluded
+/// because codegen reads those directly from globals — they don't need
+/// per-instance snapshotting.
+///
+/// `outer_scope_ids` is the snapshot of `ctx.locals` at the post-class
+/// point (when this analysis runs). Refs that aren't in this set must
+/// belong to inner closures' params/locals — `collect_local_refs_*`
+/// descends into closure bodies indiscriminately, and without this filter
+/// we'd wrongly capture inner closures' own arg ids.
+fn collect_method_captures(
+    func: &Function,
+    outer_scope_ids: &std::collections::HashSet<LocalId>,
+    module_level_ids: &std::collections::HashSet<LocalId>,
+) -> Vec<LocalId> {
+    let mut own_locals: std::collections::HashSet<LocalId> =
+        func.params.iter().map(|p| p.id).collect();
+    fn collect_let_ids(stmts: &[Stmt], out: &mut std::collections::HashSet<LocalId>) {
+        for s in stmts {
+            match s {
+                Stmt::Let { id, .. } => { out.insert(*id); }
+                Stmt::If { then_branch, else_branch, .. } => {
+                    collect_let_ids(then_branch, out);
+                    if let Some(e) = else_branch { collect_let_ids(e, out); }
+                }
+                Stmt::While { body, .. }
+                | Stmt::DoWhile { body, .. } => collect_let_ids(body, out),
+                Stmt::For { init, body, .. } => {
+                    if let Some(init_stmt) = init {
+                        if let Stmt::Let { id, .. } = init_stmt.as_ref() { out.insert(*id); }
+                    }
+                    collect_let_ids(body, out);
+                }
+                Stmt::Try { body, catch, finally } => {
+                    collect_let_ids(body, out);
+                    if let Some(c) = catch { collect_let_ids(&c.body, out); }
+                    if let Some(f) = finally { collect_let_ids(f, out); }
+                }
+                Stmt::Switch { cases, .. } => {
+                    for case in cases { collect_let_ids(&case.body, out); }
+                }
+                Stmt::Labeled { body, .. } => collect_let_ids(std::slice::from_ref(body.as_ref()), out),
+                _ => {}
+            }
+        }
+    }
+    collect_let_ids(&func.body, &mut own_locals);
+
+    let mut refs = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    for stmt in &func.body {
+        crate::analysis::collect_local_refs_stmt(stmt, &mut refs, &mut visited);
+    }
+    let mut captures: Vec<LocalId> = refs.into_iter()
+        .filter(|id| {
+            outer_scope_ids.contains(id)
+                && !own_locals.contains(id)
+                && !module_level_ids.contains(id)
+        })
+        .collect();
+    captures.sort();
+    captures.dedup();
+    captures
+}
+
+/// Conservative outer-capture check used to gate `[Symbol.dispose]` /
+/// `[Symbol.asyncDispose]` lowering: returns true when the method body
+/// references any LocalId that isn't `this` or one of the method's own
+/// parameters. Class-method-captures-outer-local has a pre-existing codegen
+/// gap; for the dispose family we silently drop the method when this is true,
+/// so test programs that previously compiled (with empty disposed output)
+/// keep compiling.
+#[allow(dead_code)]
+fn method_body_captures_outer(func: &Function, ctx: &LoweringContext) -> bool {
+    let mut own_locals: std::collections::HashSet<LocalId> =
+        func.params.iter().map(|p| p.id).collect();
+    // Also include `this` if it was registered (instance methods).
+    if let Some(this_id) = ctx.locals
+        .iter()
+        .rev()
+        .find(|(name, _, _)| name == "this")
+        .map(|(_, id, _)| *id)
+    {
+        own_locals.insert(this_id);
+    }
+    // Locals defined inside the body (e.g., `let x = ...` inside the method)
+    // also need to be treated as own-locals so they don't trip the capture
+    // check. Walk the body collecting Let ids.
+    fn collect_let_ids(stmts: &[Stmt], out: &mut std::collections::HashSet<LocalId>) {
+        for s in stmts {
+            match s {
+                Stmt::Let { id, .. } => { out.insert(*id); }
+                Stmt::If { then_branch, else_branch, .. } => {
+                    collect_let_ids(then_branch, out);
+                    if let Some(e) = else_branch { collect_let_ids(e, out); }
+                }
+                Stmt::While { body, .. }
+                | Stmt::DoWhile { body, .. } => collect_let_ids(body, out),
+                Stmt::For { init, body, .. } => {
+                    if let Some(init_stmt) = init {
+                        if let Stmt::Let { id, .. } = init_stmt.as_ref() { out.insert(*id); }
+                    }
+                    collect_let_ids(body, out);
+                }
+                Stmt::Try { body, catch, finally } => {
+                    collect_let_ids(body, out);
+                    if let Some(c) = catch { collect_let_ids(&c.body, out); }
+                    if let Some(f) = finally { collect_let_ids(f, out); }
+                }
+                Stmt::Switch { cases, .. } => {
+                    for case in cases { collect_let_ids(&case.body, out); }
+                }
+                Stmt::Labeled { body, .. } => collect_let_ids(std::slice::from_ref(body.as_ref()), out),
+                _ => {}
+            }
+        }
+    }
+    collect_let_ids(&func.body, &mut own_locals);
+
+    let mut refs = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    for stmt in &func.body {
+        crate::analysis::collect_local_refs_stmt(stmt, &mut refs, &mut visited);
+    }
+    refs.iter().any(|id| !own_locals.contains(id))
+}
+
 pub(crate) fn lower_class_method(ctx: &mut LoweringContext, method: &ast::ClassMethod) -> Result<Function> {
     let name = match &method.key {
         ast::PropName::Ident(ident) => ident.sym.to_string(),
@@ -1536,8 +2027,14 @@ pub(crate) fn lower_class_method(ctx: &mut LoweringContext, method: &ast::ClassM
             // asyncIterator) get a synthetic `@@<short>` name. The caller
             // is responsible for renaming / lifting the returned Function
             // as needed — see the well-known handling in lower_class_decl.
+            // `dispose` / `asyncDispose` get stable string names so the
+            // using-block desugarer can dispatch via plain method-call.
             if let Some(wk) = symbol_well_known_key(&computed.expr) {
-                format!("@@{}", wk)
+                match wk {
+                    "dispose" => "__perry_dispose__".to_string(),
+                    "asyncDispose" => "__perry_async_dispose__".to_string(),
+                    other => format!("@@{}", other),
+                }
             } else {
                 return Err(anyhow!("Unsupported method key"));
             }
@@ -1582,8 +2079,11 @@ pub(crate) fn lower_class_method(ctx: &mut LoweringContext, method: &ast::ClassM
         });
     }
 
-    // Extract return type (with context)
-    let return_type = method.function.return_type.as_ref()
+    // Extract return type (with context). Phase 4: when the method has no
+    // explicit annotation, fall back to body-based inference after body
+    // lowering so parameters and locals are visible to `infer_type_from_expr`.
+    let has_explicit_return_annotation = method.function.return_type.is_some();
+    let mut return_type = method.function.return_type.as_ref()
         .map(|rt| extract_ts_type_with_ctx(&rt.type_ann, Some(ctx)))
         .unwrap_or(Type::Any);
 
@@ -1593,6 +2093,30 @@ pub(crate) fn lower_class_method(ctx: &mut LoweringContext, method: &ast::ClassM
     } else {
         Vec::new()
     };
+
+    // Phase 4 (expansion): body-based return-type inference for unannotated
+    // methods. Same pattern as `lower_fn_decl`: skip when annotation is
+    // present or when the method is a generator; wrap inferred type in
+    // Promise<T> for async methods. Feeds the class's `Function.return_type`
+    // which is then consumed by call-site inference at receiver.method()
+    // sites (currently limited — bare-method call-site inference isn't
+    // wired through `infer_call_return_type` yet; this commit only
+    // populates the field so class methods stop showing Type::Any when
+    // callers inspect them via receiver_class_name + class.methods lookup).
+    if !has_explicit_return_annotation
+        && matches!(return_type, Type::Any)
+        && !method.function.is_generator
+    {
+        if let Some(ref block) = method.function.body {
+            if let Some(inferred) = infer_body_return_type(&block.stmts, ctx) {
+                return_type = if method.function.is_async {
+                    Type::Promise(Box::new(inferred))
+                } else {
+                    inferred
+                };
+            }
+        }
+    }
 
     ctx.exit_scope(scope_mark);
 
@@ -1639,8 +2163,9 @@ pub(crate) fn lower_getter_method(ctx: &mut LoweringContext, method: &ast::Class
 
     // Getters have no parameters
 
-    // Extract return type
-    let return_type = method.function.return_type.as_ref()
+    // Extract return type. Phase 4: body-based inference when no annotation.
+    let has_explicit_return_annotation = method.function.return_type.is_some();
+    let mut return_type = method.function.return_type.as_ref()
         .map(|rt| extract_ts_type_with_ctx(&rt.type_ann, Some(ctx)))
         .unwrap_or(Type::Any);
 
@@ -1650,6 +2175,18 @@ pub(crate) fn lower_getter_method(ctx: &mut LoweringContext, method: &ast::Class
     } else {
         Vec::new()
     };
+
+    // Phase 4: getters can't be async/generator by JS syntax, so just the
+    // plain body-walk + unify path. Feeds `class.getters[i].1.return_type`
+    // which `receiver_class_name`-style codegen consults to pick Return
+    // types through `obj.prop` chains.
+    if !has_explicit_return_annotation && matches!(return_type, Type::Any) {
+        if let Some(ref block) = method.function.body {
+            if let Some(inferred) = infer_body_return_type(&block.stmts, ctx) {
+                return_type = inferred;
+            }
+        }
+    }
 
     ctx.exit_scope(scope_mark);
 
@@ -1919,11 +2456,7 @@ pub(crate) fn lower_private_prop(ctx: &mut LoweringContext, prop: &ast::PrivateP
 }
 
 pub(crate) fn lower_block_stmt(ctx: &mut LoweringContext, block: &ast::BlockStmt) -> Result<Vec<Stmt>> {
-    let mut stmts = Vec::new();
-    for stmt in &block.stmts {
-        stmts.extend(lower_body_stmt(ctx, stmt)?);
-    }
-    Ok(stmts)
+    lower_stmts_using_aware(ctx, &block.stmts)
 }
 
 /// Lower a block statement that introduces its own lexical scope for
@@ -1931,12 +2464,107 @@ pub(crate) fn lower_block_stmt(ctx: &mut LoweringContext, block: &ast::BlockStmt
 /// `var` declarations remain visible (function-scoped).
 pub(crate) fn lower_block_stmt_scoped(ctx: &mut LoweringContext, block: &ast::BlockStmt) -> Result<Vec<Stmt>> {
     let mark = ctx.push_block_scope();
-    let mut stmts = Vec::new();
-    for stmt in &block.stmts {
-        stmts.extend(lower_body_stmt(ctx, stmt)?);
-    }
+    let stmts = lower_stmts_using_aware(ctx, &block.stmts)?;
     ctx.pop_block_scope(mark);
     Ok(stmts)
+}
+
+/// Lower a sequence of body statements, desugaring `using` / `await using`
+/// declarations into nested try/finally blocks that invoke the bound value's
+/// `[Symbol.dispose]()` (sync `using`) or `await [Symbol.asyncDispose]()`
+/// (`await using`) on block exit, in reverse declaration order. Issue #154.
+///
+/// Class methods written as `[Symbol.dispose]()` / `[Symbol.asyncDispose]()`
+/// are renamed at lowering time (`lower_class_method`) to the stable string
+/// names `__perry_dispose__` / `__perry_async_dispose__` so this desugarer
+/// can dispatch via plain `obj.__perry_dispose__()` method calls.
+///
+/// Bindings whose initializer evaluates to `null` or `undefined` are skipped
+/// per spec (no dispose call, no error). Multi-binding using declarations
+/// (`using a = e1, b = e2`) are unrolled left-to-right with each binding
+/// getting its own try/finally so the rightmost disposes first. SuppressedError
+/// chaining when a body throw is followed by a dispose throw is not yet
+/// implemented — the dispose throw shadows the original.
+pub(crate) fn lower_stmts_using_aware(
+    ctx: &mut LoweringContext,
+    stmts: &[ast::Stmt],
+) -> Result<Vec<Stmt>> {
+    let mut result = Vec::new();
+    for (i, stmt) in stmts.iter().enumerate() {
+        if let ast::Stmt::Decl(ast::Decl::Using(using_decl)) = stmt {
+            let is_async = using_decl.is_await;
+            let mut binding_ids: Vec<LocalId> = Vec::new();
+            for decl in &using_decl.decls {
+                if !matches!(&decl.name, ast::Pat::Ident(_)) {
+                    bail!("`using` / `await using` requires an identifier binding");
+                }
+                // Reuse lower_var_decl_with_destructuring so the binding's type
+                // is inferred from `new ClassName(...)` initializers — that
+                // makes `obj.__perry_dispose__()` route through static class-
+                // method dispatch (`receiver_class_name` returns the class name
+                // for `Type::Named` locals; without inference it stays `Any`
+                // and the call goes nowhere on missing-method).
+                let stmts = lower_var_decl_with_destructuring(ctx, decl, false)?;
+                for s in &stmts {
+                    if let Stmt::Let { id, .. } = s {
+                        binding_ids.push(*id);
+                    }
+                }
+                result.extend(stmts);
+            }
+            // Recursively lower remaining stmts as the try body.
+            let body_stmts = lower_stmts_using_aware(ctx, &stmts[i + 1..])?;
+            // Wrap each binding in its own try/finally — innermost (rightmost
+            // binding) finally runs first, giving reverse-declaration disposal.
+            let mut wrapped = body_stmts;
+            for &id in binding_ids.iter().rev() {
+                let method_name = if is_async {
+                    "__perry_async_dispose__"
+                } else {
+                    "__perry_dispose__"
+                };
+                // if (id !== null && id !== undefined) [await] id.<method>()
+                let null_check = Expr::Logical {
+                    op: LogicalOp::And,
+                    left: Box::new(Expr::Compare {
+                        op: CompareOp::Ne,
+                        left: Box::new(Expr::LocalGet(id)),
+                        right: Box::new(Expr::Null),
+                    }),
+                    right: Box::new(Expr::Compare {
+                        op: CompareOp::Ne,
+                        left: Box::new(Expr::LocalGet(id)),
+                        right: Box::new(Expr::Undefined),
+                    }),
+                };
+                let mut call_expr = Expr::Call {
+                    callee: Box::new(Expr::PropertyGet {
+                        object: Box::new(Expr::LocalGet(id)),
+                        property: method_name.to_string(),
+                    }),
+                    args: Vec::new(),
+                    type_args: Vec::new(),
+                };
+                if is_async {
+                    call_expr = Expr::Await(Box::new(call_expr));
+                }
+                let finally_stmts = vec![Stmt::If {
+                    condition: null_check,
+                    then_branch: vec![Stmt::Expr(call_expr)],
+                    else_branch: None,
+                }];
+                wrapped = vec![Stmt::Try {
+                    body: wrapped,
+                    catch: None,
+                    finally: Some(finally_stmts),
+                }];
+            }
+            result.extend(wrapped);
+            return Ok(result);
+        }
+        result.extend(lower_body_stmt(ctx, stmt)?);
+    }
+    Ok(result)
 }
 
 pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Result<Vec<Stmt>> {
@@ -2906,8 +3534,45 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
             });
             ctx.pop_block_scope(for_scope_mark);
         }
-        _ => {
-            // TODO: handle more statement types
+        // Empty statement (`;`) — nothing to lower.
+        ast::Stmt::Empty(_) => {}
+        // `debugger;` is a no-op in AOT compilation.
+        ast::Stmt::Debugger(_) => {}
+        // Type-only declarations are fully erased at compile time.
+        ast::Stmt::Decl(ast::Decl::TsInterface(_))
+        | ast::Stmt::Decl(ast::Decl::TsTypeAlias(_)) => {}
+        // Body-local enum / namespace are valid TS but Perry only registers them
+        // at module scope (see lower.rs::lower_module). Silently dropping them
+        // here produced runtime ReferenceErrors at the use site instead of a
+        // compile diagnostic — fail loud so the user knows to hoist the decl.
+        ast::Stmt::Decl(ast::Decl::TsEnum(enum_decl)) => {
+            crate::lower_bail!(
+                enum_decl.span,
+                "enum declared inside a function body is not supported; declare it at module scope"
+            );
+        }
+        ast::Stmt::Decl(ast::Decl::TsModule(ts_module)) => {
+            crate::lower_bail!(
+                ts_module.span,
+                "namespace/module declared inside a function body is not supported; declare it at module scope"
+            );
+        }
+        // `with` is forbidden under TS strict-mode (the implicit default for
+        // ES modules) — Perry does not implement dynamic scope chains.
+        ast::Stmt::With(with_stmt) => {
+            crate::lower_bail!(
+                with_stmt.span,
+                "`with` statement is not supported (also forbidden in strict mode)"
+            );
+        }
+        // Final catch-all: any genuinely unexpected variant (e.g. a future
+        // swc Stmt variant we haven't enumerated) bails instead of silently
+        // dropping the statement.
+        other => {
+            return Err(anyhow!(
+                "lower_body_stmt: unhandled statement variant {:?}",
+                std::mem::discriminant(other)
+            ));
         }
     }
 

@@ -112,6 +112,30 @@ public class bench {
         System.out.printf("  checksum: %.0f%n", sum);
     }
 
+    // Data-dependent loop with sequential multiply-carry. Sibling to
+    // benchLoopOverhead but genuinely non-foldable: array reads + a
+    // multiplicative carry through `sum` defeat HotSpot's loop
+    // unrolling and reassoc.
+    static void benchLoopDataDependent() {
+        final int N = 64;
+        final long ITERATIONS = 100_000_000L;
+        long seed = 42;
+        double[] x = new double[N];
+        for (int i = 0; i < N; i++) {
+            seed = (seed * 1103515245L + 12345L) & 0x7FFFFFFFL;
+            // [0.5, 1.0): contracts to a bounded fixed point. See bench.rs.
+            x[i] = 0.5 + ((double) seed / 2_147_483_647.0) * 0.5;
+        }
+        long start = System.currentTimeMillis();
+        double sum = 1.0;
+        for (long i = 0; i < ITERATIONS; i++) {
+            sum = sum * x[(int)(i & (N - 1))] + x[(int)((i * 7) & (N - 1))];
+        }
+        long elapsed = System.currentTimeMillis() - start;
+        System.out.println("loop_data_dependent:" + elapsed);
+        System.out.printf("  checksum: %.6f%n", sum);
+    }
+
     public static void main(String[] args) {
         benchFibonacci();
         benchLoopOverhead();
@@ -121,5 +145,6 @@ public class bench {
         benchObjectCreate();
         benchNestedLoops();
         benchAccumulate();
+        benchLoopDataDependent();
     }
 }

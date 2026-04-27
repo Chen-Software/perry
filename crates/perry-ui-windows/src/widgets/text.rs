@@ -356,3 +356,36 @@ fn apply_font(handle: i64, font: HFONT) {
         }
     }
 }
+
+/// Stored text-decoration values per widget (issue #185 Phase B closure).
+/// 0=none, 1=underline, 2=strikethrough.
+static DECORATION_VALUES: std::sync::Mutex<Vec<(i64, i64)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Set text decoration on a Text widget (issue #185 Phase B closure).
+///
+/// **Stub-with-state**: stores `decoration` in `DECORATION_VALUES` but
+/// doesn't currently rebuild the HFONT with `lfUnderline` /
+/// `lfStrikeOut` set. Real rendering requires reading the current
+/// LOGFONT (via `GetObjectW`), modifying the underline/strike flags,
+/// recreating via `CreateFontIndirectW`, and re-emitting via
+/// `WM_SETFONT` — same shape as `apply_font`. Deferred to a follow-up
+/// alongside the Windows shadow / opacity / borders paint paths.
+/// Matrix marks Windows `Status::Stub` for this row.
+pub fn set_decoration(handle: i64, decoration: i64) {
+    if let Ok(mut decorations) = DECORATION_VALUES.lock() {
+        if let Some(slot) = decorations.iter_mut().find(|e| e.0 == handle) {
+            slot.1 = decoration;
+        } else {
+            decorations.push((handle, decoration));
+        }
+    }
+}
+
+/// Read the stored decoration value (introspection hook).
+pub fn get_decoration(handle: i64) -> Option<i64> {
+    DECORATION_VALUES
+        .lock()
+        .ok()
+        .and_then(|d| d.iter().find(|e| e.0 == handle).map(|e| e.1))
+}

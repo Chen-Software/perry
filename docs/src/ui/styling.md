@@ -1,156 +1,237 @@
 # Styling
 
-Perry widgets support native styling properties that map to each platform's styling system.
+Perry widgets accept an inline `style: { ... }` object that maps to each
+platform's native styling APIs. The same shape works on every Widget
+constructor — `Button`, `Text`, `Toggle`, `Slider`, `VStack`/`HStack`,
+and friends — so cross-platform styling code stays the same regardless
+of target.
+
+## Inline style — recommended
+
+Pass a `StyleProps` object as the trailing argument to any widget
+constructor. Codegen destructures the literal at HIR time into a
+sequence of native setter calls, so the runtime shape is the same as
+hand-writing the imperative pattern below — but the source is much
+shorter:
+
+```typescript
+{{#include ../../examples/ui/styling/button_inline_style.ts:button-inline-full}}
+```
+
+The `style` arg is optional; widgets without it look identical to
+calls before this API existed. See
+[`docs/examples/ui/styling/button_inline_style.ts`](../../examples/ui/styling/button_inline_style.ts)
+for the full file.
+
+### What `style` accepts
+
+| Prop | Type | Maps to |
+|---|---|---|
+| `backgroundColor` | string \| PerryColor | `widgetSetBackgroundColor` |
+| `color` | string \| PerryColor | `textSetColor` / `buttonSetTextColor` |
+| `borderColor` | string \| PerryColor | `widgetSetBorderColor` |
+| `borderWidth` | number | `widgetSetBorderWidth` |
+| `borderRadius` | number | `setCornerRadius` |
+| `padding` | number \| `{ top, right, bottom, left }` | `widgetSetEdgeInsets` |
+| `opacity` | number (0..=1) | `widgetSetOpacity` |
+| `shadow` | `{ color, blur, offsetX, offsetY }` | `widgetSetShadow` |
+| `textDecoration` | `"none" \| "underline" \| "strikethrough"` | `textSetDecoration` |
+| `gradient` | `{ angle, stops: [c1, c2] }` | `widgetSetBackgroundGradient` |
+| `fontSize`, `fontWeight`, `fontFamily` | number / string | `textSetFont*` |
+| `tooltip` | string | `widgetSetTooltip` |
+| `hidden` | boolean | `widgetSetHidden` |
+| `enabled` | boolean | `widgetSetEnabled` |
+
+### Color values
+
+Color props accept four interchangeable shapes:
+
+```typescript,no-test
+backgroundColor: "#3B82F6"                                   // hex 6/8
+backgroundColor: "#3B82F6FF"                                 // hex with alpha
+backgroundColor: "blue"                                      // named color
+backgroundColor: { r: 0.231, g: 0.510, b: 0.965, a: 1.0 }   // PerryColor object
+backgroundColor: themeColor                                  // runtime variable
+```
+
+Named colors: `white`, `black`, `red`, `green`, `blue`, `yellow`,
+`cyan`, `magenta`, `gray` / `grey`, `transparent`. Hex forms supported:
+`#RGB`, `#RGBA`, `#RRGGBB`, `#RRGGBBAA`.
+
+Literals (the first four forms) compile-time-fold into 4 baked-in float
+arguments — zero runtime cost. Runtime variables resolve through
+`js_color_parse_channel` (a small CSS color parser in `perry-runtime`)
+so `backgroundColor: someStringVar` works the same as the literal form.
+
+### Padding shapes
+
+A single number applies to all four sides; an object picks per-side:
+
+```typescript,no-test
+padding: 12                                       // all four sides 12
+padding: { top: 8, right: 16, bottom: 8, left: 16 }  // per-side
+```
+
+Missing sides default to 0.
+
+### Container styling
+
+`VStack` and `HStack` accept `style` after the children array:
+
+```typescript
+{{#include ../../examples/ui/styling/stack_inline_style.ts:stack-inline-full}}
+```
+
+Both shapes work — `VStack(children, style?)` and `VStack(spacing, children, style?)`.
 
 ## Coming from CSS
 
-Perry's layout model is closer to SwiftUI or Flutter than CSS. If you're coming from web development, here's how concepts translate:
+If you're coming from web, the conceptual mapping is:
 
-| CSS | Perry |
+| CSS | Perry inline style |
 |-----|-------|
 | `display: flex; flex-direction: column` | `VStack(spacing, [...])` |
 | `display: flex; flex-direction: row` | `HStack(spacing, [...])` |
-| `justify-content` | `stackSetDistribution(stack, mode)` + `Spacer()` |
-| `align-items` | `stackSetAlignment(stack, value)` |
-| `position: absolute` | `widgetAddOverlay` + `widgetSetOverlayFrame` |
 | `width: 100%` | `widgetMatchParentWidth(widget)` |
-| `padding: 10px 20px` | `setEdgeInsets(10, 20, 10, 20)` |
+| `padding: 10px 20px` | `padding: { top: 10, right: 20, bottom: 10, left: 20 }` |
 | `gap: 16px` | `VStack(16, [...])` — first argument is the gap |
-| CSS variables / design tokens | `perry-styling` package ([Theming](theming.md)) |
-| `opacity` | `setOpacity(value)` |
-| `border-radius` | `setCornerRadius(value)` |
+| CSS variables / design tokens | [`perry-styling`](theming.md) package |
+| `opacity: 0.5` | `opacity: 0.5` |
+| `border-radius: 8px` | `borderRadius: 8` |
+| `background: #3B82F6` | `backgroundColor: "#3B82F6"` |
+| `box-shadow: 0 4px 12px rgba(0,0,0,0.25)` | `shadow: { color: "#0004", blur: 12, offsetY: 4 }` |
+| `text-decoration: underline` | `textDecoration: "underline"` |
 
 See [Layout](layout.md) for full details on alignment, distribution, overlays, and split views.
 
-## Colors
+## Imperative API (underlying)
 
-```typescript,no-test
-import { Text, Button } from "perry/ui";
+The inline `style` object lowers to the same FFI calls as Perry's
+imperative free-function setters: `widgetSet*`, `textSet*`,
+`buttonSet*`. They take the widget handle as the first argument and
+remain available for cases where you want fine-grained control or
+need to mutate styles after creation. Colors here are RGBA floats in
+`[0.0, 1.0]` (divide each hex byte by 255 — `0xFF3B30` →
+`(1.0, 0.231, 0.188, 1.0)`).
 
-const label = Text("Colored text");
-label.setColor("#FF0000");              // Text color (hex)
-label.setBackgroundColor("#F0F0F0");    // Background color
+Every snippet below is excerpted from
+[`docs/examples/ui/styling/snippets.ts`](../../examples/ui/styling/snippets.ts),
+which CI compiles and runs on every PR — so the API drawn here is always the
+API the compiler accepts.
+
+```typescript
+{{#include ../../examples/ui/styling/snippets.ts:imports}}
 ```
 
-Colors are specified as hex strings (`#RRGGBB`).
+### Colors
 
-## Fonts
+```typescript
+{{#include ../../examples/ui/styling/snippets.ts:colors}}
+```
 
-```typescript,no-test
-const label = Text("Styled text");
-label.setFontSize(24);                // Font size in points
-label.setFontFamily("Menlo");         // Font family name
+### Fonts
+
+```typescript
+{{#include ../../examples/ui/styling/snippets.ts:fonts}}
 ```
 
 Use `"monospaced"` for the system monospaced font.
 
-## Corner Radius
+### Corner Radius
 
-```typescript,no-test
-const btn = Button("Rounded", () => {});
-btn.setCornerRadius(12);
+```typescript
+{{#include ../../examples/ui/styling/snippets.ts:corner-radius}}
 ```
 
-## Borders
+### Borders
 
-```typescript,no-test
-const widget = VStack(0, []);
-widget.setBorderColor("#CCCCCC");
-widget.setBorderWidth(1);
+```typescript
+{{#include ../../examples/ui/styling/snippets.ts:borders}}
 ```
 
-## Padding and Insets
+### Padding and Insets
 
-```typescript,no-test
-const stack = VStack(8, [Text("Padded content")]);
-stack.setPadding(16);
-stack.setEdgeInsets(10, 20, 10, 20); // top, right, bottom, left
+```typescript
+{{#include ../../examples/ui/styling/snippets.ts:padding}}
 ```
 
-## Sizing
+### Sizing
 
-```typescript,no-test
-const widget = VStack(0, []);
-widget.setWidth(300);
-widget.setHeight(200);
-widget.setFrame(0, 0, 300, 200);  // x, y, width, height
+```typescript
+{{#include ../../examples/ui/styling/snippets.ts:sizing}}
 ```
 
-## Opacity
+### Opacity
 
-```typescript,no-test
-const widget = Text("Semi-transparent");
-widget.setOpacity(0.5); // 0.0 to 1.0
+```typescript
+{{#include ../../examples/ui/styling/snippets.ts:opacity}}
 ```
 
-## Background Gradient
+### Background Gradient
 
-```typescript,no-test
-const widget = VStack(0, []);
-widget.setBackgroundGradient("#FF0000", "#0000FF"); // Start color, end color
+```typescript
+{{#include ../../examples/ui/styling/snippets.ts:gradient}}
 ```
 
-## Control Size
+### Control Size
 
-```typescript,no-test
-const btn = Button("Small", () => {});
-btn.setControlSize(0); // 0=mini, 1=small, 2=regular, 3=large
+```typescript
+{{#include ../../examples/ui/styling/snippets.ts:control-size}}
 ```
 
 > **macOS**: Maps to `NSControl.ControlSize`. Other platforms may interpret differently.
 
-## Tooltips
+### Tooltips
 
-```typescript,no-test
-const btn = Button("Hover me", () => {});
-btn.setTooltip("Click to perform action");
+```typescript
+{{#include ../../examples/ui/styling/snippets.ts:tooltip}}
 ```
 
 > **macOS/Windows/Linux**: Native tooltips. **iOS/Android**: No tooltip support. **Web**: HTML `title` attribute.
 
-## Enabled/Disabled
+### Enabled/Disabled
 
-```typescript,no-test
-const btn = Button("Submit", () => {});
-btn.setEnabled(false);  // Greys out and disables interaction
+```typescript
+{{#include ../../examples/ui/styling/snippets.ts:enabled}}
 ```
 
-## Complete Styling Example
+### Complete Imperative Example
 
 ```typescript
 {{#include ../../examples/ui/styling/counter_card.ts}}
 ```
 
-Colors are RGBA floats in `[0.0, 1.0]`. Divide each hex byte by 255 to
-convert — `0xFF3B30` becomes `(1.0, 0.231, 0.188, 1.0)`. Padding is four
-explicit sides (`widgetSetEdgeInsets(w, top, left, bottom, right)`), not a
-single value.
-
-## Composing Styles
+### Composing Styles (imperative helper functions)
 
 Reduce repetition by creating helper functions:
 
-```typescript,no-test
-import { VStackWithInsets, Text, widgetAddChild } from "perry/ui";
-
-function card(children: any[]) {
-  const c = VStackWithInsets(12, 16, 16, 16, 16);
-  c.setCornerRadius(12);
-  c.setBackgroundColor("#FFFFFF");
-  c.setBorderColor("#E5E5E5");
-  c.setBorderWidth(1);
-  for (const child of children) widgetAddChild(c, child);
-  return c;
-}
-
-// Usage
-card([Text("Title"), Text("Body text")]);
+```typescript
+{{#include ../../examples/ui/styling/snippets.ts:card-helper}}
 ```
 
 For larger apps, use the `perry-styling` package to define design tokens in JSON and generate a typed theme file. See [Theming](theming.md) for the full workflow.
+
+## Platform support
+
+Per-prop, per-platform support is tracked in the
+[styling matrix](styling-matrix.md) — auto-generated from
+`crates/perry-ui/src/styling_matrix.rs` and CI-checked against each
+backend's `lib.rs` exports on every PR.
+
+Current state (issue [#185](https://github.com/PerryTS/perry/issues/185)):
+
+| Platform | Wired | Stub | Missing |
+|---|---|---|---|
+| macOS / iOS / tvOS / visionOS / watchOS / Android / Web | **43/43** | 0 | 0 |
+| GTK4 (Linux) | 39/43 | 0 | 4 |
+| Windows | 38/43 | 5 | 0 |
+
+- **GTK4** has 4 styling props (`widget.on_click`, `button.content_tint_color`, `button.image_position`, `stack.detaches_hidden`) that need a Linux contributor — tracked in issue [#202](https://github.com/PerryTS/perry/issues/202). Inline `style: {...}` calls referencing only the wired props compile and run cleanly today; the missing props silently no-op until that issue lands.
+- **Windows** has 5 props in a "deferred-paint family" (`shadow`, `opacity`, `border_color`, `border_width`, `text.decoration`) where the FFI symbol exists and stores the requested params, but a custom `WM_PAINT` rendering pass is needed to make them visible — tracked in issue [#210](https://github.com/PerryTS/perry/issues/210). User code authoring inline styles compiles and links cleanly on Windows; the visual rendering catches up when that issue lands.
 
 ## Next Steps
 
 - [Widgets](widgets.md) — All available widgets
 - [Layout](layout.md) — Layout containers
 - [Animation](animation.md) — Animate style changes
+- [Theming](theming.md) — Design tokens via the `perry-styling` package

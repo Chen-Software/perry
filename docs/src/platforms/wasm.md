@@ -76,10 +76,8 @@ Perry widgets map to HTML elements:
 
 The WASM target supports external FFI functions declared with `declare function`. They become WASM imports under the `"ffi"` namespace:
 
-```typescript,no-test
-declare function bloom_init_window(w: number, h: number, title: number, fs: number): void;
-declare function bloom_draw_rect(x: number, y: number, w: number, h: number,
-                                  r: number, g: number, b: number, a: number): void;
+```typescript
+{{#include ../../examples/platforms/wasm_snippets.ts:ffi-declares}}
 ```
 
 Provide them when instantiating:
@@ -98,18 +96,8 @@ await bootPerryWasm(wasmBase64, { bloom_init_window: ..., bloom_draw_rect: ... }
 
 Top-level `const`/`let` declarations are promoted to dedicated WASM globals so functions in the same module can read them, and so two modules' identical `LocalId`s don't collide:
 
-```typescript,no-test
-// telemetry.ts
-const CHIRP_URL = 'https://api.chirp247.com/api/v1/event';
-const API_KEY   = 'my-key';
-
-export function trackEvent(event: string): void {
-  fetch(CHIRP_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Chirp-Key': API_KEY },
-    body: JSON.stringify({ event }),
-  });
-}
+```typescript
+{{#include ../../examples/platforms/wasm_snippets.ts:module-const}}
 ```
 
 Both `CHIRP_URL` and `API_KEY` become WASM globals indexed by `(module_idx, LocalId)`. Reading them from `trackEvent` emits a `global.get` instead of trying to look up a function-local that doesn't exist.
@@ -133,11 +121,8 @@ All host imports are wrapped via `wrapImportsForI64()` so they automatically rei
 
 `perry/thread` works in the browser via a Web Worker pool:
 
-```typescript,no-test
-import { parallelMap } from "perry/thread";
-
-const numbers = [1, 2, 3, 4, 5, 6, 7, 8];
-const squares = parallelMap(numbers, (n) => n * n);
+```typescript
+{{#include ../../examples/platforms/wasm_snippets.ts:web-worker-thread}}
 ```
 
 Each worker instantiates its own WASM module with the same bytecode and bridge. Values cross between the main thread and workers via structured-clone serialization. See [Threading](../threading/overview.md).
@@ -162,20 +147,8 @@ perry app.ts -o app --target web --minify
 
 ## Example: Counter App
 
-```typescript,no-test
-import { App, VStack, Text, Button, State } from "perry/ui";
-
-const count = State(0);
-
-App({
-  title: "Counter",
-  width: 400,
-  height: 300,
-  body: VStack(16, [
-    Text(`Count: ${count.value}`),
-    Button("Increment", () => count.set(count.value + 1)),
-  ]),
-});
+```typescript
+{{#include ../../examples/platforms/ui/counter_app.ts:counter}}
 ```
 
 ```bash

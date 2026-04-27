@@ -1,27 +1,25 @@
 # Animation
 
-Perry supports animating widget properties for smooth transitions.
+Perry supports animating widget properties for smooth transitions. Every
+snippet below is excerpted from
+[`docs/examples/ui/animation/snippets.ts`](../../examples/ui/animation/snippets.ts) —
+CI compiles and runs it on every PR.
+
+`animateOpacity` and `animatePosition` are special: they're documented as
+methods on the widget handle (the only methods perry/ui exposes), and the HIR
+lowers them to `widgetAnimateOpacity` / `widgetAnimatePosition` calls under the
+hood.
 
 ## Opacity Animation
 
-```typescript,no-test
-import { Text } from "perry/ui";
-
-const label = Text("Fading text");
-
-// Animate from the widget's current opacity to `target` over `durationSecs`.
-label.animateOpacity(1.0, 0.3); // target, durationSeconds
+```typescript
+{{#include ../../examples/ui/animation/snippets.ts:opacity}}
 ```
 
 ## Position Animation
 
-```typescript,no-test
-import { Button } from "perry/ui";
-
-const btn = Button("Moving", () => {});
-
-// Animate by a delta (dx, dy) relative to the widget's current position.
-btn.animatePosition(100, 200, 0.5); // dx, dy, durationSeconds
+```typescript
+{{#include ../../examples/ui/animation/snippets.ts:position}}
 ```
 
 ## Example: Fade-In Effect

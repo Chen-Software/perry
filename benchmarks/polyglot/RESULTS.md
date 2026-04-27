@@ -13,33 +13,91 @@ each delta.
 
 ## Results
 
-**Run date:** 2026-04-22 — Perry commit `main` (v0.5.164).
+**Run date:** 2026-04-25 — Perry commit `main` (v0.5.249).
 **Hardware:** Apple M1 Max (10 cores, 64 GB RAM), macOS 26.4.
-**Methodology:** best of 5 runs per cell, monotonic clock, no warmup.
-All times in milliseconds. Lower is better.
+**Methodology:** RUNS=11 per cell. **Median wall-clock ms below**;
+full per-cell stats (median + p95 + σ + min + max) in `RESULTS_AUTO.md`.
+**Pinning:** macOS scheduler hint via `taskpolicy -t 0 -l 0`
+(P-core preferred via throughput/latency tiers, NOT strict affinity —
+Apple does not expose unprivileged hard core pinning). Lower is better.
 
-| Benchmark      | Perry |  Rust |   C++ |    Go | Swift |  Java |  Node |   Bun |  Python |
-|----------------|-------|-------|-------|-------|-------|-------|-------|-------|---------|
-| fibonacci      |   309 |   311 |   308 |   440 |   395 |   279 |   996 |   510 |   15792 |
-| loop_overhead  |    12 |    94 |    95 |    95 |    94 |    95 |    52 |    39 |    2929 |
-| array_write    |     3 |     6 |     2 |     8 |     2 |     6 |     8 |     4 |     385 |
-| array_read     |     3 |     9 |     9 |     9 |     9 |    11 |    13 |    14 |     327 |
-| math_intensive |    14 |    46 |    49 |    48 |    47 |    49 |    49 |    49 |    2185 |
-| object_create  |     0 |     0 |     0 |     0 |     0 |     4 |     8 |     6 |     157 |
-| nested_loops   |     8 |     8 |     8 |     9 |     8 |    10 |    16 |    19 |     458 |
-| accumulate     |    24 |    94 |    94 |    95 |    93 |    98 |   583 |    96 |    4854 |
+| Benchmark           | Perry |  Rust |   C++ |    Go | Swift |  Java |  Node |   Bun |  Python |
+|---------------------|------:|------:|------:|------:|------:|------:|------:|------:|--------:|
+| fibonacci           |   318 |   330 |   315 |   451 |   406 |   282 |  1022 |   589 |   16054 |
+| loop_overhead       |    12 |    98 |    98 |    98 |   143 |   100 |    54 |    46 |    3019 |
+| **loop_data_dependent** | **235** | **229** | **129** | **128** | **233** | **229** | **322** | **232** | **10750** |
+| array_write         |     4 |     7 |     3 |     9 |     2 |     7 |     9 |     6 |     401 |
+| array_read          |     4 |     9 |     9 |    11 |     9 |    12 |    13 |    16 |     342 |
+| math_intensive      |    14 |    48 |    51 |    49 |    50 |    74 |    51 |    51 |    2238 |
+| object_create       |     1 |     0 |     0 |     0 |     0 |     5 |    11 |     6 |     164 |
+| nested_loops        |    18 |     8 |     8 |    10 |     8 |    11 |    18 |    21 |     484 |
+| accumulate          |    34 |    98 |    98 |    98 |    98 |   100 |   617 |   100 |    5048 |
 
-**Fixed in v0.5.164** ([#140](https://github.com/PerryTS/perry/issues/140)):
-`loop_overhead`, `math_intensive`, and `accumulate` had regressed 2–4×
-between v0.5.22 and v0.5.162 (32/48/97 ms) after an `asm sideeffect`
-loop-body barrier (from #74) and an over-eager i32 shadow counter
-started blocking LLVM's vectorizer on pure-accumulator loops. v0.5.164
-scopes the i32 shadow to counters that actually appear in an index
-subtree and refines the loop-body barrier to fire only on truly-empty
-bodies — restoring the `<2 x double>` parallel-accumulator reduction
-(vectorization width 2, interleave count 4) that v0.5.22 had. The three
-cells are back to 12/14/24 ms, matching the v0.5.22 baseline exactly.
-Perry now beats Rust 3–8× on these cells again.
+**New benchmark in v0.5.249: `loop_data_dependent`.** Same shape as
+`loop_overhead` but with a multiplicative carry through `sum` and
+runtime-loaded array reads, so LLVM cannot apply reassoc, IV-simplify,
+or autovectorization. The Rust version's loop body is verified at
+the asm level (see `bench.rs` line 122) — emits a scalar fmul + fadd
+chain with two array loads, no fold, no vectorize. **The kernel
+splits the field into two FP-contract clusters:**
+
+- **FMA-contract pack (~128 ms):** Go (default), C++ `g++ -O3` on
+  Apple Clang. Both fuse `sum * a + b` into a single `FMADDD`
+  instruction (one IEEE-754 rounding instead of two), shortening
+  the per-iteration dependency chain from ~6-8 cycles
+  (FMUL→FADD on Apple silicon) to ~4 cycles (single FMADDD).
+- **No-contract pack (~229-235 ms):** Perry, Rust default `-O`,
+  Swift `-O`, Java without `-XX:+UseFMA`, Bun. All emit separate
+  `FMUL` + `FADD` because contracting changes observable IEEE-754
+  result by up to 0.5 ULP per iteration and is not legal under
+  the languages' default FP semantics.
+
+LLVM matches the FMA pack with `-ffast-math` or
+`-ffp-contract=fast`; Apple Clang's default at `-O2+` already enables
+contract. Verified at the asm level on rustc 1.94.1 / Apple Clang on
+2026-04-25 — see `bench.rs` line 115 for the full asm dump and
+toolchain notes. The dependency chain on `sum` is preserved in both
+clusters; the win is one ISA-level fusion, not a fold or a vectorize.
+Node 322 ms this run was a JIT-warm-up tail (σ=63, p95=447); on
+quieter runs it lands in the no-contract pack alongside Bun.
+
+**Interesting tails surfaced by RUNS=11:**
+
+- Python `accumulate` median 5052 ms but p95 9388 ms (σ=1454) — one
+  run took 9.4 s, likely from GC pressure or thermal throttling
+  during a 10 s+ tight loop. Best-of-5 hid this; the p95 is real.
+- Python `math_intensive` median 2244 ms but p95 4091 ms (σ=531) —
+  same pattern.
+- Most other cells have σ < 5% of median — distributions are tight.
+
+The `nested_loops` and `accumulate` regressions vs the v0.5.164
+baseline (8 → 17 ms and 24 → 34 ms) are still present and still
+caused by the v0.5.237 generational-GC default flip — `PERRY_GEN_GC=0`
+recovers the 8 / 24 ms baseline. The slight jitter on `fibonacci`
+(302 → 312 ms median across runs) is genuine variance from the
+underlying recursive call chain; best-of-5 had been picking the
+lower tail, median is more representative.
+
+**Honest regressions vs v0.5.164** (when this table was last refreshed,
+before generational GC became the default in v0.5.237):
+`nested_loops` 8 → 17 ms, `accumulate` 24 → 33 ms. Both caused by
+the v0.5.237 gen-GC default flip — the per-allocation gen-GC machinery
+(write-barrier potential, age-bump pass) is overhead that allocation-heavy
+compute benches don't recoup. `PERRY_GEN_GC=0` recovers the 8 / 24 ms
+baseline. The trade-off was deliberate; gen-GC's wins on long-running and
+RSS-sensitive workloads (`test_memory_json_churn` 115 → 91 MB) outweigh
+the small compute-bench regression. All other cells unchanged or
+slightly faster.
+
+**Original v0.5.164 fix** ([#140](https://github.com/PerryTS/perry/issues/140))
+that established the current `loop_overhead`/`math_intensive`/`accumulate`
+baseline: an `asm sideeffect` loop-body barrier (from #74) and an
+over-eager i32 shadow counter were blocking LLVM's vectorizer on pure-
+accumulator loops; v0.5.164 scoped the i32 shadow to counters that
+actually appear in an index subtree and refined the loop-body barrier
+to fire only on truly-empty bodies — restoring the `<2 x double>`
+parallel-accumulator reduction (vectorization width 2, interleave count
+4). Perry beats Rust 3–8× on these cells.
 
 ## How to reproduce
 

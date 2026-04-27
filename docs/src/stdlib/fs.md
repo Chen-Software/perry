@@ -4,72 +4,60 @@ Perry implements Node.js file system APIs for reading, writing, and managing fil
 
 ## Reading Files
 
-```typescript,no-test
-import { readFileSync } from "fs";
-
-const content = readFileSync("config.json", "utf-8");
-console.log(content);
+```typescript
+{{#include ../../examples/stdlib/fs/snippets.ts:read-text}}
 ```
 
 ### Binary File Reading
 
-```typescript,no-test
-import { readFileBuffer } from "fs";
-
-const buffer = readFileBuffer("image.png");
-console.log(`Read ${buffer.length} bytes`);
+```typescript
+{{#include ../../examples/stdlib/fs/snippets.ts:read-binary}}
 ```
 
 `readFileBuffer` reads files as binary data (uses `fs::read()` internally, not `read_to_string()`).
 
 ## Writing Files
 
-```typescript,no-test
-import { writeFileSync } from "fs";
-
-writeFileSync("output.txt", "Hello, World!");
-writeFileSync("data.json", JSON.stringify({ key: "value" }, null, 2));
+```typescript
+{{#include ../../examples/stdlib/fs/snippets.ts:write-text}}
 ```
 
 ## File Information
 
-```typescript,no-test
-import { existsSync, statSync } from "fs";
-
-if (existsSync("config.json")) {
-  const stat = statSync("config.json");
-  console.log(`Size: ${stat.size}`);
-}
+```typescript
+{{#include ../../examples/stdlib/fs/snippets.ts:stat}}
 ```
 
 ## Directory Operations
 
-```typescript,no-test
-import { mkdirSync, readdirSync, rmRecursive } from "fs";
+```typescript
+{{#include ../../examples/stdlib/fs/snippets.ts:dirs}}
+```
 
-// Create directory
-mkdirSync("output");
+For recursive removal Perry exposes `rmRecursive` (a thin wrapper around
+`std::fs::remove_dir_all`). It is not yet wired into the LLVM backend, so the
+verified snippet above uses `rmdirSync` (empty directories only). Track the
+follow-up at issue #198.
 
-// Read directory contents
-const files = readdirSync("src");
-for (const file of files) {
-  console.log(file);
-}
-
-// Remove directory recursively
-rmRecursive("output"); // Uses fs::remove_dir_all
+```text
+import { rmRecursive } from "fs";
+rmRecursive("output"); // Not yet wired into the LLVM codegen
 ```
 
 ## Path Utilities
 
-```typescript,no-test
-import { join, dirname, basename, resolve } from "path";
+```typescript
+{{#include ../../examples/stdlib/fs/snippets.ts:path-utils}}
+```
+
+For `import.meta.url` → filesystem path conversion, use `fileURLToPath` from
+the `url` module:
+
+```text
 import { fileURLToPath } from "url";
+import { dirname } from "path";
 
 const dir = dirname(fileURLToPath(import.meta.url));
-const configPath = join(dir, "config.json");
-const name = basename(configPath);        // "config.json"
-const abs = resolve("relative/path");     // Absolute path
 ```
 
 ## Next Steps

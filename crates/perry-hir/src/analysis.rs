@@ -1693,6 +1693,761 @@ pub fn replace_this_in_stmts(stmts: &mut Vec<Stmt>, this_id: LocalId) {
     }
 }
 
+/// Issue #212: rewrite every `LocalGet(old_id)` / `LocalSet(old_id, _)` /
+/// `Update { id: old_id, .. }` reference (plus the LocalId fields baked
+/// into specialized HIR variants like `Expr::ArrayPush { array_id }` and
+/// the `captures` / `mutable_captures` lists on `Expr::Closure`) where
+/// `old_id` appears as a key in `map`, replacing it with the corresponding
+/// `new_id`. Used by `lower_class_decl` to remap captured outer-fn
+/// LocalIds onto fresh per-method LocalIds, so the boxed-vars analysis at
+/// codegen time scopes each method's box decision to that method (and not
+/// to the outer fn's non-boxed slot for the same id).
+///
+/// The variant coverage mirrors `perry_transform::inline::substitute_locals`
+/// (which handles the inliner's full Expr-substitution shape). HIR has
+/// hundreds of specialized variants (ArrayJoin, ArrayMap, MathPow, etc.),
+/// most of which carry one or more `Box<Expr>` sub-trees that must be
+/// recursively rewritten — variants we miss here would silently skip the
+/// rewrite and the codegen would fall back to `double_literal(0.0)` (the
+/// soft fallback for unrecognized LocalIds), producing an array handle of
+/// 0 at runtime. Keep the variant list in sync with `substitute_locals`
+/// when adding new HIR shapes.
+pub fn remap_local_ids_in_stmts(stmts: &mut Vec<Stmt>, map: &std::collections::HashMap<LocalId, LocalId>) {
+    if map.is_empty() {
+        return;
+    }
+    for s in stmts {
+        remap_local_ids_in_stmt(s, map);
+    }
+}
+
+/// Issue #212: like `remap_local_ids_in_stmts` but additionally wraps every
+/// `Expr::LocalSet(id, v)` and `Expr::Update { id, .. }` (where `id` is a key
+/// in `field_propagation`, BEFORE remapping) in a `Sequence` that also writes
+/// the new value back to the corresponding `this.<field_name>`. Used by
+/// `lower_class_decl` to make method-body mutations of a captured outer
+/// local visible across method calls — without this, a setter writing to a
+/// captured primitive would only update the method-local rebind slot, and
+/// the next getter call would re-read the field's stale snapshot.
+///
+/// `field_propagation` keys are OUTER LocalIds (pre-remap); values are the
+/// `__perry_cap_<id>` field names. The wrapper detects the captured write
+/// by inspecting the original id, then runs the standard remap on the
+/// LocalSet/Update inside the wrap so the resulting Sequence references the
+/// fresh per-method id everywhere consistently.
+pub fn remap_local_ids_in_stmts_with_field_propagation(
+    stmts: &mut Vec<Stmt>,
+    map: &std::collections::HashMap<LocalId, LocalId>,
+    field_propagation: &std::collections::HashMap<LocalId, String>,
+) {
+    if map.is_empty() && field_propagation.is_empty() {
+        return;
+    }
+    for s in stmts {
+        remap_local_ids_in_stmt_propagating(s, map, field_propagation);
+    }
+}
+
+fn remap_local_ids_in_stmt_propagating(
+    stmt: &mut Stmt,
+    map: &std::collections::HashMap<LocalId, LocalId>,
+    fp: &std::collections::HashMap<LocalId, String>,
+) {
+    match stmt {
+        Stmt::Let { init, .. } => {
+            if let Some(e) = init {
+                remap_with_propagation(e, map, fp);
+            }
+        }
+        Stmt::Expr(e) => remap_with_propagation(e, map, fp),
+        Stmt::Return(Some(e)) => remap_with_propagation(e, map, fp),
+        Stmt::If { condition, then_branch, else_branch } => {
+            remap_with_propagation(condition, map, fp);
+            remap_local_ids_in_stmts_with_field_propagation(then_branch, map, fp);
+            if let Some(eb) = else_branch {
+                remap_local_ids_in_stmts_with_field_propagation(eb, map, fp);
+            }
+        }
+        Stmt::While { condition, body } | Stmt::DoWhile { body, condition } => {
+            remap_with_propagation(condition, map, fp);
+            remap_local_ids_in_stmts_with_field_propagation(body, map, fp);
+        }
+        Stmt::For { init, condition, update, body } => {
+            if let Some(i) = init {
+                remap_local_ids_in_stmt_propagating(i, map, fp);
+            }
+            if let Some(c) = condition {
+                remap_with_propagation(c, map, fp);
+            }
+            if let Some(u) = update {
+                remap_with_propagation(u, map, fp);
+            }
+            remap_local_ids_in_stmts_with_field_propagation(body, map, fp);
+        }
+        Stmt::Try { body, catch, finally } => {
+            remap_local_ids_in_stmts_with_field_propagation(body, map, fp);
+            if let Some(c) = catch {
+                remap_local_ids_in_stmts_with_field_propagation(&mut c.body, map, fp);
+            }
+            if let Some(f) = finally {
+                remap_local_ids_in_stmts_with_field_propagation(f, map, fp);
+            }
+        }
+        Stmt::Switch { discriminant, cases } => {
+            remap_with_propagation(discriminant, map, fp);
+            for c in cases {
+                if let Some(t) = &mut c.test {
+                    remap_with_propagation(t, map, fp);
+                }
+                remap_local_ids_in_stmts_with_field_propagation(&mut c.body, map, fp);
+            }
+        }
+        Stmt::Throw(e) => remap_with_propagation(e, map, fp),
+        Stmt::Labeled { body, .. } => remap_local_ids_in_stmt_propagating(body, map, fp),
+        _ => {}
+    }
+}
+
+/// Detect captured-LocalSet/Update at this position, replace with a
+/// Sequence that also propagates the new value to the field. Then run the
+/// standard rename pass on the wrapped expr so all ids inside are fresh.
+fn remap_with_propagation(
+    expr: &mut Expr,
+    map: &std::collections::HashMap<LocalId, LocalId>,
+    fp: &std::collections::HashMap<LocalId, String>,
+) {
+    // Detect captured LocalSet / Update at THIS position. Use the
+    // pre-remap (outer) id to look up the field name.
+    let captured_field: Option<(LocalId, String)> = match expr {
+        Expr::LocalSet(id, _) => fp.get(id).map(|f| (*id, f.clone())),
+        Expr::Update { id, .. } => fp.get(id).map(|f| (*id, f.clone())),
+        _ => None,
+    };
+    if let Some((outer_id, field_name)) = captured_field {
+        // Pull out the original LocalSet/Update so we can rename its inner
+        // ids before rewrapping in a Sequence.
+        let mut original = std::mem::replace(expr, Expr::Undefined);
+        // Standard remap on the original (without propagation — we're
+        // about to manually wrap; recursing back here would loop).
+        remap_local_ids_in_expr(&mut original, map);
+        // After remap, the LocalSet/Update's id is fresh_id (or unchanged
+        // if outer_id wasn't in `map`).
+        let fresh_id = *map.get(&outer_id).unwrap_or(&outer_id);
+        *expr = Expr::Sequence(vec![
+            original,
+            Expr::PropertySet {
+                object: Box::new(Expr::This),
+                property: field_name,
+                value: Box::new(Expr::LocalGet(fresh_id)),
+            },
+        ]);
+        return;
+    }
+    // Not a captured write at this position. Recurse via the standard
+    // remap (which handles all sub-Expr positions and inner closure
+    // captures lists).
+    remap_local_ids_in_expr(expr, map);
+}
+
+fn remap_local_ids_in_stmt(stmt: &mut Stmt, map: &std::collections::HashMap<LocalId, LocalId>) {
+    match stmt {
+        Stmt::Let { init, .. } => {
+            if let Some(e) = init {
+                remap_local_ids_in_expr(e, map);
+            }
+        }
+        Stmt::Expr(e) => remap_local_ids_in_expr(e, map),
+        Stmt::Return(Some(e)) => remap_local_ids_in_expr(e, map),
+        Stmt::If { condition, then_branch, else_branch } => {
+            remap_local_ids_in_expr(condition, map);
+            remap_local_ids_in_stmts(then_branch, map);
+            if let Some(eb) = else_branch {
+                remap_local_ids_in_stmts(eb, map);
+            }
+        }
+        Stmt::While { condition, body } | Stmt::DoWhile { body, condition } => {
+            remap_local_ids_in_expr(condition, map);
+            remap_local_ids_in_stmts(body, map);
+        }
+        Stmt::For { init, condition, update, body } => {
+            if let Some(i) = init {
+                remap_local_ids_in_stmt(i, map);
+            }
+            if let Some(c) = condition {
+                remap_local_ids_in_expr(c, map);
+            }
+            if let Some(u) = update {
+                remap_local_ids_in_expr(u, map);
+            }
+            remap_local_ids_in_stmts(body, map);
+        }
+        Stmt::Try { body, catch, finally } => {
+            remap_local_ids_in_stmts(body, map);
+            if let Some(c) = catch {
+                remap_local_ids_in_stmts(&mut c.body, map);
+            }
+            if let Some(f) = finally {
+                remap_local_ids_in_stmts(f, map);
+            }
+        }
+        Stmt::Switch { discriminant, cases } => {
+            remap_local_ids_in_expr(discriminant, map);
+            for c in cases {
+                if let Some(t) = &mut c.test {
+                    remap_local_ids_in_expr(t, map);
+                }
+                remap_local_ids_in_stmts(&mut c.body, map);
+            }
+        }
+        Stmt::Throw(e) => remap_local_ids_in_expr(e, map),
+        Stmt::Labeled { body, .. } => remap_local_ids_in_stmt(body, map),
+        _ => {}
+    }
+}
+
+fn remap_local_ids_in_expr(expr: &mut Expr, map: &std::collections::HashMap<LocalId, LocalId>) {
+    // Direct id-bearing variants first.
+    match expr {
+        Expr::LocalGet(id) => {
+            if let Some(&new_id) = map.get(id) {
+                *id = new_id;
+            }
+            return;
+        }
+        Expr::LocalSet(id, value) => {
+            if let Some(&new_id) = map.get(id) {
+                *id = new_id;
+            }
+            remap_local_ids_in_expr(value, map);
+            return;
+        }
+        Expr::Update { id, .. } => {
+            if let Some(&new_id) = map.get(id) {
+                *id = new_id;
+            }
+            return;
+        }
+        Expr::Closure { body, captures, mutable_captures, .. } => {
+            // Remap the closure's captures list AND descend into its body
+            // — the body's `LocalGet(old_id)` matches the captures list,
+            // and both must be remapped together so the creation site
+            // (which reads the captured value from the enclosing scope's
+            // remapped slot) and the closure body (which reads via the
+            // capture slot index) stay aligned.
+            for id in captures.iter_mut() {
+                if let Some(&new_id) = map.get(id) {
+                    *id = new_id;
+                }
+            }
+            for id in mutable_captures.iter_mut() {
+                if let Some(&new_id) = map.get(id) {
+                    *id = new_id;
+                }
+            }
+            remap_local_ids_in_stmts(body, map);
+            return;
+        }
+        _ => {}
+    }
+    // Generic recursion for everything else. Mirrors the structure of
+    // `replace_this_in_expr`. Variants that don't carry sub-exprs fall
+    // through harmlessly via the catch-all.
+    match expr {
+        Expr::Binary { left, right, .. }
+        | Expr::Compare { left, right, .. }
+        | Expr::Logical { left, right, .. } => {
+            remap_local_ids_in_expr(left, map);
+            remap_local_ids_in_expr(right, map);
+        }
+        Expr::Unary { operand, .. } => remap_local_ids_in_expr(operand, map),
+        Expr::Call { callee, args, .. } => {
+            remap_local_ids_in_expr(callee, map);
+            for a in args {
+                remap_local_ids_in_expr(a, map);
+            }
+        }
+        Expr::CallSpread { callee, args, .. } => {
+            remap_local_ids_in_expr(callee, map);
+            for a in args {
+                match a {
+                    CallArg::Expr(e) | CallArg::Spread(e) => remap_local_ids_in_expr(e, map),
+                }
+            }
+        }
+        Expr::PropertyGet { object, .. } => remap_local_ids_in_expr(object, map),
+        Expr::PropertySet { object, value, .. } => {
+            remap_local_ids_in_expr(object, map);
+            remap_local_ids_in_expr(value, map);
+        }
+        Expr::PropertyUpdate { object, .. } => remap_local_ids_in_expr(object, map),
+        Expr::IndexGet { object, index } => {
+            remap_local_ids_in_expr(object, map);
+            remap_local_ids_in_expr(index, map);
+        }
+        Expr::IndexSet { object, index, value } => {
+            remap_local_ids_in_expr(object, map);
+            remap_local_ids_in_expr(index, map);
+            remap_local_ids_in_expr(value, map);
+        }
+        Expr::IndexUpdate { object, index, .. } => {
+            remap_local_ids_in_expr(object, map);
+            remap_local_ids_in_expr(index, map);
+        }
+        Expr::GlobalSet(_, value) => remap_local_ids_in_expr(value, map),
+        Expr::New { args, .. } => {
+            for a in args {
+                remap_local_ids_in_expr(a, map);
+            }
+        }
+        Expr::NewDynamic { callee, args } => {
+            remap_local_ids_in_expr(callee, map);
+            for a in args {
+                remap_local_ids_in_expr(a, map);
+            }
+        }
+        Expr::Array(elements) => {
+            for e in elements {
+                remap_local_ids_in_expr(e, map);
+            }
+        }
+        Expr::ArraySpread(elements) => {
+            for el in elements {
+                match el {
+                    ArrayElement::Expr(e) | ArrayElement::Spread(e) => remap_local_ids_in_expr(e, map),
+                }
+            }
+        }
+        Expr::Object(fields) => {
+            for (_, e) in fields {
+                remap_local_ids_in_expr(e, map);
+            }
+        }
+        Expr::ObjectSpread { parts } => {
+            for (_, e) in parts {
+                remap_local_ids_in_expr(e, map);
+            }
+        }
+        Expr::Conditional { condition, then_expr, else_expr } => {
+            remap_local_ids_in_expr(condition, map);
+            remap_local_ids_in_expr(then_expr, map);
+            remap_local_ids_in_expr(else_expr, map);
+        }
+        Expr::Await(inner) => remap_local_ids_in_expr(inner, map),
+        Expr::Yield { value, .. } => {
+            if let Some(v) = value {
+                remap_local_ids_in_expr(v, map);
+            }
+        }
+        Expr::TypeOf(o) | Expr::Void(o) | Expr::Delete(o) => remap_local_ids_in_expr(o, map),
+        Expr::InstanceOf { expr: inner, .. } => remap_local_ids_in_expr(inner, map),
+        Expr::In { property, object } => {
+            remap_local_ids_in_expr(property, map);
+            remap_local_ids_in_expr(object, map);
+        }
+        Expr::Sequence(exprs) => {
+            for e in exprs {
+                remap_local_ids_in_expr(e, map);
+            }
+        }
+        Expr::NativeMethodCall { object, args, .. } => {
+            if let Some(o) = object {
+                remap_local_ids_in_expr(o, map);
+            }
+            for a in args {
+                remap_local_ids_in_expr(a, map);
+            }
+        }
+        Expr::StaticMethodCall { args, .. } => {
+            for a in args {
+                remap_local_ids_in_expr(a, map);
+            }
+        }
+        Expr::SuperCall(args) | Expr::SuperMethodCall { args, .. } => {
+            for a in args {
+                remap_local_ids_in_expr(a, map);
+            }
+        }
+        Expr::StaticFieldSet { value, .. } => remap_local_ids_in_expr(value, map),
+        // Type-coercion / unary-expression family.
+        Expr::StringCoerce(inner)
+        | Expr::BooleanCoerce(inner)
+        | Expr::NumberCoerce(inner)
+        | Expr::BigIntCoerce(inner)
+        | Expr::IsFinite(inner)
+        | Expr::IsNaN(inner)
+        | Expr::NumberIsNaN(inner)
+        | Expr::NumberIsFinite(inner)
+        | Expr::NumberIsInteger(inner)
+        | Expr::IsUndefinedOrBareNan(inner)
+        | Expr::ParseFloat(inner)
+        | Expr::WeakRefNew(inner)
+        | Expr::WeakRefDeref(inner)
+        | Expr::FinalizationRegistryNew(inner)
+        | Expr::ObjectKeys(inner)
+        | Expr::ObjectValues(inner)
+        | Expr::ObjectEntries(inner)
+        | Expr::ObjectFromEntries(inner) => {
+            remap_local_ids_in_expr(inner, map);
+        }
+        Expr::ParseInt { string, radix } => {
+            remap_local_ids_in_expr(string, map);
+            if let Some(r) = radix {
+                remap_local_ids_in_expr(r, map);
+            }
+        }
+        Expr::StringSplit(s, d) => {
+            remap_local_ids_in_expr(s, map);
+            remap_local_ids_in_expr(d, map);
+        }
+        Expr::StringFromCharCode(s) | Expr::StringFromCodePoint(s) => {
+            remap_local_ids_in_expr(s, map);
+        }
+        // Array operations carrying a LocalId in `array_id`.
+        Expr::ArrayPush { array_id, value }
+        | Expr::ArrayUnshift { array_id, value }
+        | Expr::ArrayPushSpread { array_id, source: value } => {
+            if let Some(&new_id) = map.get(array_id) {
+                *array_id = new_id;
+            }
+            remap_local_ids_in_expr(value, map);
+        }
+        Expr::ArrayPop(array_id) | Expr::ArrayShift(array_id) => {
+            if let Some(&new_id) = map.get(array_id) {
+                *array_id = new_id;
+            }
+        }
+        Expr::ArraySplice { array_id, start, delete_count, items } => {
+            if let Some(&new_id) = map.get(array_id) {
+                *array_id = new_id;
+            }
+            remap_local_ids_in_expr(start, map);
+            if let Some(dc) = delete_count {
+                remap_local_ids_in_expr(dc, map);
+            }
+            for item in items {
+                remap_local_ids_in_expr(item, map);
+            }
+        }
+        Expr::ArrayCopyWithin { array_id, target, start, end } => {
+            if let Some(&new_id) = map.get(array_id) {
+                *array_id = new_id;
+            }
+            remap_local_ids_in_expr(target, map);
+            remap_local_ids_in_expr(start, map);
+            if let Some(e) = end { remap_local_ids_in_expr(e, map); }
+        }
+        // Array operations carrying a Box<Expr> array.
+        Expr::ArrayIndexOf { array, value } | Expr::ArrayIncludes { array, value } => {
+            remap_local_ids_in_expr(array, map);
+            remap_local_ids_in_expr(value, map);
+        }
+        Expr::ArraySlice { array, start, end } => {
+            remap_local_ids_in_expr(array, map);
+            remap_local_ids_in_expr(start, map);
+            if let Some(e) = end { remap_local_ids_in_expr(e, map); }
+        }
+        Expr::ArrayForEach { array, callback }
+        | Expr::ArrayMap { array, callback }
+        | Expr::ArrayFilter { array, callback }
+        | Expr::ArrayFind { array, callback }
+        | Expr::ArrayFindIndex { array, callback }
+        | Expr::ArraySort { array, comparator: callback } => {
+            remap_local_ids_in_expr(array, map);
+            remap_local_ids_in_expr(callback, map);
+        }
+        Expr::ArrayReduce { array, callback, initial }
+        | Expr::ArrayReduceRight { array, callback, initial } => {
+            remap_local_ids_in_expr(array, map);
+            remap_local_ids_in_expr(callback, map);
+            if let Some(init) = initial { remap_local_ids_in_expr(init, map); }
+        }
+        Expr::ArrayJoin { array, separator } => {
+            remap_local_ids_in_expr(array, map);
+            if let Some(sep) = separator { remap_local_ids_in_expr(sep, map); }
+        }
+        Expr::ArrayFlat { array } | Expr::ArrayToReversed { array } => {
+            remap_local_ids_in_expr(array, map);
+        }
+        Expr::ArrayEntries(array) | Expr::ArrayKeys(array) | Expr::ArrayValues(array) => {
+            remap_local_ids_in_expr(array, map);
+        }
+        Expr::ArrayToSorted { array, comparator } => {
+            remap_local_ids_in_expr(array, map);
+            if let Some(cmp) = comparator { remap_local_ids_in_expr(cmp, map); }
+        }
+        Expr::ArrayToSpliced { array, start, delete_count, items } => {
+            remap_local_ids_in_expr(array, map);
+            remap_local_ids_in_expr(start, map);
+            remap_local_ids_in_expr(delete_count, map);
+            for item in items { remap_local_ids_in_expr(item, map); }
+        }
+        Expr::ArrayWith { array, index, value } => {
+            remap_local_ids_in_expr(array, map);
+            remap_local_ids_in_expr(index, map);
+            remap_local_ids_in_expr(value, map);
+        }
+        Expr::ArrayFromMapped { iterable, map_fn } => {
+            remap_local_ids_in_expr(iterable, map);
+            remap_local_ids_in_expr(map_fn, map);
+        }
+        Expr::ArrayIsArray(inner) | Expr::ArrayFrom(inner) | Expr::Uint8ArrayFrom(inner) => {
+            remap_local_ids_in_expr(inner, map);
+        }
+        Expr::IteratorToArray(inner) => remap_local_ids_in_expr(inner, map),
+        // Set / Map operations.
+        Expr::SetHas { set, value } | Expr::SetDelete { set, value } => {
+            remap_local_ids_in_expr(set, map);
+            remap_local_ids_in_expr(value, map);
+        }
+        Expr::SetAdd { value, .. } => remap_local_ids_in_expr(value, map),
+        Expr::SetSize(set) | Expr::SetClear(set) | Expr::SetValues(set) => {
+            remap_local_ids_in_expr(set, map);
+        }
+        Expr::MapHas { map: m, key }
+        | Expr::MapGet { map: m, key }
+        | Expr::MapDelete { map: m, key } => {
+            remap_local_ids_in_expr(m, map);
+            remap_local_ids_in_expr(key, map);
+        }
+        Expr::MapSet { map: m, key, value } => {
+            remap_local_ids_in_expr(m, map);
+            remap_local_ids_in_expr(key, map);
+            remap_local_ids_in_expr(value, map);
+        }
+        Expr::MapSize(m) | Expr::MapClear(m) => remap_local_ids_in_expr(m, map),
+        // Math operations.
+        Expr::MathFloor(inner) | Expr::MathCeil(inner) | Expr::MathRound(inner)
+        | Expr::MathAbs(inner) | Expr::MathSqrt(inner)
+        | Expr::MathLog(inner) | Expr::MathLog2(inner) | Expr::MathLog10(inner)
+        | Expr::MathLog1p(inner) | Expr::MathClz32(inner)
+        | Expr::MathSin(inner) | Expr::MathCos(inner) | Expr::MathTan(inner)
+        | Expr::MathAsin(inner) | Expr::MathAcos(inner) | Expr::MathAtan(inner)
+        | Expr::MathCbrt(inner) | Expr::MathFround(inner)
+        | Expr::MathMinSpread(inner) | Expr::MathMaxSpread(inner)
+        | Expr::MathExpm1(inner)
+        | Expr::MathExp(inner) | Expr::MathSinh(inner) | Expr::MathCosh(inner)
+        | Expr::MathTanh(inner) | Expr::MathAsinh(inner) | Expr::MathAcosh(inner)
+        | Expr::MathAtanh(inner) => {
+            remap_local_ids_in_expr(inner, map);
+        }
+        Expr::MathPow(a, b) | Expr::MathImul(a, b) | Expr::MathAtan2(a, b) => {
+            remap_local_ids_in_expr(a, map);
+            remap_local_ids_in_expr(b, map);
+        }
+        Expr::MathMin(exprs) | Expr::MathMax(exprs) | Expr::MathHypot(exprs) => {
+            for e in exprs { remap_local_ids_in_expr(e, map); }
+        }
+        // Object operations.
+        Expr::ObjectDefineProperty(a, b, c) => {
+            remap_local_ids_in_expr(a, map);
+            remap_local_ids_in_expr(b, map);
+            remap_local_ids_in_expr(c, map);
+        }
+        Expr::ObjectGetOwnPropertyDescriptor(a, b) => {
+            remap_local_ids_in_expr(a, map);
+            remap_local_ids_in_expr(b, map);
+        }
+        Expr::ObjectGetOwnPropertyNames(inner)
+        | Expr::ObjectCreate(inner)
+        | Expr::ObjectFreeze(inner)
+        | Expr::ObjectSeal(inner)
+        | Expr::ObjectPreventExtensions(inner)
+        | Expr::ObjectIsFrozen(inner)
+        | Expr::ObjectIsSealed(inner)
+        | Expr::ObjectIsExtensible(inner)
+        | Expr::ObjectGetPrototypeOf(inner)
+        | Expr::ObjectGetOwnPropertySymbols(inner) => {
+            remap_local_ids_in_expr(inner, map);
+        }
+        Expr::ObjectRest { object, .. } => remap_local_ids_in_expr(object, map),
+        // JSON operations.
+        Expr::JsonParse(inner)
+        | Expr::JsonStringify(inner) => remap_local_ids_in_expr(inner, map),
+        Expr::JsonParseTyped { text, .. } => remap_local_ids_in_expr(text, map),
+        Expr::JsonParseReviver { text, reviver } => {
+            remap_local_ids_in_expr(text, map);
+            remap_local_ids_in_expr(reviver, map);
+        }
+        Expr::JsonParseWithReviver(a, b) => {
+            remap_local_ids_in_expr(a, map);
+            remap_local_ids_in_expr(b, map);
+        }
+        Expr::JsonStringifyPretty { value, replacer, space } => {
+            remap_local_ids_in_expr(value, map);
+            if let Some(r) = replacer { remap_local_ids_in_expr(r, map); }
+            remap_local_ids_in_expr(space, map);
+        }
+        Expr::JsonStringifyFull(a, b, c) => {
+            remap_local_ids_in_expr(a, map);
+            remap_local_ids_in_expr(b, map);
+            remap_local_ids_in_expr(c, map);
+        }
+        // Path / URL operations.
+        Expr::PathJoin(a, b) => {
+            remap_local_ids_in_expr(a, map);
+            remap_local_ids_in_expr(b, map);
+        }
+        Expr::PathDirname(inner)
+        | Expr::PathBasename(inner)
+        | Expr::PathExtname(inner)
+        | Expr::PathResolve(inner)
+        | Expr::PathIsAbsolute(inner)
+        | Expr::FileURLToPath(inner) => remap_local_ids_in_expr(inner, map),
+        // RegExp / String operations.
+        Expr::RegExpExec { regex, string }
+        | Expr::RegExpTest { regex, string }
+        | Expr::StringMatch { string, regex } => {
+            remap_local_ids_in_expr(regex, map);
+            remap_local_ids_in_expr(string, map);
+        }
+        Expr::RegExpSource(inner)
+        | Expr::RegExpFlags(inner)
+        | Expr::RegExpLastIndex(inner) => remap_local_ids_in_expr(inner, map),
+        Expr::RegExpSetLastIndex { regex, value } => {
+            remap_local_ids_in_expr(regex, map);
+            remap_local_ids_in_expr(value, map);
+        }
+        Expr::RegExpReplaceFn { string, regex, callback } => {
+            remap_local_ids_in_expr(string, map);
+            remap_local_ids_in_expr(regex, map);
+            remap_local_ids_in_expr(callback, map);
+        }
+        Expr::StringReplace { string, pattern, replacement } => {
+            remap_local_ids_in_expr(string, map);
+            remap_local_ids_in_expr(pattern, map);
+            remap_local_ids_in_expr(replacement, map);
+        }
+        // Error / Date.
+        Expr::ErrorNew(Some(inner)) | Expr::ErrorMessage(inner) => {
+            remap_local_ids_in_expr(inner, map);
+        }
+        Expr::ErrorNewWithCause { message, cause } => {
+            remap_local_ids_in_expr(message, map);
+            remap_local_ids_in_expr(cause, map);
+        }
+        Expr::TypeErrorNew(m)
+        | Expr::RangeErrorNew(m)
+        | Expr::ReferenceErrorNew(m)
+        | Expr::SyntaxErrorNew(m) => remap_local_ids_in_expr(m, map),
+        Expr::AggregateErrorNew { errors, message } => {
+            remap_local_ids_in_expr(errors, map);
+            remap_local_ids_in_expr(message, map);
+        }
+        Expr::DateNew(Some(inner))
+        | Expr::DateGetTime(inner)
+        | Expr::DateToISOString(inner)
+        | Expr::DateGetFullYear(inner)
+        | Expr::DateGetMonth(inner)
+        | Expr::DateGetDate(inner)
+        | Expr::DateGetHours(inner)
+        | Expr::DateGetMinutes(inner)
+        | Expr::DateGetSeconds(inner)
+        | Expr::DateGetMilliseconds(inner) => remap_local_ids_in_expr(inner, map),
+        // FS operations.
+        Expr::FsReadFileSync(inner)
+        | Expr::FsExistsSync(inner)
+        | Expr::FsMkdirSync(inner)
+        | Expr::FsUnlinkSync(inner)
+        | Expr::FsReadFileBinary(inner)
+        | Expr::FsRmRecursive(inner) => remap_local_ids_in_expr(inner, map),
+        Expr::FsWriteFileSync(a, b) | Expr::FsAppendFileSync(a, b) => {
+            remap_local_ids_in_expr(a, map);
+            remap_local_ids_in_expr(b, map);
+        }
+        // Process operations.
+        Expr::ProcessNextTick(inner) | Expr::ProcessChdir(inner) => {
+            remap_local_ids_in_expr(inner, map);
+        }
+        Expr::ProcessOn { event, handler } => {
+            remap_local_ids_in_expr(event, map);
+            remap_local_ids_in_expr(handler, map);
+        }
+        Expr::ProcessKill { pid, signal } => {
+            remap_local_ids_in_expr(pid, map);
+            if let Some(s) = signal { remap_local_ids_in_expr(s, map); }
+        }
+        Expr::ProcessExit(opt) => {
+            if let Some(e) = opt { remap_local_ids_in_expr(e, map); }
+        }
+        // Buffer / TypedArray operations.
+        Expr::BufferFrom { data, encoding } => {
+            remap_local_ids_in_expr(data, map);
+            if let Some(e) = encoding { remap_local_ids_in_expr(e, map); }
+        }
+        Expr::BufferAlloc { size, fill } => {
+            remap_local_ids_in_expr(size, map);
+            if let Some(f) = fill { remap_local_ids_in_expr(f, map); }
+        }
+        Expr::BufferAllocUnsafe(inner)
+        | Expr::BufferConcat(inner)
+        | Expr::BufferIsBuffer(inner)
+        | Expr::BufferByteLength(inner)
+        | Expr::BufferLength(inner) => remap_local_ids_in_expr(inner, map),
+        Expr::BufferToString { buffer, encoding } => {
+            remap_local_ids_in_expr(buffer, map);
+            if let Some(e) = encoding { remap_local_ids_in_expr(e, map); }
+        }
+        Expr::BufferSlice { buffer, start, end } => {
+            remap_local_ids_in_expr(buffer, map);
+            if let Some(s) = start { remap_local_ids_in_expr(s, map); }
+            if let Some(e) = end { remap_local_ids_in_expr(e, map); }
+        }
+        Expr::BufferFill { buffer, value } => {
+            remap_local_ids_in_expr(buffer, map);
+            remap_local_ids_in_expr(value, map);
+        }
+        Expr::BufferEquals { buffer, other } => {
+            remap_local_ids_in_expr(buffer, map);
+            remap_local_ids_in_expr(other, map);
+        }
+        Expr::BufferIndexGet { buffer, index } => {
+            remap_local_ids_in_expr(buffer, map);
+            remap_local_ids_in_expr(index, map);
+        }
+        Expr::BufferIndexSet { buffer, index, value } => {
+            remap_local_ids_in_expr(buffer, map);
+            remap_local_ids_in_expr(index, map);
+            remap_local_ids_in_expr(value, map);
+        }
+        Expr::BufferCopy { source, target, target_start, source_start, source_end } => {
+            remap_local_ids_in_expr(source, map);
+            remap_local_ids_in_expr(target, map);
+            if let Some(ts) = target_start { remap_local_ids_in_expr(ts, map); }
+            if let Some(ss) = source_start { remap_local_ids_in_expr(ss, map); }
+            if let Some(se) = source_end { remap_local_ids_in_expr(se, map); }
+        }
+        Expr::BufferWrite { buffer, string, offset, encoding } => {
+            remap_local_ids_in_expr(buffer, map);
+            remap_local_ids_in_expr(string, map);
+            if let Some(o) = offset { remap_local_ids_in_expr(o, map); }
+            if let Some(e) = encoding { remap_local_ids_in_expr(e, map); }
+        }
+        Expr::Uint8ArrayGet { array, index } => {
+            remap_local_ids_in_expr(array, map);
+            remap_local_ids_in_expr(index, map);
+        }
+        Expr::Uint8ArraySet { array, index, value } => {
+            remap_local_ids_in_expr(array, map);
+            remap_local_ids_in_expr(index, map);
+            remap_local_ids_in_expr(value, map);
+        }
+        Expr::Uint8ArrayLength(arr) => remap_local_ids_in_expr(arr, map),
+        Expr::Uint8ArrayNew(opt) => {
+            if let Some(arg) = opt { remap_local_ids_in_expr(arg, map); }
+        }
+        // Misc one-off helpers.
+        Expr::StructuredClone(inner) | Expr::QueueMicrotask(inner) => {
+            remap_local_ids_in_expr(inner, map);
+        }
+        // Catch-all: variants that carry no LocalId-bearing sub-exprs
+        // (literals, ClassRef, FuncRef, This, Undefined, Null, etc.)
+        // fall through unchanged. New HIR variants that carry LocalIds
+        // need explicit arms here OR they'll be silently skipped — same
+        // class of bug as the issue this fix covers.
+        _ => {}
+    }
+}
+
 fn replace_this_in_stmt(stmt: &mut Stmt, this_id: LocalId) {
     match stmt {
         Stmt::Let { init, .. } => {

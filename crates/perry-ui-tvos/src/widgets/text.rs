@@ -139,3 +139,38 @@ pub fn set_selectable(_handle: i64, _selectable: bool) {
     // UILabel is not selectable by default and making it so requires
     // UITextView instead. No-op for now.
 }
+
+/// Text decoration on a UILabel (issue #185 Phase B). 0=none, 1=underline,
+/// 2=strikethrough. Pattern mirrors iOS / visionOS twin exactly.
+pub fn set_decoration(handle: i64, decoration: i64) {
+    use objc2::runtime::{AnyClass, AnyObject};
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            let label: &UILabel = &*(Retained::as_ptr(&view) as *const UILabel);
+            let current: Retained<objc2_foundation::NSString> = msg_send![label, text];
+            if decoration == 0 {
+                let _: () = msg_send![label, setText: &*current];
+                return;
+            }
+            let key = objc2_foundation::NSString::from_str(
+                if decoration == 1 { "NSUnderline" } else { "NSStrikethrough" }
+            );
+            let num_cls = AnyClass::get(c"NSNumber").unwrap();
+            let one: Retained<AnyObject> = msg_send![num_cls, numberWithInt: 1i32];
+            let attrs: Retained<AnyObject> = msg_send![
+                AnyClass::get(c"NSDictionary").unwrap(),
+                dictionaryWithObject: &*one,
+                forKey: &*key
+            ];
+            let ns_str: *const AnyObject = Retained::as_ptr(&current) as *const AnyObject;
+            let cls = AnyClass::get(c"NSAttributedString").unwrap();
+            let alloc: *mut AnyObject = msg_send![cls, alloc];
+            let attr_str: *mut AnyObject = msg_send![
+                alloc,
+                initWithString: ns_str,
+                attributes: &*attrs
+            ];
+            let _: () = msg_send![label, setAttributedText: attr_str];
+        }
+    }
+}

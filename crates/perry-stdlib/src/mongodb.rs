@@ -8,8 +8,27 @@ use perry_runtime::{
     js_object_alloc, js_object_set_field, js_promise_new, js_string_from_bytes,
     JSValue, ObjectHeader, Promise, StringHeader,
 };
+use perry_runtime::json::js_json_stringify;
 use mongodb::{Client, Collection, Database};
 use crate::common::{get_handle, register_handle, spawn_for_promise, spawn_for_promise_deferred, Handle};
+
+/// JSON-stringify a NaN-boxed JSValue at the FFI boundary. Used by the
+/// `*_value` collection-method wrappers below to bridge codegen's
+/// `NA_F64` arg coercion (passes the JSValue as f64) to the existing
+/// runtime functions (which expect a JSON string pointer).
+///
+/// Returns the empty string on null/undefined or stringify failure —
+/// the downstream `serde_json::from_str` then surfaces the parse error
+/// rather than panicking on a NULL StringHeader read. Strings that
+/// already came in as STRING_TAG values pass through verbatim, matching
+/// the spec semantic that `JSON.stringify("foo")` → `"\"foo\""`.
+unsafe fn jsvalue_to_json_string(value: f64) -> String {
+    let str_ptr = js_json_stringify(value, 0);
+    if str_ptr.is_null() {
+        return String::new();
+    }
+    string_from_header(str_ptr).unwrap_or_default()
+}
 
 /// Helper to extract string from StringHeader pointer
 unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
@@ -22,9 +41,96 @@ unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
     Some(String::from_utf8_lossy(bytes).to_string())
 }
 
-/// MongoDB client handle
+/// MongoDB client handle.
+///
+/// Lives in two states like PgConnectionHandle: pre-connect (`pending_uri`
+/// holds the URI, `client` is None) and connected (`client` is Some).
+/// `new MongoClient(uri)` creates the pre-connect form synchronously;
+/// `await client.connect()` flips it to the connected form. The older
+/// combined `js_mongodb_connect` factory still returns a fully-connected
+/// handle in one step (back-compat).
 pub struct MongoClientHandle {
-    pub client: Client,
+    pub client: Option<Client>,
+    pub pending_uri: Option<String>,
+}
+
+impl MongoClientHandle {
+    pub fn new(client: Client) -> Self {
+        Self { client: Some(client), pending_uri: None }
+    }
+
+    pub fn pending(uri: String) -> Self {
+        Self { client: None, pending_uri: Some(uri) }
+    }
+
+    /// Borrow the connected client. Use for query paths that require a
+    /// live connection — they bail with `"Client not connected"` if the
+    /// user forgot to call `await client.connect()`.
+    pub fn client_ref(&self) -> Result<&Client, String> {
+        self.client.as_ref().ok_or_else(|| {
+            "MongoClient not connected — call await client.connect() first".to_string()
+        })
+    }
+}
+
+/// `new MongoClient(uri)` — synchronous constructor matching npm
+/// mongodb's API. Stores the URI; the actual `ClientOptions::parse +
+/// Client::with_options` work happens inside `.connect()`.
+///
+/// # Safety
+/// `uri_ptr` must be a valid `*const StringHeader` (or null, which
+/// produces a handle whose subsequent `.connect()` will fail with a
+/// helpful error).
+#[no_mangle]
+pub unsafe extern "C" fn js_mongodb_client_new(uri_ptr: *const StringHeader) -> Handle {
+    let uri = string_from_header(uri_ptr).unwrap_or_default();
+    register_handle(MongoClientHandle::pending(uri))
+}
+
+/// `client.connect()` — opens the connection using the URI stored by
+/// `js_mongodb_client_new`. Returns Promise<void>. No-op (resolves
+/// immediately) if the client was already connected (e.g. it came from
+/// the older `js_mongodb_connect` combined factory).
+#[no_mangle]
+pub unsafe extern "C" fn js_mongodb_client_connect(client_handle: Handle) -> *mut Promise {
+    use crate::common::get_handle_mut;
+
+    let promise = js_promise_new();
+
+    let pending = if let Some(h) = get_handle_mut::<MongoClientHandle>(client_handle) {
+        h.pending_uri.take()
+    } else {
+        None
+    };
+
+    let Some(uri) = pending else {
+        // Already connected (or back-compat handle) → resolve immediately.
+        spawn_for_promise(promise as *mut u8, async move {
+            Ok(JSValue::undefined().bits())
+        });
+        return promise;
+    };
+
+    spawn_for_promise(promise as *mut u8, async move {
+        let mut opts = mongodb::options::ClientOptions::parse(&uri).await
+            .map_err(|e| format!("Failed to parse URI: {}", e))?;
+        let timeout = std::time::Duration::from_secs(5);
+        if opts.connect_timeout.is_none() {
+            opts.connect_timeout = Some(timeout);
+        }
+        if opts.server_selection_timeout.is_none() {
+            opts.server_selection_timeout = Some(timeout);
+        }
+        let client = Client::with_options(opts)
+            .map_err(|e| format!("Failed to connect: {}", e))?;
+
+        if let Some(h) = get_handle_mut::<MongoClientHandle>(client_handle) {
+            h.client = Some(client);
+        }
+        Ok(JSValue::undefined().bits())
+    });
+
+    promise
 }
 
 /// MongoDB database handle
@@ -107,7 +213,7 @@ pub unsafe extern "C" fn js_mongodb_connect(uri_ptr: *const StringHeader) -> *mu
         let client = Client::with_options(opts)
             .map_err(|e| format!("Failed to connect: {}", e))?;
 
-        let handle = register_handle(MongoClientHandle { client });
+        let handle = register_handle(MongoClientHandle::new(client));
         Ok(handle as u64)
     });
 
@@ -125,9 +231,18 @@ pub unsafe extern "C" fn js_mongodb_client_db(
         None => return -1,
     };
 
+    // db() requires a connected client. If the user did `new MongoClient(uri)`
+    // and skipped `await client.connect()`, return -1 — the same sentinel the
+    // null-name path uses. Sub-handle dispatch (db.collection, etc.) will
+    // continue to fail-soft with -1 propagation.
     if let Some(client_wrapper) = get_handle::<MongoClientHandle>(client_handle) {
-        let db = client_wrapper.client.database(&name);
-        register_handle(MongoDatabaseHandle { db })
+        match client_wrapper.client_ref() {
+            Ok(client) => {
+                let db = client.database(&name);
+                register_handle(MongoDatabaseHandle { db })
+            }
+            Err(_) => -1,
+        }
     } else {
         -1
     }
@@ -186,6 +301,12 @@ pub unsafe extern "C" fn js_mongodb_collection_find_one(
             }
         },
         |result: Option<String>| {
+            // Pre-existing limitation: findOne resolves with a JSON STRING
+            // (not a parsed object). Tried converting via js_json_parse
+            // here, but a separate Perry-wide JSON-parse-then-property-
+            // access bug surfaced (`JSON.parse('{"foo":"perry"}').foo` ->
+            // NaN), so leaving the string return for now. Users do
+            // `JSON.parse(await coll.findOne(...))` once that's fixed.
             match result {
                 Some(json) => {
                     let ptr = js_string_from_bytes(json.as_ptr(), json.len() as u32);
@@ -496,6 +617,113 @@ pub unsafe extern "C" fn js_mongodb_collection_count(
     promise
 }
 
+// ---------------------------------------------------------------------------
+// `_value` wrappers — bridge JSValue f64 args to the JSON-string-taking
+// runtime fns above. Codegen's NATIVE_MODULE_TABLE rows pass user-supplied
+// objects/filters as `NA_F64` (NaN-boxed JSValue), but the existing
+// collection-method runtime fns expect a `*const StringHeader` (a
+// pre-stringified JSON document). Pre-#187 follow-up these wrappers
+// didn't exist and the dispatch table emitted calls that landed inside
+// the f64 bit pattern's bytes as if they were a StringHeader — every
+// caller saw `"Invalid document"` because string_from_header read garbage.
+// Same fix-shape as the v0.5.270 ioredis row-name correction.
+
+#[no_mangle]
+pub unsafe extern "C" fn js_mongodb_collection_insert_one_value(
+    handle: Handle,
+    doc_value: f64,
+) -> *mut Promise {
+    let json = jsvalue_to_json_string(doc_value);
+    let str_ptr = js_string_from_bytes(json.as_ptr(), json.len() as u32);
+    js_mongodb_collection_insert_one(handle, str_ptr)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_mongodb_collection_insert_many_value(
+    handle: Handle,
+    docs_value: f64,
+) -> *mut Promise {
+    let json = jsvalue_to_json_string(docs_value);
+    let str_ptr = js_string_from_bytes(json.as_ptr(), json.len() as u32);
+    js_mongodb_collection_insert_many(handle, str_ptr)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_mongodb_collection_find_value(
+    handle: Handle,
+    filter_value: f64,
+) -> *mut Promise {
+    let json = jsvalue_to_json_string(filter_value);
+    let str_ptr = js_string_from_bytes(json.as_ptr(), json.len() as u32);
+    js_mongodb_collection_find(handle, str_ptr)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_mongodb_collection_find_one_value(
+    handle: Handle,
+    filter_value: f64,
+) -> *mut Promise {
+    let json = jsvalue_to_json_string(filter_value);
+    let str_ptr = js_string_from_bytes(json.as_ptr(), json.len() as u32);
+    js_mongodb_collection_find_one(handle, str_ptr)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_mongodb_collection_update_one_value(
+    handle: Handle,
+    filter_value: f64,
+    update_value: f64,
+) -> *mut Promise {
+    let filter_json = jsvalue_to_json_string(filter_value);
+    let update_json = jsvalue_to_json_string(update_value);
+    let filter_ptr = js_string_from_bytes(filter_json.as_ptr(), filter_json.len() as u32);
+    let update_ptr = js_string_from_bytes(update_json.as_ptr(), update_json.len() as u32);
+    js_mongodb_collection_update_one(handle, filter_ptr, update_ptr)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_mongodb_collection_update_many_value(
+    handle: Handle,
+    filter_value: f64,
+    update_value: f64,
+) -> *mut Promise {
+    let filter_json = jsvalue_to_json_string(filter_value);
+    let update_json = jsvalue_to_json_string(update_value);
+    let filter_ptr = js_string_from_bytes(filter_json.as_ptr(), filter_json.len() as u32);
+    let update_ptr = js_string_from_bytes(update_json.as_ptr(), update_json.len() as u32);
+    js_mongodb_collection_update_many(handle, filter_ptr, update_ptr)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_mongodb_collection_delete_one_value(
+    handle: Handle,
+    filter_value: f64,
+) -> *mut Promise {
+    let json = jsvalue_to_json_string(filter_value);
+    let str_ptr = js_string_from_bytes(json.as_ptr(), json.len() as u32);
+    js_mongodb_collection_delete_one(handle, str_ptr)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_mongodb_collection_delete_many_value(
+    handle: Handle,
+    filter_value: f64,
+) -> *mut Promise {
+    let json = jsvalue_to_json_string(filter_value);
+    let str_ptr = js_string_from_bytes(json.as_ptr(), json.len() as u32);
+    js_mongodb_collection_delete_many(handle, str_ptr)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_mongodb_collection_count_value(
+    handle: Handle,
+    filter_value: f64,
+) -> *mut Promise {
+    let json = jsvalue_to_json_string(filter_value);
+    let str_ptr = js_string_from_bytes(json.as_ptr(), json.len() as u32);
+    js_mongodb_collection_count(handle, str_ptr)
+}
+
 /// client.close() -> Promise<void>
 #[no_mangle]
 pub unsafe extern "C" fn js_mongodb_client_close(_client_handle: Handle) -> *mut Promise {
@@ -519,7 +747,8 @@ pub unsafe extern "C" fn js_mongodb_client_list_databases(client_handle: Handle)
         promise as *mut u8,
         async move {
             if let Some(client_wrapper) = get_handle::<MongoClientHandle>(client_handle) {
-                match client_wrapper.client.list_database_names().await {
+                let client = client_wrapper.client_ref()?;
+                match client.list_database_names().await {
                     Ok(names) => {
                         let json = serde_json::to_string(&names)
                             .unwrap_or_else(|_| "[]".to_string());

@@ -1099,7 +1099,7 @@ pub(crate) fn lower_var_decl_with_destructuring(
                             if let Some((module_name, Some(method_name))) = ctx.lookup_native_module(func_name) {
                                 if module_name == "perry/ui" {
                                     match method_name {
-                                        "State" | "Sheet" | "Toolbar" | "Window" | "LazyVStack"
+                                        "Canvas" | "State" | "Sheet" | "Toolbar" | "Window" | "LazyVStack"
                                         | "NavigationStack" | "Picker" | "Table" | "TabBar" => {
                                             ctx.register_native_instance(name.clone(), module_name.to_string(), method_name.to_string());
                                         }
@@ -1376,6 +1376,10 @@ pub(crate) fn lower_var_decl_with_destructuring(
                     }
                     _ => None,
                 };
+                // Variable-to-variable propagation for native instances
+                // (`let sock: Socket = plainSock`) is handled by the
+                // post-lowering cross-module pass; see
+                // `js_transform::scan_for_ident_init_propagation`.
                 if let Some(call_expr) = call_expr {
                     if let ast::Callee::Expr(callee_expr) = &call_expr.callee {
                         // Check direct function calls: const x = someFunc()

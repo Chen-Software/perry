@@ -291,8 +291,9 @@ pub extern "C" fn perry_ui_toggle_create(label_ptr: i64, on_change: f64) -> i64 
 }
 
 #[no_mangle]
-pub extern "C" fn perry_ui_slider_create(min: f64, max: f64, initial: f64, on_change: f64) -> i64 {
-    widgets::slider::create(min, max, initial, on_change)
+pub extern "C" fn perry_ui_slider_create(min: f64, max: f64, on_change: f64) -> i64 {
+    // Codegen emits 3-arg `Slider(min, max, onChange)`; default initial=min.
+    widgets::slider::create(min, max, min, on_change)
 }
 
 // =============================================================================
@@ -429,6 +430,12 @@ pub extern "C" fn perry_ui_text_set_font_weight(handle: i64, size: f64, weight: 
 #[no_mangle]
 pub extern "C" fn perry_ui_text_set_selectable(handle: i64, selectable: f64) {
     widgets::text::set_selectable(handle, selectable != 0.0);
+}
+
+/// Text decoration (issue #185 Phase B). 0=none, 1=underline, 2=strikethrough.
+#[no_mangle]
+pub extern "C" fn perry_ui_text_set_decoration(handle: i64, decoration: i64) {
+    widgets::text::set_decoration(handle, decoration);
 }
 
 #[no_mangle]
@@ -690,6 +697,19 @@ pub extern "C" fn perry_ui_canvas_fill_gradient(handle: i64, r1: f64, g1: f64, b
     widgets::canvas::fill_gradient(handle, r1, g1, b1, a1, r2, g2, b2, a2, direction);
 }
 
+#[no_mangle] pub extern "C" fn perry_ui_canvas_set_fill_color(_h: i64, _r: f64, _g: f64, _b: f64, _a: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_set_stroke_color(_h: i64, _r: f64, _g: f64, _b: f64, _a: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_set_line_width(_h: i64, _w: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_fill_rect(_h: i64, _x: f64, _y: f64, _w: f64, _ht: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_stroke_rect(_h: i64, _x: f64, _y: f64, _w: f64, _ht: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_clear_rect(h: i64, _x: f64, _y: f64, _w: f64, _ht: f64) { widgets::canvas::clear(h); }
+#[no_mangle] pub extern "C" fn perry_ui_canvas_arc(_h: i64, _x: f64, _y: f64, _r: f64, _sa: f64, _ea: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_close_path(_h: i64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_fill(_h: i64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_stroke_path(_h: i64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_fill_text(_h: i64, _ptr: i64, _x: f64, _y: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_set_font(_h: i64, _ptr: i64) {}
+
 // =============================================================================
 // Picker
 // =============================================================================
@@ -779,6 +799,18 @@ pub extern "C" fn perry_ui_widget_set_control_size(handle: i64, size: i64) {
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_set_corner_radius(handle: i64, radius: f64) {
     widgets::set_corner_radius(handle, radius);
+}
+
+/// Set drop shadow via Material `setElevation` + (API 28+)
+/// `setOutlineSpotShadowColor` / `setOutlineAmbientShadowColor`. See
+/// `widgets::set_shadow` for the full mapping rationale (issue #185 Phase B).
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_shadow(
+    handle: i64,
+    r: f64, g: f64, b: f64, a: f64,
+    blur: f64, offset_x: f64, offset_y: f64,
+) {
+    widgets::set_shadow(handle, r, g, b, a, blur, offset_x, offset_y);
 }
 
 #[no_mangle]
@@ -966,6 +998,81 @@ pub extern "C" fn perry_system_keychain_delete(key_ptr: i64) {
 #[no_mangle]
 pub extern "C" fn perry_system_notification_send(title_ptr: i64, body_ptr: i64) {
     system::notification_send(title_ptr as *const u8, body_ptr as *const u8);
+}
+
+/// Real impl (#95): kick off FCM token fetch + register the JS closure that
+/// fires when FCM hands us a registration token. Requires a real
+/// `google-services.json` to actually work — the placeholder bundled with
+/// the template lets the build succeed but the SDK rejects it at runtime.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_register_remote(callback: f64) {
+    system::notification_register_remote(callback);
+}
+
+/// Real impl (#95): register the JS closure that fires for foreground FCM
+/// payloads. `PerryFirebaseMessagingService.onMessageReceived` forwards
+/// the JSON-serialized RemoteMessage to native via JNI.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_receive(callback: f64) {
+    system::notification_on_receive(callback);
+}
+
+/// Real impl (#98): register the JS closure that fires for background FCM
+/// payloads. Routes through the same `PerryFirebaseMessagingService`
+/// pipeline as foreground delivery — Android doesn't split the two at the
+/// service layer — so the callback fires for every payload that reaches
+/// `nativeNotificationBackgroundReceive`. See system.rs for the v1
+/// trade-offs around Promise gating and cold-start.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_background_receive(callback: f64) {
+    system::notification_on_background_receive(callback);
+}
+
+/// Schedule a fire-after-N-seconds notification via AlarmManager (#96).
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_interval(
+    id_ptr: i64, title_ptr: i64, body_ptr: i64, seconds: f64, repeats: f64,
+) {
+    system::notification_schedule_interval(
+        id_ptr as *const u8, title_ptr as *const u8, body_ptr as *const u8,
+        seconds, repeats,
+    );
+}
+
+/// Schedule a fire-at-wallclock-ms notification via AlarmManager (#96).
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_calendar(
+    id_ptr: i64, title_ptr: i64, body_ptr: i64, timestamp_ms: f64,
+) {
+    system::notification_schedule_calendar(
+        id_ptr as *const u8, title_ptr as *const u8, body_ptr as *const u8,
+        timestamp_ms,
+    );
+}
+
+/// Logged no-op — Geofencing API requires `FUSED_LOCATION_PROVIDER` + a
+/// runtime `ACCESS_FINE_LOCATION` grant. Deferred to #96 follow-up.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_location(
+    id_ptr: i64, title_ptr: i64, body_ptr: i64, lat: f64, lon: f64, radius: f64,
+) {
+    system::notification_schedule_location(
+        id_ptr as *const u8, title_ptr as *const u8, body_ptr as *const u8,
+        lat, lon, radius,
+    );
+}
+
+/// Cancel a scheduled or already-displayed notification by id (#96).
+#[no_mangle]
+pub extern "C" fn perry_system_notification_cancel(id_ptr: i64) {
+    system::notification_cancel(id_ptr as *const u8);
+}
+
+/// Real impl (#97): register the tap callback so `PerryNotificationReceiver`
+/// can dispatch back to it when the user taps a delivered notification.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_tap(callback: f64) {
+    system::notification_on_tap(callback);
 }
 
 #[no_mangle]

@@ -55,19 +55,48 @@ pub fn set_string(handle: i64, text_ptr: *const u8) {
 }
 
 /// Set the text color of a Text widget.
+///
+/// Phase C step 6/7's inline-style codegen dispatches every `color: ...`
+/// prop through this entry point, regardless of the actual widget class
+/// (`crates/perry-codegen/src/lower_call.rs` ~3231). The codegen comment
+/// states "no-op on widgets that ignore it" — so this function probes
+/// the widget's runtime class and routes appropriately:
+///
+/// - NSTextField → setTextColor: (the original path)
+/// - NSButton    → forward to button::set_text_color (NSButton has no
+///                 `setTextColor:` selector; calling it raises an
+///                 unrecognized-selector ObjC exception, which crosses
+///                 the FFI boundary as a non-unwinding panic and aborts
+///                 the process — exactly the regression seen on
+///                 `docs/examples/ui/styling/{hex_gradient,dynamic_color}.ts`
+///                 before this fix)
+/// - other       → silent no-op (matches the codegen's documented intent)
 pub fn set_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
-    if let Some(view) = super::get_widget(handle) {
-        unsafe {
-            let tf: &NSTextField = &*(Retained::as_ptr(&view) as *const NSTextField);
-            let color: Retained<objc2_app_kit::NSColor> = objc2::msg_send![
-                objc2::runtime::AnyClass::get(c"NSColor").unwrap(),
-                colorWithRed: r as objc2_core_foundation::CGFloat,
-                green: g as objc2_core_foundation::CGFloat,
-                blue: b as objc2_core_foundation::CGFloat,
-                alpha: a as objc2_core_foundation::CGFloat
-            ];
-            tf.setTextColor(Some(&color));
+    let Some(view) = super::get_widget(handle) else { return; };
+    unsafe {
+        if let Some(btn_cls) = objc2::runtime::AnyClass::get(c"NSButton") {
+            let is_btn: bool = objc2::msg_send![&*view, isKindOfClass: btn_cls];
+            if is_btn {
+                drop(view);
+                super::button::set_text_color(handle, r, g, b, a);
+                return;
+            }
         }
+        if let Some(tf_cls) = objc2::runtime::AnyClass::get(c"NSTextField") {
+            let is_tf: bool = objc2::msg_send![&*view, isKindOfClass: tf_cls];
+            if !is_tf {
+                return;
+            }
+        }
+        let tf: &NSTextField = &*(Retained::as_ptr(&view) as *const NSTextField);
+        let color: Retained<objc2_app_kit::NSColor> = objc2::msg_send![
+            objc2::runtime::AnyClass::get(c"NSColor").unwrap(),
+            colorWithRed: r as objc2_core_foundation::CGFloat,
+            green: g as objc2_core_foundation::CGFloat,
+            blue: b as objc2_core_foundation::CGFloat,
+            alpha: a as objc2_core_foundation::CGFloat
+        ];
+        tf.setTextColor(Some(&color));
     }
 }
 
@@ -126,6 +155,47 @@ pub fn set_selectable(handle: i64, selectable: bool) {
         unsafe {
             let tf: &NSTextField = &*(Retained::as_ptr(&view) as *const NSTextField);
             tf.setSelectable(selectable);
+        }
+    }
+}
+
+/// Set text decoration on a Text widget via `NSAttributedString` (issue
+/// #185 Phase B). `decoration`: 0=none, 1=underline, 2=strikethrough.
+/// Reads the current `stringValue`, wraps it with the requested
+/// underline / strikethrough attribute (NSUnderlineStyleSingle = 1),
+/// and calls `setAttributedStringValue:`. Calling this with `decoration =
+/// 0` resets to the plain string. Pattern mirrors `button::set_text_color`.
+pub fn set_decoration(handle: i64, decoration: i64) {
+    use objc2::runtime::{AnyClass, AnyObject};
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            let tf: &NSTextField = &*(Retained::as_ptr(&view) as *const NSTextField);
+            let current: Retained<NSString> = objc2::msg_send![tf, stringValue];
+            if decoration == 0 {
+                tf.setStringValue(&current);
+                return;
+            }
+            let key = if decoration == 1 {
+                NSString::from_str("NSUnderline")
+            } else {
+                NSString::from_str("NSStrikethrough")
+            };
+            let num_cls = AnyClass::get(c"NSNumber").unwrap();
+            let one: Retained<AnyObject> = objc2::msg_send![num_cls, numberWithInt: 1i32];
+            let attrs: Retained<AnyObject> = objc2::msg_send![
+                AnyClass::get(c"NSDictionary").unwrap(),
+                dictionaryWithObject: &*one,
+                forKey: &*key
+            ];
+            let ns_str: *const AnyObject = Retained::as_ptr(&current) as *const AnyObject;
+            let cls = AnyClass::get(c"NSAttributedString").unwrap();
+            let alloc: *mut AnyObject = objc2::msg_send![cls, alloc];
+            let attr_str: *mut AnyObject = objc2::msg_send![
+                alloc,
+                initWithString: ns_str,
+                attributes: &*attrs
+            ];
+            let _: () = objc2::msg_send![tf, setAttributedStringValue: attr_str];
         }
     }
 }

@@ -142,8 +142,10 @@ pub const FEATURES: &[Feature] = &[
     Feature { name: "perry_ui_text_set_font_family", category: TextStyling, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: Some("perry_ui_set_font_family") },
 
     // ── Button Ops ───────────────────────────────────────────────────────
-    Feature { name: "perry_ui_button_set_bordered", category: ButtonOps, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
-    Feature { name: "perry_ui_button_set_title",    category: ButtonOps, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
+    Feature { name: "perry_ui_button_set_bordered",           category: ButtonOps, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
+    Feature { name: "perry_ui_button_set_title",              category: ButtonOps, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
+    Feature { name: "perry_ui_button_set_content_tint_color", category: ButtonOps, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
+    Feature { name: "perry_ui_button_set_image_position",     category: ButtonOps, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
 
     // ── TextField Ops ────────────────────────────────────────────────────
     Feature { name: "perry_ui_textfield_focus",      category: TextFieldOps, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
@@ -200,14 +202,16 @@ pub const FEATURES: &[Feature] = &[
     // ── Events ───────────────────────────────────────────────────────────
     Feature { name: "perry_ui_widget_set_on_hover",        category: Events, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: Some("perry_ui_set_on_hover") },
     Feature { name: "perry_ui_widget_set_on_double_click", category: Events, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: Some("perry_ui_set_on_double_click") },
+    Feature { name: "perry_ui_widget_set_on_click",        category: Events, macos: S, ios: S, android: S, gtk4: S, windows: S, web: U, web_name: None },
 
     // ── Animation ────────────────────────────────────────────────────────
     Feature { name: "perry_ui_widget_animate_opacity",  category: Animation, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: Some("perry_ui_animate_opacity") },
     Feature { name: "perry_ui_widget_animate_position", category: Animation, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: Some("perry_ui_animate_position") },
 
     // ── Layout ───────────────────────────────────────────────────────────
-    Feature { name: "perry_ui_vstack_create_with_insets", category: Layout, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
-    Feature { name: "perry_ui_hstack_create_with_insets", category: Layout, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
+    Feature { name: "perry_ui_vstack_create_with_insets",   category: Layout, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
+    Feature { name: "perry_ui_hstack_create_with_insets",   category: Layout, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
+    Feature { name: "perry_ui_stack_set_detaches_hidden",   category: Layout, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
 
     // ── ForEach ──────────────────────────────────────────────────────────
     Feature { name: "perry_ui_for_each_init", category: ForEach, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: Some("perry_ui_state_bind_foreach") },
@@ -250,6 +254,13 @@ pub const FEATURES: &[Feature] = &[
     Feature { name: "perry_system_keychain_get",       category: SystemApi, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
     Feature { name: "perry_system_keychain_delete",    category: SystemApi, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
     Feature { name: "perry_system_notification_send",  category: SystemApi, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
+    Feature { name: "perry_system_notification_register_remote", category: SystemApi, macos: S, ios: S, android: U, gtk4: U, windows: U, web: U, web_name: None },
+    Feature { name: "perry_system_notification_on_receive",      category: SystemApi, macos: S, ios: S, android: U, gtk4: U, windows: U, web: U, web_name: None },
+    Feature { name: "perry_system_notification_schedule_interval", category: SystemApi, macos: S, ios: S, android: U, gtk4: U, windows: U, web: U, web_name: None },
+    Feature { name: "perry_system_notification_schedule_calendar", category: SystemApi, macos: S, ios: S, android: U, gtk4: U, windows: U, web: U, web_name: None },
+    Feature { name: "perry_system_notification_schedule_location", category: SystemApi, macos: U, ios: S, android: U, gtk4: U, windows: U, web: U, web_name: None },
+    Feature { name: "perry_system_notification_cancel",            category: SystemApi, macos: S, ios: S, android: U, gtk4: U, windows: U, web: U, web_name: None },
+    Feature { name: "perry_system_notification_on_tap",            category: SystemApi, macos: S, ios: S, android: U, gtk4: U, windows: U, web: U, web_name: None },
 
     // ── Web-Only Functions ───────────────────────────────────────────────
     // These exist only in the web runtime and have no native equivalent.

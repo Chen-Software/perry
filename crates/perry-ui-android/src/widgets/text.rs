@@ -187,3 +187,40 @@ pub fn set_selectable(handle: i64, selectable: bool) {
         unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
     }
 }
+
+/// Set text decoration on a TextView via Paint flags (issue #185 Phase B).
+/// `decoration`: 0=none, 1=underline, 2=strikethrough. Uses the Paint
+/// flag path on the view's `getPaint()` rather than building a
+/// SpannableString — `Paint.UNDERLINE_TEXT_FLAG = 8`,
+/// `Paint.STRIKE_THRU_TEXT_FLAG = 16`. Calls `invalidate()` so the
+/// view repaints with the new flags.
+pub fn set_decoration(handle: i64, decoration: i64) {
+    if let Some(view_ref) = super::get_widget(handle) {
+        let mut env = jni_bridge::get_env();
+        let _ = env.push_local_frame(8);
+        if let Ok(paint_val) = env.call_method(
+            view_ref.as_obj(),
+            "getPaint",
+            "()Landroid/text/TextPaint;",
+            &[],
+        ) {
+            if let Ok(paint_obj) = paint_val.l() {
+                if !paint_obj.is_null() {
+                    let flag: i32 = match decoration {
+                        1 => 8,
+                        2 => 16,
+                        _ => 0,
+                    };
+                    let _ = env.call_method(
+                        &paint_obj,
+                        "setFlags",
+                        "(I)V",
+                        &[JValue::Int(flag)],
+                    );
+                    let _ = env.call_method(view_ref.as_obj(), "invalidate", "()V", &[]);
+                }
+            }
+        }
+        unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
+    }
+}

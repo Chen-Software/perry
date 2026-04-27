@@ -6,6 +6,7 @@ pub mod crash_log;
 pub mod file_dialog;
 pub mod location;
 pub mod menu;
+pub mod notifications;
 pub mod screenshot;
 pub mod state;
 pub mod websocket;
@@ -216,8 +217,9 @@ pub extern "C" fn perry_ui_toggle_create(label_ptr: i64, on_change: f64) -> i64 
 }
 
 #[no_mangle]
-pub extern "C" fn perry_ui_slider_create(min: f64, max: f64, initial: f64, on_change: f64) -> i64 {
-    widgets::slider::create(min, max, initial, on_change)
+pub extern "C" fn perry_ui_slider_create(min: f64, max: f64, on_change: f64) -> i64 {
+    // Codegen emits 3-arg `Slider(min, max, onChange)`; default initial=min.
+    widgets::slider::create(min, max, min, on_change)
 }
 
 // =============================================================================
@@ -340,6 +342,12 @@ pub extern "C" fn perry_ui_text_set_font_weight(handle: i64, size: f64, weight: 
 #[no_mangle]
 pub extern "C" fn perry_ui_text_set_wraps(handle: i64, max_width: f64) {
     widgets::text::set_wraps(handle, max_width);
+}
+
+/// Text decoration (issue #185 Phase B). 0=none, 1=underline, 2=strikethrough.
+#[no_mangle]
+pub extern "C" fn perry_ui_text_set_decoration(handle: i64, decoration: i64) {
+    widgets::text::set_decoration(handle, decoration);
 }
 
 #[no_mangle]
@@ -689,6 +697,19 @@ pub extern "C" fn perry_ui_canvas_fill_gradient(
 ) {
     widgets::canvas::fill_gradient(handle, r1, g1, b1, a1, r2, g2, b2, a2, direction);
 }
+
+#[no_mangle] pub extern "C" fn perry_ui_canvas_set_fill_color(_h: i64, _r: f64, _g: f64, _b: f64, _a: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_set_stroke_color(_h: i64, _r: f64, _g: f64, _b: f64, _a: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_set_line_width(_h: i64, _w: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_fill_rect(_h: i64, _x: f64, _y: f64, _w: f64, _ht: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_stroke_rect(_h: i64, _x: f64, _y: f64, _w: f64, _ht: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_clear_rect(h: i64, _x: f64, _y: f64, _w: f64, _ht: f64) { widgets::canvas::clear(h); }
+#[no_mangle] pub extern "C" fn perry_ui_canvas_arc(_h: i64, _x: f64, _y: f64, _r: f64, _sa: f64, _ea: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_close_path(_h: i64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_fill(_h: i64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_stroke_path(_h: i64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_fill_text(_h: i64, _ptr: i64, _x: f64, _y: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_set_font(_h: i64, _ptr: i64) {}
 
 // =============================================================================
 // New Widgets: SecureField, ProgressView, Image, Picker, Form, NavStack, ZStack
@@ -1120,6 +1141,37 @@ pub extern "C" fn perry_ui_widget_set_border_color(handle: i64, r: f64, g: f64, 
     }
 }
 
+/// Set drop shadow on any widget via its CALayer (issue #185 Phase B).
+/// Signature mirrors macOS: `(r,g,b,a)` shadow color (alpha → shadowOpacity
+/// so a non-1 alpha doesn't double-multiply via the CGColor's alpha),
+/// `blur` → shadowRadius, `(offset_x, offset_y)` → shadowOffset CGSize.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_shadow(
+    handle: i64,
+    r: f64, g: f64, b: f64, a: f64,
+    blur: f64, offset_x: f64, offset_y: f64,
+) {
+    if let Some(view) = widgets::get_widget(handle) {
+        unsafe {
+            let layer: *mut objc2::runtime::AnyObject = objc2::msg_send![&*view, layer];
+            if !layer.is_null() {
+                let cg_color = widgets::create_cg_color(r, g, b, 1.0);
+                let _: () = objc2::msg_send![layer, setShadowColor: cg_color];
+                extern "C" { fn CGColorRelease(color: *mut std::ffi::c_void); }
+                CGColorRelease(cg_color);
+                let _: () = objc2::msg_send![layer, setShadowOpacity: a as f32];
+                let _: () = objc2::msg_send![layer, setShadowRadius: blur];
+                let offset = objc2_core_foundation::CGSize::new(offset_x, offset_y);
+                let _: () = objc2::msg_send![layer, setShadowOffset: offset];
+                // CALayer shadows are clipped by masksToBounds; ensure
+                // off so corner-radius widgets still show shadow outside
+                // the rounded edge.
+                let _: () = objc2::msg_send![layer, setMasksToBounds: false];
+            }
+        }
+    }
+}
+
 /// Set border width on a widget via its CALayer.
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_set_border_width(handle: i64, width: f64) {
@@ -1546,7 +1598,88 @@ pub extern "C" fn perry_system_keychain_delete(key_ptr: i64) {
 // =============================================================================
 
 #[no_mangle]
-pub extern "C" fn perry_system_notification_send(_title: i64, _body: i64) {}
+pub extern "C" fn perry_system_notification_send(title_ptr: i64, body_ptr: i64) {
+    notifications::send(title_ptr as *const u8, body_ptr as *const u8);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_register_remote(callback: f64) {
+    notifications::register_remote(callback);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_receive(callback: f64) {
+    notifications::on_receive(callback);
+}
+
+/// Background-delivery handler (#98). The closure registered here fires from
+/// `application:didReceiveRemoteNotification:fetchCompletionHandler:`; iOS's
+/// completion handler is invoked once the user's returned Promise settles.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_background_receive(callback: f64) {
+    notifications::on_background_receive(callback);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_interval(
+    id_ptr: i64,
+    title_ptr: i64,
+    body_ptr: i64,
+    seconds: f64,
+    repeats: f64,
+) {
+    notifications::schedule_interval(
+        id_ptr as *const u8,
+        title_ptr as *const u8,
+        body_ptr as *const u8,
+        seconds,
+        repeats,
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_calendar(
+    id_ptr: i64,
+    title_ptr: i64,
+    body_ptr: i64,
+    timestamp_ms: f64,
+) {
+    notifications::schedule_calendar(
+        id_ptr as *const u8,
+        title_ptr as *const u8,
+        body_ptr as *const u8,
+        timestamp_ms,
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_location(
+    id_ptr: i64,
+    title_ptr: i64,
+    body_ptr: i64,
+    lat: f64,
+    lon: f64,
+    radius: f64,
+) {
+    notifications::schedule_location(
+        id_ptr as *const u8,
+        title_ptr as *const u8,
+        body_ptr as *const u8,
+        lat,
+        lon,
+        radius,
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_cancel(id_ptr: i64) {
+    notifications::cancel(id_ptr as *const u8);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_tap(callback: f64) {
+    notifications::set_on_tap(callback);
+}
 
 #[no_mangle]
 pub extern "C" fn perry_system_get_locale() -> i64 {

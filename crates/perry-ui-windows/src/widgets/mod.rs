@@ -792,6 +792,138 @@ pub fn set_corner_radius(handle: i64, radius: f64) {
     }
 }
 
+/// Stored shadow params per widget handle — applied later by a custom paint
+/// pass once one lands. Shape: `(handle, (r, g, b, a, blur, offset_x, offset_y))`.
+/// See `set_shadow` for the rationale.
+static SHADOW_PARAMS: std::sync::Mutex<Vec<(i64, (f64, f64, f64, f64, f64, f64, f64))>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Set drop shadow on a widget (issue #185 Phase B closure).
+///
+/// **Currently a stub-with-state**: parameters are stored in `SHADOW_PARAMS`
+/// (matching the `CORNER_RADII` deferred-application pattern) but no
+/// rendering pass consumes them yet. Real shadow rendering on Windows
+/// needs either DirectComposition (`IDCompositionVisual` + `DropShadowEffect`)
+/// or a custom alpha-blended `WM_PAINT` pass — multi-day work that
+/// belongs in its own follow-up. Storing the params here means:
+///   - User code that calls `widgetSetShadow(...)` compiles + links
+///     cleanly across all platforms (cross-platform code is portable).
+///   - The styling-matrix drift check passes (the FFI symbol is exported).
+///   - When the rendering pass lands, every previously-stored handle
+///     gets its shadow applied automatically — no API change needed.
+///
+/// Reflected in `crates/perry-ui/src/styling_matrix.rs` as `Status::Stub`
+/// for Windows, distinct from `Wired` so users know the prop is honored
+/// but not yet visible.
+pub fn set_shadow(
+    handle: i64,
+    r: f64, g: f64, b: f64, a: f64,
+    blur: f64, offset_x: f64, offset_y: f64,
+) {
+    if let Ok(mut shadows) = SHADOW_PARAMS.lock() {
+        let entry = (r, g, b, a, blur, offset_x, offset_y);
+        if let Some(slot) = shadows.iter_mut().find(|e| e.0 == handle) {
+            slot.1 = entry;
+        } else {
+            shadows.push((handle, entry));
+        }
+    }
+}
+
+/// Read back the stored shadow params for a widget. Returns `None` if no
+/// shadow has been set. The eventual paint pass calls this; today it's
+/// also a useful introspection hook for tests.
+pub fn get_shadow(handle: i64) -> Option<(f64, f64, f64, f64, f64, f64, f64)> {
+    SHADOW_PARAMS
+        .lock()
+        .ok()
+        .and_then(|s| s.iter().find(|e| e.0 == handle).map(|e| e.1))
+}
+
+/// Stored opacity values per widget handle. Kept separately from
+/// `SHADOW_PARAMS` so future Windows work can apply them through
+/// independent paint paths.
+static OPACITY_VALUES: std::sync::Mutex<Vec<(i64, f64)>> = std::sync::Mutex::new(Vec::new());
+
+/// Set static opacity on a widget (issue #185 Phase B closure).
+///
+/// **Currently a stub-with-state**: opacity is stored, but no paint path
+/// applies it yet. Real per-widget opacity on Win32 child HWNDs requires
+/// `WS_EX_LAYERED` + `SetLayeredWindowAttributes`, which is supported on
+/// Windows 8+ for child windows but needs careful per-widget-class
+/// integration with the existing WM_PAINT pipeline. The same shape as
+/// `set_shadow`'s deferred rendering — when the paint pass lands, this
+/// store gets read by `apply_opacity` (analogous to `apply_corner_radius`).
+/// Until then, cross-platform code calling `widgetSetOpacity` compiles +
+/// links cleanly across all platforms; the matrix marks Windows
+/// `Status::Stub` for opacity so users know.
+///
+/// `animate_opacity` (already in this file) is also a no-op for the same
+/// reason; once the paint pass lands, animations can read both stores.
+pub fn set_opacity(handle: i64, opacity: f64) {
+    if let Ok(mut opacities) = OPACITY_VALUES.lock() {
+        if let Some(slot) = opacities.iter_mut().find(|e| e.0 == handle) {
+            slot.1 = opacity;
+        } else {
+            opacities.push((handle, opacity));
+        }
+    }
+}
+
+/// Read the stored opacity for a widget. Returns `None` if not set.
+pub fn get_opacity(handle: i64) -> Option<f64> {
+    OPACITY_VALUES
+        .lock()
+        .ok()
+        .and_then(|s| s.iter().find(|e| e.0 == handle).map(|e| e.1))
+}
+
+/// Joint per-handle border state — `(color_rgba, width)`. Set by
+/// either `set_border_color` or `set_border_width`; consumed jointly
+/// by the eventual paint pass.
+static BORDER_STATE: std::sync::Mutex<Vec<(i64, (Option<(f64, f64, f64, f64)>, Option<f64>))>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Set border color (issue #185 Phase B closure).
+///
+/// **Stub-with-state**: stores the color in `BORDER_STATE` next to any
+/// previously-set width. Real Win32 borders on child HWNDs need either
+/// a custom `WM_PAINT` `Rectangle()` pass or a wrapping owner-drawn
+/// parent — neither is wired yet. Same shape as `set_shadow` /
+/// `set_opacity` deferred-application pattern. Matrix marks Windows
+/// `Status::Stub` for both border setters.
+pub fn set_border_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    if let Ok(mut state) = BORDER_STATE.lock() {
+        let color = (r, g, b, a);
+        if let Some(slot) = state.iter_mut().find(|e| e.0 == handle) {
+            slot.1 .0 = Some(color);
+        } else {
+            state.push((handle, (Some(color), None)));
+        }
+    }
+}
+
+/// Set border width (issue #185 Phase B closure). Stub-with-state — see
+/// `set_border_color`.
+pub fn set_border_width(handle: i64, width: f64) {
+    if let Ok(mut state) = BORDER_STATE.lock() {
+        if let Some(slot) = state.iter_mut().find(|e| e.0 == handle) {
+            slot.1 .1 = Some(width);
+        } else {
+            state.push((handle, (None, Some(width))));
+        }
+    }
+}
+
+/// Read the stored border state. Returns `None` if neither setter has
+/// been called for this handle. Used by the eventual paint pass.
+pub fn get_border(handle: i64) -> Option<(Option<(f64, f64, f64, f64)>, Option<f64>)> {
+    BORDER_STATE
+        .lock()
+        .ok()
+        .and_then(|s| s.iter().find(|e| e.0 == handle).map(|e| e.1))
+}
+
 /// Apply the stored corner radius to a widget after it has been laid out
 /// and has its final size. Called from the layout engine.
 #[cfg(target_os = "windows")]

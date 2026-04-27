@@ -1,5 +1,7 @@
 # Plugin System Overview
 
+> **Status: not yet wired into any codegen path.** The `perry/plugin` import is recognised by the parser and the runtime FFI (`perry_plugin_load`, `perry_plugin_emit_hook`, `perry_plugin_invoke_tool`, ...) ships in `libperry_runtime.a`, but receiver-less native calls — `loadPlugin(path)`, `emitHook(name, data)`, `invokeTool(name, args)`, `listPlugins()` — currently lower to a no-op that drops args and returns `undefined`. Same for `PluginApi` instance methods (`api.registerHook`, `api.registerTool`, ...). The TypeScript-level snippets on these pages will compile (the imports resolve and the calls are silently swallowed) but they will **not actually load a plugin or fire a hook** at runtime. They're left as `,no-test` to make this explicit; CI doesn't claim they work end-to-end. Tracking issue: codegen wiring for `perry/plugin` static dispatch.
+
 Perry supports native plugins as shared libraries (`.dylib`/`.so`). Plugins extend Perry applications with custom hooks, tools, services, and routes.
 
 ## How It Works
@@ -24,7 +26,7 @@ Host
 
 ### Plugin (compiled with `--output-type dylib`)
 
-```typescript,no-test
+```text
 // my-plugin.ts
 export function activate(api: PluginAPI) {
   api.setMetadata("my-plugin", "1.0.0", "A sample plugin");
@@ -50,7 +52,7 @@ perry my-plugin.ts --output-type dylib -o my-plugin.dylib
 
 ### Host Application
 
-```typescript,no-test
+```text
 import { loadPlugin, emitHook, invokeTool, listPlugins } from "perry/plugin";
 
 loadPlugin("./my-plugin.dylib");

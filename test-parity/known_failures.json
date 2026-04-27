@@ -1,51 +1,15 @@
 {
-  "test_edge_class_advanced": {
-    "status": "known_limitation",
-    "reason": "Advanced class features: private methods, static blocks not fully implemented"
+  "test_edge_control_flow": {
+    "status": "flake",
+    "reason": "Intermittent: failed in parity run 2026-04-25 but passed on isolated re-run with the same binary. Appeared alongside test_cli_simulation between the 2026-04-24 and 2026-04-25 runs. Possibly state-dependent on sibling tests or non-deterministic codegen path; investigate separately."
   },
-  "test_edge_classes": {
-    "status": "bug",
-    "reason": "Class edge cases: getter/setter or inheritance dispatch issues"
-  },
-  "test_edge_complex_patterns": {
-    "status": "bug",
-    "reason": "Complex pattern matching edge cases in destructuring/spread"
-  },
-  "test_edge_generics": {
-    "status": "bug",
-    "reason": "Generic type instantiation edge cases"
-  },
-  "test_edge_interfaces": {
-    "status": "bug",
-    "reason": "Interface implementation edge cases"
+  "test_edge_error_handling": {
+    "status": "flake",
+    "reason": "Same flake family as test_edge_control_flow: failed in parity run 2026-04-25 but passed on isolated re-run with the same binary. Pre-existing, appeared between 2026-04-24 and 2026-04-25 parity runs."
   },
   "test_gap_async_advanced": {
     "status": "known_limitation",
     "reason": "Async generators, for-await-of, Promise.allSettled not implemented (segfault)"
-  },
-  "test_gap_class_advanced": {
-    "status": "known_limitation",
-    "reason": "Private methods, static blocks not implemented"
-  },
-  "test_gap_console_methods": {
-    "status": "known_limitation",
-    "reason": "console.dir formatting, console.group indent, console.table differences"
-  },
-  "test_gap_global_apis": {
-    "status": "known_limitation",
-    "reason": "Missing global APIs: URL/Blob/AbortController extensions"
-  },
-  "test_gap_string_methods": {
-    "status": "known_limitation",
-    "reason": "Lone surrogate handling (isWellFormed/toWellFormed needs WTF-8)"
-  },
-  "test_getters_setters": {
-    "status": "bug",
-    "reason": "Getter/setter dispatch issues in some patterns"
-  },
-  "test_method_inherit": {
-    "status": "bug",
-    "reason": "Method inheritance dispatch edge cases"
   },
   "test_net_min": {
     "status": "skip",
@@ -59,41 +23,13 @@
     "status": "skip",
     "reason": "Requires TLS/network infrastructure"
   },
-  "test_perf_paths": {
-    "status": "bug",
-    "reason": "Performance path optimization edge case"
-  },
-  "test_super_calls": {
-    "status": "bug",
-    "reason": "Super call dispatch in deep inheritance chains"
-  },
   "test_tls_connect": {
     "status": "skip",
     "reason": "Compile failure — TLS connect not implemented"
   },
-  "test_closure_capture_types": {
-    "status": "bug",
-    "reason": "Closure box init: js_box_get null-pointer warnings on first read of captured locals before they're written"
-  },
-  "test_edge_closures": {
-    "status": "bug",
-    "reason": "Closure capture: same null-box pattern as test_closure_capture_types"
-  },
-  "test_edge_rest_spread_defaults": {
-    "status": "bug",
-    "reason": "Rest-parameter array elements interpreted as raw doubles instead of NaN-boxed strings (parts.join() prints scientific-notation numbers)"
-  },
-  "test_edge_scope_hoisting": {
-    "status": "bug",
-    "reason": "Closure capture order: js_box_get null-pointer warnings, then NaN result"
-  },
   "test_gap_buffer_ops": {
     "status": "ci-env",
     "reason": "Compile-fails on macOS-14 CI runner, passes locally on macOS 15.x. Likely SDK/linker version interaction; perry CLI itself is fine"
-  },
-  "test_gap_map_set_extended": {
-    "status": "known_limitation",
-    "reason": "Map keying does not distinguish -0 from +0 (JS spec says they're the same key, but Map.has(0) after Map.set(-0, ...) differs from Node)"
   },
   "test_gap_node_crypto_buffer": {
     "status": "ci-env",
@@ -108,15 +44,31 @@
     "reason": "Compile-fails on macOS-14 CI runner, passes locally on macOS 15.x"
   },
   "test_stress_int_ops": {
-    "status": "ci-env",
-    "reason": "Compile-fails on macOS-14 CI runner, passes locally on macOS 15.x"
-  },
-  "test_stress_nanbox": {
     "status": "bug",
-    "reason": "NaN-boxing edge cases: typeof undefined inside specific stress patterns differs (run-to-run noise possible)"
+    "reason": "Console.log array-of-numbers inspection format: Node right-aligns + computes per-line count via util.inspect (`[\n   0,  1,  4,  9, 16,\n  25, 36, 49, 64, 81\n]`); Perry packs without padding 4 per line. NaN/Infinity ToInt32 coercion (`(NaN) | 0`, etc.) was fixed at v0.5.279 — that bug had `is_known_finite` accepting any `Expr::Number(_)` regardless of finite-ness; now checks `n.is_finite()`."
+  },
+  "test_buffer_small_alloc": {
+    "status": "ci-env",
+    "reason": "Compile-fails on macOS-14 CI runner, passes locally on macOS 15.x. Same SDK gap as test_gap_buffer_ops; exercises the #92 Buffer.alloc small-buffer slab fast path."
+  },
+  "test_buffer_numeric_read_intrinsic": {
+    "status": "ci-env",
+    "reason": "Compile-fails on macOS-14 CI runner, passes locally on macOS 15.x. Same SDK gap as test_gap_buffer_ops; exercises the #92 Buffer numeric-read intrinsic."
+  },
+  "test_gap_console_methods": {
+    "status": "ci-env",
+    "reason": "Re-added v0.5.294 after the v0.5.290 stub-audit drop turned out to be premature: passes locally through the parity-runner's normalize_output (timer-value variation gets normalized) but fails on macOS-14 CI runners where normalize_output doesn't catch the variant produced. Either the normalize_output rule needs broadening or the test needs more determinism — investigate separately."
   },
   "test_stress_promises": {
     "status": "bug",
-    "reason": "Promise resolve order under heavy concurrency — perry returns array values where Node returns scalar 42"
+    "reason": "Multiple distinct Promise issues remaining after v0.5.283 fix (which addressed (a) microtask FIFO ordering — TASK_QUEUE was a Vec with .pop() → LIFO; switched to VecDeque + pop_front, and (b) `.then(h)` / `.catch(h)` not catching throws inside h — microtask runner now wraps closure call in setjmp): (1) `new Promise<T>((resolve, reject) => ...)` constructor body not running (lines `constructor resolve: 99` / `constructor reject: constructor-err` missing from output); (2) `Promise.any` produces no output (any/any-all-rejected/any-errors-length lines missing); (3) `.then(p => Promise.resolve(...))` doesn't unwrap inner Promise (logs `Promise { <pending> }` instead of resolved value); (4) `.finally(() => ...).then(v => ...)` value-passing wrong (Perry: `finally value: 0`, Node: `finally value: done`)."
+  },
+  "test_inline_uint8array_param": {
+    "status": "bug",
+    "reason": "Regression test added by v0.5.314 (#169 fix in perry-transform substitute_locals). The test compiles successfully locally but compile-fails on CI runners — likely an SDK/linker version interaction shared with the test_gap_buffer_ops family. The underlying Uint8Array param substitution fix landed in 976c3eb5; this test documents the case but the CI env exhibits a separate compile-fail mode. Pair-investigate with test_issue_167_loop_alloca_stack_eat."
+  },
+  "test_issue_167_loop_alloca_stack_eat": {
+    "status": "bug",
+    "reason": "Regression test added by v0.5.316 (#167 fix hoisting js_native_call_method args alloca to entry block). Same compile-fail-on-CI / passes-locally pattern as test_inline_uint8array_param — both tests are about Buffer/Uint8Array codepaths and likely share the macOS-14 SDK gap."
   }
 }

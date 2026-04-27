@@ -230,11 +230,15 @@ pub extern "C" fn perry_ui_toggle_create(label_ptr: i64, on_change: f64) -> i64 
     widgets::toggle::create(label_ptr as *const u8, on_change)
 }
 
-/// Create a Slider. min/max/initial are f64, on_change = NaN-boxed closure.
-/// Returns widget handle.
+/// Create a Slider. min/max are f64, on_change = NaN-boxed closure.
+/// Returns widget handle. Initial value defaults to `min` (the TS
+/// surface `Slider(min, max, onChange)` doesn't expose `initial`, and
+/// codegen emits a 3-arg call — the prior 4-arg FFI relied on
+/// undefined register state for the missing arg, silently NaN on
+/// some calling conventions).
 #[no_mangle]
-pub extern "C" fn perry_ui_slider_create(min: f64, max: f64, initial: f64, on_change: f64) -> i64 {
-    widgets::slider::create(min, max, initial, on_change)
+pub extern "C" fn perry_ui_slider_create(min: f64, max: f64, on_change: f64) -> i64 {
+    widgets::slider::create(min, max, min, on_change)
 }
 
 // =============================================================================
@@ -399,6 +403,13 @@ pub extern "C" fn perry_ui_text_set_font_weight(handle: i64, size: f64, weight: 
 #[no_mangle]
 pub extern "C" fn perry_ui_text_set_wraps(handle: i64, max_width: f64) {
     widgets::text::set_wraps(handle, max_width);
+}
+
+/// Set text decoration on a Text widget (issue #185 Phase B).
+/// `decoration`: 0=none, 1=underline, 2=strikethrough.
+#[no_mangle]
+pub extern "C" fn perry_ui_text_set_decoration(handle: i64, decoration: i64) {
+    widgets::text::set_decoration(handle, decoration);
 }
 
 /// Set whether a Text widget is selectable.
@@ -723,6 +734,19 @@ pub extern "C" fn perry_ui_widget_set_border_width(handle: i64, width: f64) {
     widgets::set_border_width(handle, width);
 }
 
+/// Set drop shadow on any widget via its CALayer (issue #185 Phase B).
+/// (r,g,b,a) is shadow color; alpha lands in `shadowOpacity`. `blur` is
+/// `shadowRadius`; `(offset_x, offset_y)` is `shadowOffset` (positive y =
+/// downward, matching HTML `box-shadow`).
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_shadow(
+    handle: i64,
+    r: f64, g: f64, b: f64, a: f64,
+    blur: f64, offset_x: f64, offset_y: f64,
+) {
+    widgets::set_shadow(handle, r, g, b, a, blur, offset_x, offset_y);
+}
+
 /// Set edge insets (padding) on an NSStackView widget. No-op for other widget types.
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_set_edge_insets(
@@ -783,6 +807,19 @@ pub extern "C" fn perry_ui_canvas_fill_gradient(
 ) {
     widgets::canvas::fill_gradient(handle, r1, g1, b1, a1, r2, g2, b2, a2, direction);
 }
+
+#[no_mangle] pub extern "C" fn perry_ui_canvas_set_fill_color(_h: i64, _r: f64, _g: f64, _b: f64, _a: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_set_stroke_color(_h: i64, _r: f64, _g: f64, _b: f64, _a: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_set_line_width(_h: i64, _w: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_fill_rect(_h: i64, _x: f64, _y: f64, _w: f64, _ht: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_stroke_rect(_h: i64, _x: f64, _y: f64, _w: f64, _ht: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_clear_rect(h: i64, _x: f64, _y: f64, _w: f64, _ht: f64) { widgets::canvas::clear(h); }
+#[no_mangle] pub extern "C" fn perry_ui_canvas_arc(_h: i64, _x: f64, _y: f64, _r: f64, _sa: f64, _ea: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_close_path(_h: i64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_fill(_h: i64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_stroke_path(_h: i64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_fill_text(_h: i64, _ptr: i64, _x: f64, _y: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_set_font(_h: i64, _ptr: i64) {}
 
 // =============================================================================
 // New Widgets: SecureField, ProgressView, Image, Picker, Form, NavStack, ZStack
@@ -1299,6 +1336,90 @@ pub extern "C" fn perry_system_notification_send(title_ptr: i64, body_ptr: i64) 
     crate::notifications::send(title_ptr as *const u8, body_ptr as *const u8);
 }
 
+/// Register for remote (APNs) notifications. `callback` is invoked once with
+/// the device token hex string when iOS/macOS negotiates one.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_register_remote(callback: f64) {
+    crate::notifications::register_remote(callback);
+}
+
+/// Register a handler for foreground remote-notification payloads.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_receive(callback: f64) {
+    crate::notifications::on_receive(callback);
+}
+
+/// Background-receive (#98) — no-op on macOS. Desktop apps don't have an
+/// equivalent of `application:didReceiveRemoteNotification:fetchCompletionHandler:`;
+/// the foreground delegate fires for both foregrounded and background app
+/// states (NSApplication doesn't suspend background processes the way iOS
+/// does), so user code targeting macOS should register `notificationOnReceive`
+/// instead. Stub kept so cross-platform user code linking in macOS doesn't
+/// fail to resolve the symbol.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_background_receive(_callback: f64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_interval(
+    id_ptr: i64,
+    title_ptr: i64,
+    body_ptr: i64,
+    seconds: f64,
+    repeats: f64,
+) {
+    crate::notifications::schedule_interval(
+        id_ptr as *const u8,
+        title_ptr as *const u8,
+        body_ptr as *const u8,
+        seconds,
+        repeats,
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_calendar(
+    id_ptr: i64,
+    title_ptr: i64,
+    body_ptr: i64,
+    timestamp_ms: f64,
+) {
+    crate::notifications::schedule_calendar(
+        id_ptr as *const u8,
+        title_ptr as *const u8,
+        body_ptr as *const u8,
+        timestamp_ms,
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_location(
+    id_ptr: i64,
+    title_ptr: i64,
+    body_ptr: i64,
+    lat: f64,
+    lon: f64,
+    radius: f64,
+) {
+    crate::notifications::schedule_location(
+        id_ptr as *const u8,
+        title_ptr as *const u8,
+        body_ptr as *const u8,
+        lat,
+        lon,
+        radius,
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_cancel(id_ptr: i64) {
+    crate::notifications::cancel(id_ptr as *const u8);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_tap(callback: f64) {
+    crate::notifications::set_on_tap(callback);
+}
+
 // =============================================================================
 // Location (perry/system) — stub on macOS, iOS only
 // =============================================================================
@@ -1553,3 +1674,31 @@ pub extern "C" fn perry_ui_scrollview_set_refresh_control(_handle: i64, _callbac
 
 #[no_mangle]
 pub extern "C" fn perry_ui_scrollview_end_refreshing(_handle: i64) {}
+
+// --- Camera stubs (issue #191) ---
+// Real implementations live in `perry-ui-ios` (AVCaptureSession) and
+// `perry-ui-android` (Camera2). macOS has working AVFoundation but the
+// preview-layer plumbing isn't wired through perry-ui-macos yet — these
+// no-ops let cross-platform user code link cleanly today and can be
+// replaced incrementally.
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_create() -> i64 { 0 }
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_start(_handle: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_stop(_handle: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_freeze(_handle: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_unfreeze(_handle: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_sample_color(_x: f64, _y: f64) -> f64 { -1.0 }
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_set_on_tap(_handle: i64, _callback: f64) {}

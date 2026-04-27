@@ -2,57 +2,24 @@
 
 Perry widgets support user-configurable parameters. On iOS/watchOS, these compile to AppIntent configurations (the "Edit Widget" sheet). On Android/Wear OS, they compile to a Configuration Activity.
 
+> **Status:** the full `TopSitesWidget` declaration below compile-links cleanly
+> on the host LLVM target via
+> [`docs/examples/widgets/snippets.ts`](https://github.com/PerryTS/perry/blob/main/docs/examples/widgets/snippets.ts),
+> so the `config: { ... }` shape is verified against
+> `parse_config_params` in `crates/perry-hir/src/lower.rs`. The shorter
+> fragments lower on the page (just a `provider:` body, just a `config:`
+> object) are rendered as plain text — they're not standalone declarations.
+> The cross-compile targets themselves (`--target ios-widget`/
+> `android-widget`/`watchos-widget`/`wearos-tile`) still aren't driven by
+> the doc-tests harness — each needs `--app-bundle-id` and a platform SDK
+> ([#194](https://github.com/PerryTS/perry/issues/194)).
+
 ## Defining Config Fields
 
 Add a `config` object to your `Widget()` declaration. Each field specifies a type, allowed values, a default, and a display title.
 
-```typescript,no-test
-import { Widget, Text, VStack, HStack, Spacer } from "perry/widget";
-
-Widget({
-  kind: "TopSitesWidget",
-  displayName: "Top Sites",
-  description: "Your top performing sites",
-  supportedFamilies: ["systemSmall", "systemMedium"],
-  appGroup: "group.com.example.shared",
-
-  config: {
-    sortBy: {
-      type: "enum",
-      values: ["clicks", "impressions", "ctr", "position"],
-      default: "clicks",
-      title: "Sort By",
-    },
-    dateRange: {
-      type: "enum",
-      values: ["7d", "28d", "90d"],
-      default: "7d",
-      title: "Date Range",
-    },
-  },
-
-  entryFields: {
-    total: "number",
-    label: "string",
-  },
-
-  provider: async (config: { sortBy: string; dateRange: string }) => {
-    const res = await fetch(
-      `https://api.example.com/stats?sort=${config.sortBy}&range=${config.dateRange}`
-    );
-    const data = await res.json();
-    return {
-      entries: [{ total: data.total, label: data.label }],
-      reloadPolicy: { after: { minutes: 30 } },
-    };
-  },
-
-  render: (entry) =>
-    VStack([
-      Text(`${entry.total}`, { font: "title", fontWeight: "bold" }),
-      Text(entry.label, { font: "caption", color: "secondary" }),
-    ]),
-});
+```typescript
+{{#include ../../examples/widgets/snippets.ts:top-sites-widget}}
 ```
 
 ## Supported Parameter Types
@@ -67,7 +34,7 @@ Widget({
 
 The `provider` function receives the current config values as its argument. The config object keys match the field names you defined:
 
-```typescript,no-test
+```text
 provider: async (config: { sortBy: string; dateRange: string }) => {
   // config.sortBy === "clicks" | "impressions" | "ctr" | "position"
   // config.dateRange === "7d" | "28d" | "90d"
@@ -82,7 +49,7 @@ When the user changes a config value, the system calls your provider again with 
 
 ## Boolean Config Example
 
-```typescript,no-test
+```text
 config: {
   showDetails: {
     type: "bool",

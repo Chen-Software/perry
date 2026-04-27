@@ -112,6 +112,24 @@ pub fn set_wraps(handle: i64, _max_width: f64) {
     }
 }
 
+/// Set text decoration via Pango attributes (issue #185 Phase B).
+/// `decoration`: 0=none, 1=underline, 2=strikethrough.
+pub fn set_decoration(handle: i64, decoration: i64) {
+    if let Some(widget) = super::get_widget(handle) {
+        if let Some(label) = widget.downcast_ref::<Label>() {
+            let attrs = label.attributes().unwrap_or_else(pango::AttrList::new);
+            // Reset any prior underline/strikethrough so calls compose correctly.
+            let underline = pango::AttrInt::new_underline(
+                if decoration == 1 { pango::Underline::Single } else { pango::Underline::None }
+            );
+            let strikethrough = pango::AttrInt::new_strikethrough(decoration == 2);
+            attrs.insert(underline);
+            attrs.insert(strikethrough);
+            label.set_attributes(Some(&attrs));
+        }
+    }
+}
+
 /// Set the font family of a Text widget.
 pub fn set_font_family(handle: i64, family_ptr: *const u8) {
     let family = str_from_header(family_ptr);

@@ -804,6 +804,8 @@ fn rust_target_triple(target: Option<&str>) -> Option<&'static str> {
     match target {
         Some("ios-simulator") | Some("ios-widget-simulator") => Some("aarch64-apple-ios-sim"),
         Some("ios") | Some("ios-widget") => Some("aarch64-apple-ios"),
+        Some("visionos-simulator") => Some("aarch64-apple-visionos-sim"),
+        Some("visionos") => Some("aarch64-apple-visionos"),
         Some("watchos-simulator") => Some("aarch64-apple-watchos-sim"),
         Some("watchos") => Some("arm64_32-apple-watchos"),
         Some("tvos-simulator") => Some("aarch64-apple-tvos-sim"),
@@ -864,6 +866,8 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
         Some("windows")
     } else if lib_name.contains("_ios") {
         Some("ios")
+    } else if lib_name.contains("_visionos") {
+        Some("visionos")
     } else if lib_name.contains("_tvos") {
         Some("tvos")
     } else if lib_name.contains("_watchos") {
@@ -966,9 +970,25 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
         if m.ends_with(".dll") { return false; }
         if m.contains("compiler_builtins") { excluded_by_pattern += 1; return false; }
         // Don't exclude by name-match against runtime/stdlib member lists —
-        // same-named objects (alloc, core, std, windows crate) can contain
-        // different monomorphizations needed by the UI code. /FORCE:MULTIPLE
-        // handles the actual duplicate symbols at link time.
+        // same-named objects (alloc, core, std, windows crate, AND
+        // perry_runtime / perry_stdlib themselves) can contain different
+        // generic monomorphizations needed by the UI code. The
+        // perry-ui-gtk4 staticlib bundles perry_runtime CGUs that include
+        // hashbrown::raw::RawTable<T,A>::reserve_rehash monomorphized for
+        // GTK4-specific types (e.g. HashMap<i64, gtk4::Widget>) — those
+        // monomorphizations don't exist in the standalone libperry_runtime.a
+        // because the standalone build never sees those type
+        // instantiations. Pre-fix, a name-pattern drop on `perry_runtime-`
+        // / `perry_stdlib-` was added to placate lld-link's
+        // duplicate-symbol rejection on Windows cross-compile (commit
+        // 7a2e27ca), but this strip-dedup pass now skips Windows entirely
+        // (see is_windows guard at the call site). The pattern drop is
+        // dead-weight on Linux/macOS: --allow-multiple-definition (ELF) /
+        // ld64 first-wins (Mach-O) handle the actual duplicates safely,
+        // and dropping by pattern silently strips unique
+        // monomorphizations, causing
+        // `undefined reference to hashbrown::raw::RawTable::reserve_rehash`
+        // and similar (#181 Arch Linux comment).
         if exclude_members.contains(m.as_str()) { excluded_by_set += 1; }
         if has_rlib {
             if let Some(prefix) = rlib_objects.first()
@@ -978,8 +998,6 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
                 if m.starts_with(&format!("{}-", prefix)) { excluded_by_pattern += 1; return false; }
             }
         }
-        if m.contains("perry_runtime-") { excluded_by_pattern += 1; return false; }
-        if m.contains("perry_stdlib-") { excluded_by_pattern += 1; return false; }
         true
     }).collect();
 
@@ -1164,10 +1182,135 @@ fn find_msvc_link_exe() -> Option<PathBuf> {
     find_llvm_tool("lld-link")
 }
 
+/// Find `lld-link.exe` — LLVM's drop-in replacement for MSVC `link.exe`. Ships
+/// with `winget install LLVM.LLVM`. Enables the "lightweight Windows toolchain"
+/// path: LLVM for codegen + linking, xwin'd sysroot for CRT + Windows SDK libs,
+/// no Visual Studio required. See `perry setup windows`.
+///
+/// Available on all hosts (not just Windows native): cross-compile callers on
+/// macOS/Linux targeting Windows also want to locate a bundled lld-link
+/// before falling back to vswhere-based MSVC detection.
+fn find_lld_link() -> Option<PathBuf> {
+    // Honor explicit override (shared with MSVC path).
+    if let Ok(p) = std::env::var("PERRY_LLD_LINK") {
+        let candidate = PathBuf::from(p);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    // Standard LLVM installer location.
+    let standalone = PathBuf::from(r"C:\Program Files\LLVM\bin\lld-link.exe");
+    if standalone.exists() {
+        return Some(standalone);
+    }
+    // PATH fallback.
+    if let Ok(output) = Command::new("where").arg("lld-link").output() {
+        if output.status.success() {
+            let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if let Some(first) = s.lines().next() {
+                let p = PathBuf::from(first);
+                if p.exists() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Location where `perry setup windows` writes the xwin'd Microsoft CRT +
+/// Windows SDK. Returns `Some(root)` only when `<root>/crt/lib/x86_64` exists,
+/// so callers can treat `Some` as "toolchain is complete and ready to link."
+///
+/// Default location is `%LOCALAPPDATA%\perry\windows-sdk` on Windows; can be
+/// overridden via `PERRY_WINDOWS_SYSROOT` (same env var already used by the
+/// cross-compile branch, so a single env var works for both hosts).
+/// Available on all hosts so the `is_windows` target branch (which fires on
+/// macOS/Linux cross-compiles too) can check for an xwin'd Windows SDK without
+/// needing its own cfg gate.
+fn find_perry_windows_sdk() -> Option<PathBuf> {
+    let explicit = std::env::var("PERRY_WINDOWS_SYSROOT")
+        .ok()
+        .map(PathBuf::from);
+    let default = dirs::data_local_dir().map(|p| p.join("perry").join("windows-sdk"));
+    for candidate in [explicit, default].into_iter().flatten() {
+        // Sanity-check: xwin splat populates crt/lib/x86_64 (or crt/lib/x64 with
+        // --preserve-ms-arch-notation). If neither exists, the directory isn't a
+        // completed xwin output — skip it.
+        if candidate.join("crt").join("lib").join("x86_64").exists()
+            || candidate.join("crt").join("lib").join("x64").exists()
+        {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Returns the `/SUBSYSTEM:…` flag for MSVC `link.exe` / `lld-link`.
+///
+/// CLI programs must use `CONSOLE` (3) so the OS loader attaches stdin/stdout/stderr
+/// before `main()` runs. GUI programs use `WINDOWS` (2) to suppress the console
+/// window that would otherwise flash alongside the app window. Passing neither
+/// flag lets the linker pick a default, which historically resolved to `WINDOWS`
+/// for Perry builds and silently discarded all `console.log` output (issue #120).
+fn windows_pe_subsystem_flag(needs_ui: bool) -> &'static str {
+    if needs_ui { "/SUBSYSTEM:WINDOWS" } else { "/SUBSYSTEM:CONSOLE" }
+}
+
+/// Given a sysroot directory populated by `xwin splat` (or a compatible layout),
+/// return the lib search paths for MSVC / lld-link's LIB env var. Callers pass
+/// the directory root (e.g. `%LOCALAPPDATA%\perry\windows-sdk`) and get back a
+/// `Vec<String>` of absolute lib dirs: `<root>/crt/lib/x86_64`,
+/// `<root>/sdk/lib/um/x86_64`, `<root>/sdk/lib/ucrt/x86_64`. Falls through to
+/// `<root>/lib` and finally `<root>` itself if the structured layout isn't
+/// present (e.g. a user pointed PERRY_WINDOWS_SYSROOT at a custom dir).
+fn xwin_sysroot_lib_paths(root: &Path) -> Vec<String> {
+    let mut paths = Vec::new();
+
+    // xwin default layout — also covers --preserve-ms-arch-notation (x64 suffix).
+    for (crt_sub, um_sub, ucrt_sub) in &[
+        ("crt/lib/x86_64", "sdk/lib/um/x86_64", "sdk/lib/ucrt/x86_64"),
+        ("crt/lib/x64", "sdk/lib/um/x64", "sdk/lib/ucrt/x64"),
+    ] {
+        let crt = root.join(crt_sub);
+        let um = root.join(um_sub);
+        let ucrt = root.join(ucrt_sub);
+        if crt.exists() || um.exists() || ucrt.exists() {
+            if crt.exists() { paths.push(crt.to_string_lossy().to_string()); }
+            if um.exists() { paths.push(um.to_string_lossy().to_string()); }
+            if ucrt.exists() { paths.push(ucrt.to_string_lossy().to_string()); }
+            return paths;
+        }
+    }
+
+    let flat_lib = root.join("lib");
+    if flat_lib.exists() {
+        paths.push(flat_lib.to_string_lossy().to_string());
+        return paths;
+    }
+
+    paths.push(root.to_string_lossy().to_string());
+    paths
+}
+
 /// Find MSVC library search paths (MSVC CRT, Windows SDK um, Windows SDK ucrt).
 /// Returns a semicolon-separated string suitable for the LIB environment variable.
+///
+/// On Windows, prefers `perry setup windows`'s xwin'd sysroot when present
+/// (matches the "lightweight toolchain" opt-in mental model), then falls back
+/// to vswhere-located Visual Studio install paths.
 #[cfg(target_os = "windows")]
 fn find_msvc_lib_paths() -> Option<String> {
+    // If the user ran `perry setup windows`, use that sysroot — they've
+    // expressed intent to use the lightweight LLVM + xwin path even if MSVC
+    // is also installed. Same precedence as find_msvc_link_exe_or_lld_link().
+    if let Some(sysroot) = find_perry_windows_sdk() {
+        let paths = xwin_sysroot_lib_paths(&sysroot);
+        if !paths.is_empty() {
+            return Some(paths.join(";"));
+        }
+    }
+
     let mut paths = Vec::new();
 
     // Find MSVC CRT lib path via vswhere
@@ -1233,38 +1376,7 @@ fn find_msvc_lib_paths() -> Option<String> {
         return None;
     }
 
-    let mut paths = Vec::new();
-
-    // Search for xwin-style structured layout (crt/lib/x86_64, sdk/lib/um/x86_64, etc.)
-    for (crt_sub, um_sub, ucrt_sub) in &[
-        ("crt/lib/x86_64", "sdk/lib/um/x86_64", "sdk/lib/ucrt/x86_64"),
-        ("crt/lib/x64", "sdk/lib/um/x64", "sdk/lib/ucrt/x64"),
-    ] {
-        let crt = root.join(crt_sub);
-        let um = root.join(um_sub);
-        let ucrt = root.join(ucrt_sub);
-        if crt.exists() || um.exists() || ucrt.exists() {
-            if crt.exists() { paths.push(crt.to_string_lossy().to_string()); }
-            if um.exists() { paths.push(um.to_string_lossy().to_string()); }
-            if ucrt.exists() { paths.push(ucrt.to_string_lossy().to_string()); }
-            break;
-        }
-    }
-
-    // Flat lib/ directory
-    if paths.is_empty() {
-        let flat_lib = root.join("lib");
-        if flat_lib.exists() {
-            paths.push(flat_lib.to_string_lossy().to_string());
-        }
-    }
-
-    // Root itself as last resort
-    if paths.is_empty() {
-        paths.push(root.to_string_lossy().to_string());
-    }
-
-    Some(paths.join(";"))
+    Some(xwin_sysroot_lib_paths(&root).join(";"))
 }
 
 /// Find a library by name, optionally searching cross-compilation target directories.
@@ -1320,6 +1432,22 @@ fn collect_library_candidates(name: &str, target: Option<&str>) -> Vec<PathBuf> 
         // Also check directories relative to the perry executable.
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
+                // Cross-compile targets are in ../../target/<triple>/release/ relative
+                // to the perry binary (which is in target/release/). Check this
+                // BEFORE the exe-dir bundled-install lookups below — in an
+                // in-tree dev build, `target/release/libperry_ui_ios.a` is the
+                // host-platform (macOS) artifact left over from a native build,
+                // and would shadow the freshly cross-compiled iOS lib in
+                // `target/aarch64-apple-ios-sim/release/`.
+                if let Some(target_dir) = dir.parent() {
+                    candidates.push(target_dir.join(triple).join("release").join(name));
+                    candidates.push(target_dir.join(triple).join("debug").join(name));
+                }
+                // When cargo install'd, check the original source tree's target dir
+                let source_target = Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../target").join(triple).join("release").join(name);
+                candidates.push(source_target);
+
                 // For iOS targets, check the exe directory for libs with _ios naming:
                 // - Libs already named with _ios (e.g. libperry_ui_ios.a) → direct lookup
                 // - Libs using _ios suffix convention (e.g. libperry_runtime.a stored as
@@ -1330,6 +1458,14 @@ fn collect_library_candidates(name: &str, target: Option<&str>) -> Vec<PathBuf> 
                     } else {
                         let ios_name = name.replace(".a", "_ios.a");
                         candidates.push(dir.join(&ios_name));
+                    }
+                }
+                if matches!(target, Some("visionos") | Some("visionos-simulator")) {
+                    if name.contains("_visionos") {
+                        candidates.push(dir.join(name));
+                    } else {
+                        let visionos_name = name.replace(".a", "_visionos.a");
+                        candidates.push(dir.join(&visionos_name));
                     }
                 }
                 if matches!(target, Some("watchos") | Some("watchos-simulator")) {
@@ -1348,16 +1484,6 @@ fn collect_library_candidates(name: &str, target: Option<&str>) -> Vec<PathBuf> 
                         candidates.push(dir.join(&tvos_name));
                     }
                 }
-                // Cross-compile targets are in ../../target/<triple>/release/ relative
-                // to the perry binary (which is in target/release/)
-                if let Some(target_dir) = dir.parent() {
-                    candidates.push(target_dir.join(triple).join("release").join(name));
-                    candidates.push(target_dir.join(triple).join("debug").join(name));
-                }
-                // When cargo install'd, check the original source tree's target dir
-                let source_target = Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../target").join(triple).join("release").join(name);
-                candidates.push(source_target);
             }
         }
     } else {
@@ -1448,6 +1574,7 @@ fn find_jsruntime_library(target: Option<&str>) -> Option<PathBuf> {
 fn find_ui_library(target: Option<&str>) -> Option<PathBuf> {
     let lib_name = match target {
         Some("ios-simulator") | Some("ios") => "libperry_ui_ios.a",
+        Some("visionos-simulator") | Some("visionos") => "libperry_ui_visionos.a",
         Some("android") => "libperry_ui_android.a",
         Some("watchos-simulator") | Some("watchos") => "libperry_ui_watchos.a",
         Some("tvos-simulator") | Some("tvos") => "libperry_ui_tvos.a",
@@ -1521,6 +1648,8 @@ fn find_geisterhand_runtime(target: Option<&str>) -> Option<PathBuf> {
 fn find_geisterhand_ui(target: Option<&str>) -> Option<PathBuf> {
     let name = if matches!(target, Some("ios-simulator") | Some("ios")) {
         "libperry_ui_ios.a"
+    } else if matches!(target, Some("visionos-simulator") | Some("visionos")) {
+        return None;
     } else if matches!(target, Some("android")) {
         "libperry_ui_android.a"
     } else if matches!(target, Some("linux")) || cfg!(target_os = "linux") {
@@ -1536,6 +1665,11 @@ fn find_geisterhand_ui(target: Option<&str>) -> Option<PathBuf> {
 /// Auto-build geisterhand-enabled libraries when they're missing.
 /// Uses a separate target dir (target/geisterhand/) to avoid mixing with normal builds.
 fn build_geisterhand_libs(target: Option<&str>, format: OutputFormat) -> Result<()> {
+    if matches!(target, Some("visionos") | Some("visionos-simulator")) {
+        return Err(anyhow!(
+            "Geisterhand is not supported on visionOS yet."
+        ));
+    }
     // Determine which UI crate to build based on target platform
     let ui_crate = match target {
         Some("ios-simulator") | Some("ios") => "perry-ui-ios",
@@ -1948,6 +2082,7 @@ fn build_optimized_libs(
         if ctx.needs_ui {
             let ui_crate = match target {
                 Some("ios-simulator") | Some("ios") | Some("ios-widget") | Some("ios-widget-simulator") => "perry-ui-ios",
+                Some("visionos-simulator") | Some("visionos") => "perry-ui-visionos",
                 Some("android") => "perry-ui-android",
                 Some("watchos-simulator") | Some("watchos") => "perry-ui-watchos",
                 Some("tvos-simulator") | Some("tvos") => "perry-ui-tvos",
@@ -2083,6 +2218,7 @@ fn parse_native_library_manifest(
     // Parse target config
     let target_key = match target {
         Some("ios-simulator") | Some("ios") => "ios",
+        Some("visionos-simulator") | Some("visionos") => "visionos",
         Some("android") => "android",
         Some("tvos-simulator") | Some("tvos") => "tvos",
         Some("watchos-simulator") | Some("watchos") => "watchos",
@@ -2211,6 +2347,53 @@ fn find_node_modules(start: &Path) -> Option<PathBuf> {
             return None;
         }
     }
+}
+
+/// Look up a bare package name in the nearest package.json's `dependencies` /
+/// `devDependencies` sections and, if the entry has a `file:` prefix, return the
+/// resolved directory path (NOT canonicalized — caller does that).
+///
+/// This is the fallback used when `node_modules/<pkg>` does not exist (e.g., the
+/// user manually removed the symlink, or `npm install` was not re-run after
+/// rewriting `package.json` to point at a new `file:` path).  It also covers
+/// the "file: dep inside the project root" shape described in #209:
+///
+///   "bloom": "file:./vendor/bloom/"   ← vendor/bloom may itself be a symlink
+///
+/// By resolving against the package.json directory (not through the node_modules
+/// symlink chain) we arrive at the same canonical target regardless of how many
+/// symlink hops npm left behind.
+fn find_file_dep_in_package_json(start: &Path, package_name: &str) -> Option<PathBuf> {
+    let mut dir = start.to_path_buf();
+    loop {
+        let pkg_json = dir.join("package.json");
+        if pkg_json.exists() {
+            if let Ok(content) = fs::read_to_string(&pkg_json) {
+                if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&content) {
+                    for dep_section in &["dependencies", "devDependencies"] {
+                        if let Some(deps) = pkg.get(*dep_section).and_then(|d| d.as_object()) {
+                            if let Some(dep_val) = deps.get(package_name) {
+                                if let Some(dep_str) = dep_val.as_str() {
+                                    if let Some(file_path) = dep_str.strip_prefix("file:") {
+                                        // Trim trailing slash so dir.join() works cleanly
+                                        let resolved = dir.join(file_path.trim_end_matches('/'));
+                                        return Some(resolved);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Found a package.json but no matching file: dep for this package.
+            // Stop climbing — don't look in ancestor workspaces.
+            break;
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    None
 }
 
 /// Parse a package specifier into (package_name, subpath)
@@ -2469,8 +2652,10 @@ fn resolve_exports(exports: &serde_json::Value, subpath: &str) -> Option<String>
             }
 
             // Try common conditions (for both main entry and subpath entries)
-            // This handles the case where we've matched a subpath and now need to resolve the conditions
-            for condition in ["import", "module", "default", "require", "node"] {
+            // This handles the case where we've matched a subpath and now need to resolve the conditions.
+            // "perry" is checked first so packages can ship a TypeScript source entry
+            // intended for Perry compilation alongside a pre-built JS entry for Node/Bun.
+            for condition in ["perry", "import", "module", "default", "require", "node"] {
                 if let Some(entry) = map.get(condition) {
                     return resolve_exports(entry, subpath);
                 }
@@ -2600,6 +2785,47 @@ fn resolve_import(
                     // not user code to be compiled. V8 will handle them at runtime.
                     return Some((entry.canonicalize().ok()?, ModuleKind::Interpreted));
                 }
+            }
+        }
+    }
+
+    // Fallback: look for a `file:` entry in the nearest package.json.
+    //
+    // Handles two failure modes that the node_modules walk above cannot catch:
+    //
+    //   1. `node_modules/<pkg>` was removed (or npm install was not re-run after
+    //      changing package.json).  The manual repro in #209 hits this directly.
+    //
+    //   2. `node_modules/<pkg>` exists but points *inside* the project root via an
+    //      intermediate symlink (e.g. `node_modules/bloom -> ../vendor/bloom` where
+    //      `vendor/bloom` is itself a symlink or a real directory cloned by CI).
+    //      In that case the canonical path resolves to a path like
+    //      `/project/vendor/bloom/index.ts` — which is inside the project root but
+    //      outside any `node_modules/` component — so the `is_in_node_modules`
+    //      string check returns false and downstream classify-as-Interpreted guards
+    //      can misfire for JS files.  Resolving directly from `package.json` gives
+    //      us the same canonical target while keeping `package_dir` pointing at the
+    //      real package root (with its perry.nativeLibrary / perry.nativeModule
+    //      marker) so `has_perry_native_library` can read it without traversing a
+    //      potentially-confusing symlink chain.
+    if let Some(file_dep_dir) = find_file_dep_in_package_json(project_root, &package_name) {
+        if file_dep_dir.is_dir() {
+            if let Some(entry) = resolve_package_entry(&file_dep_dir, subpath.as_deref()) {
+                if has_perry_native_library(&file_dep_dir) {
+                    return Some((entry.canonicalize().ok()?, ModuleKind::NativeCompiled));
+                }
+                if has_perry_native_module(&file_dep_dir) {
+                    return Some((entry.canonicalize().ok()?, ModuleKind::NativeCompiled));
+                }
+                if compile_packages.contains(&package_name) {
+                    if let Some(src_entry) = resolve_package_source_entry(&file_dep_dir, subpath.as_deref()) {
+                        return Some((src_entry.canonicalize().ok()?, ModuleKind::NativeCompiled));
+                    }
+                    if let Some(fallback_entry) = resolve_package_entry(&file_dep_dir, subpath.as_deref()) {
+                        return Some((fallback_entry.canonicalize().ok()?, ModuleKind::NativeCompiled));
+                    }
+                }
+                return Some((entry.canonicalize().ok()?, ModuleKind::Interpreted));
             }
         }
     }
@@ -2744,7 +2970,15 @@ fn collect_modules(
             } else {
                 false
             }
-        });
+        })
+        // A file whose canonical path resolves to inside a perry.nativeLibrary package
+        // but is NOT under any node_modules/ component (i.e., reached via a file: dep
+        // that places the package inside the project root, as in #209 "file:./vendor/bloom/")
+        // must still be compiled natively, not handed to the JS runtime.
+        // Guard with !is_in_node_modules so this branch never fires for the standard
+        // node_modules/ioredis, node_modules/ethers etc. paths that already have their
+        // own handling (is_perry_native above).
+        || (!is_in_node_modules && is_in_perry_native_package(&canonical));
     let should_use_js_runtime = (is_js_file(&canonical) && !is_in_compiled_pkg)
         || is_declaration_file(&canonical)
         || is_json
@@ -2844,7 +3078,7 @@ fn collect_modules(
     };
 
     let (mut hir_module, new_next_class_id) = perry_hir::lower_module_with_class_id_and_types(
-        ast_module, &module_name, &source_file_path, *next_class_id, resolved_types
+        ast_module, &module_name, &source_file_path, *next_class_id, resolved_types,
     )?;
     *next_class_id = new_next_class_id; // Update the global class_id counter
 
@@ -3324,6 +3558,47 @@ fn find_watchos_swift_runtime() -> Option<PathBuf> {
     }
 
     None
+}
+
+fn find_visionos_swift_runtime() -> Option<PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("swift").join("PerryVisionApp.swift");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+            if let Some(prefix) = dir.parent() {
+                let candidate = prefix.join("lib").join("perry").join("swift").join("PerryVisionApp.swift");
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    let source_candidate = PathBuf::from("crates/perry-ui-visionos/swift/PerryVisionApp.swift");
+    if source_candidate.exists() {
+        return Some(source_candidate);
+    }
+
+    None
+}
+
+fn apple_sdk_version(sdk: &str) -> Option<String> {
+    let output = Command::new("xcrun")
+        .args(["--sdk", sdk, "--show-sdk-version"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version = String::from_utf8(output.stdout).ok()?;
+    let version = version.trim();
+    if version.is_empty() {
+        None
+    } else {
+        Some(version.to_string())
+    }
 }
 
 /// Look up bundle_id from perry.toml for a specific section (e.g., "watchos", "ios", "app")
@@ -4969,7 +5244,13 @@ pub fn run_with_parse_cache(
             .map(|f| f.trim().to_string())
             .filter(|f| !f.is_empty())
             .collect();
-        let is_mobile = matches!(target.as_deref(), Some("ios") | Some("ios-simulator") | Some("android") | Some("watchos") | Some("watchos-simulator") | Some("tvos") | Some("tvos-simulator"));
+        let is_mobile = matches!(target.as_deref(),
+            Some("ios") | Some("ios-simulator") |
+            Some("visionos") | Some("visionos-simulator") |
+            Some("android") |
+            Some("watchos") | Some("watchos-simulator") |
+            Some("tvos") | Some("tvos-simulator")
+        );
         if is_mobile {
             features.retain(|f| f != "plugins");
         }
@@ -5130,8 +5411,12 @@ pub fn run_with_parse_cache(
                                         source_prefix: origin_prefix.clone(),
                                         constructor_param_count: class.constructor.as_ref().map(|c| c.params.len()).unwrap_or(0),
                                         method_names: class.methods.iter().map(|m| m.name.clone()).collect(),
+                                        static_method_names: class.static_methods.iter().map(|m| m.name.clone()).collect(),
+                                        getter_names: class.getters.iter().map(|(n, _)| n.clone()).collect(),
+                                        setter_names: class.setters.iter().map(|(n, _)| n.clone()).collect(),
                                         parent_name: class.extends_name.clone(),
                                         field_names: class.fields.iter().map(|f| f.name.clone()).collect(),
+                                        field_types: class.fields.iter().map(|f| f.ty.clone()).collect(),
                                         source_class_id: Some(class.id),
                                     });
                                 }
@@ -5188,8 +5473,12 @@ pub fn run_with_parse_cache(
                             source_prefix: effective_prefix.clone(),
                             constructor_param_count: class.constructor.as_ref().map(|c| c.params.len()).unwrap_or(0),
                             method_names: class.methods.iter().map(|m| m.name.clone()).collect(),
+                            static_method_names: class.static_methods.iter().map(|m| m.name.clone()).collect(),
+                            getter_names: class.getters.iter().map(|(n, _)| n.clone()).collect(),
+                            setter_names: class.setters.iter().map(|(n, _)| n.clone()).collect(),
                             parent_name: class.extends_name.clone(),
                             field_names: class.fields.iter().map(|f| f.name.clone()).collect(),
+                            field_types: class.fields.iter().map(|f| f.ty.clone()).collect(),
                             source_class_id: Some(class.id),
                         });
                     }
@@ -5286,10 +5575,72 @@ pub fn run_with_parse_cache(
                             source_prefix: class_prefix,
                             constructor_param_count: class.constructor.as_ref().map(|c| c.params.len()).unwrap_or(0),
                             method_names: class.methods.iter().map(|m| m.name.clone()).collect(),
+                            static_method_names: class.static_methods.iter().map(|m| m.name.clone()).collect(),
+                            getter_names: class.getters.iter().map(|(n, _)| n.clone()).collect(),
+                            setter_names: class.setters.iter().map(|(n, _)| n.clone()).collect(),
                             parent_name: class.extends_name.clone(),
                             field_names: class.fields.iter().map(|f| f.name.clone()).collect(),
+                            field_types: class.fields.iter().map(|f| f.ty.clone()).collect(),
                             source_class_id: Some(class.id),
                         });
+                    }
+                }
+            }
+
+            // Transitive class closure: pull in classes referenced by
+            // field types of already-imported classes. Without this, a
+            // chain like `vm.viewport.scroll.scrollTop` (where vm is
+            // `EditorViewModel`, `viewport: ViewportManager`, `scroll:
+            // ScrollController`) breaks at the first hop because only
+            // `EditorViewModel` lives in `imported_classes` for this
+            // module — `receiver_class_name` can't walk through
+            // `viewport.scroll` because `ViewportManager` isn't in
+            // `class_table` and its field types are unknown. Closing
+            // over field types lets `PropertyGet` recursion resolve
+            // the receiver class at every step of the chain.
+            let mut visited_imports: std::collections::HashSet<String> = imported_classes
+                .iter()
+                .map(|ic| ic.name.clone())
+                .collect();
+            let mut closure_worklist: Vec<String> =
+                visited_imports.iter().cloned().collect();
+            while let Some(name) = closure_worklist.pop() {
+                let ic_idx = imported_classes
+                    .iter()
+                    .position(|ic| ic.name == name);
+                let Some(idx) = ic_idx else { continue };
+                let field_types_clone = imported_classes[idx].field_types.clone();
+                for ty in &field_types_clone {
+                    let ref_name = match ty {
+                        perry_types::Type::Named(n) => n.clone(),
+                        perry_types::Type::Generic { base, .. } => base.clone(),
+                        _ => continue,
+                    };
+                    if visited_imports.contains(&ref_name) {
+                        continue;
+                    }
+                    let found = exported_classes
+                        .iter()
+                        .find(|((_, cname), _)| cname == &ref_name)
+                        .map(|((path, _), class)| (path.clone(), *class));
+                    if let Some((src_path, class)) = found {
+                        let class_prefix = compute_module_prefix(&src_path, &ctx.project_root);
+                        imported_classes.push(perry_codegen::ImportedClass {
+                            name: class.name.clone(),
+                            local_alias: None,
+                            source_prefix: class_prefix,
+                            constructor_param_count: class.constructor.as_ref().map(|c| c.params.len()).unwrap_or(0),
+                            method_names: class.methods.iter().map(|m| m.name.clone()).collect(),
+                            static_method_names: class.static_methods.iter().map(|m| m.name.clone()).collect(),
+                            getter_names: class.getters.iter().map(|(n, _)| n.clone()).collect(),
+                            setter_names: class.setters.iter().map(|(n, _)| n.clone()).collect(),
+                            parent_name: class.extends_name.clone(),
+                            field_names: class.fields.iter().map(|f| f.name.clone()).collect(),
+                            field_types: class.fields.iter().map(|f| f.ty.clone()).collect(),
+                            source_class_id: Some(class.id),
+                        });
+                        visited_imports.insert(ref_name.clone());
+                        closure_worklist.push(ref_name);
                     }
                 }
             }
@@ -5605,6 +5956,7 @@ pub fn run_with_parse_cache(
         // Use TARGET (what we're compiling to), not HOST (what we're running on)
         let is_macho = matches!(target.as_deref(),
             Some("ios") | Some("ios-simulator") | Some("ios-widget") | Some("ios-widget-simulator") |
+            Some("visionos") | Some("visionos-simulator") |
             Some("macos") | Some("watchos") | Some("watchos-simulator") |
             Some("tvos") | Some("tvos-simulator")
         ) || (!is_windows && !is_linux && !is_android && cfg!(target_os = "macos"));
@@ -5854,6 +6206,7 @@ pub fn run_with_parse_cache(
     }
 
     let is_ios = matches!(target.as_deref(), Some("ios-simulator") | Some("ios"));
+    let is_visionos = matches!(target.as_deref(), Some("visionos-simulator") | Some("visionos"));
     let is_android = matches!(target.as_deref(), Some("android"));
     let is_linux = matches!(target.as_deref(), Some("linux"))
         || (target.is_none() && cfg!(target_os = "linux"));
@@ -5861,6 +6214,7 @@ pub fn run_with_parse_cache(
         || (target.is_none() && cfg!(target_os = "windows"));
     let is_cross_windows = is_windows && !cfg!(target_os = "windows");
     let is_cross_ios = is_ios && !cfg!(target_os = "macos");
+    let is_cross_visionos = is_visionos && !cfg!(target_os = "macos");
     let is_cross_macos = matches!(target.as_deref(), Some("macos")) && !cfg!(target_os = "macos");
     // Note: is_watchos and is_tvos are defined below (near jsruntime_lib); is_cross_tvos
     // is set after them so this block keeps all is_cross_* bindings together.
@@ -5940,7 +6294,7 @@ pub fn run_with_parse_cache(
     // Without this the is_tvos branch below would unconditionally call `xcrun`,
     // which only exists on macOS with Xcode.
     let is_cross_tvos = is_tvos && !cfg!(target_os = "macos");
-    let jsruntime_lib = if !is_ios && !is_android && !is_watchos && !is_tvos && (ctx.needs_js_runtime || args.enable_js_runtime) {
+    let jsruntime_lib = if !is_ios && !is_visionos && !is_android && !is_watchos && !is_tvos && (ctx.needs_js_runtime || args.enable_js_runtime) {
         match find_jsruntime_library(target.as_deref()) {
             Some(lib) => {
                 match format {
@@ -6058,6 +6412,57 @@ pub fn run_with_parse_cache(
              .arg(&swift_runtime);
             c
         }
+    } else if is_visionos && is_cross_visionos {
+        return Err(anyhow!(
+            "Local visionOS compilation requires Xcode on macOS. Use a macOS host or Perry Hub remote build."
+        ));
+    } else if is_visionos {
+        let sdk = if target.as_deref() == Some("visionos-simulator") { "xrsimulator" } else { "xros" };
+        let swiftc = String::from_utf8(
+            Command::new("xcrun").args(["--sdk", sdk, "--find", "swiftc"]).output()?.stdout
+        )?.trim().to_string();
+        let sysroot = String::from_utf8(
+            Command::new("xcrun").args(["--sdk", sdk, "--show-sdk-path"]).output()?.stdout
+        )?.trim().to_string();
+        let sdk_version = apple_sdk_version(sdk).unwrap_or_else(|| "1.0".to_string());
+        let triple = if target.as_deref() == Some("visionos-simulator") {
+            format!("arm64-apple-xros{}-simulator", sdk_version)
+        } else {
+            format!("arm64-apple-xros{}", sdk_version)
+        };
+        let swift_runtime = find_visionos_swift_runtime()
+            .ok_or_else(|| anyhow!(
+                "PerryVisionApp.swift not found. Expected next to perry binary or in source tree."
+            ))?;
+
+        let input_stem = args.input.file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| format!("{}_ts", s))
+            .unwrap_or_else(|| "main_ts".to_string());
+        if let Some(entry_obj) = obj_paths.iter().find(|f| {
+            f.file_stem().and_then(|s| s.to_str())
+                .map(|s| s == input_stem.as_str() || s.ends_with(&format!("_{}", input_stem)))
+                .unwrap_or(false)
+        }) {
+            let objcopy = std::env::var("HOME").ok()
+                .map(|h| PathBuf::from(h).join(".rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/bin/rust-objcopy"))
+                .filter(|p| p.exists())
+                .or_else(|| std::env::var("HOME").ok()
+                    .map(|h| PathBuf::from(h).join(".rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/bin/llvm-objcopy"))
+                    .filter(|p| p.exists()))
+                .unwrap_or_else(|| PathBuf::from("rust-objcopy"));
+            let _ = Command::new(&objcopy)
+                .args(["--redefine-sym", "_main=_perry_main_init"])
+                .arg(entry_obj)
+                .status();
+        }
+
+        let mut c = Command::new(swiftc);
+        c.arg("-target").arg(&triple)
+         .arg("-sdk").arg(&sysroot)
+         .arg("-parse-as-library")
+         .arg(&swift_runtime);
+        c
     } else if is_ios && is_cross_ios {
         // Cross-compile iOS from Linux using ld64.lld + Apple SDK sysroot
         let ld64 = find_llvm_tool("ld64.lld")
@@ -6223,28 +6628,63 @@ pub fn run_with_parse_cache(
         // that should fail the link rather than produce a broken binary.
         c
     } else if is_windows {
-        // Windows target — use MSVC link.exe (native) or lld-link (cross)
-        // Check for PERRY_LLD_LINK override to use lld-link instead of MSVC link.exe.
-        // lld-link may handle large COFF objects differently than MSVC's linker.
+        // Windows target — two linker paths supported:
+        //   Lightweight: lld-link (from LLVM) + xwin'd sysroot (from `perry setup windows`)
+        //   MSVC:        link.exe + Visual Studio's VCTools + Windows SDK
+        //
+        // Precedence on native Windows:
+        //   1. PERRY_LLD_LINK env var (explicit override — always wins)
+        //   2. xwin'd sysroot present at %LOCALAPPDATA%\perry\windows-sdk → lld-link
+        //      (if user ran `perry setup windows`, they've opted into this path)
+        //   3. vswhere finds VCTools-enabled VS install → MSVC link.exe
+        //   4. Bail with two-option install hint
         let linker = if let Ok(lld) = std::env::var("PERRY_LLD_LINK") {
             PathBuf::from(lld)
-        } else {
-            find_msvc_link_exe().unwrap_or_else(|| {
-                if is_cross_windows {
-                    eprintln!("Warning: lld-link not found for cross-compilation. Install: rustup component add llvm-tools");
+        } else if !is_cross_windows && find_perry_windows_sdk().is_some() {
+            // User ran `perry setup windows`. Use LLVM's lld-link.
+            match find_lld_link() {
+                Some(p) => p,
+                None => {
+                    return Err(anyhow!(
+                        "`perry setup windows` has populated a Windows SDK at {} but \
+                         LLVM's lld-link.exe is missing. Install LLVM via:\n\
+                         \x20  winget install LLVM.LLVM\n\
+                         then open a new terminal and retry.",
+                        find_perry_windows_sdk().unwrap().display()
+                    ));
                 }
-                PathBuf::from("link.exe")
-            })
+            }
+        } else if let Some(path) = find_msvc_link_exe() {
+            path
+        } else if is_cross_windows {
+            eprintln!("Warning: lld-link not found for cross-compilation. Install: rustup component add llvm-tools");
+            PathBuf::from("link.exe")
+        } else {
+            // Native Windows: neither MSVC (via vswhere) nor the xwin'd sysroot
+            // is present. Fail fast with both install paths — matches the
+            // `find_clang` context pattern in perry-codegen/src/linker.rs.
+            return Err(anyhow!(
+                "No Windows linker toolchain found. Perry needs either MSVC link.exe + \
+                 Windows SDK, or LLVM's lld-link + the xwin'd sysroot from `perry setup \
+                 windows`. Pick whichever is lighter for you:\n\
+                 \n\
+                 \x20  A) Lightweight (LLVM + xwin, ~1.5 GB, no Visual Studio needed):\n\
+                 \x20       winget install LLVM.LLVM\n\
+                 \x20       perry setup windows\n\
+                 \n\
+                 \x20  B) MSVC (Visual Studio Build Tools + C++ workload, ~8 GB):\n\
+                 \x20       Visual Studio Installer → Modify → \"Desktop development with C++\"\n\
+                 \x20       or: winget install Microsoft.VisualStudio.2022.BuildTools --override \
+                 \"--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended\"\n\
+                 \n\
+                 Then open a new terminal and retry. Run `perry doctor` to verify."
+            ));
         };
         let mut c = Command::new(linker);
-        // CONSOLE for CLI programs so the loader attaches stdin/stdout/stderr
-        // before main() runs — otherwise println!() in js_console_log writes
-        // to a detached handle and nothing appears in the terminal (#108).
-        // WINDOWS for UI programs so no console flashes alongside the window.
-        // /ENTRY:mainCRTStartup works for both: Perry emits `int main()` and
-        // the MSVC CRT invokes it regardless of subsystem.
-        let subsystem = if ctx.needs_ui { "/SUBSYSTEM:WINDOWS" } else { "/SUBSYSTEM:CONSOLE" };
-        c.arg(subsystem)
+        // /ENTRY:mainCRTStartup works for both subsystems: Perry emits
+        // `int main()` and the MSVC CRT invokes it regardless of subsystem.
+        // See windows_pe_subsystem_flag() for subsystem selection rationale.
+        c.arg(windows_pe_subsystem_flag(ctx.needs_ui))
          .arg("/ENTRY:mainCRTStartup")
          .arg("/NOLOGO")
          // Perry generates large init functions for TS modules (one function
@@ -6325,10 +6765,10 @@ pub fn run_with_parse_cache(
     if !is_windows {
         if is_android || is_linux {
             cmd.arg("-Wl,--gc-sections");
-        } else if is_cross_ios || is_cross_macos || is_cross_tvos {
+        } else if is_cross_ios || is_cross_visionos || is_cross_macos || is_cross_tvos {
             // ld64.lld called directly — no -Wl, prefix needed
             cmd.arg("-dead_strip");
-        } else if is_watchos {
+        } else if is_watchos || is_visionos {
             cmd.arg("-Xlinker").arg("-dead_strip");
         } else {
             // Native macOS/iOS via clang driver
@@ -6360,7 +6800,9 @@ pub fn run_with_parse_cache(
     // symbols (alloc, std::thread_local, etc.). The .a archive provides those
     // as a fallback — the linker only pulls object files from the .a that
     // resolve still-undefined symbols (first-definition-wins on macOS).
-    let skip_runtime = (is_android || is_watchos) && ctx.needs_ui && find_ui_library(target.as_deref()).is_some();
+    let skip_runtime = (is_android || is_watchos || is_visionos)
+        && ctx.needs_ui
+        && find_ui_library(target.as_deref()).is_some();
     if !skip_runtime {
         if let Some(ref jsruntime) = jsruntime_lib {
             cmd.arg(jsruntime);
@@ -6503,6 +6945,25 @@ pub fn run_with_parse_cache(
            .arg("-framework").arg("AVFoundation") // Camera capture (AVCaptureSession)
            .arg("-framework").arg("CoreMedia") // CMSampleBuffer
            .arg("-framework").arg("CoreVideo") // CVPixelBuffer
+           .arg("-framework").arg("UserNotifications") // UNUserNotificationCenter (perry/system notificationSend)
+           .arg("-framework").arg("CoreLocation") // CLCircularRegion for UNLocationNotificationTrigger (#96)
+           .arg("-liconv")
+           .arg("-lresolv")
+           .arg("-lobjc")
+           .arg("-lSystem");
+    } else if is_visionos {
+        cmd.arg("-framework").arg("SwiftUI")
+           .arg("-framework").arg("UIKit")
+           .arg("-framework").arg("Foundation")
+           .arg("-framework").arg("CoreGraphics")
+           .arg("-framework").arg("Security")
+           .arg("-framework").arg("CoreFoundation")
+           .arg("-framework").arg("SystemConfiguration")
+           .arg("-framework").arg("QuartzCore")
+           .arg("-framework").arg("AVFAudio")
+           .arg("-framework").arg("AVFoundation")
+           .arg("-framework").arg("CoreMedia")
+           .arg("-framework").arg("CoreVideo")
            .arg("-liconv")
            .arg("-lresolv")
            .arg("-lobjc")
@@ -6601,6 +7062,13 @@ pub fn run_with_parse_cache(
            .arg("bcrypt.lib")
            .arg("ntdll.lib")
            .arg("userenv.lib")
+           // secur32.lib exports `GetUserNameExW`, called by the `whoami`
+           // crate (transitively pulled in via `sqlx-mysql`/`sqlx-postgres`
+           // through `perry-stdlib`). Without it, every doc-test that
+           // touches stdlib fails on the Windows runner with
+           // `LNK2019: unresolved external symbol __imp_GetUserNameExW`.
+           // Closes #220.
+           .arg("secur32.lib")
            .arg("oleaut32.lib")
            .arg("propsys.lib")
            .arg("runtimeobject.lib")
@@ -6655,7 +7123,7 @@ pub fn run_with_parse_cache(
             // and --allow-multiple-definition (ELF) / /FORCE:MULTIPLE (COFF)
             // handles duplicate symbols safely. On Android, skip_runtime=true
             // means the UI lib is the sole provider of perry-runtime symbols.
-            let ui_lib = if is_windows || is_android {
+            let ui_lib = if is_windows || is_android || is_visionos {
                 ui_lib
             } else {
                 match strip_duplicate_objects_from_lib(&ui_lib) {
@@ -6678,7 +7146,7 @@ pub fn run_with_parse_cache(
 
             if is_watchos {
                 // SwiftUI/WatchKit already linked above
-            } else if is_ios || is_tvos {
+            } else if is_ios || is_visionos || is_tvos {
                 // UIKit already linked above
             } else if is_android {
                 // Allow multiple definitions from perry-runtime in both UI lib and native libs
@@ -6704,20 +7172,54 @@ pub fn run_with_parse_cache(
                        .arg(stdlib)
                        .arg("-Wl,--no-whole-archive");
                 }
-                // GTK4 libraries via pkg-config
-                if let Ok(output) = Command::new("pkg-config").args(["--libs", "gtk4"]).output() {
+                // GTK4 libraries via pkg-config. The fallback fires in two
+                // distinct cases: pkg-config not installed (spawn fails), OR
+                // installed but `gtk4.pc` not on the search path (exit != 0
+                // — happens e.g. on Ubuntu hosts where libgtk-4-dev is split
+                // across packages, or when PKG_CONFIG_PATH is locked down).
+                // Pre-fix the second case silently emitted no GTK link flags
+                // and the link bombed with hundreds of `g_object_unref` /
+                // `gtk_widget_*` undefined references (#181).
+                let mut got_gtk_libs = false;
+                let pc_out = Command::new("pkg-config").args(["--libs", "gtk4"]).output();
+                if let Ok(ref output) = pc_out {
                     if output.status.success() {
                         let libs = String::from_utf8_lossy(&output.stdout);
                         for flag in libs.trim().split_whitespace() {
                             cmd.arg(flag);
                         }
+                        got_gtk_libs = true;
                     }
-                } else {
-                    // Fallback: link GTK4 libraries directly
-                    cmd.arg("-lgtk-4")
-                       .arg("-lgobject-2.0")
-                       .arg("-lglib-2.0")
-                       .arg("-lgio-2.0");
+                }
+                if !got_gtk_libs {
+                    // Mirrors what `pkg-config --libs gtk4` returns on a
+                    // standard libgtk-4-dev install. Pre-fix only listed the
+                    // glib/gio core, which left pango/cairo/gdk_pixbuf
+                    // undefined.
+                    eprintln!(
+                        "Warning: `pkg-config --libs gtk4` did not return GTK4 \
+                         linker flags ({}). Falling back to a hardcoded GTK4 \
+                         link set — install `libgtk-4-dev` (Debian/Ubuntu) or \
+                         `gtk4-devel` (Fedora/RHEL) and ensure pkg-config can \
+                         find `gtk4.pc` to silence this warning.",
+                        match &pc_out {
+                            Err(e) => format!("pkg-config not runnable: {e}"),
+                            Ok(o) if !o.status.success() => format!(
+                                "pkg-config exited {}: {}",
+                                o.status.code().unwrap_or(-1),
+                                String::from_utf8_lossy(&o.stderr).trim()
+                            ),
+                            Ok(_) => "no output".to_string(),
+                        }
+                    );
+                    for lib in [
+                        "-lgtk-4", "-lgio-2.0", "-lgobject-2.0", "-lglib-2.0",
+                        "-lpangocairo-1.0", "-lpango-1.0", "-lharfbuzz",
+                        "-lgdk_pixbuf-2.0", "-lcairo-gobject", "-lcairo",
+                        "-lgraphene-1.0",
+                    ] {
+                        cmd.arg(lib);
+                    }
                 }
                 // PulseAudio for audio capture (only needed with UI)
                 cmd.arg("-lpulse-simple")
@@ -6745,6 +7247,8 @@ pub fn run_with_parse_cache(
                 ("libperry_ui_watchos.a", "cargo build --release -p perry-ui-watchos --target arm64_32-apple-watchos")
             } else if is_tvos {
                 ("libperry_ui_tvos.a", "cargo build --release -p perry-ui-tvos --target aarch64-apple-tvos")
+            } else if is_visionos {
+                ("libperry_ui_visionos.a", "cargo build --release -p perry-ui-visionos --target aarch64-apple-visionos-sim")
             } else if is_ios {
                 ("libperry_ui_ios.a", "cargo build --release -p perry-ui-ios --target aarch64-apple-ios-sim")
             } else if is_android {
@@ -7678,6 +8182,216 @@ pub fn run_with_parse_cache(
                 println!("{}", serde_json::to_string(&result)?);
             }
         }
+    } else if is_visionos {
+        let app_dir = exe_path.with_extension("app");
+        let _ = fs::create_dir_all(&app_dir);
+        let bundle_exe = app_dir.join(exe_path.file_name().unwrap_or_default());
+        fs::copy(&exe_path, &bundle_exe)?;
+        let _ = fs::remove_file(&exe_path);
+
+        let exe_stem = exe_path.file_stem().and_then(|s| s.to_str()).unwrap_or(stem);
+        let bundle_id = lookup_bundle_id_from_toml(&args.input, "visionos")
+            .or_else(|| lookup_bundle_id_from_toml(&args.input, "app"))
+            .or_else(|| lookup_bundle_id_from_toml(&args.input, "ios"))
+            .unwrap_or_else(|| format!("com.perry.{}", exe_stem));
+        result_bundle_id = Some(bundle_id.clone());
+        result_app_dir = Some(app_dir.clone());
+
+        let (app_version, app_build_number, deployment_target, encryption_exempt, custom_plist_entries) = (|| -> Option<(String, String, String, Option<bool>, String)> {
+            let mut dir = args.input.canonicalize().ok()?;
+            for _ in 0..5 {
+                dir = dir.parent()?.to_path_buf();
+                let toml_path = dir.join("perry.toml");
+                if !toml_path.exists() {
+                    continue;
+                }
+                let data = fs::read_to_string(&toml_path).ok()?;
+                let doc: toml::Table = data.parse().ok()?;
+                let project = doc.get("project").and_then(|v| v.as_table());
+                let visionos = doc.get("visionos").and_then(|v| v.as_table());
+                let version = project
+                    .and_then(|p| p.get("version"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("1.0.0")
+                    .to_string();
+                let build_number = project
+                    .and_then(|p| p.get("build_number"))
+                    .and_then(|v| v.as_integer().map(|n| n.to_string()).or_else(|| v.as_str().map(|s| s.to_string())))
+                    .unwrap_or_else(|| "1".to_string());
+                let deployment_target = visionos
+                    .and_then(|v| v.get("deployment_target").or_else(|| v.get("minimum_version")))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("1.0")
+                    .to_string();
+                let encryption_exempt = visionos
+                    .and_then(|v| v.get("encryption_exempt"))
+                    .and_then(|v| v.as_bool());
+                let mut entries = String::new();
+                if let Some(info_plist) = visionos
+                    .and_then(|v| v.get("info_plist"))
+                    .and_then(|v| v.as_table())
+                {
+                    for (key, value) in info_plist {
+                        if let Some(s) = value.as_str() {
+                            entries.push_str(&format!("    <key>{}</key>\n    <string>{}</string>\n", key, s));
+                        } else if let Some(b) = value.as_bool() {
+                            entries.push_str(&format!("    <key>{}</key>\n    <{}/>\n", key, if b { "true" } else { "false" }));
+                        } else if let Some(i) = value.as_integer() {
+                            entries.push_str(&format!("    <key>{}</key>\n    <integer>{}</integer>\n", key, i));
+                        }
+                    }
+                }
+                return Some((version, build_number, deployment_target, encryption_exempt, entries));
+            }
+            Some(("1.0.0".to_string(), "1".to_string(), "1.0".to_string(), None, String::new()))
+        })().unwrap();
+
+        let platform_name = if target.as_deref() == Some("visionos-simulator") {
+            "XRSimulator"
+        } else {
+            "XROS"
+        };
+
+        let mut info_plist = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>{exe_stem}</string>
+    <key>CFBundleIdentifier</key>
+    <string>{bundle_id}</string>
+    <key>CFBundleName</key>
+    <string>{exe_stem}</string>
+    <key>CFBundleVersion</key>
+    <string>{app_build_number}</string>
+    <key>CFBundleShortVersionString</key>
+    <string>{app_version}</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>MinimumOSVersion</key>
+    <string>{deployment_target}</string>
+    <key>CFBundleSupportedPlatforms</key>
+    <array>
+        <string>{platform_name}</string>
+    </array>
+    <key>UIRequiredDeviceCapabilities</key>
+    <array>
+        <string>arm64</string>
+    </array>
+    <key>UIDeviceFamily</key>
+    <array>
+        <integer>7</integer>
+    </array>
+    <key>UILaunchScreen</key>
+    <dict/>
+    <key>UIApplicationSceneManifest</key>
+    <dict>
+        <key>UIApplicationSupportsMultipleScenes</key>
+        <true/>
+        <key>UIApplicationPreferredDefaultSceneSessionRole</key>
+        <string>UIWindowSceneSessionRoleApplication</string>
+        <key>UISceneConfigurations</key>
+        <dict/>
+    </dict>
+</dict>
+</plist>"#
+        );
+
+        let usage_descriptions = concat!(
+            "    <key>NSCameraUsageDescription</key>\n",
+            "    <string>This app uses the camera to identify colors.</string>\n",
+            "    <key>NSMicrophoneUsageDescription</key>\n",
+            "    <string>This app uses the microphone to measure sound levels.</string>\n",
+        );
+        info_plist = info_plist.replace("</dict>\n</plist>", &format!("{}</dict>\n</plist>", usage_descriptions));
+
+        if let Some(exempt) = encryption_exempt {
+            let encryption_entry = format!(
+                "    <key>ITSAppUsesNonExemptEncryption</key>\n    <{}/>\n",
+                if exempt { "false" } else { "true" }
+            );
+            info_plist = info_plist.replace("</dict>\n</plist>", &format!("{}</dict>\n</plist>", encryption_entry));
+        }
+
+        if !custom_plist_entries.is_empty() {
+            info_plist = info_plist.replace("</dict>\n</plist>", &format!("{}</dict>\n</plist>", custom_plist_entries));
+        }
+
+        fs::write(app_dir.join("Info.plist"), info_plist)?;
+
+        let source_dir = args.input.canonicalize().ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        if let Some(src_dir) = &source_dir {
+            let mut project_root = src_dir.clone();
+            for _ in 0..5 {
+                if project_root.join("package.json").exists() || project_root.join("perry.toml").exists() { break; }
+                if let Some(parent) = project_root.parent() {
+                    project_root = parent.to_path_buf();
+                } else { break; }
+            }
+            fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+                fs::create_dir_all(dst)?;
+                for entry in fs::read_dir(src)? {
+                    let entry = entry?;
+                    let ty = entry.file_type()?;
+                    let dest_path = dst.join(entry.file_name());
+                    if ty.is_dir() {
+                        copy_dir_recursive(&entry.path(), &dest_path)?;
+                    } else {
+                        fs::copy(entry.path(), &dest_path)?;
+                    }
+                }
+                Ok(())
+            }
+            for dir_name in &["logo", "assets", "resources", "images"] {
+                let resource_dir = project_root.join(dir_name);
+                if resource_dir.is_dir() {
+                    let dest = app_dir.join(dir_name);
+                    let _ = copy_dir_recursive(&resource_dir, &dest);
+                }
+            }
+        }
+
+        if let (Some(ref table), Some(ref config)) = (&i18n_table, &i18n_config) {
+            if !table.keys.is_empty() {
+                for (locale_idx, locale) in config.locales.iter().enumerate() {
+                    let lproj_dir = app_dir.join(format!("{}.lproj", locale));
+                    let _ = fs::create_dir_all(&lproj_dir);
+                    let mut strings_content = String::new();
+                    for (key_idx, key) in table.keys.iter().enumerate() {
+                        let flat_idx = locale_idx * table.keys.len() + key_idx;
+                        let value = table.translations.get(flat_idx).cloned().unwrap_or_else(|| key.clone());
+                        let escaped_key = key.replace('\\', "\\\\").replace('"', "\\\"");
+                        let escaped_val = value.replace('\\', "\\\\").replace('"', "\\\"");
+                        strings_content.push_str(&format!("\"{}\" = \"{}\";\n", escaped_key, escaped_val));
+                    }
+                    let _ = fs::write(lproj_dir.join("Localizable.strings"), &strings_content);
+                }
+            }
+        }
+
+        match format {
+            OutputFormat::Text => {
+                println!("Wrote visionOS app bundle: {}", app_dir.display());
+                println!();
+                println!("To run on Apple Vision Pro Simulator:");
+                println!("  xcrun simctl install booted {}", app_dir.display());
+                println!("  xcrun simctl launch booted {}", bundle_id);
+            }
+            OutputFormat::Json => {
+                let result = serde_json::json!({
+                    "success": true,
+                    "output": app_dir.to_string_lossy(),
+                    "bundle_id": bundle_id,
+                    "native_modules": ctx.native_modules.len(),
+                    "js_modules": ctx.js_modules.len(),
+                });
+                println!("{}", serde_json::to_string(&result)?);
+            }
+        }
     } else if is_watchos {
         // Create watchOS .app bundle
         let app_dir = exe_path.with_extension("app");
@@ -7951,8 +8665,10 @@ pub fn run_with_parse_cache(
 
     // Strip debug symbols from the final binary (reduces size significantly)
     // Skip for iOS/Android cross-compilation — host strip can't handle foreign architectures
+    // Skip for watchOS — bundling above already moved exe_path into the .app
     // Skip when PERRY_DEBUG_SYMBOLS=1 is set — keep symbols for crash debugging
-    if !is_dylib && !is_ios && !is_tvos && target.as_deref() != Some("android")
+    if !is_dylib && !is_ios && !is_visionos && !is_tvos && !is_watchos
+        && target.as_deref() != Some("android")
         && std::env::var("PERRY_DEBUG_SYMBOLS").is_err() {
         if ctx.needs_plugins {
             // When plugins are enabled, use strip -x to keep exported symbols
@@ -8266,8 +8982,12 @@ mod object_cache_tests {
             source_prefix: "src".into(),
             constructor_param_count: 1,
             method_names: vec!["bar".into()],
+            static_method_names: vec![],
+            getter_names: vec![],
+            setter_names: vec![],
             parent_name: None,
             field_names: vec!["x".into()],
+            field_types: vec![],
             source_class_id: Some(42),
         });
         b.imported_classes.push(ImportedClass {
@@ -8276,8 +8996,12 @@ mod object_cache_tests {
             source_prefix: "src".into(),
             constructor_param_count: 2, // different arity
             method_names: vec!["bar".into()],
+            static_method_names: vec![],
+            getter_names: vec![],
+            setter_names: vec![],
             parent_name: None,
             field_names: vec!["x".into()],
+            field_types: vec![],
             source_class_id: Some(42),
         });
         assert_ne!(
@@ -8401,5 +9125,24 @@ mod object_cache_tests {
         a.store(0x777, b"from-a");
         assert!(b.lookup(0x777).is_none());
         assert_eq!(a.lookup(0x777).as_deref(), Some(b"from-a".as_ref()));
+    }
+}
+
+#[cfg(test)]
+mod windows_link_tests {
+    use super::windows_pe_subsystem_flag;
+
+    // Regression guard for issue #120: without an explicit subsystem flag the
+    // MSVC linker historically defaulted to WINDOWS (2), silently detaching
+    // stdout/stderr so console.log output never reached the terminal.
+
+    #[test]
+    fn cli_build_uses_console_subsystem() {
+        assert_eq!(windows_pe_subsystem_flag(false), "/SUBSYSTEM:CONSOLE");
+    }
+
+    #[test]
+    fn ui_build_uses_windows_subsystem() {
+        assert_eq!(windows_pe_subsystem_flag(true), "/SUBSYSTEM:WINDOWS");
     }
 }

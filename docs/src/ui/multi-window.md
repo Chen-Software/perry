@@ -1,66 +1,46 @@
 # Multi-Window & Window Management
 
-Perry supports creating multiple native windows and controlling their appearance and behavior.
+Perry supports creating multiple native windows and controlling their
+appearance and behavior. Every snippet below is excerpted from
+[`docs/examples/ui/multi_window/snippets.ts`](../../examples/ui/multi_window/snippets.ts) —
+CI compiles and runs it on every PR.
 
 ## Creating Windows
 
-```typescript,no-test
-import { App, Window, Text, Button, VStack } from "perry/ui";
+`Window(title, width, height)` returns a window handle. Call `.setBody()` to
+set its content and `.show()` to display it:
 
-const win = Window("Settings", 500, 400);
-win.setBody(VStack(16, [
-  Text("Settings panel"),
-]));
-win.show();
-
-App({
-  title: "My App",
-  width: 800,
-  height: 600,
-  body: VStack(16, [
-    Text("Main Window"),
-    Button("Open Settings", () => win.show()),
-  ]),
-});
+```typescript
+{{#include ../../examples/ui/multi_window/snippets.ts:create}}
 ```
-
-`Window(title, width, height)` creates a new native window. Call `.setBody()` to set its content and `.show()` to display it.
 
 ## Window Instance Methods
 
-```typescript,no-test
-const win = Window("My Window", 600, 400);
-
-win.setBody(widget);     // Set the root widget
-win.show();              // Show the window
-win.hide();              // Hide without destroying
-win.closeWindow();       // Close and destroy
-win.onFocusLost(() => {  // Called when window loses focus
-  win.hide();
-});
+```typescript
+{{#include ../../examples/ui/multi_window/snippets.ts:methods}}
 ```
+
+| Method | Description |
+|--------|-------------|
+| `setBody(widget)` | Set the root widget of the window |
+| `show()` | Show the window |
+| `hide()` | Hide without destroying — call `show()` again to reveal |
+| `setSize(w, h)` | Resize dynamically |
+| `onFocusLost(cb)` | Register a callback that fires when focus leaves the window |
+| `close()` | Close and destroy |
 
 ## App Window Properties
 
-The main `App({})` config object supports several window properties for building launcher-style, overlay, or utility apps:
+The main `App({})` config object accepts the same window properties for
+building launcher-style, overlay, or utility apps:
 
-```typescript,no-test
-import { App, Text, VStack } from "perry/ui";
-
-App({
-  title: "QuickLaunch",
-  width: 600,
-  height: 80,
-  frameless: true,
-  level: "floating",
-  transparent: true,
-  vibrancy: "sidebar",
-  activationPolicy: "accessory",
-  body: VStack(8, [
-    Text("Search..."),
-  ]),
-});
+```typescript
+{{#include ../../examples/ui/multi_window/snippets.ts:app-config}}
 ```
+
+`App` additionally accepts the optional fields `frameless`, `level`,
+`transparent`, `vibrancy`, `activationPolicy`, and `icon`. They map to the
+following native primitives:
 
 ### `frameless: true`
 
@@ -91,7 +71,8 @@ Controls the window's z-order level relative to other windows.
 
 ### `transparent: true`
 
-Makes the window background transparent, allowing the desktop to show through non-opaque regions of your UI.
+Makes the window background transparent, allowing the desktop to show through
+non-opaque regions of your UI.
 
 | Platform | Implementation |
 |----------|---------------|
@@ -101,9 +82,13 @@ Makes the window background transparent, allowing the desktop to show through no
 
 ### `vibrancy: string`
 
-Applies a native translucent material to the window background. On macOS this uses the system vibrancy effect; on Windows it uses Mica/Acrylic.
+Applies a native translucent material to the window background. On macOS this
+uses the system vibrancy effect; on Windows it uses Mica/Acrylic.
 
-**macOS materials:** `"sidebar"`, `"titlebar"`, `"selection"`, `"menu"`, `"popover"`, `"headerView"`, `"sheet"`, `"windowBackground"`, `"hudWindow"`, `"fullScreenUI"`, `"tooltip"`, `"contentBackground"`, `"underWindowBackground"`, `"underPageBackground"`
+**macOS materials:** `"sidebar"`, `"titlebar"`, `"selection"`, `"menu"`,
+`"popover"`, `"headerView"`, `"sheet"`, `"windowBackground"`, `"hudWindow"`,
+`"fullScreenUI"`, `"tooltip"`, `"contentBackground"`, `"underWindowBackground"`,
+`"underPageBackground"`
 
 | Platform | Implementation |
 |----------|---------------|
@@ -127,27 +112,6 @@ Controls whether the app appears in the dock/taskbar.
 | Windows | `WS_EX_TOOLWINDOW` (removes from taskbar) |
 | Linux | `set_deletable(false)` (best-effort) |
 
-## Standalone Window Functions
-
-Window management is also available as standalone functions for use with window handles:
-
-```typescript,no-test
-import { Window, windowHide, windowSetSize, onWindowFocusLost } from "perry/ui";
-
-const win = Window("Panel", 400, 300);
-
-// Hide/show
-windowHide(win);
-
-// Resize dynamically
-windowSetSize(win, 600, computedHeight);
-
-// React to focus loss
-onWindowFocusLost(win, () => {
-  windowHide(win);
-});
-```
-
 ## Platform Notes
 
 | Platform | Implementation |
@@ -158,11 +122,12 @@ onWindowFocusLost(win, () => {
 | Web | Floating `<div>` |
 | iOS/Android | Modal view controller / Dialog |
 
-On mobile platforms, "windows" are presented as modal views or dialogs since mobile apps typically use a single-window model.
+On mobile platforms, "windows" are presented as modal views or dialogs since
+mobile apps typically use a single-window model.
 
 ## Next Steps
 
-- [Events](events.md) — Global hotkeys and keyboard shortcuts
+- [Events](events.md) — Keyboard shortcuts
 - [Dialogs](dialogs.md) — Modal dialogs and sheets
 - [Menus](menus.md) — Menu bar and toolbar
 - [UI Overview](overview.md) — Full UI system overview

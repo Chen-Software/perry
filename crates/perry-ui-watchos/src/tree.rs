@@ -69,12 +69,21 @@ pub struct NodeData {
     // Border
     pub border_color: Option<(f64, f64, f64, f64)>,
     pub border_width: Option<f64>,
+    // Drop shadow: (r, g, b, a, blur, offset_x, offset_y).
+    // Issue #185 Phase B; populated for tree-introspection clients
+    // even though the watchOS UIKit subset can't render shadows
+    // directly (SwiftUI host applies them when present).
+    pub shadow: Option<(f64, f64, f64, f64, f64, f64, f64)>,
     // Edge insets (padding per-side)
     pub edge_insets: Option<(f64, f64, f64, f64)>,
     // Font family
     pub font_family: Option<CString>,
     // Text wrapping
     pub text_wraps: bool,
+    // Text decoration (issue #185 Phase B): 0=none, 1=underline, 2=strikethrough.
+    // SwiftUI host applies `.underline()` / `.strikethrough()` modifier when
+    // rendering.
+    pub text_decoration: i64,
 }
 
 impl NodeData {
@@ -110,9 +119,11 @@ impl NodeData {
             image_tint: None,
             border_color: None,
             border_width: None,
+            shadow: None,
             edge_insets: None,
             font_family: None,
             text_wraps: false,
+            text_decoration: 0,
         }
     }
 }

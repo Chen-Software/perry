@@ -4,9 +4,8 @@ Perry natively implements many popular npm packages and Node.js APIs. When you i
 
 ## How It Works
 
-```typescript,no-test
-import fastify from "fastify";
-import mysql from "mysql2/promise";
+```typescript
+{{#include ../../examples/stdlib/overview/snippets.ts:imports}}
 ```
 
 Perry recognizes these imports at compile time and routes them to native Rust implementations in the `perry-stdlib` crate. The API surface matches the original npm package, so existing code often works unchanged.
@@ -91,10 +90,10 @@ See [Project Configuration](../getting-started/project-config.md) for details.
 
 ## JavaScript Runtime Fallback
 
-For packages that can't be compiled natively (native addons, dynamic code, etc.), Perry includes a QuickJS-based JavaScript runtime as a fallback:
+For packages that can't be compiled natively (native addons, dynamic code, etc.), Perry includes a QuickJS-based JavaScript runtime as a fallback. The exact API surface is internal-only today; the import below is illustrative:
 
-```typescript,no-test
-import { jsEval } from "perry/jsruntime";
+```text
+import { jsEval } from "perry/jsruntime"; // illustrative — not yet a public export
 ```
 
 ## Next Steps

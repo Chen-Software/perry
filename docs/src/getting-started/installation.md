@@ -6,7 +6,7 @@ Perry compiles TypeScript to native binaries by linking with your system's C too
 
 - **macOS**: Xcode Command Line Tools (`xcode-select --install`)
 - **Linux**: `gcc` or `clang` (`apt install build-essential` on Debian/Ubuntu, `apk add build-base` on Alpine)
-- **Windows**: MSVC via Visual Studio Build Tools with the "Desktop development with C++" workload
+- **Windows**: LLVM (`winget install LLVM.LLVM`) + `perry setup windows` (lightweight, ~1.5 GB, no Visual Studio needed), or MSVC Build Tools with the "Desktop development with C++" workload — see the [Windows platform guide](../platforms/windows.md) for both options
 
 The source install additionally needs the **Rust toolchain** via [rustup](https://rustup.rs/).
 
@@ -120,7 +120,27 @@ sudo dnf install gtk4-devel
 
 ### Windows
 
-Install Visual Studio Build Tools with the "Desktop development with C++" workload.
+Two toolchain options — pick one. Both produce identical binaries.
+
+**Lightweight (recommended, ~1.5 GB, no Visual Studio):**
+
+```powershell
+winget install LLVM.LLVM
+perry setup windows
+```
+
+`perry setup windows` downloads the Microsoft CRT + Windows SDK libraries via xwin after prompting for license acceptance. Pass `--accept-license` to skip the prompt in CI.
+
+**MSVC Build Tools (~8 GB):**
+
+Install Visual Studio Build Tools with the "Desktop development with C++" workload — via the Visual Studio Installer, or:
+
+```powershell
+winget install Microsoft.VisualStudio.2022.BuildTools --override `
+  "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+```
+
+Run `perry doctor` to verify the toolchain. See the [Windows platform guide](../platforms/windows.md) for details.
 
 ## What's Next
 

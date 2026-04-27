@@ -18,6 +18,7 @@ pub mod canvas;
 pub mod navstack;
 pub mod lazyvstack;
 pub mod image;
+pub mod splitview;
 
 use gtk4::prelude::*;
 use gtk4::Widget;
@@ -171,6 +172,81 @@ pub fn set_enabled(handle: i64, enabled: bool) {
     }
 }
 
+/// Set opacity (issue #185 Phase B). GTK4 has a built-in
+/// `Widget::set_opacity(0.0..=1.0)` that handles compositing on the
+/// platform's behalf; no CSS provider needed.
+pub fn set_opacity(handle: i64, opacity: f64) {
+    if let Some(widget) = get_widget(handle) {
+        widget.set_opacity(opacity);
+    }
+}
+
+thread_local! {
+    /// Joint border state per widget handle: `(color, width)`. Both
+    /// setters update this and re-emit the CSS rule together, because
+    /// CSS requires `border-style: solid` + a non-zero width + a color
+    /// all in the same provider for a border to actually render.
+    /// Setting only one would otherwise be silently ignored.
+    static BORDER_STATE: RefCell<std::collections::HashMap<i64, (Option<(f64, f64, f64, f64)>, Option<f64>)>>
+        = RefCell::new(std::collections::HashMap::new());
+}
+
+/// Helper: regenerate the per-handle border CSS provider from current
+/// state. Called from both `set_border_color` and `set_border_width`.
+fn apply_border_css(handle: i64) {
+    let Some(widget) = get_widget(handle) else { return };
+    let (color, width) = BORDER_STATE.with(|s| {
+        s.borrow().get(&handle).copied().unwrap_or((None, None))
+    });
+    // Defaults match CALayer-ish behavior: width 1.0 if unset,
+    // color black if unset. The cross-platform shape lets users
+    // call either setter alone and still get a visible border.
+    let (r, g, b, a) = color.unwrap_or((0.0, 0.0, 0.0, 1.0));
+    let w = width.unwrap_or(1.0);
+    let class_name = format!("perry-bd-{}", handle);
+    widget.remove_css_class(&class_name);
+    let rgba = format!("rgba({},{},{},{})", (r * 255.0) as i32, (g * 255.0) as i32, (b * 255.0) as i32, a);
+    let decl = format!("border: {}px solid {};", w as i32, rgba);
+    let is_button = widget.downcast_ref::<gtk4::Button>().is_some();
+    if is_button {
+        widget.add_css_class(&class_name);
+        let css = format!(
+            "button.flat.{} {{ {} }}\nbutton.{} {{ {} }}",
+            class_name, decl, class_name, decl
+        );
+        let provider = gtk4::CssProvider::new();
+        provider.load_from_data(&css);
+        gtk4::style_context_add_provider_for_display(
+            &widget.display(),
+            &provider,
+            gtk4::STYLE_PROVIDER_PRIORITY_USER,
+        );
+    } else {
+        let css = format!("* {{ {} }}", decl);
+        apply_css(&widget, &css);
+    }
+}
+
+/// Set border color (issue #185 Phase B). Joint state with `set_border_width`.
+pub fn set_border_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    BORDER_STATE.with(|s| {
+        let mut state = s.borrow_mut();
+        let entry = state.entry(handle).or_insert((None, None));
+        entry.0 = Some((r, g, b, a));
+    });
+    apply_border_css(handle);
+}
+
+/// Set border width (issue #185 Phase B). Joint state with `set_border_color`.
+pub fn set_border_width(handle: i64, width: f64) {
+    BORDER_STATE.with(|s| {
+        let mut state = s.borrow_mut();
+        let entry = state.entry(handle).or_insert((None, None));
+        entry.1 = Some(width);
+    });
+    apply_border_css(handle);
+}
+
 /// Set tooltip text on a widget.
 pub fn set_tooltip(handle: i64, text_ptr: *const u8) {
     let text = crate::app::str_from_header(text_ptr);
@@ -218,6 +294,59 @@ pub fn set_corner_radius(handle: i64, radius: f64) {
             );
         } else {
             let css = format!("* {{ border-radius: {}px; }}", radius as i32);
+            apply_css(&widget, &css);
+        }
+    }
+}
+
+/// Set drop shadow on a widget via CSS `box-shadow` (issue #185 Phase B).
+/// `(r, g, b, a)` is shadow color in 0–1 (alpha rides on the rgba() in CSS,
+/// so a non-1 alpha produces the soft tint just like the Apple twin's
+/// shadowOpacity). `blur` is the blur radius (px). `(offset_x, offset_y)`
+/// is the offset (positive y = downward, matching CSS `box-shadow` and
+/// the Apple CALayer twin).
+///
+/// Pattern mirrors `set_corner_radius`: a per-handle CSS class like
+/// `perry-sh-{handle}` is added to the widget, and a fresh
+/// `CssProvider` emits the `box-shadow` rule scoped to that class.
+/// Display-level `STYLE_PROVIDER_PRIORITY_USER` for buttons (matches
+/// the corner-radius button special-case), widget-level for other
+/// widgets via the shared `apply_css` helper. The class is removed
+/// before re-adding so repeat calls don't pile up stale providers.
+pub fn set_shadow(
+    handle: i64,
+    r: f64, g: f64, b: f64, a: f64,
+    blur: f64, offset_x: f64, offset_y: f64,
+) {
+    if let Some(widget) = get_widget(handle) {
+        let class_name = format!("perry-sh-{}", handle);
+        widget.remove_css_class(&class_name);
+        let r255 = (r * 255.0) as i32;
+        let g255 = (g * 255.0) as i32;
+        let b255 = (b * 255.0) as i32;
+        let rgba = format!("rgba({},{},{},{})", r255, g255, b255, a);
+        let shadow_decl = format!(
+            "box-shadow: {}px {}px {}px {};",
+            offset_x as i32, offset_y as i32, blur as i32, rgba
+        );
+        let is_button = widget.downcast_ref::<gtk4::Button>().is_some();
+        if is_button {
+            widget.add_css_class(&class_name);
+            let css = format!(
+                "button.flat.{} {{ {} }}\n\
+                 button.{} {{ {} }}",
+                class_name, shadow_decl,
+                class_name, shadow_decl
+            );
+            let provider = gtk4::CssProvider::new();
+            provider.load_from_data(&css);
+            gtk4::style_context_add_provider_for_display(
+                &widget.display(),
+                &provider,
+                gtk4::STYLE_PROVIDER_PRIORITY_USER,
+            );
+        } else {
+            let css = format!("* {{ {} }}", shadow_decl);
             apply_css(&widget, &css);
         }
     }
@@ -319,6 +448,29 @@ pub fn set_on_double_click(handle: i64, callback: f64) {
         widget.add_controller(gesture);
     }
 }
+
+/// Set a single-click callback on a widget.
+pub fn set_on_click(handle: i64, callback: f64) {
+    extern "C" {
+        fn js_closure_call0(closure: *const u8) -> f64;
+        fn js_nanbox_get_pointer(value: f64) -> i64;
+    }
+    if let Some(widget) = get_widget(handle) {
+        let gesture = gtk4::GestureClick::new();
+        gesture.set_button(1);
+        let cb = callback;
+        gesture.connect_pressed(move |_gesture, n_press, _x, _y| {
+            if n_press == 1 {
+                let ptr = unsafe { js_nanbox_get_pointer(cb) } as *const u8;
+                unsafe { js_closure_call0(ptr); }
+            }
+        });
+        widget.add_controller(gesture);
+    }
+}
+
+/// GTK4 already excludes non-visible children from layout — this is a no-op stub.
+pub fn set_detaches_hidden(_handle: i64, _detaches: bool) {}
 
 /// Animate the opacity of a widget. `duration_secs` is in seconds.
 pub fn animate_opacity(handle: i64, target: f64, duration_secs: f64) {
@@ -445,6 +597,129 @@ pub fn set_alignment(handle: i64, alignment: i64) {
                 }
             }
         }
+    }
+}
+
+/// Remove a single child widget from its parent. Mirrors macOS
+/// `perry_ui_widget_remove_child`. Dispatches by parent container kind:
+/// Box uses `remove(&child)`; ScrolledWindow / Frame inner-box / Overlay
+/// each clear by their own API. The handle stays registered (we don't
+/// shrink the WIDGETS vec, since handles are positional indices) — only
+/// the GTK4 parent link is severed, mirroring NSView's
+/// `removeFromSuperview`.
+pub fn remove_child(parent_handle: i64, child_handle: i64) {
+    if let (Some(parent), Some(child)) = (get_widget(parent_handle), get_widget(child_handle)) {
+        if let Some(container) = parent.downcast_ref::<gtk4::Box>() {
+            if child.parent().as_ref() == Some(container.upcast_ref::<Widget>()) {
+                container.remove(&child);
+            }
+        } else if let Some(scrolled) = parent.downcast_ref::<gtk4::ScrolledWindow>() {
+            if scrolled.child().as_ref() == Some(&child) {
+                scrolled.set_child(None::<&Widget>);
+            }
+        } else if let Some(overlay) = parent.downcast_ref::<gtk4::Overlay>() {
+            if overlay.child().as_ref() == Some(&child) {
+                overlay.set_child(None::<&Widget>);
+            } else {
+                overlay.remove_overlay(&child);
+            }
+        } else if let Some(frame) = parent.downcast_ref::<gtk4::Frame>() {
+            if let Some(inner) = frame.child() {
+                if let Some(inner_box) = inner.downcast_ref::<gtk4::Box>() {
+                    if child.parent().as_ref() == Some(inner_box.upcast_ref::<Widget>()) {
+                        inner_box.remove(&child);
+                    }
+                }
+            }
+        } else if child.parent().is_some() {
+            child.unparent();
+        }
+    }
+}
+
+/// Reorder a child within its parent container by positional index.
+/// Mirrors macOS `perry_ui_widget_reorder_child(parent, from, to)` —
+/// the macOS impl walks `arrangedSubviews` and uses `insertArrangedSubview:atIndex:`.
+/// On GTK4 we walk `parent.first_child()` siblings to locate the child at
+/// `from_index`, then walk again to find the anchor sibling at `to_index`,
+/// and call `Box::reorder_child_after(&child, anchor)`. Out-of-range
+/// indices are clamped: from > N-1 → no-op; to >= N → moves to the end.
+pub fn reorder_child(parent_handle: i64, from_index: i64, to_index: i64) {
+    let Some(parent) = get_widget(parent_handle) else { return };
+    let Some(container) = parent.downcast_ref::<gtk4::Box>() else { return };
+
+    // Snapshot the sibling list (positional, before mutation).
+    let mut siblings: Vec<Widget> = Vec::new();
+    let mut cur = container.first_child();
+    while let Some(c) = cur {
+        siblings.push(c.clone());
+        cur = c.next_sibling();
+    }
+    let n = siblings.len() as i64;
+    if from_index < 0 || from_index >= n {
+        return;
+    }
+    let child = siblings[from_index as usize].clone();
+    let to = to_index.clamp(0, n - 1);
+    if to == from_index {
+        return;
+    }
+    // `reorder_child_after(child, sibling)` — sibling=None places child first.
+    if to == 0 {
+        container.reorder_child_after(&child, None::<&Widget>);
+    } else {
+        // The anchor is the sibling that should end up immediately *before* child.
+        // After removal of child from position `from`, the sibling currently at
+        // `to` (when moving forward) or `to-1` (when moving back) is the right anchor.
+        let anchor_idx = if to > from_index { to as usize } else { (to - 1).max(0) as usize };
+        let anchor = siblings[anchor_idx].clone();
+        container.reorder_child_after(&child, Some(&anchor));
+    }
+}
+
+/// Add an overlay child on top of a parent. Mirrors macOS
+/// `perry_ui_widget_add_overlay` (which uses plain `addSubview`, so the
+/// child floats above arranged subviews). On GTK4 the natural primitive
+/// is `gtk4::Overlay::add_overlay`. If the parent isn't already an
+/// `Overlay`, we cannot retroactively wrap it in one (GTK4 widgets have a
+/// single immutable parent slot), so we log a warning and fall through to
+/// `add_child` — the user will still see their widget, just not floating
+/// above siblings. Use a `ZStack` (which is backed by `gtk4::Overlay`) as
+/// the parent for true overlay semantics.
+pub fn add_overlay(parent_handle: i64, child_handle: i64) {
+    if let (Some(parent), Some(child)) = (get_widget(parent_handle), get_widget(child_handle)) {
+        if child.parent().is_some() {
+            child.unparent();
+        }
+        if let Some(overlay) = parent.downcast_ref::<gtk4::Overlay>() {
+            overlay.add_overlay(&child);
+        } else {
+            eprintln!(
+                "perry-ui-gtk4: widget_add_overlay on non-Overlay parent — \
+                 falling back to add_child. Wrap the parent in a ZStack for true overlay."
+            );
+            add_child(parent_handle, child_handle);
+        }
+    }
+}
+
+/// Position + size an overlay child. Mirrors macOS
+/// `perry_ui_widget_set_overlay_frame` (CGRect on a subview). GTK4's
+/// layout model is constraint-based, not absolute-frame, so we approximate
+/// using `halign/valign = Start` + start/top margins for the (x, y) offset
+/// and `set_size_request(w, h)` for the size. This works correctly when
+/// the parent is a `gtk4::Overlay` (the common case for floating widgets)
+/// because Overlay honors child halign/valign. For other parent types the
+/// approximation may not produce pixel-perfect positioning — true
+/// absolute-frame semantics on a non-Overlay parent need a `gtk4::Fixed`
+/// wrapper, deferred until a use case surfaces.
+pub fn set_overlay_frame(handle: i64, x: f64, y: f64, w: f64, h: f64) {
+    if let Some(widget) = get_widget(handle) {
+        widget.set_halign(gtk4::Align::Start);
+        widget.set_valign(gtk4::Align::Start);
+        widget.set_margin_start(x as i32);
+        widget.set_margin_top(y as i32);
+        widget.set_size_request(w as i32, h as i32);
     }
 }
 

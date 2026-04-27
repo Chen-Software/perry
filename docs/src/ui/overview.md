@@ -14,7 +14,7 @@ perry app.ts -o app && ./app
 
 ## Mental Model
 
-Perry's UI follows the same model as SwiftUI and Flutter: you compose native widgets using stack-based layout containers (`VStack`, `HStack`, `ZStack`), control alignment and distribution, and style widgets directly via method calls. If you're coming from web development, the key shift is:
+Perry's UI follows the same model as SwiftUI and Flutter: you compose native widgets using stack-based layout containers (`VStack`, `HStack`, `ZStack`), control alignment and distribution, and style widgets via free functions that take the widget handle as their first argument (`textSetColor(label, r, g, b, a)`, `widgetSetEdgeInsets(stack, ...)`, etc.). If you're coming from web development, the key shift is:
 
 - **Layout** is controlled by stack alignment, distribution, and spacers — not CSS properties. See [Layout](layout.md).
 - **Styling** is applied directly to widgets — not through stylesheets. See [Styling](styling.md).
@@ -25,17 +25,8 @@ Perry's UI follows the same model as SwiftUI and Flutter: you compose native wid
 
 Every Perry UI app starts with `App()`:
 
-```typescript,no-test
-import { App, VStack, Text } from "perry/ui";
-
-App({
-  title: "Window Title",
-  width: 800,
-  height: 600,
-  body: VStack(16, [
-    Text("Content here"),
-  ]),
-});
+```typescript
+{{#include ../../examples/ui/overview/snippets.ts:app-shell}}
 ```
 
 `App({})` accepts a config object with the following properties:
@@ -57,40 +48,16 @@ See [Multi-Window](multi-window.md) for full documentation on window properties.
 
 ### Lifecycle Hooks
 
-```typescript,no-test
-import { App, onActivate, onTerminate } from "perry/ui";
-
-onActivate(() => {
-  console.log("App became active");
-});
-
-onTerminate(() => {
-  console.log("App is closing");
-});
-
-App({ title: "My App", width: 800, height: 600, body: /* ... */ });
+```typescript
+{{#include ../../examples/ui/overview/snippets.ts:lifecycle}}
 ```
 
 ## Widget Tree
 
 Perry UIs are built as a tree of widgets:
 
-```typescript,no-test
-import { App, Text, Button, VStack, HStack } from "perry/ui";
-
-App({
-  title: "Layout Demo",
-  width: 400,
-  height: 300,
-  body: VStack(16, [
-    Text("Header"),
-    HStack(8, [
-      Button("Left", () => console.log("left")),
-      Button("Right", () => console.log("right")),
-    ]),
-    Text("Footer"),
-  ]),
-});
+```typescript
+{{#include ../../examples/ui/overview/snippets.ts:widget-tree}}
 ```
 
 Widgets are created by calling their constructor functions. Layout containers (`VStack`, `HStack`, `ZStack`) accept a spacing value (in points) followed by an array of child widgets.
@@ -99,58 +66,22 @@ Widgets are created by calling their constructor functions. Layout containers (`
 
 Under the hood, each widget is a handle — a small integer that references a native platform object. When you call `Text("hello")`, Perry creates a native `NSTextField` (macOS), `UILabel` (iOS), `GtkLabel` (Linux), or `<span>` (web) and returns a handle you can use to modify it.
 
-```typescript,no-test
-const label = Text("Hello");
-label.setFontSize(18);        // Modifies the native widget
-label.setColor("#FF0000");     // Through the handle
+```typescript
+{{#include ../../examples/ui/overview/snippets.ts:handle-modify}}
 ```
 
 ## Imports
 
 All UI functions are imported from `perry/ui`:
 
-```typescript,no-test
-import {
-  // App lifecycle
-  App, onActivate, onTerminate,
-
-  // Widgets
-  Text, Button, TextField, SecureField, Toggle, Slider,
-  Image, ProgressView, Picker,
-
-  // Layout
-  VStack, HStack, ZStack, ScrollView, Spacer, Divider,
-  NavigationStack, LazyVStack, Form, Section,
-  VStackWithInsets, HStackWithInsets, SplitView, splitViewAddChild,
-
-  // Layout control
-  stackSetAlignment, stackSetDistribution, stackSetDetachesHidden,
-  widgetMatchParentWidth, widgetMatchParentHeight, widgetSetHugging,
-  widgetAddOverlay, widgetSetOverlayFrame,
-
-  // State
-  State, ForEach,
-
-  // Dialogs
-  openFileDialog, saveFileDialog, alert, Sheet,
-
-  // Menus
-  menuBarCreate, menuBarAddMenu, contextMenu,
-
-  // Canvas
-  Canvas,
-
-  // Table
-  Table,
-
-  // Window
-  Window,
-
-  // Camera (iOS)
-  CameraView, cameraStart, cameraStop, cameraFreeze, cameraUnfreeze,
-  cameraSampleColor, cameraSetOnTap,
-} from "perry/ui";
+```typescript
+{{#include ../../examples/ui/overview/imports.ts:imports}}
 ```
+
+> Canvas, camera capture, and a virtualized `Table` widget exist in some
+> platform backends but are not yet wired into the native (LLVM) codegen for
+> desktop targets. The pages dedicated to those features document the shape of
+> the API and which targets currently honor it.
 
 ## Platform Differences
 

@@ -290,7 +290,13 @@ pub(crate) fn lower_array_method(
             let val_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
             let recv_handle = unbox_to_i64(blk, &recv_box);
-            let i32_v = blk.call(I32, "js_array_indexOf_f64", &[(I64, &recv_handle), (DOUBLE, &val_box)]);
+            // Issue #214: route through `_jsvalue` so string elements
+            // match by content (handles SSO + heap-string mixed arrays
+            // — `arr.indexOf("hello")` on a `JSON.parse(...)`-derived
+            // string array returned -1 because the SSO element bits
+            // never bit-equal the heap-string needle bits). Mirrors
+            // the existing `includes` arm.
+            let i32_v = blk.call(I32, "js_array_indexOf_jsvalue", &[(I64, &recv_handle), (DOUBLE, &val_box)]);
             Ok(blk.sitofp(I32, &i32_v, DOUBLE))
         }
         "at" => {

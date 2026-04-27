@@ -38,10 +38,24 @@ pub fn compile_ll_to_object(ll_text: &str, target_triple: Option<&str>) -> Resul
     }
 
     let clang = find_clang().context(if cfg!(windows) {
-        "clang not found. Install LLVM from https://github.com/llvm/llvm-project/releases \
-         or set PERRY_LLVM_CLANG to the path of clang.exe"
+        "clang not found. Install LLVM with one of:\n\
+         \n\
+         \x20   winget install LLVM.LLVM       (Windows Package Manager)\n\
+         \x20   choco install llvm             (Chocolatey)\n\
+         \x20   scoop install llvm             (Scoop)\n\
+         \n\
+         or download the installer from https://github.com/llvm/llvm-project/releases\n\
+         (look for LLVM-<version>-win64.exe). After installation, open a new terminal\n\
+         so the updated PATH takes effect, or set PERRY_LLVM_CLANG to the full path of\n\
+         clang.exe. Run `perry doctor` to verify the install."
+    } else if cfg!(target_os = "macos") {
+        "clang not found. Install LLVM with `brew install llvm` or install Xcode \
+         command-line tools with `xcode-select --install`. Or set PERRY_LLVM_CLANG \
+         to the path of clang. Run `perry doctor` to verify the install."
     } else {
-        "No clang found in PATH. Install LLVM/clang or set PERRY_LLVM_CLANG"
+        "clang not found in PATH. Install LLVM/clang via your package manager \
+         (e.g. `apt install clang`, `dnf install clang`, `pacman -S clang`) or set \
+         PERRY_LLVM_CLANG to the path of clang. Run `perry doctor` to verify the install."
     })?;
 
     let mut cmd = Command::new(&clang);
@@ -66,12 +80,19 @@ pub fn compile_ll_to_object(ll_text: &str, target_triple: Option<&str>) -> Resul
         // -funsafe-math-optimizations: allows reassociation + reciprocal
         // -fno-math-errno: skip errno checks on math functions
         // (Do NOT use -ffinite-math-only or -ffast-math)
-        .arg("-fno-math-errno")
-        // Use native CPU features for better codegen on the build machine.
-        // ARM uses -mcpu=native; x86 uses -march=native.
-        // Cross-compilation overrides this via -target.
-        .arg(if cfg!(target_arch = "aarch64") { "-mcpu=native" } else { "-march=native" })
-        .arg(&ll_path)
+        .arg("-fno-math-errno");
+    // Native CPU tuning: only when building for the host. The flag name
+    // (`-mcpu` vs `-march`) is also arch-specific, and clang rejects
+    // `-mcpu=` for x86 targets and `-march=` for arm targets — so when
+    // cross-compiling we skip it entirely and let clang's `-target`
+    // default suffice. (Without this guard, an aarch64 macOS host
+    // cross-building for `x86_64-unknown-linux-gnu` would pass
+    // `-mcpu=native` to a clang invocation aimed at x86, which fails
+    // with `unsupported option '-mcpu='`.)
+    if target_triple.is_none() {
+        cmd.arg(if cfg!(target_arch = "aarch64") { "-mcpu=native" } else { "-march=native" });
+    }
+    cmd.arg(&ll_path)
         .arg("-o")
         .arg(&obj_path);
     if let Some(triple) = target_triple {
@@ -110,7 +131,7 @@ pub fn compile_ll_to_object(ll_text: &str, target_triple: Option<&str>) -> Resul
     Ok(bytes)
 }
 
-fn find_clang() -> Option<PathBuf> {
+pub fn find_clang() -> Option<PathBuf> {
     // Honor explicit override first — useful on systems with multiple clang
     // installs (e.g. Homebrew LLVM vs Xcode).
     if let Ok(p) = env::var("PERRY_LLVM_CLANG") {
@@ -138,7 +159,15 @@ fn find_clang() -> Option<PathBuf> {
     }
     #[cfg(not(windows))]
     {
-        for prefix in &["/opt/homebrew/opt/llvm/bin", "/usr/local/opt/llvm/bin"] {
+        // Homebrew on macOS, ROCm / distro LLVM on Linux.
+        for prefix in &[
+            "/opt/homebrew/opt/llvm/bin",
+            "/usr/local/opt/llvm/bin",
+            "/usr/lib64/rocm/llvm/bin",
+            "/usr/lib/llvm-19/bin",
+            "/usr/lib/llvm-18/bin",
+            "/usr/lib/llvm-17/bin",
+        ] {
             let candidate = PathBuf::from(prefix).join("clang");
             if candidate.exists() && is_executable(&candidate) {
                 return Some(candidate);
@@ -240,7 +269,14 @@ fn find_llvm_tool(tool: &str) -> Option<PathBuf> {
             return Some(candidate);
         }
     }
-    for prefix in &["/opt/homebrew/opt/llvm/bin", "/usr/local/opt/llvm/bin"] {
+    for prefix in &[
+        "/opt/homebrew/opt/llvm/bin",
+        "/usr/local/opt/llvm/bin",
+        "/usr/lib64/rocm/llvm/bin",
+        "/usr/lib/llvm-19/bin",
+        "/usr/lib/llvm-18/bin",
+        "/usr/lib/llvm-17/bin",
+    ] {
         let candidate = PathBuf::from(prefix).join(tool);
         if candidate.exists() && is_executable(&candidate) {
             return Some(candidate);

@@ -49,6 +49,21 @@ pub struct LoweringContext {
     pub(crate) interfaces: Vec<(String, InterfaceId)>,
     /// Type aliases: name -> (id, type_params, aliased_type)
     pub(crate) type_aliases: Vec<(String, TypeAliasId, Vec<TypeParam>, Type)>,
+    /// Issue #179 typed-parse: interface name → field names in AST
+    /// source order. Populated alongside `interfaces` during
+    /// `lower_interface_decl`. `ObjectType::properties` is a HashMap
+    /// that loses source order; this side table preserves it so
+    /// `JSON.parse<Item[]>` codegen can emit a shape hint whose order
+    /// matches typical `JSON.stringify` output (source order ≈
+    /// insertion order ≈ what we see on the wire). Lost order would
+    /// still be correct, just not fast-path friendly.
+    pub(crate) interface_source_keys: std::collections::HashMap<String, Vec<String>>,
+    /// Issue #179 typed-parse: interface name → resolved `ObjectType`.
+    /// `resolve_typed_parse_ty` uses this so `JSON.parse<Item[]>`
+    /// lowers to `Array<Object{fields}>` instead of `Array<Named("Item")>`.
+    /// Without this, codegen sees only `Named` and can't extract the
+    /// shape, so the specialized parse path never fires.
+    pub(crate) interface_object_types: std::collections::HashMap<String, perry_types::ObjectType>,
     /// Imported functions: local_name -> original_name (the exported name in the source module)
     pub(crate) imported_functions: Vec<(String, String)>,
     /// Native module imports: local_name -> (module_name, method_name)
@@ -176,6 +191,30 @@ pub struct LoweringContext {
     /// Used to resolve `new.target` to a placeholder object whose `.name`
     /// returns the class name. None outside any constructor.
     pub(crate) in_constructor_class: Option<String>,
+    /// Phase 3 anon-class registry for closed-shape object literals: shape key
+    /// (canonical field-name + type-tag joined) -> synthetic class name. Lets
+    /// identical-shape literals within the same module share one synthesized
+    /// class — shared class_id, shared keys_array global, shared direct-GEP
+    /// field layout. Dedup is per-module only; cross-module dedup would need
+    /// a stable hash and is deferred.
+    pub(crate) anon_shape_classes: HashMap<String, String>,
+    /// Counter for generating anon-class names (`__AnonShape_N`).
+    pub(crate) next_anon_shape_id: u32,
+    /// Phase 4.1: method return types registry keyed by (class_name,
+    /// method_name). Populated as methods are lowered so call-site inference
+    /// (`infer_call_return_type`'s Member arm) can resolve `obj.method()` to
+    /// the method's declared or inferred return type when `obj`'s type is
+    /// `Type::Named(class_name)`. Mirrors `func_return_types` but for the
+    /// method-dispatch path.
+    pub(crate) class_method_return_types: Vec<(String, String, Type)>,
+    /// Issue #212: classes nested inside a function whose method bodies
+    /// reference enclosing-scope locals. `lower_class_decl` adds hidden
+    /// `__perry_cap_<id>` fields, prepends `let id = this.__perry_cap_<id>`
+    /// to each capturing instance method, extends the constructor with one
+    /// synthesized param per captured id, and registers the captured ids
+    /// here so the `Expr::New { class_name }` lowering can append
+    /// `LocalGet(id)` for each captured id at every construction site.
+    pub(crate) class_captures: Vec<(String, Vec<LocalId>)>,
 }
 
 impl LoweringContext {
@@ -202,6 +241,8 @@ impl LoweringContext {
             enums: Vec::new(),
             interfaces: Vec::new(),
             type_aliases: Vec::new(),
+            interface_source_keys: std::collections::HashMap::new(),
+            interface_object_types: std::collections::HashMap::new(),
             imported_functions: Vec::new(),
             native_modules: Vec::new(),
             builtin_module_aliases: Vec::new(),
@@ -243,6 +284,10 @@ impl LoweringContext {
             class_expr_aliases: HashMap::new(),
             in_constructor_class: None,
             mixin_funcs: HashMap::new(),
+            anon_shape_classes: HashMap::new(),
+            next_anon_shape_id: 0,
+            class_method_return_types: Vec::new(),
+            class_captures: Vec::new(),
         }
     }
 
@@ -283,6 +328,96 @@ impl LoweringContext {
             .find(|(alias_name, _, type_params, _)| alias_name == name && type_params.is_empty())
             .map(|(_, _, _, ty)| ty.clone())
     }
+}
+
+/// Issue #179 typed-parse: extract the field-name list in source
+/// order from a `JSON.parse<T>` AST type argument. `T` may be:
+/// - A type literal `{id: number, name: string}` — direct extraction
+/// - `Array<T>` / `T[]` — recurse on element
+/// - A named interface reference `Item` — resolve via ctx and re-walk
+///   the interface declaration's member list
+///
+/// Returns None on any unresolved reference or unsupported shape. The
+/// caller treats that as "no fast-path order available" and emits the
+/// slow-path only (still correct, just slower).
+fn extract_typed_parse_source_order(
+    ts_type: &swc_ecma_ast::TsType,
+    ctx: &LoweringContext,
+) -> Option<Vec<String>> {
+    use swc_ecma_ast as ast;
+    match ts_type {
+        ast::TsType::TsArrayType(arr) => {
+            extract_typed_parse_source_order(&arr.elem_type, ctx)
+        }
+        ast::TsType::TsTypeLit(lit) => {
+            let mut keys = Vec::with_capacity(lit.members.len());
+            for member in &lit.members {
+                if let ast::TsTypeElement::TsPropertySignature(prop) = member {
+                    if let ast::Expr::Ident(ident) = prop.key.as_ref() {
+                        keys.push(ident.sym.to_string());
+                    } else {
+                        return None;
+                    }
+                }
+            }
+            if keys.is_empty() { None } else { Some(keys) }
+        }
+        ast::TsType::TsTypeRef(tref) => {
+            // `Array<T>` — recurse on the element type argument.
+            if let Some(type_params) = &tref.type_params {
+                let name = match &tref.type_name {
+                    ast::TsEntityName::Ident(i) => i.sym.as_ref(),
+                    _ => return None,
+                };
+                if name == "Array" && type_params.params.len() == 1 {
+                    return extract_typed_parse_source_order(&type_params.params[0], ctx);
+                }
+            }
+            // Named interface reference — look up the source-order
+            // field list recorded by `lower_interface_decl`.
+            let name = match &tref.type_name {
+                ast::TsEntityName::Ident(i) => i.sym.to_string(),
+                _ => return None,
+            };
+            ctx.interface_source_keys.get(&name).cloned()
+        }
+        _ => None,
+    }
+}
+
+/// Issue #179 typed-parse: fully resolve a `JSON.parse<T>` type argument
+/// down to a structural form codegen can use (ObjectType with fields /
+/// Array of object). Named/interface references are expanded via the
+/// lowering context's type-alias table. Unresolvable references collapse
+/// to `Type::Any` so the caller falls through to the generic parser.
+fn resolve_typed_parse_ty(ctx: &LoweringContext, ty: Type) -> Type {
+    match ty {
+        Type::Named(ref name) => {
+            // Interface reference? Expand to ObjectType from the
+            // typed-parse side table (populated by `lower_interface_decl`).
+            if let Some(obj) = ctx.interface_object_types.get(name) {
+                return Type::Object(obj.clone());
+            }
+            // Type alias? Expand and recurse.
+            match ctx.resolve_type_alias(name) {
+                Some(resolved) => resolve_typed_parse_ty(ctx, resolved),
+                None => Type::Any,
+            }
+        }
+        Type::Array(elem) => {
+            let resolved = resolve_typed_parse_ty(ctx, *elem);
+            Type::Array(Box::new(resolved))
+        }
+        Type::Generic { base, type_args } if base == "Array" && type_args.len() == 1 => {
+            let resolved = resolve_typed_parse_ty(ctx, type_args.into_iter().next().unwrap());
+            Type::Array(Box::new(resolved))
+        }
+        // Object/primitive/tuple types pass through unchanged.
+        other => other,
+    }
+}
+
+impl LoweringContext {
 
     pub(crate) fn fresh_local(&mut self) -> LocalId {
         let id = self.next_local_id;
@@ -370,6 +505,24 @@ impl LoweringContext {
     /// Look up the list of instance field names declared on a class (NOT including inherited).
     pub(crate) fn lookup_class_field_names(&self, class_name: &str) -> Option<&[String]> {
         self.class_field_names.iter().find(|(n, _)| n == class_name).map(|(_, f)| f.as_slice())
+    }
+
+    /// Issue #212: register the outer-scope LocalIds that a nested class
+    /// captures. `lower_class_decl` calls this after extending the
+    /// constructor; `Expr::New { class_name }` lowering looks it up and
+    /// appends `LocalGet(id)` per captured id at every construction site.
+    pub(crate) fn register_class_captures(&mut self, class_name: String, captures: Vec<LocalId>) {
+        if let Some(entry) = self.class_captures.iter_mut().find(|(n, _)| *n == class_name) {
+            entry.1 = captures;
+        } else {
+            self.class_captures.push((class_name, captures));
+        }
+    }
+
+    /// Look up the captured outer-scope LocalIds for a class. Returns `None`
+    /// for plain (non-capturing) classes.
+    pub(crate) fn lookup_class_captures(&self, class_name: &str) -> Option<&[LocalId]> {
+        self.class_captures.iter().find(|(n, _)| n == class_name).map(|(_, c)| c.as_slice())
     }
 
     pub(crate) fn register_class_statics(&mut self, class_name: String, static_fields: Vec<String>, static_methods: Vec<String>) {
@@ -463,6 +616,141 @@ impl LoweringContext {
         let idx = self.classes.len();
         self.classes_index.insert(name.clone(), idx);
         self.classes.push((name, id));
+    }
+
+    /// Phase 3: synthesize (or retrieve) an anon class for a closed-shape object
+    /// literal. `fields_with_types` is parallel to the literal's source-declared
+    /// properties — source order is preserved so the anon class's field layout
+    /// matches JS evaluation order. Returns the synthetic class name.
+    ///
+    /// The synthesized class has fields with `init: None`. Each literal's
+    /// values are stored via per-literal `PropertySet` statements emitted
+    /// after the allocation at the Object-arm call site (wrapped in an
+    /// `Expr::Sequence`). This preserves the per-literal values under
+    /// shape-deduplication — earlier versions put the init values on the
+    /// class itself, which meant dedup'd classes silently kept only the
+    /// FIRST literal's values (every subsequent `{name:"b",…}` saw the
+    /// original `{name:"a",…}` inits — broke `arr.map(x => x.name)` into
+    /// `[a, a, a, a]`).
+    pub(crate) fn synthesize_anon_shape_class(
+        &mut self,
+        fields_with_types: &[(String, Type, Expr)],
+    ) -> String {
+        // Canonical shape key: each field as `name:tag` joined by ',' in source
+        // order. Different declaration orders -> different classes (preserves
+        // JS eval order). Type tag is a coarse primitive fingerprint so two
+        // literals with identical names but Number vs String fields don't
+        // share a misleading class.
+        fn tag(ty: &Type) -> &'static str {
+            match ty {
+                Type::Number => "n",
+                Type::Int32 => "i",
+                Type::String => "s",
+                Type::Boolean => "b",
+                Type::BigInt => "B",
+                Type::Null => "N",
+                Type::Void => "v",
+                Type::Array(_) => "a",
+                Type::Object(_) => "o",
+                Type::Function(_) => "f",
+                Type::Named(_) => "c",
+                Type::Promise(_) => "p",
+                _ => "?",
+            }
+        }
+        let mut shape_key = String::new();
+        for (name, ty, _) in fields_with_types {
+            shape_key.push_str(name);
+            shape_key.push(':');
+            shape_key.push_str(tag(ty));
+            shape_key.push(',');
+        }
+
+        if let Some(existing) = self.anon_shape_classes.get(&shape_key) {
+            return existing.clone();
+        }
+
+        let anon_id = self.next_anon_shape_id;
+        self.next_anon_shape_id += 1;
+        let class_name = format!("__AnonShape_{}", anon_id);
+        let class_id = self.fresh_class();
+
+        // Fields have `init: None` — each literal's values are passed as
+        // positional constructor args, so the class stays shape-only (no
+        // per-literal state). See the method doc comment for why this
+        // matters under shape-deduplication.
+        let fields: Vec<ClassField> = fields_with_types
+            .iter()
+            .map(|(name, ty, _init_expr_unused)| ClassField {
+                name: name.clone(),
+                ty: ty.clone(),
+                init: None,
+                is_private: false,
+                is_readonly: false,
+            })
+            .collect();
+
+        // Synthesize a constructor `(f1, f2, ...) => { this.f1 = f1; this.f2 = f2; ... }`.
+        // `Expr::New { args }` at call sites passes each literal's values
+        // in field-declaration order; the constructor body assigns them.
+        // PropertySet's direct-GEP path fires because `this` resolves to
+        // the anon class via the usual class_stack/this_stack dance in
+        // lower_call.rs::lower_new.
+        let mut ctor_params: Vec<Param> = Vec::with_capacity(fields_with_types.len());
+        let mut ctor_body: Vec<Stmt> = Vec::with_capacity(fields_with_types.len());
+        for (name, ty, _value) in fields_with_types {
+            let param_id = self.fresh_local();
+            ctor_params.push(Param {
+                id: param_id,
+                name: name.clone(),
+                ty: ty.clone(),
+                default: None,
+                is_rest: false,
+            });
+            ctor_body.push(Stmt::Expr(Expr::PropertySet {
+                object: Box::new(Expr::This),
+                property: name.clone(),
+                value: Box::new(Expr::LocalGet(param_id)),
+            }));
+        }
+        let constructor = Function {
+            id: self.fresh_func(),
+            name: "constructor".to_string(),
+            type_params: Vec::new(),
+            params: ctor_params,
+            return_type: Type::Void,
+            body: ctor_body,
+            is_async: false,
+            is_generator: false,
+            is_exported: false,
+            captures: Vec::new(),
+            decorators: Vec::new(),
+        };
+
+        // Register in the name->id index so lookup_class finds it, and push to
+        // pending_classes so it flushes into module.classes after the enclosing
+        // statement finishes lowering (same pattern as anonymous class
+        // expressions — see `ast::Expr::Class` arm in lower_expr).
+        self.register_class(class_name.clone(), class_id);
+        self.pending_classes.push(Class {
+            id: class_id,
+            name: class_name.clone(),
+            type_params: Vec::new(),
+            extends: None,
+            extends_name: None,
+            native_extends: None,
+            fields,
+            constructor: Some(constructor),
+            methods: Vec::new(),
+            getters: Vec::new(),
+            setters: Vec::new(),
+            static_fields: Vec::new(),
+            static_methods: Vec::new(),
+            is_exported: false,
+        });
+
+        self.anon_shape_classes.insert(shape_key, class_name.clone());
+        class_name
     }
 
     pub(crate) fn lookup_func_name(&self, func_id: FuncId) -> Option<&str> {
@@ -674,6 +962,37 @@ impl LoweringContext {
         self.func_return_types.iter().rev()
             .find(|(n, _)| n == name)
             .map(|(_, ty)| ty)
+    }
+
+    /// Phase 4.1: register a method's return type so call-site inference can
+    /// resolve `obj.method()` when `obj: Type::Named(class_name)`. Called
+    /// from `lower_class_from_ast` right after each method's Function is
+    /// built, so both declared annotations and Phase 4-expansion body
+    /// inferences flow through. Extends-chain traversal happens at lookup
+    /// time via `lookup_class_method_return_type`.
+    pub(crate) fn register_class_method_return_type(
+        &mut self,
+        class_name: String,
+        method_name: String,
+        ty: Type,
+    ) {
+        self.class_method_return_types.push((class_name, method_name, ty));
+    }
+
+    /// Phase 4.1: lookup the return type of `class_name.method_name`.
+    /// Does NOT walk the extends chain today — that needs the parent class
+    /// name accessible from the context, which the current registry doesn't
+    /// track. Callers handle inheritance externally if needed. Reverse
+    /// iteration so the latest registration wins for shadowing (mirrors
+    /// `lookup_func_return_type`).
+    pub(crate) fn lookup_class_method_return_type(
+        &self,
+        class_name: &str,
+        method_name: &str,
+    ) -> Option<&Type> {
+        self.class_method_return_types.iter().rev()
+            .find(|(c, m, _)| c == class_name && m == method_name)
+            .map(|(_, _, ty)| ty)
     }
 
     pub(crate) fn enter_scope(&mut self) -> (usize, usize, usize) {
@@ -2680,7 +2999,7 @@ fn lower_module_decl(
                                         if let Some((module_name, Some(method_name))) = ctx.lookup_native_module(func_name) {
                                             if module_name == "perry/ui" {
                                                 match method_name {
-                                                    "State" | "Sheet" | "Toolbar" | "Window" | "LazyVStack"
+                                                    "Canvas" | "State" | "Sheet" | "Toolbar" | "Window" | "LazyVStack"
                                                     | "NavigationStack" | "Picker" | "Table" | "TabBar" => {
                                                         ctx.register_native_instance(name.clone(), module_name.to_string(), method_name.to_string());
                                                     }
@@ -4682,7 +5001,9 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                 // Global Infinity identifier
                 Ok(Expr::Number(f64::INFINITY))
             } else {
-                // Assume it's a global (like console)
+                // GlobalGet(0) is a sentinel: codegen routes by name from the
+                // parent PropertyGet/Call/Member context. Bare uses lower to
+                // 0.0 (perry-codegen/src/expr.rs Expr::GlobalGet arm).
                 if name != "console" && name != "process" && name != "globalThis" && name != "Buffer"
                     && name != "Date" && name != "JSON" && name != "Math" && name != "Object"
                     && name != "Array" && name != "String" && name != "Number" && name != "Boolean"
@@ -4696,8 +5017,12 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                     && name != "Headers" && name != "fetch" && name != "crypto" && name != "performance"
                     && name != "queueMicrotask" && name != "structuredClone" && name != "atob" && name != "btoa"
                     && name != "BigInt" {
+                    eprintln!(
+                        "  Warning: unknown identifier '{}' — assuming global; member access will dispatch by name at runtime, bare reads lower to 0",
+                        name
+                    );
                 }
-                Ok(Expr::GlobalGet(0)) // TODO: proper global lookup
+                Ok(Expr::GlobalGet(0))
             }
         }
         ast::Expr::Bin(bin) => {
@@ -5543,11 +5868,21 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                     if let ast::Expr::Member(member) = expr.as_ref() {
                         if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
                             let obj_name = obj_ident.sym.to_string();
-                            if ctx.lookup_class(&obj_name).is_some() {
+                            // Treat uppercase imported identifiers as candidate classes —
+                            // we don't have cross-module class metadata at HIR-lower
+                            // time, so without this `import { MongoClient } from
+                            // 'pkg'; MongoClient.connect(...)` falls through to the
+                            // dynamic-dispatch path and reads garbage from the static
+                            // ClosureHeader.  See compile.rs::imported_classes for the
+                            // backing dispatch table that resolves these calls at
+                            // codegen time.
+                            let is_imported_upper = ctx.lookup_imported_func(&obj_name).is_some()
+                                && obj_name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
+                            if ctx.lookup_class(&obj_name).is_some() || is_imported_upper {
                                 match &member.prop {
                                     ast::MemberProp::Ident(method_ident) => {
                                         let method_name = method_ident.sym.to_string();
-                                        if ctx.has_static_method(&obj_name, &method_name) {
+                                        if ctx.has_static_method(&obj_name, &method_name) || is_imported_upper {
                                             return Ok(Expr::StaticMethodCall {
                                                 class_name: obj_name,
                                                 method_name,
@@ -5597,6 +5932,35 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                             }
                         }
 
+                        // issue #195: WidgetCtor(...).modifierName(...) is silently dropped.
+                        // Reject at compile time so users discover the options-object form.
+                        if let ast::Expr::Call(inner_call) = member.obj.as_ref() {
+                            if let ast::Callee::Expr(inner_callee) = &inner_call.callee {
+                                if let ast::Expr::Ident(widget_ident) = inner_callee.as_ref() {
+                                    let widget_name = widget_ident.sym.as_ref();
+                                    if matches!(widget_name,
+                                        "Text" | "VStack" | "HStack" | "ZStack" |
+                                        "Image" | "Spacer" | "Divider" |
+                                        "ForEach" | "Label" | "Gauge"
+                                    ) {
+                                        if matches!(ctx.lookup_native_module(widget_name),
+                                            Some(("perry/ui", _))
+                                        ) {
+                                            if let ast::MemberProp::Ident(method_ident) = &member.prop {
+                                                let modifier_name = method_ident.sym.as_ref();
+                                                if is_widget_modifier_name(modifier_name) {
+                                                    return Err(anyhow!(
+                                                        "modifier '{}' must be passed as an option-object on the widget constructor; use: {}(\"...\", {{ {}: ... }})",
+                                                        modifier_name, widget_name, modifier_name
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // Check for method calls on new Big/Decimal/BigNumber() expressions
                         // e.g., new Big("100").div(2)
                         if let Some(module_name) = detect_native_instance_expr(&member.obj) {
@@ -5620,15 +5984,40 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                             let method_name = method_ident.sym.to_string();
                             // Lower the object expression first
                             let object_expr = lower_expr(ctx, &member.obj)?;
-                            // Check if it's a NativeMethodCall for a math library
+                            // Check if it's a NativeMethodCall for a fluent-API native module
                             if let Expr::NativeMethodCall { module, class_name, .. } = &object_expr {
                                 // Methods that return the same type (builder pattern)
                                 let is_math_lib = matches!(module.as_str(), "big.js" | "decimal.js" | "bignumber.js");
-                                let is_fluent_method = matches!(method_name.as_str(),
+                                let is_math_method = matches!(method_name.as_str(),
+                                    // arithmetic + chainable rounding/formatting
                                     "plus" | "minus" | "times" | "div" | "mod" |
-                                    "pow" | "sqrt" | "abs" | "neg" | "round" | "floor" | "ceil" | "toFixed"
+                                    "pow" | "sqrt" | "abs" | "neg" | "round" | "floor" | "ceil" | "toFixed" |
+                                    // decimal.js: terminal-shape methods that still need
+                                    // NativeMethodCall dispatch (so a.plus(b).eq(c) etc.
+                                    // doesn't fall back to the generic Call+PropertyGet path).
+                                    "toString" | "toNumber" | "valueOf" |
+                                    "eq" | "lt" | "lte" | "gt" | "gte" | "cmp" |
+                                    "isZero" | "isPositive" | "isNegative"
                                 );
-                                if is_math_lib && is_fluent_method {
+                                // commander Command — every fluent method either
+                                // returns the same handle (name/version/description/
+                                // option/requiredOption/action) or a sub-Command with
+                                // the same module + class (.command(name)). Either way
+                                // the next chained call must dispatch through the
+                                // commander NativeModSig table, not the generic
+                                // dynamic-property fallback. Without this branch
+                                // `program.name(...).version(...)` only the first
+                                // call landed as a NativeMethodCall and the rest
+                                // silently no-op'd at codegen — issue #187.
+                                let is_commander = module.as_str() == "commander";
+                                let is_commander_method = matches!(method_name.as_str(),
+                                    "name" | "version" | "description" |
+                                    "option" | "requiredOption" |
+                                    "action" | "command" | "parse" | "opts"
+                                );
+                                if (is_math_lib && is_math_method)
+                                    || (is_commander && is_commander_method)
+                                {
                                     return Ok(Expr::NativeMethodCall {
                                         module: module.clone(),
                                         class_name: class_name.clone(),
@@ -5795,7 +6184,41 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                 let reviver = iter.next().unwrap();
                                                 return Ok(Expr::JsonParseWithReviver(Box::new(text), Box::new(reviver)));
                                             } else if args.len() >= 1 {
-                                                return Ok(Expr::JsonParse(Box::new(args.into_iter().next().unwrap())));
+                                                let text = args.into_iter().next().unwrap();
+                                                // Issue #179 typed-parse plan: if the call site
+                                                // provides a TypeScript type argument (e.g.
+                                                // `JSON.parse<Item[]>(blob)`), carry it into HIR
+                                                // so codegen can emit a specialized parse path.
+                                                // Semantically identical to JsonParse at runtime
+                                                // (the `<T>` erases — Node-compatible).
+                                                if let Some(type_args) = call.type_args.as_ref() {
+                                                    if let Some(ts_type) = type_args.params.first() {
+                                                        let ty = extract_ts_type_with_ctx(ts_type, Some(ctx));
+                                                        // Resolve Named → structural (interface)
+                                                        // aliases so codegen sees the full
+                                                        // ObjectType without re-walking the alias
+                                                        // table. Array<Named> inner element
+                                                        // also gets resolved.
+                                                        let resolved = resolve_typed_parse_ty(ctx, ty);
+                                                        if !matches!(resolved, Type::Any | Type::Unknown) {
+                                                            // Source-order field list for the
+                                                            // inner Object type, if we can
+                                                            // extract it from the AST. Codegen
+                                                            // uses this for the fast-path
+                                                            // per-field comparison.
+                                                            let ordered_keys =
+                                                                extract_typed_parse_source_order(
+                                                                    ts_type, ctx,
+                                                                );
+                                                            return Ok(Expr::JsonParseTyped {
+                                                                text: Box::new(text),
+                                                                ty: resolved,
+                                                                ordered_keys,
+                                                            });
+                                                        }
+                                                    }
+                                                }
+                                                return Ok(Expr::JsonParse(Box::new(text)));
                                             }
                                         }
                                         "stringify" => {
@@ -6712,14 +7135,41 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                 // to the class method, not runtime js_array_push. Map/Set/Promise are
                                 // handled by explicit checks within the array block below.
                                 let builtin_generic_bases = ["Map", "Set", "WeakMap", "WeakSet", "Promise"];
+                                // Imported classes don't show up in `lookup_class`; treat any
+                                // uppercase imported identifier as a candidate class so the
+                                // array fast-path doesn't swallow `coll.find(filter)` etc.
+                                let is_imported_class_name = |n: &str| -> bool {
+                                    if let Some(c) = n.chars().next() {
+                                        if c.is_uppercase() && ctx.lookup_imported_func(n).is_some() {
+                                            return true;
+                                        }
+                                    }
+                                    false
+                                };
                                 let is_user_class_instance = match type_info {
-                                    Some(Type::Named(name)) => ctx.lookup_class(name).is_some(),
+                                    Some(Type::Named(name)) => {
+                                        ctx.lookup_class(name).is_some() || is_imported_class_name(name)
+                                    }
                                     Some(Type::Generic { base, .. }) => {
                                         !builtin_generic_bases.contains(&base.as_str())
-                                            && ctx.lookup_class(base).is_some()
+                                            && (ctx.lookup_class(base).is_some()
+                                                || is_imported_class_name(base))
                                     }
                                     _ => false,
                                 };
+                                // When the receiver type is Any and the method name is one
+                                // commonly defined on user classes too (e.g. mongo's
+                                // `Collection.find(filter)`), skip the array fast-path so the
+                                // dispatch falls through to class-method resolution. Without this
+                                // guard, the lowering blindly emits `Expr::ArrayFind` and the
+                                // call resolves to `js_array_find` at codegen time, returning 0.
+                                let is_class_overlapping_method = matches!(method_name,
+                                    "find" | "findIndex" | "findLast" | "findLastIndex"
+                                    | "map" | "filter" | "some" | "every"
+                                    | "forEach" | "reduce" | "reduceRight"
+                                    | "join"
+                                );
+                                let is_unknown_recv = matches!(type_info, None | Some(Type::Any) | Some(Type::Unknown));
                                 let is_known_not_string = type_info
                                     .map(|ty| !matches!(ty, Type::String | Type::Any | Type::Unknown))
                                     .unwrap_or(false)
@@ -6755,6 +7205,8 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                     true   // definitely not a string, enter array block
                                 } else if is_ambiguous_method {
                                     false  // type unknown + ambiguous method, skip array block (fall through to general dispatch)
+                                } else if is_unknown_recv && is_class_overlapping_method {
+                                    false  // type unknown + method commonly defined on user classes — fall through
                                 } else {
                                     true   // type unknown + array-only method (push, pop, etc.), enter array block
                                 };
@@ -6879,96 +7331,45 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                 });
                                             }
                                         }
-                                        "map" => {
-                                            // Only use ArrayMap if receiver is not a class instance
-                                            let is_class_instance = ctx.lookup_local_type(&arr_name)
-                                                .map(|ty| matches!(ty, Type::Named(_) | Type::Generic { .. }) && !matches!(ty, Type::Array(_)))
+                                        "map" | "filter" | "find" | "findIndex"
+                                        | "findLast" | "findLastIndex" | "some"
+                                        | "every" | "at" => {
+                                            // Skip the array-method fast path when the receiver
+                                            // is a known class instance (e.g. mongo `Collection.find`).
+                                            // Without this guard, `coll.find(filter)` lowers to
+                                            // `Expr::ArrayFind` and dispatches to `js_array_find`,
+                                            // which silently returns 0 on a class receiver.
+                                            let recv_ty = ctx.lookup_local_type(&arr_name);
+                                            let is_class_instance = recv_ty
+                                                .as_ref()
+                                                .map(|ty| matches!(ty, Type::Named(_) | Type::Generic { .. })
+                                                    && !matches!(ty, Type::Array(_)))
                                                 .unwrap_or(false);
-                                            if !is_class_instance && args.len() >= 1 {
-                                                let cb = args.into_iter().next().unwrap();
-                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
-                                                return Ok(Expr::ArrayMap {
-                                                    array: Box::new(Expr::LocalGet(array_id)),
-                                                    callback: Box::new(cb),
-                                                });
-                                            }
-                                        }
-                                        "filter" => {
-                                            if args.len() >= 1 {
-                                                let cb = args.into_iter().next().unwrap();
-                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
-                                                return Ok(Expr::ArrayFilter {
-                                                    array: Box::new(Expr::LocalGet(array_id)),
-                                                    callback: Box::new(cb),
-                                                });
-                                            }
-                                        }
-                                        "find" => {
-                                            if args.len() >= 1 {
-                                                let cb = args.into_iter().next().unwrap();
-                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
-                                                return Ok(Expr::ArrayFind {
-                                                    array: Box::new(Expr::LocalGet(array_id)),
-                                                    callback: Box::new(cb),
-                                                });
-                                            }
-                                        }
-                                        "findIndex" => {
-                                            if args.len() >= 1 {
-                                                let cb = args.into_iter().next().unwrap();
-                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
-                                                return Ok(Expr::ArrayFindIndex {
-                                                    array: Box::new(Expr::LocalGet(array_id)),
-                                                    callback: Box::new(cb),
-                                                });
-                                            }
-                                        }
-                                        "findLast" => {
-                                            if args.len() >= 1 {
-                                                let cb = args.into_iter().next().unwrap();
-                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
-                                                return Ok(Expr::ArrayFindLast {
-                                                    array: Box::new(Expr::LocalGet(array_id)),
-                                                    callback: Box::new(cb),
-                                                });
-                                            }
-                                        }
-                                        "findLastIndex" => {
-                                            if args.len() >= 1 {
-                                                let cb = args.into_iter().next().unwrap();
-                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
-                                                return Ok(Expr::ArrayFindLastIndex {
-                                                    array: Box::new(Expr::LocalGet(array_id)),
-                                                    callback: Box::new(cb),
-                                                });
-                                            }
-                                        }
-                                        "at" => {
-                                            if args.len() >= 1 {
-                                                return Ok(Expr::ArrayAt {
-                                                    array: Box::new(Expr::LocalGet(array_id)),
-                                                    index: Box::new(args.into_iter().next().unwrap()),
-                                                });
-                                            }
-                                        }
-                                        "some" => {
-                                            if args.len() >= 1 {
-                                                let cb = args.into_iter().next().unwrap();
-                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
-                                                return Ok(Expr::ArraySome {
-                                                    array: Box::new(Expr::LocalGet(array_id)),
-                                                    callback: Box::new(cb),
-                                                });
-                                            }
-                                        }
-                                        "every" => {
-                                            if args.len() >= 1 {
-                                                let cb = args.into_iter().next().unwrap();
-                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
-                                                return Ok(Expr::ArrayEvery {
-                                                    array: Box::new(Expr::LocalGet(array_id)),
-                                                    callback: Box::new(cb),
-                                                });
+                                            if !is_class_instance {
+                                                if method_name == "at" {
+                                                    if args.len() >= 1 {
+                                                        return Ok(Expr::ArrayAt {
+                                                            array: Box::new(Expr::LocalGet(array_id)),
+                                                            index: Box::new(args.into_iter().next().unwrap()),
+                                                        });
+                                                    }
+                                                } else if args.len() >= 1 {
+                                                    let cb = args.into_iter().next().unwrap();
+                                                    let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
+                                                    let array = Box::new(Expr::LocalGet(array_id));
+                                                    let callback = Box::new(cb);
+                                                    return Ok(match method_name {
+                                                        "map" => Expr::ArrayMap { array, callback },
+                                                        "filter" => Expr::ArrayFilter { array, callback },
+                                                        "find" => Expr::ArrayFind { array, callback },
+                                                        "findIndex" => Expr::ArrayFindIndex { array, callback },
+                                                        "findLast" => Expr::ArrayFindLast { array, callback },
+                                                        "findLastIndex" => Expr::ArrayFindLastIndex { array, callback },
+                                                        "some" => Expr::ArraySome { array, callback },
+                                                        "every" => Expr::ArrayEvery { array, callback },
+                                                        _ => unreachable!(),
+                                                    });
+                                                }
                                             }
                                         }
                                         "flatMap" => {
@@ -7815,8 +8216,33 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                         if let ast::Expr::Member(member) = expr.as_ref() {
                             if let ast::MemberProp::Ident(method_ident) = &member.prop {
                                 let method_name = method_ident.sym.as_ref();
+                                // Helper: skip array-method dispatch when the receiver is a
+                                // known class instance (e.g. mongo `Collection.find`,
+                                // `Stack<T>.map`). Without this guard the lowering blindly
+                                // emits `Expr::Array<Method>` and the compiled binary calls
+                                // `js_array_<method>` on a class handle.
+                                let recv_is_class = match member.obj.as_ref() {
+                                    ast::Expr::Ident(ident) => {
+                                        let n = ident.sym.to_string();
+                                        let ty = ctx.lookup_local_type(&n);
+                                        let class_typed = ty
+                                            .as_ref()
+                                            .map(|t| matches!(t, Type::Named(_) | Type::Generic { .. })
+                                                && !matches!(t, Type::Array(_)))
+                                            .unwrap_or(false);
+                                        let unknown_recv = matches!(ty, None | Some(Type::Any) | Some(Type::Unknown));
+                                        let is_overlapping = matches!(method_name,
+                                            "find" | "findIndex" | "findLast" | "findLastIndex"
+                                            | "map" | "filter" | "some" | "every"
+                                            | "forEach" | "reduce" | "reduceRight" | "join"
+                                        );
+                                        class_typed || (unknown_recv && is_overlapping)
+                                    }
+                                    ast::Expr::New(_) => true,
+                                    _ => false,
+                                };
                                 match method_name {
-                                    "reduce" if args.len() >= 1 => {
+                                    "reduce" if args.len() >= 1 && !recv_is_class => {
                                         let array_expr = lower_expr(ctx, &member.obj)?;
                                         let mut args_iter = args.into_iter();
                                         let callback = args_iter.next().unwrap();
@@ -7827,32 +8253,16 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             initial,
                                         });
                                     }
-                                    "map" if args.len() >= 1 => {
-                                        // Skip if receiver is a known class instance (e.g., Box.map())
-                                        // Check both local variables with class types AND new expressions
-                                        let is_class_instance = match member.obj.as_ref() {
-                                            ast::Expr::Ident(ident) => {
-                                                ctx.lookup_local_type(&ident.sym.to_string())
-                                                    .map(|ty| matches!(ty, Type::Named(_) | Type::Generic { .. }) && !matches!(ty, Type::Array(_)))
-                                                    .unwrap_or(false)
-                                            }
-                                            ast::Expr::New(_) => {
-                                                // new ClassName(...).map() - always a class instance, not an array
-                                                true
-                                            }
-                                            _ => false,
-                                        };
-                                        if !is_class_instance {
-                                            let cb = args.into_iter().next().unwrap();
-                                            let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
-                                            let array_expr = lower_expr(ctx, &member.obj)?;
-                                            return Ok(Expr::ArrayMap {
-                                                array: Box::new(array_expr),
-                                                callback: Box::new(cb),
-                                            });
-                                        }
+                                    "map" if args.len() >= 1 && !recv_is_class => {
+                                        let cb = args.into_iter().next().unwrap();
+                                        let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
+                                        let array_expr = lower_expr(ctx, &member.obj)?;
+                                        return Ok(Expr::ArrayMap {
+                                            array: Box::new(array_expr),
+                                            callback: Box::new(cb),
+                                        });
                                     }
-                                    "filter" if args.len() >= 1 => {
+                                    "filter" if args.len() >= 1 && !recv_is_class => {
                                         let cb = args.into_iter().next().unwrap();
                                         let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
                                         let array_expr = lower_expr(ctx, &member.obj)?;
@@ -7861,7 +8271,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             callback: Box::new(cb),
                                         });
                                     }
-                                    "forEach" if args.len() >= 1 => {
+                                    "forEach" if args.len() >= 1 && !recv_is_class => {
                                         // Check if the receiver is a Map or Set - if so, don't use ArrayForEach
                                         let is_map_or_set = if let ast::Expr::Ident(ident) = member.obj.as_ref() {
                                             ctx.lookup_local_type(&ident.sym.to_string())
@@ -7880,7 +8290,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             });
                                         }
                                     }
-                                    "find" if args.len() >= 1 => {
+                                    "find" if args.len() >= 1 && !recv_is_class => {
                                         let cb = args.into_iter().next().unwrap();
                                         let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
                                         let array_expr = lower_expr(ctx, &member.obj)?;
@@ -7889,7 +8299,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             callback: Box::new(cb),
                                         });
                                     }
-                                    "findIndex" if args.len() >= 1 => {
+                                    "findIndex" if args.len() >= 1 && !recv_is_class => {
                                         let cb = args.into_iter().next().unwrap();
                                         let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
                                         let array_expr = lower_expr(ctx, &member.obj)?;
@@ -8880,11 +9290,11 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
 
             // Check if this is Symbol.<well-known> — Symbol.toPrimitive,
             // Symbol.hasInstance, Symbol.toStringTag, Symbol.iterator,
-            // Symbol.asyncIterator. Lowered to `SymbolFor(String("@@__perry_wk_<name>"))`
-            // which the runtime's `js_symbol_for` sniffs via prefix and
-            // resolves from the well-known cache (not the registry). This
-            // gives each well-known symbol a stable pointer without needing
-            // a new HIR variant.
+            // Symbol.asyncIterator, Symbol.dispose, Symbol.asyncDispose.
+            // Lowered to `SymbolFor(String("@@__perry_wk_<name>"))` which the
+            // runtime's `js_symbol_for` sniffs via prefix and resolves from
+            // the well-known cache (not the registry). Gives each well-known
+            // symbol a stable pointer without needing a new HIR variant.
             if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
                 if obj_ident.sym.as_ref() == "Symbol" {
                     if let ast::MemberProp::Ident(prop_ident) = &member.prop {
@@ -8896,6 +9306,8 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                 | "toStringTag"
                                 | "iterator"
                                 | "asyncIterator"
+                                | "dispose"
+                                | "asyncDispose"
                         ) {
                             return Ok(Expr::SymbolFor(Box::new(Expr::String(
                                 format!("@@__perry_wk_{}", prop_name),
@@ -9557,6 +9969,89 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
             }
         }
         ast::Expr::Object(obj) => {
+            // Phase 3: closed-shape object literals lower to `new __AnonShape_N()`
+            // so downstream field access hits the direct-GEP fast path. The
+            // anon class is synthesized with `init: Some(value_expr)` on each
+            // field, and `apply_field_initializers_recursive` at codegen time
+            // emits `PropertySet { this, field, init }` — PropertySet's
+            // direct-GEP arm at `crates/perry-codegen/src/expr.rs:2277-2293`
+            // fires because `this` resolves to the anon class via class_stack.
+            //
+            // Runtime parity for Object.* introspection APIs on anon-shape
+            // classes is handled runtime-side in perry-runtime's object module
+            // — see that crate's handling of `class_id`-tagged objects on
+            // getOwnPropertyDescriptor / Object.keys / JSON.stringify / etc.
+            fn is_closed_shape(obj: &ast::ObjectLit) -> bool {
+                if obj.props.is_empty() { return false; }
+                for p in &obj.props {
+                    match p {
+                        ast::PropOrSpread::Spread(_) => return false,
+                        ast::PropOrSpread::Prop(prop) => match prop.as_ref() {
+                            ast::Prop::KeyValue(kv) => match &kv.key {
+                                ast::PropName::Ident(_)
+                                | ast::PropName::Str(_)
+                                | ast::PropName::Num(_) => {}
+                                _ => return false,
+                            },
+                            ast::Prop::Shorthand(_) => {}
+                            _ => return false,
+                        },
+                    }
+                }
+                true
+            }
+            if is_closed_shape(obj) {
+                let mut fields: Vec<(String, Type, Expr)> = Vec::new();
+                let mut bail = false;
+                let mut seen = std::collections::HashSet::new();
+                for prop in &obj.props {
+                    let ast::PropOrSpread::Prop(p) = prop else { unreachable!() };
+                    match p.as_ref() {
+                        ast::Prop::KeyValue(kv) => {
+                            let key = match &kv.key {
+                                ast::PropName::Ident(ident) => ident.sym.to_string(),
+                                ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+                                ast::PropName::Num(n) => n.value.to_string(),
+                                _ => unreachable!(),
+                            };
+                            if !seen.insert(key.clone()) { bail = true; break; }
+                            let ty = crate::lower_types::infer_type_from_expr(&kv.value, ctx);
+                            let value = lower_expr(ctx, &kv.value)?;
+                            fields.push((key, ty, value));
+                        }
+                        ast::Prop::Shorthand(ident) => {
+                            let name = ident.sym.to_string();
+                            if !seen.insert(name.clone()) { bail = true; break; }
+                            let (value, ty) = if let Some(func_id) = ctx.lookup_func(&name) {
+                                (Expr::FuncRef(func_id), Type::Any)
+                            } else if let Some(local_id) = ctx.lookup_local(&name) {
+                                let ty = ctx.lookup_local_type(&name).cloned().unwrap_or(Type::Any);
+                                (Expr::LocalGet(local_id), ty)
+                            } else if ctx.lookup_class(&name).is_some() {
+                                (Expr::ClassRef(name.clone()), Type::Any)
+                            } else {
+                                bail = true; break;
+                            };
+                            fields.push((name, ty, value));
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                if !bail {
+                    // Split (name, ty, value) into parallel vecs before the
+                    // synthesize call consumes ownership of the shape.
+                    let args: Vec<Expr> = fields.iter().map(|(_, _, v)| v.clone()).collect();
+                    let class_name = ctx.synthesize_anon_shape_class(&fields);
+                    return Ok(Expr::New {
+                        class_name,
+                        args,
+                        type_args: Vec::new(),
+                    });
+                }
+            }
+            // Legacy path — spread, methods/getters/setters, computed keys,
+            // dup keys, or unresolvable shorthand.
+            //
             // Check if any spread elements exist; if so, use ObjectSpread
             let has_spread = obj.props.iter().any(|p| matches!(p, ast::PropOrSpread::Spread(_)));
             if has_spread {
@@ -10095,30 +10590,82 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                         || class_name == "ReferenceError" || class_name == "SyntaxError"
                         || class_name == "BugIndicatingError" {
                         // new Error() / new Error(message) / new Error(message, { cause })
+                        //
+                        // 2-arg form detection runs at AST level (not HIR) because Phase 3
+                        // synthesises anon classes for closed-shape object literals — the
+                        // options `{ cause: e }` would become `Expr::New { __AnonShape_N }`
+                        // after lower_expr, and the `Expr::Object(fields)` match below
+                        // would miss it. Pull `cause` directly from the AST first, then
+                        // fall through to the standard argument lowering for other shapes.
+                        let ast_args = new_expr.args.as_deref().unwrap_or(&[]);
+                        if ast_args.len() == 2 && class_name == "Error" {
+                            let msg = lower_expr(ctx, &ast_args[0].expr)?;
+                            // Peel `Expr::Paren(({ cause: e }))` — SWC preserves paren
+                            // nodes, so without unwrapping the outer Object match below
+                            // would miss `new Error(msg, ({ cause }))` and we'd silently
+                            // drop the cause.
+                            let mut opts_expr: &ast::Expr = &ast_args[1].expr;
+                            while let ast::Expr::Paren(p) = opts_expr {
+                                opts_expr = &p.expr;
+                            }
+                            // Look for `{ cause: <expr> }` or `{ cause }` at the AST level.
+                            if let ast::Expr::Object(opts_obj) = opts_expr {
+                                for prop in &opts_obj.props {
+                                    if let ast::PropOrSpread::Prop(p) = prop {
+                                        match p.as_ref() {
+                                            ast::Prop::KeyValue(kv) => {
+                                                let key = match &kv.key {
+                                                    ast::PropName::Ident(i) => i.sym.to_string(),
+                                                    ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+                                                    _ => continue,
+                                                };
+                                                if key == "cause" {
+                                                    let cause = lower_expr(ctx, &kv.value)?;
+                                                    return Ok(Expr::ErrorNewWithCause {
+                                                        message: Box::new(msg),
+                                                        cause: Box::new(cause),
+                                                    });
+                                                }
+                                            }
+                                            // ES2022 shorthand `new Error(msg, { cause })`
+                                            // — the canonical idiom inside a `catch (cause)`
+                                            // block. Resolve the ident the same way the
+                                            // HIR Object-literal lowering does: func /
+                                            // local / class-ref precedence.
+                                            ast::Prop::Shorthand(ident) => {
+                                                let name = ident.sym.to_string();
+                                                if name != "cause" { continue; }
+                                                let cause = if let Some(func_id) = ctx.lookup_func(&name) {
+                                                    Expr::FuncRef(func_id)
+                                                } else if let Some(local_id) = ctx.lookup_local(&name) {
+                                                    Expr::LocalGet(local_id)
+                                                } else if ctx.lookup_class(&name).is_some() {
+                                                    Expr::ClassRef(name.clone())
+                                                } else {
+                                                    // Unresolvable identifier — fall through
+                                                    // to the no-cause path below.
+                                                    continue;
+                                                };
+                                                return Ok(Expr::ErrorNewWithCause {
+                                                    message: Box::new(msg),
+                                                    cause: Box::new(cause),
+                                                });
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
+                            // No recognizable `cause` key — lower the opts for side effects,
+                            // then emit a plain Error with just the message.
+                            let _ = lower_expr(ctx, &ast_args[1].expr)?;
+                            return Ok(Expr::ErrorNew(Some(Box::new(msg))));
+                        }
+
                         let args = new_expr.args.as_ref()
                             .map(|args| args.iter().map(|a| lower_expr(ctx, &a.expr)).collect::<Result<Vec<_>>>())
                             .transpose()?
                             .unwrap_or_default();
-
-                        // Detect 2-arg form: new Error(msg, { cause })
-                        if args.len() == 2 && class_name == "Error" {
-                            let mut iter = args.into_iter();
-                            let msg = iter.next().unwrap();
-                            let opts = iter.next().unwrap();
-                            // Try to extract `.cause` from the options object literal
-                            if let Expr::Object(fields) = &opts {
-                                for (key, val) in fields {
-                                    if key == "cause" {
-                                        return Ok(Expr::ErrorNewWithCause {
-                                            message: Box::new(msg),
-                                            cause: Box::new(val.clone()),
-                                        });
-                                    }
-                                }
-                            }
-                            // Fallback: just create the error without cause
-                            return Ok(Expr::ErrorNew(Some(Box::new(msg))));
-                        }
 
                         if args.is_empty() {
                             return match class_name.as_str() {
@@ -10218,10 +10765,10 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                         // new Uint8Array(buffer, byteOffset, length) etc.
                     }
 
-                    // Handle other typed-array constructors (Int8/16/32, Uint16/32, Float32/64).
-                    // Uint8Array stays on the Buffer path above.
+                    // Handle other typed-array constructors (Int8/16/32, Uint16/32, Float32/64,
+                    // Uint8ClampedArray). Uint8Array stays on the Buffer path above.
                     if let Some(kind) = crate::ir::typed_array_kind_for_name(class_name.as_str()) {
-                        if class_name != "Uint8Array" && class_name != "Uint8ClampedArray" {
+                        if class_name != "Uint8Array" {
                             let args = new_expr.args.as_ref()
                                 .map(|args| args.iter().map(|a| lower_expr(ctx, &a.expr)).collect::<Result<Vec<_>>>())
                                 .transpose()?
@@ -10238,7 +10785,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                         }
                     }
 
-                    let args = new_expr.args.as_ref()
+                    let mut args = new_expr.args.as_ref()
                         .map(|args| args.iter().map(|a| lower_expr(ctx, &a.expr)).collect::<Result<Vec<_>>>())
                         .transpose()?
                         .unwrap_or_default();
@@ -10248,6 +10795,17 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                             .map(|t| extract_ts_type_with_ctx(t, Some(ctx)))
                             .collect())
                         .unwrap_or_default();
+                    // Issue #212: classes nested in a function may capture
+                    // enclosing-scope locals. `lower_class_decl` extended the
+                    // constructor with one synthesized param per captured id;
+                    // pass each as `LocalGet(id)` here so the outer scope's
+                    // current value is snapshotted onto the new instance.
+                    let class_captures: Vec<LocalId> = ctx.lookup_class_captures(&class_name)
+                        .map(|c| c.to_vec())
+                        .unwrap_or_default();
+                    for cid in class_captures {
+                        args.push(Expr::LocalGet(cid));
+                    }
                     Ok(Expr::New { class_name, args, type_args })
                 }
                 // Non-identifier callee (e.g., new (condition ? A : B)() or new someVar())
@@ -12176,6 +12734,19 @@ fn parse_modifiers_from_args(args: &[ast::ExprOrSpread], start_idx: usize) -> Ve
         }
     }
     modifiers
+}
+
+/// Returns true if `name` is a known widget modifier key (used to detect
+/// unsupported method-chain modifier calls, e.g. `Text("hi").font("title")`).
+fn is_widget_modifier_name(name: &str) -> bool {
+    matches!(name,
+        "font" | "fontWeight" | "weight" | "foregroundColor" | "color" | "foreground" |
+        "padding" | "cornerRadius" | "background" | "backgroundColor" |
+        "opacity" | "lineLimit" | "frame" | "minimumScaleFactor" |
+        "containerBackground" | "maxWidth" | "url" |
+        "bold" | "italic" | "underline" | "fontSize" |
+        "strikethrough" | "multilineTextAlignment" | "lineSpacing"
+    )
 }
 
 /// Parse a single modifier from key/value

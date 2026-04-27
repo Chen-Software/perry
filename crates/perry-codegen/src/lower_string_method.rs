@@ -7,8 +7,7 @@ use anyhow::{anyhow, bail, Result};
 use perry_hir::Expr;
 use perry_types::Type as HirType;
 
-use crate::expr::{lower_expr, nanbox_pointer_inline, nanbox_string_inline, unbox_to_i64, i32_bool_to_nanbox, FnCtx};
-use crate::nanbox::POINTER_MASK_I64;
+use crate::expr::{lower_expr, nanbox_pointer_inline, nanbox_string_inline, unbox_str_handle, i32_bool_to_nanbox, FnCtx};
 use crate::type_analysis::is_string_expr;
 use crate::types::{DOUBLE, I1, I32, I64};
 
@@ -43,8 +42,8 @@ pub(crate) fn lower_string_method(
                 None
             };
             let blk = ctx.block();
-            let recv_handle = unbox_to_i64(blk, &recv_box);
-            let needle_handle = unbox_to_i64(blk, &needle_box);
+            let recv_handle = unbox_str_handle(blk, &recv_box);
+            let needle_handle = unbox_str_handle(blk, &needle_box);
             let result_i32 = if let Some(from_d) = from_idx_double {
                 let from_i32 = blk.fptosi(DOUBLE, &from_d, I32);
                 blk.call(
@@ -76,17 +75,18 @@ pub(crate) fn lower_string_method(
             let end_d = if args.len() == 2 {
                 lower_expr(ctx, &args[1])?
             } else {
-                // Inline length read on the receiver. Same pattern as
-                // the dedicated `str.length` arm.
+                // Issue #214: route through SSO-safe unbox so the
+                // length read works for SHORT_STRING_TAG receivers.
+                // The inline `bits & POINTER_MASK_I64` would treat
+                // the SSO payload as a heap pointer.
                 let blk = ctx.block();
-                let recv_bits = blk.bitcast_double_to_i64(&recv_box);
-                let recv_handle = blk.and(I64, &recv_bits, POINTER_MASK_I64);
+                let recv_handle = unbox_str_handle(blk, &recv_box);
                 let len_ptr = blk.inttoptr(I64, &recv_handle);
                 let len_i32 = blk.load(I32, &len_ptr);
                 blk.sitofp(I32, &len_i32, DOUBLE)
             };
             let blk = ctx.block();
-            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let recv_handle = unbox_str_handle(blk, &recv_box);
             let start_i32 = blk.fptosi(DOUBLE, &start_d, I32);
             let end_i32 = blk.fptosi(DOUBLE, &end_d, I32);
             let runtime_fn = if property == "slice" {
@@ -111,8 +111,8 @@ pub(crate) fn lower_string_method(
             // internally. This avoids needing a new LLVM runtime decl.
             let delim_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
-            let recv_handle = unbox_to_i64(blk, &recv_box);
-            let delim_handle = unbox_to_i64(blk, &delim_box);
+            let recv_handle = unbox_str_handle(blk, &recv_box);
+            let delim_handle = unbox_str_handle(blk, &delim_box);
             let result_arr = blk.call(
                 I64,
                 "js_string_split",
@@ -131,7 +131,7 @@ pub(crate) fn lower_string_method(
                 );
             }
             let blk = ctx.block();
-            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let recv_handle = unbox_str_handle(blk, &recv_box);
             let runtime_fn = match property {
                 "toLowerCase" => "js_string_to_lower_case",
                 "toUpperCase" => "js_string_to_upper_case",
@@ -149,7 +149,7 @@ pub(crate) fn lower_string_method(
             }
             let idx_d = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
-            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let recv_handle = unbox_str_handle(blk, &recv_box);
             let idx_i32 = blk.fptosi(DOUBLE, &idx_d, I32);
             let result = blk.call(
                 I64,
@@ -164,7 +164,7 @@ pub(crate) fn lower_string_method(
             }
             let count_d = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
-            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let recv_handle = unbox_str_handle(blk, &recv_box);
             let count_i32 = blk.fptosi(DOUBLE, &count_d, I32);
             let result = blk.call(
                 I64,
@@ -202,8 +202,8 @@ pub(crate) fn lower_string_method(
             let needle_box = lower_expr(ctx, &args[0])?;
             let repl_box = lower_expr(ctx, &args[1])?;
             let blk = ctx.block();
-            let recv_handle = unbox_to_i64(blk, &recv_box);
-            let needle_handle = unbox_to_i64(blk, &needle_box);
+            let recv_handle = unbox_str_handle(blk, &recv_box);
+            let needle_handle = unbox_str_handle(blk, &needle_box);
             if needle_is_regex && repl_is_function {
                 // repl_box is a NaN-boxed closure pointer (double).
                 // js_string_replace_regex_fn takes the callback as f64.
@@ -214,8 +214,8 @@ pub(crate) fn lower_string_method(
                 );
                 return Ok(nanbox_string_inline(blk, &result));
             }
-            let repl_bits = blk.bitcast_double_to_i64(&repl_box);
-            let repl_handle = blk.and(I64, &repl_bits, POINTER_MASK_I64);
+            // Issue #214: SSO-safe unbox of replacement string.
+            let repl_handle = unbox_str_handle(blk, &repl_box);
             let runtime_fn = if needle_is_regex {
                 if repl_has_named {
                     "js_string_replace_regex_named"
@@ -241,7 +241,7 @@ pub(crate) fn lower_string_method(
             }
             let idx_d = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
-            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let recv_handle = unbox_str_handle(blk, &recv_box);
             let idx_i32 = blk.fptosi(DOUBLE, &idx_d, I32);
             // js_string_at returns a NaN-boxed string or undefined directly.
             Ok(blk.call(DOUBLE, "js_string_at", &[(I64, &recv_handle), (I32, &idx_i32)]))
@@ -252,7 +252,7 @@ pub(crate) fn lower_string_method(
             }
             let idx_d = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
-            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let recv_handle = unbox_str_handle(blk, &recv_box);
             let idx_i32 = blk.fptosi(DOUBLE, &idx_d, I32);
             // Returns NaN-boxed number or undefined directly.
             Ok(blk.call(DOUBLE, "js_string_code_point_at", &[(I64, &recv_handle), (I32, &idx_i32)]))
@@ -263,7 +263,7 @@ pub(crate) fn lower_string_method(
             }
             let idx_d = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
-            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let recv_handle = unbox_str_handle(blk, &recv_box);
             let idx_i32 = blk.fptosi(DOUBLE, &idx_d, I32);
             // js_string_char_code_at returns a plain f64 (NaN for OOB).
             Ok(blk.call(DOUBLE, "js_string_char_code_at", &[(I64, &recv_handle), (I32, &idx_i32)]))
@@ -274,8 +274,8 @@ pub(crate) fn lower_string_method(
             }
             let needle_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
-            let recv_handle = unbox_to_i64(blk, &recv_box);
-            let needle_handle = unbox_to_i64(blk, &needle_box);
+            let recv_handle = unbox_str_handle(blk, &recv_box);
+            let needle_handle = unbox_str_handle(blk, &needle_box);
             let i32_v = blk.call(
                 I32,
                 "js_string_last_index_of",
@@ -292,16 +292,16 @@ pub(crate) fn lower_string_method(
             let pad_handle = if args.len() == 2 {
                 let pad_box = lower_expr(ctx, &args[1])?;
                 let blk = ctx.block();
-                unbox_to_i64(blk, &pad_box)
+                unbox_str_handle(blk, &pad_box)
             } else {
                 let sp_idx = ctx.strings.intern(" ");
                 let sp_global = format!("@{}", ctx.strings.entry(sp_idx).handle_global);
                 let blk = ctx.block();
                 let sp_box = blk.load(DOUBLE, &sp_global);
-                unbox_to_i64(blk, &sp_box)
+                unbox_str_handle(blk, &sp_box)
             };
             let blk = ctx.block();
-            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let recv_handle = unbox_str_handle(blk, &recv_box);
             let len_i32 = blk.fptosi(DOUBLE, &len_d, I32);
             let runtime_fn = if property == "padStart" {
                 "js_string_pad_start"
@@ -326,10 +326,10 @@ pub(crate) fn lower_string_method(
             } else {
                 let form_box = lower_expr(ctx, &args[0])?;
                 let blk = ctx.block();
-                unbox_to_i64(blk, &form_box)
+                unbox_str_handle(blk, &form_box)
             };
             let blk = ctx.block();
-            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let recv_handle = unbox_str_handle(blk, &recv_box);
             let result = blk.call(
                 I64,
                 "js_string_normalize",
@@ -347,8 +347,8 @@ pub(crate) fn lower_string_method(
                 let _ = lower_expr(ctx, extra)?;
             }
             let blk = ctx.block();
-            let recv_handle = unbox_to_i64(blk, &recv_box);
-            let other_handle = unbox_to_i64(blk, &other_box);
+            let recv_handle = unbox_str_handle(blk, &recv_box);
+            let other_handle = unbox_str_handle(blk, &other_box);
             // Returns a plain f64 (-1/0/1) — NOT NaN-tagged.
             Ok(blk.call(
                 DOUBLE,
@@ -363,8 +363,8 @@ pub(crate) fn lower_string_method(
             // The arg is a regex (literal or local).
             let re_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
-            let recv_handle = unbox_to_i64(blk, &recv_box);
-            let re_handle = unbox_to_i64(blk, &re_box);
+            let recv_handle = unbox_str_handle(blk, &recv_box);
+            let re_handle = unbox_str_handle(blk, &re_box);
             let i32_v = blk.call(
                 I32,
                 "js_string_search_regex",
@@ -378,8 +378,8 @@ pub(crate) fn lower_string_method(
             }
             let re_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
-            let recv_handle = unbox_to_i64(blk, &recv_box);
-            let re_handle = unbox_to_i64(blk, &re_box);
+            let recv_handle = unbox_str_handle(blk, &recv_box);
+            let re_handle = unbox_str_handle(blk, &re_box);
             let result = blk.call(
                 I64,
                 "js_string_match",
@@ -405,8 +405,8 @@ pub(crate) fn lower_string_method(
             }
             let re_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
-            let recv_handle = unbox_to_i64(blk, &recv_box);
-            let re_handle = unbox_to_i64(blk, &re_box);
+            let recv_handle = unbox_str_handle(blk, &recv_box);
+            let re_handle = unbox_str_handle(blk, &re_box);
             let result = blk.call(
                 I64,
                 "js_string_match_all",
@@ -420,7 +420,7 @@ pub(crate) fn lower_string_method(
                 bail!("perry-codegen: String.isWellFormed takes no args, got {}", args.len());
             }
             let blk = ctx.block();
-            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let recv_handle = unbox_str_handle(blk, &recv_box);
             // Returns a NaN-tagged boolean directly.
             Ok(blk.call(DOUBLE, "js_string_is_well_formed", &[(I64, &recv_handle)]))
         }
@@ -429,7 +429,7 @@ pub(crate) fn lower_string_method(
                 bail!("perry-codegen: String.toWellFormed takes no args, got {}", args.len());
             }
             let blk = ctx.block();
-            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let recv_handle = unbox_str_handle(blk, &recv_box);
             let result = blk.call(I64, "js_string_to_well_formed", &[(I64, &recv_handle)]);
             Ok(nanbox_string_inline(blk, &result))
         }
@@ -437,11 +437,11 @@ pub(crate) fn lower_string_method(
             // str.concat(s1, s2, …) = str + s1 + s2 + … . Sequential
             // js_string_concat calls; each op returns a new handle.
             let blk = ctx.block();
-            let mut acc_handle = unbox_to_i64(blk, &recv_box);
+            let mut acc_handle = unbox_str_handle(blk, &recv_box);
             for a in args {
                 let s_box = lower_expr(ctx, a)?;
                 let blk = ctx.block();
-                let s_handle = unbox_to_i64(blk, &s_box);
+                let s_handle = unbox_str_handle(blk, &s_box);
                 acc_handle = blk.call(
                     I64,
                     "js_string_concat",
@@ -458,7 +458,7 @@ pub(crate) fn lower_string_method(
             }
             let start_d = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
-            let recv_handle = unbox_to_i64(blk, &recv_box);
+            let recv_handle = unbox_str_handle(blk, &recv_box);
             let start_i32 = blk.fptosi(DOUBLE, &start_d, I32);
             let end_i32 = if args.len() == 2 {
                 let len_d = lower_expr(ctx, &args[1])?;
@@ -489,8 +489,8 @@ pub(crate) fn lower_string_method(
             }
             let other_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
-            let recv_handle = unbox_to_i64(blk, &recv_box);
-            let other_handle = unbox_to_i64(blk, &other_box);
+            let recv_handle = unbox_str_handle(blk, &recv_box);
+            let other_handle = unbox_str_handle(blk, &other_box);
             let runtime_fn = if property == "startsWith" {
                 "js_string_starts_with"
             } else {
@@ -515,8 +515,8 @@ pub(crate) fn lower_string_method(
                 let _ = lower_expr(ctx, &args[1])?;
             }
             let blk = ctx.block();
-            let recv_handle = unbox_to_i64(blk, &recv_box);
-            let needle_handle = unbox_to_i64(blk, &needle_box);
+            let recv_handle = unbox_str_handle(blk, &recv_box);
+            let needle_handle = unbox_str_handle(blk, &needle_box);
             let idx_i32 = blk.call(
                 I32,
                 "js_string_index_of",
@@ -588,7 +588,8 @@ pub(crate) fn lower_string_self_append(
         let _lhs = lhs_val.clone();
         let rhs_val = lower_expr(ctx, rhs)?;
         let blk = ctx.block();
-        let l_handle = unbox_to_i64(blk, &lhs_val);
+        // Issue #214: SSO-safe unbox.
+        let l_handle = unbox_str_handle(blk, &lhs_val);
         // Coerce non-string RHS to a string handle.
         let r_handle = blk.call(I64, "js_jsvalue_to_string", &[(DOUBLE, &rhs_val)]);
         let result = blk.call(I64, "js_string_append", &[(I64, &l_handle), (I64, &r_handle)]);
@@ -600,8 +601,9 @@ pub(crate) fn lower_string_self_append(
     let rhs_box = lower_expr(ctx, rhs)?;
     let blk = ctx.block();
     let lhs_box = blk.load(DOUBLE, &slot);
-    let l_handle = unbox_to_i64(blk, &lhs_box);
-    let r_handle = unbox_to_i64(blk, &rhs_box);
+    // Issue #214: SSO-safe unbox.
+    let l_handle = unbox_str_handle(blk, &lhs_box);
+    let r_handle = unbox_str_handle(blk, &rhs_box);
     let new_handle = blk.call(
         I64,
         "js_string_append",
@@ -638,10 +640,8 @@ pub(crate) fn lower_string_coerce_concat(
     // js_jsvalue_to_string + js_string_concat into a single allocation
     // for number operands (the common `"item_" + i` pattern).
     if l_is_string && !r_is_string {
-        let l_handle = {
-            let bits = blk.bitcast_double_to_i64(&l_box);
-            blk.and(I64, &bits, POINTER_MASK_I64)
-        };
+        // Issue #214: SSO-safe unbox — see lower_string_concat.
+        let l_handle = unbox_str_handle(blk, &l_box);
         let result_handle = blk.call(
             I64,
             "js_string_concat_value",
@@ -651,10 +651,8 @@ pub(crate) fn lower_string_coerce_concat(
     }
 
     if !l_is_string && r_is_string {
-        let r_handle = {
-            let bits = blk.bitcast_double_to_i64(&r_box);
-            blk.and(I64, &bits, POINTER_MASK_I64)
-        };
+        // Issue #214: SSO-safe unbox — see lower_string_concat.
+        let r_handle = unbox_str_handle(blk, &r_box);
         let result_handle = blk.call(
             I64,
             "js_value_concat_string",
@@ -698,10 +696,12 @@ pub(crate) fn lower_string_concat(ctx: &mut FnCtx<'_>, left: &Expr, right: &Expr
     let l_box = lower_expr(ctx, left)?;
     let r_box = lower_expr(ctx, right)?;
     let blk = ctx.block();
-    let l_bits = blk.bitcast_double_to_i64(&l_box);
-    let l_handle = blk.and(I64, &l_bits, POINTER_MASK_I64);
-    let r_bits = blk.bitcast_double_to_i64(&r_box);
-    let r_handle = blk.and(I64, &r_bits, POINTER_MASK_I64);
+    // Issue #214: inline `bitcast + and POINTER_MASK_I64` returns garbage
+    // for SSO operands (SHORT_STRING_TAG = 0x7FF9, lower 48 bits encode
+    // payload, not a pointer). Route through `unbox_str_handle` →
+    // `js_get_string_pointer_unified` which materializes SSO to heap.
+    let l_handle = unbox_str_handle(blk, &l_box);
+    let r_handle = unbox_str_handle(blk, &r_box);
     let result_handle = blk.call(
         I64,
         "js_string_concat",

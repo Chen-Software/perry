@@ -1,65 +1,37 @@
 # Menus
 
-Perry supports native menu bars, context menus, and toolbar items across all platforms.
+Perry supports native menu bars, context menus, and toolbars across all
+platforms. Every snippet below is excerpted from
+[`docs/examples/ui/menus/snippets.ts`](../../examples/ui/menus/snippets.ts) —
+CI compiles and runs it on every PR.
+
+The menu API is **handle-based** and free-function: build menus with
+`menuCreate()`, fill them with `menuAddItem` / `menuAddItemWithShortcut`, and
+attach them with `menuBarAddMenu(bar, title, menu)`. Submenus go through
+`menuAddSubmenu(parent, title, submenu)`.
 
 ## Menu Bar
 
-Create a native application menu bar:
-
-```typescript,no-test
-import { App, VStack, Text, menuBarCreate, menuBarAddMenu, menuAddItem, menuAddSeparator, menuAddSubmenu, menuBarAttach } from "perry/ui";
-
-// Build the menu bar before App(...)
-const menuBar = menuBarCreate();
-
-// File menu
-const fileMenu = menuBarAddMenu(menuBar, "File");
-menuAddItem(fileMenu, "New", () => newDoc(), "n");         // Cmd+N
-menuAddItem(fileMenu, "Open", () => openDoc(), "o");       // Cmd+O
-menuAddSeparator(fileMenu);
-menuAddItem(fileMenu, "Save", () => saveDoc(), "s");       // Cmd+S
-menuAddItem(fileMenu, "Save As...", () => saveAs(), "S");  // Cmd+Shift+S
-
-// Edit menu
-const editMenu = menuBarAddMenu(menuBar, "Edit");
-menuAddItem(editMenu, "Undo", () => undo(), "z");
-menuAddItem(editMenu, "Redo", () => redo(), "Z");         // Cmd+Shift+Z
-menuAddSeparator(editMenu);
-menuAddItem(editMenu, "Cut", () => cut(), "x");
-menuAddItem(editMenu, "Copy", () => copy(), "c");
-menuAddItem(editMenu, "Paste", () => paste(), "v");
-
-// Submenu
-const viewMenu = menuBarAddMenu(menuBar, "View");
-const zoomSubmenu = menuAddSubmenu(viewMenu, "Zoom");
-menuAddItem(zoomSubmenu, "Zoom In", () => zoomIn(), "+");
-menuAddItem(zoomSubmenu, "Zoom Out", () => zoomOut(), "-");
-menuAddItem(zoomSubmenu, "Actual Size", () => zoomReset(), "0");
-
-menuBarAttach(menuBar);
-
-App({
-  title: "Menu Demo",
-  width: 800,
-  height: 600,
-  body: VStack(16, [
-    Text("App content here"),
-  ]),
-});
+```typescript
+{{#include ../../examples/ui/menus/snippets.ts:menubar}}
 ```
 
 ### Menu Bar Functions
 
-- `menuBarCreate()` — Create a new menu bar
-- `menuBarAddMenu(menuBar, title)` — Add a top-level menu, returns menu handle
-- `menuAddItem(menu, label, callback, shortcut?)` — Add a menu item with optional keyboard shortcut
-- `menuAddSeparator(menu)` — Add a separator line
-- `menuAddSubmenu(menu, title)` — Add a submenu, returns submenu handle
-- `menuBarAttach(menuBar)` — Attach the menu bar to the application
+| Function | Description |
+|----------|-------------|
+| `menuBarCreate()` | Create a new (empty) menu bar |
+| `menuCreate()` | Create a new menu — used as a child of the bar or as a submenu |
+| `menuBarAddMenu(bar, title, menu)` | Attach a top-level menu under `title` |
+| `menuAddItem(menu, label, callback)` | Append an item without a shortcut |
+| `menuAddItemWithShortcut(menu, label, shortcut, callback)` | Append an item with a keyboard shortcut |
+| `menuAddSeparator(menu)` | Append a horizontal separator line |
+| `menuAddSubmenu(parent, title, submenu)` | Nest a previously-created menu under a label |
+| `menuBarAttach(bar)` | Install the bar as the application's main menu |
 
 ### Keyboard Shortcuts
 
-The 4th argument to `menuAddItem` is an optional keyboard shortcut:
+The third argument to `menuAddItemWithShortcut` is the shortcut key:
 
 | Shortcut | macOS | Other |
 |----------|-------|-------|
@@ -71,40 +43,20 @@ Uppercase letters imply Shift.
 
 ## Context Menus
 
-Right-click menus on widgets:
+Right-click menus are attached to widgets via `widgetSetContextMenu(widget, menu)`.
+Build the menu the same way as a menu-bar entry, then bind it:
 
-```typescript,no-test
-import { Text, contextMenu } from "perry/ui";
-
-const label = Text("Right-click me");
-contextMenu(label, [
-  { label: "Copy", action: () => copyText() },
-  { label: "Paste", action: () => pasteText() },
-  { separator: true },
-  { label: "Delete", action: () => deleteItem() },
-]);
+```typescript
+{{#include ../../examples/ui/menus/snippets.ts:context-menu}}
 ```
 
 ## Toolbar
 
-Add a toolbar to the window:
+Add a toolbar to a window. `toolbarAddItem` takes an *identifier* (used by
+AppKit to deduplicate items) and a *label*:
 
-```typescript,no-test
-import { App, VStack, Text, toolbarCreate, toolbarAddItem } from "perry/ui";
-
-const toolbar = toolbarCreate();
-toolbarAddItem(toolbar, "New", () => newDoc());
-toolbarAddItem(toolbar, "Save", () => saveDoc());
-toolbarAddItem(toolbar, "Run", () => runCode());
-
-App({
-  title: "Toolbar Demo",
-  width: 800,
-  height: 600,
-  body: VStack(16, [
-    Text("App content here"),
-  ]),
-});
+```typescript
+{{#include ../../examples/ui/menus/snippets.ts:toolbar}}
 ```
 
 ## Platform Notes
@@ -123,4 +75,4 @@ App({
 
 - [Events](events.md) — Keyboard shortcuts and interactions
 - [Dialogs](dialogs.md) — File dialogs and alerts
-- [Toolbar and navigation](layout.md)
+- [Layout](layout.md) — Toolbar and navigation patterns

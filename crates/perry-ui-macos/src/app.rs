@@ -1048,7 +1048,7 @@ thread_local! {
 }
 
 extern "C" {
-    fn js_stdlib_process_pending();
+    fn js_run_stdlib_pump();
     fn js_promise_run_microtasks() -> i32;
     fn js_callback_timer_tick() -> i32;
     fn js_interval_timer_tick() -> i32;
@@ -1069,7 +1069,7 @@ define_class!(
         fn timer_fired(&self, _sender: &AnyObject) {
             crate::catch_callback_panic("timer callback", std::panic::AssertUnwindSafe(|| {
                 unsafe {
-                    js_stdlib_process_pending();
+                    js_run_stdlib_pump();
                     js_promise_run_microtasks();
                 }
 
@@ -1204,6 +1204,51 @@ define_class!(
         fn application_did_become_active(&self, _notification: &AnyObject) {
             invoke_activate_callback();
         }
+
+        /// APNs handed us a device token (#95). Hex-format it and call the
+        /// closure passed to `notificationRegisterRemote`.
+        #[unsafe(method(application:didRegisterForRemoteNotificationsWithDeviceToken:))]
+        fn did_register_for_remote_notifications(
+            &self,
+            _app: &AnyObject,
+            device_token: &AnyObject,
+        ) {
+            unsafe {
+                crate::notifications::dispatch_device_token(
+                    device_token as *const _ as *mut AnyObject,
+                );
+            }
+        }
+
+        /// APNs rejected the registration (missing entitlement, network
+        /// error, …). Logged to stderr.
+        #[unsafe(method(application:didFailToRegisterForRemoteNotificationsWithError:))]
+        fn did_fail_to_register_for_remote_notifications(
+            &self,
+            _app: &AnyObject,
+            error: &AnyObject,
+        ) {
+            unsafe {
+                crate::notifications::dispatch_registration_failure(
+                    error as *const _ as *mut AnyObject,
+                );
+            }
+        }
+
+        /// Foreground remote-notification payload. Background delivery is
+        /// issue #98 (needs `fetchCompletionHandler:` variant).
+        #[unsafe(method(application:didReceiveRemoteNotification:))]
+        fn did_receive_remote_notification(
+            &self,
+            _app: &AnyObject,
+            user_info: &AnyObject,
+        ) {
+            unsafe {
+                crate::notifications::dispatch_remote_payload(
+                    user_info as *const _ as *mut AnyObject,
+                );
+            }
+        }
     }
 );
 
@@ -1259,7 +1304,7 @@ pub fn poll_open_file() -> String {
 }
 
 /// Set a recurring timer. interval_ms is in milliseconds.
-/// The timer calls js_stdlib_process_pending() then invokes the callback.
+/// The timer calls js_run_stdlib_pump() then invokes the callback.
 pub fn set_timer(interval_ms: f64, callback: f64) {
     let interval_secs = interval_ms / 1000.0;
 

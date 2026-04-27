@@ -4,7 +4,12 @@ Additional npm packages and Node.js APIs supported by Perry.
 
 ## sharp (Image Processing)
 
-```typescript,no-test
+The `sharp` runtime functions are declared (`js_sharp_resize`, `js_sharp_blur`,
+`js_sharp_to_buffer`, etc.) but the user-facing dispatch from
+`import sharp from "sharp"; sharp(input).resize(...)` is not wired into the
+LLVM backend yet. Track the follow-up at issue #200.
+
+```text
 import sharp from "sharp";
 
 await sharp("input.jpg")
@@ -14,7 +19,10 @@ await sharp("input.jpg")
 
 ## cheerio (HTML Parsing)
 
-```typescript,no-test
+The `cheerio` runtime exists (see `crates/perry-stdlib/src/cheerio.rs`) but
+the dispatch path is not wired yet — track at issue #200.
+
+```text
 import cheerio from "cheerio";
 
 const html = "<html><body><h1>Hello</h1><p>World</p></body></html>";
@@ -24,26 +32,16 @@ console.log($("h1").text()); // "Hello"
 
 ## nodemailer (Email)
 
-```typescript,no-test
-import nodemailer from "nodemailer";
-
-const transporter = nodemailer.createTransport({
-  host: "smtp.example.com",
-  port: 587,
-  auth: { user: "user", pass: "pass" },
-});
-
-await transporter.sendMail({
-  from: "sender@example.com",
-  to: "recipient@example.com",
-  subject: "Hello from Perry",
-  text: "This email was sent from a compiled TypeScript binary!",
-});
+```typescript
+{{#include ../../examples/stdlib/other/snippets.ts:nodemailer}}
 ```
 
 ## zlib (Compression)
 
-```typescript,no-test
+The `zlib` runtime exists but dispatch from `import zlib from "zlib"` is not
+wired yet — track at issue #200.
+
+```text
 import zlib from "zlib";
 
 const compressed = zlib.gzipSync("Hello, World!");
@@ -52,7 +50,10 @@ const decompressed = zlib.gunzipSync(compressed);
 
 ## cron (Job Scheduling)
 
-```typescript,no-test
+The `cron` runtime exists but dispatch from `import { CronJob } from "cron"`
+is not wired yet — track at issue #200.
+
+```text
 import { CronJob } from "cron";
 
 const job = new CronJob("*/5 * * * *", () => {
@@ -63,7 +64,12 @@ job.start();
 
 ## worker_threads
 
-```typescript,no-test
+The `worker_threads` API is partially recognized at HIR-lowering time
+(`parentPort` / `Worker` shapes) but full dispatch is incomplete. For
+data-parallel work today, prefer `parallelMap` / `parallelFilter` /
+`spawn` from `perry/thread` (see [Threading](../threading/overview.md)).
+
+```text
 import { Worker, parentPort, workerData } from "worker_threads";
 
 if (parentPort) {
@@ -83,68 +89,30 @@ if (parentPort) {
 
 ## commander (CLI Parsing)
 
-```typescript,no-test
-import { Command } from "commander";
-
-const program = new Command();
-program.name("my-cli").version("1.0.0").description("My CLI tool");
-
-program
-  .command("serve")
-  .option("-p, --port <number>", "Port number")
-  .option("--verbose", "Verbose output")
-  .action((options) => {
-    console.log(`Starting server on port ${options.port}`);
-  });
-
-program.parse(process.argv);
+```typescript
+{{#include ../../examples/stdlib/other/snippets.ts:commander}}
 ```
 
 ## decimal.js (Arbitrary Precision)
 
-```typescript,no-test
-import Decimal from "decimal.js";
-
-const a = new Decimal("0.1");
-const b = new Decimal("0.2");
-const sum = a.plus(b); // Exactly 0.3 (no floating point errors)
-
-sum.toFixed(2);      // "0.30"
-sum.toNumber();      // 0.3
-a.times(b);          // 0.02
-a.div(b);            // 0.5
-a.pow(10);           // 1e-10
-a.sqrt();            // 0.316...
+```typescript
+{{#include ../../examples/stdlib/other/snippets.ts:decimal}}
 ```
 
 ## lru-cache
 
-```typescript,no-test
-import LRUCache from "lru-cache";
+The wired constructor takes the npm v7+ options-object shape
+(`new LRUCache({ max: 100 })`) — the older positional form
+`new LRUCache(100)` falls through to a `max=100` default.
 
-const cache = new LRUCache(100); // max 100 entries
-
-cache.set("key", "value");
-cache.get("key");       // "value"
-cache.has("key");       // true
-cache.delete("key");
-cache.clear();
+```typescript
+{{#include ../../examples/stdlib/other/snippets.ts:lru-cache}}
 ```
 
 ## child_process
 
-```typescript,no-test
-import { spawnBackground, getProcessStatus, killProcess } from "child_process";
-
-// Spawn a background process
-const { pid, handleId } = spawnBackground("sleep", ["10"], "/tmp/log.txt");
-
-// Check if it's still running
-const status = getProcessStatus(handleId);
-console.log(status.alive); // true
-
-// Kill it
-killProcess(handleId);
+```typescript
+{{#include ../../examples/stdlib/other/snippets.ts:child-process}}
 ```
 
 ## Next Steps

@@ -1,21 +1,13 @@
 # parallelFilter
 
-```typescript,no-test
-import { parallelFilter } from "perry/thread";
-
-function parallelFilter<T>(data: T[], predicate: (item: T) => boolean): T[];
-```
+**Signature**: `parallelFilter<T>(data: T[], predicate: (item: T) => boolean): T[]` — imported from `perry/thread`.
 
 Filters an array in parallel across all available CPU cores. Returns a new array containing only the elements where the predicate returned a truthy value. Order is preserved.
 
 ## Basic Usage
 
-```typescript,no-test
-import { parallelFilter } from "perry/thread";
-
-const numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-const evens = parallelFilter(numbers, (x) => x % 2 === 0);
-// [2, 4, 6, 8, 10]
+```typescript
+{{#include ../../examples/runtime/thread_snippets.ts:parallel-filter-basic}}
 ```
 
 ## How It Works
@@ -37,13 +29,8 @@ Each core independently tests its chunk of elements. Results are merged in the o
 
 Regular `.filter()` runs on a single thread. For large arrays with expensive predicates, `parallelFilter` distributes the work:
 
-```typescript,no-test
-// Single-threaded — one core does all the work
-const results = data.filter((item) => expensivePredicate(item));
-
-// Parallel — all cores share the work
-import { parallelFilter } from "perry/thread";
-const results = parallelFilter(data, (item) => expensivePredicate(item));
+```typescript
+{{#include ../../examples/runtime/thread_snippets.ts:parallel-filter-vs-filter}}
 ```
 
 The tradeoff: `parallelFilter` has overhead from copying values between threads. Use it when the predicate is expensive enough to justify that cost.
@@ -52,16 +39,8 @@ The tradeoff: `parallelFilter` has overhead from copying values between threads.
 
 Like `parallelMap`, the predicate can capture outer variables. Captures are deep-copied to each thread:
 
-```typescript,no-test
-import { parallelFilter } from "perry/thread";
-
-const minScore = 85;
-const maxAge = 30;
-
-// minScore and maxAge are captured and copied to each thread
-const qualified = parallelFilter(candidates, (c) => {
-    return c.score >= minScore && c.age <= maxAge;
-});
+```typescript
+{{#include ../../examples/runtime/thread_snippets.ts:parallel-filter-capture}}
 ```
 
 Mutable variables cannot be captured — the compiler rejects this at compile time.
@@ -70,42 +49,20 @@ Mutable variables cannot be captured — the compiler rejects this at compile ti
 
 ### Filtering Large Datasets
 
-```typescript,no-test
-import { parallelFilter } from "perry/thread";
-
-const transactions = getTransactionLog(); // millions of records
-
-const suspicious = parallelFilter(transactions, (tx) => {
-    return tx.amount > 10000
-        && tx.country !== tx.user.homeCountry
-        && tx.timestamp.hour < 6;
-});
+```typescript
+{{#include ../../examples/runtime/thread_snippets.ts:parallel-filter-large}}
 ```
 
 ### Combined with parallelMap
 
-```typescript,no-test
-import { parallelMap, parallelFilter } from "perry/thread";
-
-// Step 1: Filter to relevant items (parallel)
-const active = parallelFilter(users, (u) => u.isActive && u.age >= 18);
-
-// Step 2: Transform the filtered results (parallel)
-const profiles = parallelMap(active, (u) => ({
-    name: u.name,
-    score: computeScore(u),
-}));
+```typescript
+{{#include ../../examples/runtime/thread_snippets.ts:parallel-filter-combined}}
 ```
 
 ### Predicate with Heavy Computation
 
-```typescript,no-test
-import { parallelFilter } from "perry/thread";
-
-// Each predicate call does significant work — perfect for parallelization
-const valid = parallelFilter(certificates, (cert) => {
-    return verifyCertificateChain(cert) && !isRevoked(cert);
-});
+```typescript
+{{#include ../../examples/runtime/thread_snippets.ts:parallel-filter-heavy}}
 ```
 
 ## Performance

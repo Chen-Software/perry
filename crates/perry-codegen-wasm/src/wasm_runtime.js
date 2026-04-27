@@ -689,6 +689,7 @@ function buildImports() {
           matchParentHeight: "perry_ui_widget_match_parent_height",
           setHidden: "perry_ui_set_widget_hidden",
           setEdgeInsets: "perry_ui_widget_set_edge_insets",
+          setShadow: "perry_ui_widget_set_shadow",
           // App
           run: "perry_ui_app_run", setBody: "perry_ui_app_set_body",
         };
@@ -1823,6 +1824,7 @@ const __memDispatch = {
       matchParentWidth: "perry_ui_widget_match_parent_width",
       matchParentHeight: "perry_ui_widget_match_parent_height",
       setHidden: "perry_ui_set_widget_hidden", setEdgeInsets: "perry_ui_widget_set_edge_insets",
+      setShadow: "perry_ui_widget_set_shadow",
       run: "perry_ui_app_run", setBody: "perry_ui_app_set_body",
     };
     const uiFnName = uiMethodMap[mname];
@@ -2574,9 +2576,10 @@ function perry_ui_toggle_create(label, callback) {
   });
   return uiAlloc(wrap);
 }
-function perry_ui_slider_create(min, max, initial, callback) {
+function perry_ui_slider_create(min, max, callback) {
+  // Codegen emits 3-arg Slider(min, max, onChange); default initial=min
   const el = document.createElement("input"); el.type = "range";
-  el.min = min || 0; el.max = max || 100; el.value = initial || 0; el.step = "any";
+  el.min = min || 0; el.max = max || 100; el.value = el.min; el.step = "any";
   el._perryCallback = callback;
   el.addEventListener("input", () => {
     if (el._perryCallback !== undefined) callWasmClosure(el._perryCallback, parseFloat(el.value));
@@ -2747,6 +2750,79 @@ function perry_ui_set_frame(h, width, height) {
 function perry_ui_set_corner_radius(h, radius) { const el = uiGet(h); if (el) el.style.borderRadius = radius + "px"; }
 function perry_ui_set_border(h, width, r, g, b, a) {
   const el = uiGet(h); if (el) el.style.border = `${width}px solid rgba(${r*255|0},${g*255|0},${b*255|0},${a})`;
+}
+// Joint border state for the Apple-style split setters
+// (`widgetSetBorderColor` / `widgetSetBorderWidth`). CSS won't render a
+// border unless style + color + width are all set in the same rule, so
+// we cache (color, width) per handle and re-apply `el.style.border` on
+// every change. Defaults match CALayer-ish behavior: missing color =
+// black, missing width = 1px. Issue #185 Phase B closure.
+const __perryBorderState = new Map();
+function __perry_apply_border(h) {
+  const el = uiGet(h);
+  if (!el) return;
+  const s = __perryBorderState.get(h) || {};
+  const color = s.color || [0, 0, 0, 1];
+  const width = s.width != null ? s.width : 1;
+  const [r, g, b, a] = color;
+  el.style.border = `${width}px solid rgba(${r*255|0},${g*255|0},${b*255|0},${a})`;
+}
+function perry_ui_widget_set_border_color(h, r, g, b, a) {
+  const s = __perryBorderState.get(h) || {};
+  s.color = [r, g, b, a];
+  __perryBorderState.set(h, s);
+  __perry_apply_border(h);
+}
+function perry_ui_widget_set_border_width(h, width) {
+  const s = __perryBorderState.get(h) || {};
+  s.width = width;
+  __perryBorderState.set(h, s);
+  __perry_apply_border(h);
+}
+// Text decoration (issue #185 Phase B closure). 0=none, 1=underline,
+// 2=strikethrough. CSS `text-decoration` values map cleanly.
+function perry_ui_text_set_decoration(h, decoration) {
+  const el = uiGet(h);
+  if (!el) return;
+  const css = decoration === 1 ? "underline"
+    : decoration === 2 ? "line-through"
+    : "none";
+  el.style.textDecoration = css;
+}
+// Issue #185 Phase B closure 11 — TextField borderless. Drops the
+// rendered border so the input visually matches a non-bordered
+// borderless setter on the Apple side.
+function perry_ui_textfield_set_borderless(h, borderless) {
+  const el = uiGet(h);
+  if (!el) return;
+  el.style.border = borderless ? "none" : "";
+  // Also strip the default browser focus outline so "borderless"
+  // really feels borderless. User can override with explicit
+  // border / outline rules afterwards.
+  el.style.outline = borderless ? "none" : "";
+}
+// Issue #185 Phase B closure 11 — Stack alignment via CSS flex.
+// Numeric enum: 0=fill, 1=center, 2=leading, 3=trailing, 4=baseline.
+// Maps to CSS `align-items` (cross-axis on flex containers).
+function perry_ui_stack_set_alignment(h, alignment) {
+  const el = uiGet(h);
+  if (!el) return;
+  const value = alignment === 0 ? "stretch"
+    : alignment === 1 ? "center"
+    : alignment === 2 ? "flex-start"
+    : alignment === 3 ? "flex-end"
+    : alignment === 4 ? "baseline"
+    : "stretch";
+  el.style.alignItems = value;
+}
+// Drop shadow (issue #185 Phase B closure 2). Same arg shape as the
+// Apple CALayer twin — `(r,g,b,a)` is shadow color, `blur` is shadow
+// radius, `(offsetX, offsetY)` is shadow offset (positive y = downward,
+// matching CALayer + native HTML semantics).
+function perry_ui_widget_set_shadow(h, r, g, b, a, blur, offsetX, offsetY) {
+  const el = uiGet(h);
+  if (!el) return;
+  el.style.boxShadow = `${offsetX}px ${offsetY}px ${blur}px rgba(${r*255|0},${g*255|0},${b*255|0},${a})`;
 }
 function perry_ui_set_opacity(h, opacity) { const el = uiGet(h); if (el) el.style.opacity = opacity; }
 function perry_ui_set_enabled(h, enabled) {
@@ -3109,6 +3185,34 @@ function perry_system_notification_send(title, body) {
 function perry_ui_frame_split_create() { return perry_ui_hstack_create(0); }
 function perry_ui_frame_split_add_child(splitH, childH) { perry_ui_widget_add_child(splitH, childH); }
 
+// ---------- Camera (issue #191) ----------
+// Browser stubs. The Web target has no `getUserMedia`-backed live preview
+// integrated yet, so these return sentinel values matching the documented
+// contract: `cameraSampleColor` returns `-1` when no frame is available, the
+// other setters are no-ops. User code calling `CameraView()` from a browser
+// build resolves the symbol cleanly; on iOS/Android the same source compiles
+// to the real AVCaptureSession / Camera2 backend.
+function perry_ui_camera_create() {
+  // Render a placeholder div so layout slots reserve space the same way
+  // they would for a real preview. No camera permission is requested.
+  const el = document.createElement("div");
+  el.style.background = "#000";
+  el.style.color = "#888";
+  el.style.display = "flex";
+  el.style.alignItems = "center";
+  el.style.justifyContent = "center";
+  el.style.minWidth = "200px";
+  el.style.minHeight = "200px";
+  el.textContent = "[camera preview not supported on web]";
+  return uiAlloc(el);
+}
+function perry_ui_camera_start(_h) {}
+function perry_ui_camera_stop(_h) {}
+function perry_ui_camera_freeze(_h) {}
+function perry_ui_camera_unfreeze(_h) {}
+function perry_ui_camera_sample_color(_x, _y) { return -1; }
+function perry_ui_camera_set_on_tap(_h, _cb) {}
+
 // ---------- UI Dispatch table (maps bridge function names to implementations) ----------
 const __perryUiDispatch = {
   // Widget creation
@@ -3131,6 +3235,10 @@ const __perryUiDispatch = {
   perry_ui_set_font_family, perry_ui_set_padding, perry_ui_set_frame, perry_ui_set_corner_radius,
   perry_ui_set_border, perry_ui_set_opacity, perry_ui_set_enabled, perry_ui_set_tooltip,
   perry_ui_set_control_size, perry_ui_set_widget_hidden, perry_ui_widget_set_background_gradient,
+  perry_ui_widget_set_shadow,
+  perry_ui_widget_set_border_color, perry_ui_widget_set_border_width,
+  perry_ui_text_set_decoration,
+  perry_ui_textfield_set_borderless, perry_ui_stack_set_alignment,
   perry_ui_widget_set_width, perry_ui_widget_set_height, perry_ui_widget_set_hugging,
   perry_ui_widget_match_parent_width, perry_ui_widget_match_parent_height,
   perry_ui_widget_set_edge_insets, perry_ui_stack_set_detaches_hidden, perry_ui_stack_set_distribution,
@@ -3193,6 +3301,10 @@ const __perryUiDispatch = {
   perry_system_keychain_delete, perry_system_notification_send,
   // Frame split
   perry_ui_frame_split_create, perry_ui_frame_split_add_child,
+  // Camera (issue #191) — browser stubs
+  perry_ui_camera_create, perry_ui_camera_start, perry_ui_camera_stop,
+  perry_ui_camera_freeze, perry_ui_camera_unfreeze,
+  perry_ui_camera_sample_color, perry_ui_camera_set_on_tap,
 };
 
 // Also expose as __perryUi for JS async function context
@@ -3236,6 +3348,7 @@ const __uiMethodMap = {
   matchParentHeight: "perry_ui_widget_match_parent_height",
   setHidden: "perry_ui_set_widget_hidden",
   setEdgeInsets: "perry_ui_widget_set_edge_insets",
+  setShadow: "perry_ui_widget_set_shadow",
   run: "perry_ui_app_run", setBody: "perry_ui_app_set_body",
   addOverlay: "perry_ui_widget_add_overlay",
 };

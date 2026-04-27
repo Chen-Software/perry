@@ -6,9 +6,8 @@ Perry compiles a practical subset of TypeScript. This page documents what's not 
 
 Types are erased at compile time. There is no runtime type system — Perry doesn't generate type guards or runtime type metadata.
 
-```typescript,no-test
-// These annotations are erased — no runtime effect
-const x: number = someFunction(); // No runtime check that result is actually a number
+```typescript
+{{#include ../../examples/language/limitations.ts:erased-types}}
 ```
 
 Use explicit `typeof` checks where runtime type discrimination is needed.
@@ -17,7 +16,8 @@ Use explicit `typeof` checks where runtime type discrimination is needed.
 
 Perry compiles to native code ahead of time. Dynamic code execution is not possible:
 
-```typescript,no-test
+<!-- intentionally-rejects: this snippet documents code Perry refuses to compile -->
+```text
 // Not supported
 eval("console.log('hi')");
 new Function("return 42");
@@ -27,7 +27,8 @@ new Function("return 42");
 
 TypeScript decorators are not currently supported:
 
-```typescript,no-test
+<!-- intentionally-rejects: this snippet documents code Perry refuses to compile -->
+```text
 // Not supported
 @Component
 class MyClass {}
@@ -37,7 +38,8 @@ class MyClass {}
 
 There is no `Reflect` API or runtime type metadata:
 
-```typescript,no-test
+<!-- intentionally-rejects: this snippet documents code Perry refuses to compile -->
+```text
 // Not supported
 Reflect.getMetadata("design:type", target, key);
 ```
@@ -46,7 +48,8 @@ Reflect.getMetadata("design:type", target, key);
 
 Only static imports are supported:
 
-```typescript,no-test
+<!-- intentionally-rejects: the `require` and dynamic-`import` lines are code Perry refuses to compile -->
+```text
 // Supported
 import { foo } from "./module";
 
@@ -59,7 +62,8 @@ const mod = await import("./module");
 
 Perry compiles classes to fixed structures. Dynamic prototype modification is not supported:
 
-```typescript,no-test
+<!-- intentionally-rejects: this snippet documents code Perry refuses to compile -->
+```text
 // Not supported
 MyClass.prototype.newMethod = function() {};
 Object.setPrototypeOf(obj, proto);
@@ -69,7 +73,8 @@ Object.setPrototypeOf(obj, proto);
 
 The `Symbol` primitive type is not currently supported:
 
-```typescript,no-test
+<!-- intentionally-rejects: this snippet documents code Perry refuses to compile -->
+```text
 // Not supported
 const sym = Symbol("description");
 ```
@@ -78,7 +83,8 @@ const sym = Symbol("description");
 
 Weak references are not implemented:
 
-```typescript,no-test
+<!-- intentionally-rejects: this snippet documents code Perry refuses to compile -->
+```text
 // Not supported
 const wm = new WeakMap();
 const wr = new WeakRef(obj);
@@ -88,7 +94,8 @@ const wr = new WeakRef(obj);
 
 The `Proxy` object is not supported:
 
-```typescript,no-test
+<!-- intentionally-rejects: this snippet documents code Perry refuses to compile -->
+```text
 // Not supported
 const proxy = new Proxy(target, handler);
 ```
@@ -97,18 +104,8 @@ const proxy = new Proxy(target, handler);
 
 `Error` and basic `throw`/`catch` work, but custom error subclasses have limited support:
 
-```typescript,no-test
-// Works
-throw new Error("message");
-
-// Limited
-class CustomError extends Error {
-  code: number;
-  constructor(msg: string, code: number) {
-    super(msg);
-    this.code = code;
-  }
-}
+```typescript
+{{#include ../../examples/language/limitations.ts:error-subclass}}
 ```
 
 ## Threading Model
@@ -121,7 +118,8 @@ Threads do not share mutable state — closures passed to thread primitives cann
 
 Dynamic property keys in object literals are limited:
 
-```typescript,no-test
+<!-- intentionally-rejects: the `{ [key]: "value" }` line at the bottom is code Perry refuses to compile -->
+```text
 // Supported
 const key = "name";
 obj[key] = "value";
@@ -144,7 +142,8 @@ Not all npm packages work with Perry:
 
 For cases where you need dynamic behavior, use the JavaScript runtime fallback:
 
-```typescript,no-test
+<!-- intentionally-rejects: `jsEval` is a hypothetical helper used to illustrate the QuickJS escape-hatch shape; not a stable API -->
+```text
 import { jsEval } from "perry/jsruntime";
 // Routes specific code through QuickJS for dynamic evaluation
 ```
@@ -153,13 +152,8 @@ import { jsEval } from "perry/jsruntime";
 
 Since there's no runtime type checking, use explicit checks:
 
-```typescript,no-test
-// Instead of relying on type narrowing from generics
-if (typeof value === "string") {
-  // String path
-} else if (typeof value === "number") {
-  // Number path
-}
+```typescript
+{{#include ../../examples/language/limitations.ts:type-narrowing}}
 ```
 
 ## Next Steps

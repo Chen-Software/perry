@@ -1,72 +1,65 @@
 # Dialogs
 
 Perry provides native dialog functions for file selection, alerts, and sheets.
+Every snippet below is excerpted from
+[`docs/examples/ui/dialogs/snippets.ts`](../../examples/ui/dialogs/snippets.ts) —
+CI compiles and links the file on every PR, so the API drawn here is the API
+the runtime exposes.
+
+All file dialogs are **callback-based** (the OS-modal panel is non-blocking on
+Apple platforms, so a synchronous return wouldn't be possible without freezing
+the app's run loop). The callback receives an empty string when the user
+cancels.
 
 ## File Open Dialog
 
-```typescript,no-test
-import { openFileDialog } from "perry/ui";
-
-const filePath = openFileDialog();
-if (filePath) {
-  console.log(`Selected: ${filePath}`);
-}
+```typescript
+{{#include ../../examples/ui/dialogs/snippets.ts:open-file}}
 ```
-
-Returns the selected file path, or `null` if cancelled.
 
 ## Folder Selection Dialog
 
-```typescript,no-test
-import { openFolderDialog } from "perry/ui";
-
-const folderPath = openFolderDialog();
-if (folderPath) {
-  console.log(`Selected folder: ${folderPath}`);
-}
+```typescript
+{{#include ../../examples/ui/dialogs/snippets.ts:open-folder}}
 ```
 
 ## Save File Dialog
 
-```typescript,no-test
-import { saveFileDialog } from "perry/ui";
-
-const savePath = saveFileDialog();
-if (savePath) {
-  // Write file to savePath
-}
+```typescript
+{{#include ../../examples/ui/dialogs/snippets.ts:save-file}}
 ```
+
+`saveFileDialog(callback, defaultName, extension)` pre-fills the name field
+with `defaultName.<extension>`.
 
 ## Alert
 
 Display a native alert dialog:
 
-```typescript,no-test
-import { alert } from "perry/ui";
-
-alert("Operation Complete", "Your file has been saved successfully.");
+```typescript
+{{#include ../../examples/ui/dialogs/snippets.ts:alert}}
 ```
 
 `alert(title, message)` shows a modal alert with an OK button.
 
+## Alert with Buttons
+
+```typescript
+{{#include ../../examples/ui/dialogs/snippets.ts:alert-with-buttons}}
+```
+
+`alertWithButtons(title, message, buttons, callback)` invokes the callback
+with the 0-based index of the button the user clicked. By convention put a
+destructive label last and check the index in the callback.
+
 ## Sheets
 
-Sheets are modal panels attached to a window:
+Sheets are modal panels attached to a window. Build the body, hand it (with a
+size) to `sheetCreate`, then `sheetPresent` it. To dismiss programmatically,
+keep the handle around and call `sheetDismiss(handle)`:
 
-```typescript,no-test
-import { Sheet, Text, Button, VStack } from "perry/ui";
-
-const sheet = Sheet(
-  VStack(16, [
-    Text("Sheet Content"),
-    Button("Close", () => {
-      sheet.dismiss();
-    }),
-  ])
-);
-
-// Show the sheet
-sheet.present();
+```typescript
+{{#include ../../examples/ui/dialogs/snippets.ts:sheet}}
 ```
 
 ## Platform Notes
@@ -79,41 +72,13 @@ sheet.present();
 | Alert | NSAlert | UIAlertController | MessageBoxW | MessageDialog | `alert()` |
 | Sheet | NSSheet | Modal VC | Modal Dialog | Modal Window | Modal div |
 
-## Complete Example
+## Complete Example: minimal text editor
 
-```typescript,no-test
-import { App, Text, Button, TextField, VStack, HStack, State, openFileDialog, saveFileDialog, alert } from "perry/ui";
-import { readFileSync, writeFileSync } from "perry/fs";
+A real program that wires `openFileDialog` and `saveFileDialog` into a
+state-bound `TextField`:
 
-const content = State("");
-const filePath = State("");
-
-App({
-  title: "Text Editor",
-  width: 800,
-  height: 600,
-  body: VStack(12, [
-    HStack(8, [
-      Button("Open", () => {
-        const path = openFileDialog();
-        if (path) {
-          filePath.set(path);
-          content.set(readFileSync(path));
-        }
-      }),
-      Button("Save As", () => {
-        const path = saveFileDialog();
-        if (path) {
-          writeFileSync(path, content.value);
-          filePath.set(path);
-          alert("Saved", `File saved to ${path}`);
-        }
-      }),
-    ]),
-    Text(`File: ${filePath.value || "No file open"}`),
-    TextField("Start typing...", (value: string) => content.set(value)),
-  ]),
-});
+```typescript
+{{#include ../../examples/ui/dialogs/text_editor.ts}}
 ```
 
 ## Next Steps

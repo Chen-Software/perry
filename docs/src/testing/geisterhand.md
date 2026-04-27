@@ -567,65 +567,11 @@ jobs:
 
 ## Example App
 
-A complete Perry UI app demonstrating all widget types that geisterhand can interact with:
+A complete Perry UI app demonstrating every widget type Geisterhand can
+interact with — verified by CI:
 
-```typescript,no-test
-import {
-  App, VStack, HStack, Text, Button, TextField,
-  Slider, Toggle, Picker, State
-} from "perry/ui";
-
-// State for reactive UI
-const counterState = State(0);
-const textState = State("");
-
-// Labels
-const title = Text("Geisterhand Demo");
-const counterLabel = Text("Count: 0");
-
-// Bind counter state to label
-counterState.onChange((val: number) => {
-  counterLabel.setText("Count: " + val);
-});
-
-// Button — handle 3 (approx), widget_type=0
-const incrementBtn = Button("Increment", () => {
-  counterState.set(counterState.value + 1);
-});
-
-const resetBtn = Button("Reset", () => {
-  counterState.set(0);
-});
-
-// TextField — widget_type=1
-const nameField = TextField("Enter your name", (text: string) => {
-  textState.set(text);
-  console.log("Name:", text);
-});
-
-// Slider — widget_type=2
-const volumeSlider = Slider(0, 100, 50, (value: number) => {
-  console.log("Volume:", value);
-});
-
-// Toggle — widget_type=3
-const darkModeToggle = Toggle("Dark Mode", false, (on: boolean) => {
-  console.log("Dark mode:", on);
-});
-
-// Layout
-const buttonRow = HStack(8, [incrementBtn, resetBtn]);
-const stack = VStack(12, [
-  title, counterLabel, buttonRow,
-  nameField, volumeSlider, darkModeToggle
-]);
-
-App({
-  title: "Geisterhand Demo",
-  width: 400,
-  height: 400,
-  body: stack
-});
+```typescript
+{{#include ../../examples/ui/testing/geisterhand_demo.ts}}
 ```
 
 After compiling with `--enable-geisterhand` and running:

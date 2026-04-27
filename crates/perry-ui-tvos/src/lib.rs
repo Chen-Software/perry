@@ -341,6 +341,12 @@ pub extern "C" fn perry_ui_text_set_wraps(handle: i64, max_width: f64) {
     widgets::text::set_wraps(handle, max_width);
 }
 
+/// Text decoration (issue #185 Phase B). 0=none, 1=underline, 2=strikethrough.
+#[no_mangle]
+pub extern "C" fn perry_ui_text_set_decoration(handle: i64, decoration: i64) {
+    widgets::text::set_decoration(handle, decoration);
+}
+
 #[no_mangle]
 pub extern "C" fn perry_ui_text_set_selectable(handle: i64, selectable: f64) {
     widgets::text::set_selectable(handle, selectable != 0.0);
@@ -683,6 +689,19 @@ pub extern "C" fn perry_ui_canvas_fill_gradient(
 ) {
     widgets::canvas::fill_gradient(handle, r1, g1, b1, a1, r2, g2, b2, a2, direction);
 }
+
+#[no_mangle] pub extern "C" fn perry_ui_canvas_set_fill_color(_h: i64, _r: f64, _g: f64, _b: f64, _a: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_set_stroke_color(_h: i64, _r: f64, _g: f64, _b: f64, _a: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_set_line_width(_h: i64, _w: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_fill_rect(_h: i64, _x: f64, _y: f64, _w: f64, _ht: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_stroke_rect(_h: i64, _x: f64, _y: f64, _w: f64, _ht: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_clear_rect(h: i64, _x: f64, _y: f64, _w: f64, _ht: f64) { widgets::canvas::clear(h); }
+#[no_mangle] pub extern "C" fn perry_ui_canvas_arc(_h: i64, _x: f64, _y: f64, _r: f64, _sa: f64, _ea: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_close_path(_h: i64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_fill(_h: i64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_stroke_path(_h: i64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_fill_text(_h: i64, _ptr: i64, _x: f64, _y: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_canvas_set_font(_h: i64, _ptr: i64) {}
 
 // =============================================================================
 // New Widgets: SecureField, ProgressView, Image, Picker, Form, NavStack, ZStack
@@ -1073,6 +1092,35 @@ pub extern "C" fn perry_ui_widget_set_border_color(handle: i64, r: f64, g: f64, 
                 let _: () = objc2::msg_send![layer, setBorderColor: cg_color];
                 extern "C" { fn CGColorRelease(color: *mut std::ffi::c_void); }
                 CGColorRelease(cg_color);
+            }
+        }
+    }
+}
+
+/// Set drop shadow on any widget via its CALayer (issue #185 Phase B).
+/// Mirrors the iOS / visionOS / macOS twin so the user-facing API is
+/// identical across Apple targets: `(r,g,b,a)` shadow color (alpha →
+/// shadowOpacity), `blur` → shadowRadius, `(offset_x, offset_y)` →
+/// shadowOffset CGSize.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_shadow(
+    handle: i64,
+    r: f64, g: f64, b: f64, a: f64,
+    blur: f64, offset_x: f64, offset_y: f64,
+) {
+    if let Some(view) = widgets::get_widget(handle) {
+        unsafe {
+            let layer: *mut objc2::runtime::AnyObject = objc2::msg_send![&*view, layer];
+            if !layer.is_null() {
+                let cg_color = widgets::create_cg_color(r, g, b, 1.0);
+                let _: () = objc2::msg_send![layer, setShadowColor: cg_color];
+                extern "C" { fn CGColorRelease(color: *mut std::ffi::c_void); }
+                CGColorRelease(cg_color);
+                let _: () = objc2::msg_send![layer, setShadowOpacity: a as f32];
+                let _: () = objc2::msg_send![layer, setShadowRadius: blur];
+                let offset = objc2_core_foundation::CGSize::new(offset_x, offset_y);
+                let _: () = objc2::msg_send![layer, setShadowOffset: offset];
+                let _: () = objc2::msg_send![layer, setMasksToBounds: false];
             }
         }
     }
@@ -1502,6 +1550,39 @@ pub extern "C" fn perry_system_keychain_delete(key_ptr: i64) {
 
 #[no_mangle]
 pub extern "C" fn perry_system_notification_send(_title: i64, _body: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_register_remote(_callback: f64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_receive(_callback: f64) {}
+
+/// Background-receive (#98) — no-op on tvOS. Apple TV doesn't deliver
+/// silent push to backgrounded apps the way iOS does; the symbol exists so
+/// cross-platform user code links cleanly.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_background_receive(_callback: f64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_interval(
+    _id_ptr: i64, _title_ptr: i64, _body_ptr: i64, _seconds: f64, _repeats: f64,
+) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_calendar(
+    _id_ptr: i64, _title_ptr: i64, _body_ptr: i64, _timestamp_ms: f64,
+) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_schedule_location(
+    _id_ptr: i64, _title_ptr: i64, _body_ptr: i64, _lat: f64, _lon: f64, _radius: f64,
+) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_cancel(_id_ptr: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_tap(_callback: f64) {}
 
 #[no_mangle]
 pub extern "C" fn perry_system_get_locale() -> i64 {

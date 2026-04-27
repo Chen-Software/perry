@@ -347,6 +347,63 @@ pub fn set_background_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
     }
 }
 
+/// Set drop shadow on a widget (issue #185 Phase B).
+///
+/// Maps the cross-platform `(r, g, b, a, blur, offset_x, offset_y)` shape
+/// onto Android's Material elevation model. Android Views don't expose
+/// arbitrary blur/offset/color shadows like CSS or CALayer; instead the
+/// platform owns the lighting and the app picks the elevation depth (in
+/// dp). The mapping:
+///   - `elevation = blur / 2` dp (clamped to ≥ 0). A 12-px blur becomes a
+///     6 dp elevation, which gives a Material-style soft shadow that
+///     reads similarly to the iOS / macOS / Web twins.
+///   - `(r, g, b, a)` is forwarded to `setOutlineSpotShadowColor` and
+///     `setOutlineAmbientShadowColor` (API 28+). Both calls silently
+///     no-op on API 24-27, so we don't gate them — older devices get the
+///     default system shadow color, newer devices get the requested tint.
+///   - `(offset_x, offset_y)` is intentionally ignored — Android's
+///     elevation model derives shadow direction from the device-level
+///     light source, not per-widget. Phase C's `style: { shadow: {...} }`
+///     ergonomic API will document this caveat.
+pub fn set_shadow(
+    handle: i64,
+    r: f64, g: f64, b: f64, a: f64,
+    blur: f64, _offset_x: f64, _offset_y: f64,
+) {
+    if let Some(view_ref) = get_widget(handle) {
+        let mut env = jni_bridge::get_env();
+        let _ = env.push_local_frame(8);
+
+        let elevation_dp = (blur / 2.0).max(0.0) as f32;
+        let elevation_px = dp_to_px(&mut env, elevation_dp) as f32;
+        let _ = env.call_method(
+            view_ref.as_obj(),
+            "setElevation",
+            "(F)V",
+            &[JValue::Float(elevation_px)],
+        );
+
+        // API 28+ shadow tinting; both call_method results are ignored
+        // because older API levels just don't have the method and we
+        // accept the system default in that case.
+        let color = argb_color(a, r, g, b);
+        let _ = env.call_method(
+            view_ref.as_obj(),
+            "setOutlineSpotShadowColor",
+            "(I)V",
+            &[JValue::Int(color)],
+        );
+        let _ = env.call_method(
+            view_ref.as_obj(),
+            "setOutlineAmbientShadowColor",
+            "(I)V",
+            &[JValue::Int(color)],
+        );
+
+        unsafe { env.pop_local_frame(&JObject::null()); }
+    }
+}
+
 /// Set background gradient.
 pub fn set_background_gradient(handle: i64, r1: f64, g1: f64, b1: f64, a1: f64, r2: f64, g2: f64, b2: f64, a2: f64, direction: f64) {
     if let Some(view_ref) = get_widget(handle) {

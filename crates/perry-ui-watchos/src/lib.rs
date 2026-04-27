@@ -320,6 +320,16 @@ pub extern "C" fn perry_ui_text_set_wraps(handle: i64, _max_width: f64) {
     });
 }
 
+/// Text decoration (issue #185 Phase B). 0=none, 1=underline, 2=strikethrough.
+/// Stored on `NodeData`; the SwiftUI host applies `.underline()` /
+/// `.strikethrough()` modifiers at render time.
+#[no_mangle]
+pub extern "C" fn perry_ui_text_set_decoration(handle: i64, decoration: i64) {
+    tree::with_node_mut(handle, |node| {
+        node.text_decoration = decoration;
+    });
+}
+
 #[no_mangle]
 pub extern "C" fn perry_ui_text_set_selectable(_handle: i64, _selectable: f64) {}
 
@@ -422,6 +432,20 @@ pub extern "C" fn perry_ui_widget_set_enabled(handle: i64, enabled: i64) {
 pub extern "C" fn perry_ui_widget_set_border_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
     tree::with_node_mut(handle, |node| {
         node.border_color = Some((r, g, b, a));
+    });
+}
+
+/// Set drop shadow on a widget node (issue #185 Phase B).
+/// watchOS stores shadow in the introspection tree; the SwiftUI host
+/// applies `.shadow(color:radius:x:y:)` modifier when rendering.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_shadow(
+    handle: i64,
+    r: f64, g: f64, b: f64, a: f64,
+    blur: f64, offset_x: f64, offset_y: f64,
+) {
+    tree::with_node_mut(handle, |node| {
+        node.shadow = Some((r, g, b, a, blur, offset_x, offset_y));
     });
 }
 
@@ -671,6 +695,14 @@ pub extern "C" fn perry_ui_hstack_create_with_insets(spacing: f64, top: f64, lef
 #[no_mangle] pub extern "C" fn perry_system_keychain_get(_key: i64) -> f64 { f64::from_bits(0x7FFC_0000_0000_0001) }
 #[no_mangle] pub extern "C" fn perry_system_keychain_delete(_key: i64) {}
 #[no_mangle] pub extern "C" fn perry_system_notification_send(_title: i64, _body: i64) {}
+#[no_mangle] pub extern "C" fn perry_system_notification_register_remote(_callback: f64) {}
+#[no_mangle] pub extern "C" fn perry_system_notification_on_receive(_callback: f64) {}
+#[no_mangle] pub extern "C" fn perry_system_notification_on_background_receive(_callback: f64) {}
+#[no_mangle] pub extern "C" fn perry_system_notification_schedule_interval(_id_ptr: i64, _title_ptr: i64, _body_ptr: i64, _seconds: f64, _repeats: f64) {}
+#[no_mangle] pub extern "C" fn perry_system_notification_schedule_calendar(_id_ptr: i64, _title_ptr: i64, _body_ptr: i64, _timestamp_ms: f64) {}
+#[no_mangle] pub extern "C" fn perry_system_notification_schedule_location(_id_ptr: i64, _title_ptr: i64, _body_ptr: i64, _lat: f64, _lon: f64, _radius: f64) {}
+#[no_mangle] pub extern "C" fn perry_system_notification_cancel(_id_ptr: i64) {}
+#[no_mangle] pub extern "C" fn perry_system_notification_on_tap(_callback: f64) {}
 #[no_mangle]
 pub extern "C" fn perry_system_get_locale() -> i64 {
     extern "C" { fn js_string_from_bytes(ptr: *const u8, len: i32) -> i64; }
