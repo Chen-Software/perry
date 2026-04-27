@@ -121,3 +121,10 @@ private-*
 
 # mdBook output
 docs/book/
+
+# Mach-O and executable binaries
+example-code/**/myapp
+*.exe
+*.dll
+*.so
+*.dylib

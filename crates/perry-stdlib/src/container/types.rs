@@ -50,6 +50,9 @@ pub struct ContainerSpec {
     pub read_only: Option<bool>,
     pub seccomp: Option<String>,
     pub labels: Option<HashMap<String, String>>,
+    pub tmpfs: Option<Vec<String>>,
+    pub cap_drop: Option<Vec<String>>,
+    pub user: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

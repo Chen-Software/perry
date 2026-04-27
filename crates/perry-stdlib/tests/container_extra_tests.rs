@@ -51,7 +51,7 @@ fn test_topological_sort_tie_breaking() {
     // Alphabetical order: api, db, redis, web
     // Roots: db, redis -> db is processed first (d < r)
     // After db: api and web are added to queue. Queue now has: redis, api, web.
-    // Alphabetical pick from queue: api (a), then redis (r), then web (w).
+    // Alphabetical pick from queue: api (a) comes before redis (r) and web (w).
     // Final order: ["db", "api", "redis", "web"]
     assert_eq!(order, vec!["db", "api", "redis", "web"]);
 }

@@ -81,6 +81,9 @@ pub unsafe extern "C" fn js_container_run(spec_json_ptr: *const StringHeader) ->
             rm: spec.rm,
             read_only: spec.read_only,
             seccomp: spec.seccomp,
+            tmpfs: spec.tmpfs,
+            cap_drop: spec.cap_drop,
+            user: spec.user,
         };
         let handle = backend.run(&internal_spec).await.map_err(|e| compose_error_to_js(&e))?;
         let id = register_container_handle(ContainerHandle { id: handle.id, name: handle.name });
@@ -124,6 +127,9 @@ pub unsafe extern "C" fn js_container_create(spec_json_ptr: *const StringHeader)
             rm: spec.rm,
             read_only: spec.read_only,
             seccomp: spec.seccomp,
+            tmpfs: spec.tmpfs,
+            cap_drop: spec.cap_drop,
+            user: spec.user,
         };
         let handle = backend.create(&internal_spec).await.map_err(|e| compose_error_to_js(&e))?;
         let id = register_container_handle(ContainerHandle { id: handle.id, name: handle.name });
@@ -408,11 +414,6 @@ pub unsafe extern "C" fn js_container_composeUp(spec_json_ptr: *const StringHead
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_up(spec_json_ptr: *const StringHeader) -> *mut Promise {
-    js_container_composeUp(spec_json_ptr)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn js_container_compose_down(handle_id: f64, volumes: f64) -> *mut Promise {
     let promise = js_promise_new();
     let id = handle_id as u64;
@@ -421,11 +422,6 @@ pub unsafe extern "C" fn js_container_compose_down(handle_id: f64, volumes: f64)
         compose::compose_down(id, v).await.map(|_| 0).map_err(|e| e.to_string())
     });
     promise
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn js_compose_down(handle_id: f64, volumes: f64) -> *mut Promise {
-    js_container_compose_down(handle_id, volumes)
 }
 
 #[no_mangle]
@@ -443,11 +439,6 @@ pub unsafe extern "C" fn js_container_compose_ps(handle_id: f64) -> *mut Promise
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_ps(handle_id: f64) -> *mut Promise {
-    js_container_compose_ps(handle_id)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn js_container_compose_logs(handle_id: f64, service_ptr: *const StringHeader, tail: f64) -> *mut Promise {
     let promise = js_promise_new();
     let id = handle_id as u64;
@@ -462,11 +453,6 @@ pub unsafe extern "C" fn js_container_compose_logs(handle_id: f64, service_ptr: 
         JSValue::string_ptr(str_ptr).bits()
     });
     promise
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn js_compose_logs(handle_id: f64, service_ptr: *const StringHeader, tail: f64) -> *mut Promise {
-    js_container_compose_logs(handle_id, service_ptr, tail)
 }
 
 #[no_mangle]
@@ -514,16 +500,6 @@ pub unsafe extern "C" fn js_container_compose_exec(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_exec(
-    handle_id: f64,
-    service_ptr: *const StringHeader,
-    cmd_json_ptr: *const StringHeader,
-    opts_json_ptr: *const StringHeader
-) -> *mut Promise {
-    js_container_compose_exec(handle_id, service_ptr, cmd_json_ptr, opts_json_ptr)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn js_container_compose_config(handle_id: f64) -> *mut Promise {
     let promise = js_promise_new();
     let id = handle_id as u64;
@@ -534,11 +510,6 @@ pub unsafe extern "C" fn js_container_compose_config(handle_id: f64) -> *mut Pro
         JSValue::string_ptr(str_ptr).bits()
     });
     promise
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn js_compose_config(handle_id: f64) -> *mut Promise {
-    js_container_compose_config(handle_id)
 }
 
 #[no_mangle]
@@ -554,11 +525,6 @@ pub unsafe extern "C" fn js_container_compose_start(handle_id: f64, services_jso
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_start(handle_id: f64, services_json_ptr: *const StringHeader) -> *mut Promise {
-    js_container_compose_start(handle_id, services_json_ptr)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn js_container_compose_stop(handle_id: f64, services_json_ptr: *const StringHeader) -> *mut Promise {
     let promise = js_promise_new();
     let id = handle_id as u64;
@@ -571,11 +537,6 @@ pub unsafe extern "C" fn js_container_compose_stop(handle_id: f64, services_json
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_stop(handle_id: f64, services_json_ptr: *const StringHeader) -> *mut Promise {
-    js_container_compose_stop(handle_id, services_json_ptr)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn js_container_compose_restart(handle_id: f64, services_json_ptr: *const StringHeader) -> *mut Promise {
     let promise = js_promise_new();
     let id = handle_id as u64;
@@ -585,11 +546,6 @@ pub unsafe extern "C" fn js_container_compose_restart(handle_id: f64, services_j
         compose::compose_restart(id, services).await.map(|_| 0).map_err(|e| e.to_string())
     });
     promise
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn js_compose_restart(handle_id: f64, services_json_ptr: *const StringHeader) -> *mut Promise {
-    js_container_compose_restart(handle_id, services_json_ptr)
 }
 
 #[no_mangle]

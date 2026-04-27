@@ -2477,15 +2477,15 @@ fn lower_module_decl(
                                     _ => None,
                                 },
                                 "perry/compose" => match imported.as_str() {
-                                    "up" => Some("js_compose_up"),
-                                    "down" => Some("js_compose_down"),
-                                    "ps" => Some("js_compose_ps"),
-                                    "logs" => Some("js_compose_logs"),
-                                    "exec" => Some("js_compose_exec"),
-                                    "config" => Some("js_compose_config"),
-                                    "start" => Some("js_compose_start"),
-                                    "stop" => Some("js_compose_stop"),
-                                    "restart" => Some("js_compose_restart"),
+                                    "up" => Some("js_container_composeUp"),
+                                    "down" => Some("js_container_compose_down"),
+                                    "ps" => Some("js_container_compose_ps"),
+                                    "logs" => Some("js_container_compose_logs"),
+                                    "exec" => Some("js_container_compose_exec"),
+                                    "config" => Some("js_container_compose_config"),
+                                    "start" => Some("js_container_compose_start"),
+                                    "stop" => Some("js_container_compose_stop"),
+                                    "restart" => Some("js_container_compose_restart"),
                                     _ => None,
                                 },
                                 _ => None,
@@ -7960,8 +7960,10 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             Expr::ArrayToReversed { .. } | Expr::ArrayToSorted { .. } |
                                             Expr::ArrayToSpliced { .. } | Expr::ArrayWith { .. } |
                                             Expr::ArrayEntries(_) | Expr::ArrayKeys(_) | Expr::ArrayValues(_) |
-                                            Expr::ObjectKeys(_) | Expr::ObjectValues(_) | Expr::ObjectEntries(_)
+                                            Expr::ObjectKeys(_) | Expr::ObjectValues(_) | Expr::ObjectEntries(_) | Expr::ProcessArgv
                                         ) {
+                                            // Feature: perry-container | Layer: HIR | Req: 11.2
+                                            // Specialization for process.argv.slice() - closes #41
                                             let mut args_iter = args.into_iter();
                                             let start = args_iter.next().unwrap();
                                             let end = args_iter.next();
@@ -9209,7 +9211,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                     // Specialize for Uint8Array/Buffer variables → byte-level access
                     if let Expr::LocalGet(id) = &*object {
                         if let Some((_, _, ty)) = ctx.locals.iter().find(|(_, lid, _)| lid == id) {
-                            if matches!(ty, Type::Named(n) if n == "Uint8Array") {
+                            if matches!(ty, Type::Named(n) if n == "Uint8Array" || n == "Buffer") {
                                 return Ok(Expr::Uint8ArrayGet { array: object, index });
                             }
                         }
@@ -9498,7 +9500,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                             // Specialize for Uint8Array/Buffer variables → byte-level access
                             if let Expr::LocalGet(id) = &*object {
                                 if let Some((_, _, ty)) = ctx.locals.iter().find(|(_, lid, _)| lid == id) {
-                                    if matches!(ty, Type::Named(n) if n == "Uint8Array") {
+                                    if matches!(ty, Type::Named(n) if n == "Uint8Array" || n == "Buffer") {
                                         return Ok(Expr::Uint8ArraySet { array: object, index, value });
                                     }
                                 }

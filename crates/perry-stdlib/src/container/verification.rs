@@ -23,12 +23,12 @@ pub async fn fetch_image_digest(reference: &str) -> Result<String, String> {
     Ok(info.id)
 }
 
-pub async fn run_cosign_verify(reference: &str, digest: &str) -> VerificationResult {
+pub async fn run_cosign_verify(reference: &str, digest: &str, identity: &str, issuer: &str) -> VerificationResult {
     let output = tokio::process::Command::new("cosign")
         .args([
             "verify",
-            "--certificate-identity", CHAINGUARD_IDENTITY,
-            "--certificate-oidc-issuer", CHAINGUARD_ISSUER,
+            "--certificate-identity", identity,
+            "--certificate-oidc-issuer", issuer,
             &format!("{}@{}", reference, digest),
         ])
         .output()
@@ -58,7 +58,7 @@ pub async fn verify_image(reference: &str) -> Result<String, String> {
     }
 
     // 3. Run cosign verify
-    let result = run_cosign_verify(reference, &digest).await;
+    let result = run_cosign_verify(reference, &digest, CHAINGUARD_IDENTITY, CHAINGUARD_ISSUER).await;
 
     // 4. Cache result
     {

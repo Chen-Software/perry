@@ -48,13 +48,20 @@ impl ServiceState {
 }
 
 /// Generate a container name for a service, using explicit name if set.
-pub fn service_container_name(svc: &ComposeService, _service_name: &str) -> String {
+pub fn service_container_name(svc: &ComposeService, service_name: &str) -> String {
     if let Some(explicit) = svc.explicit_name() {
         return explicit.to_string();
     }
 
     let service_yaml = serde_yaml::to_string(svc).unwrap_or_default();
-    generate_name(&service_yaml)
+    let mut hasher = Md5::new();
+    hasher.update(service_name.as_bytes());
+    hasher.update(service_yaml.as_bytes());
+    let hash = hasher.finalize();
+    let short_hash = &hex::encode(hash)[..8];
+
+    let random_suffix: u32 = rand::random();
+    format!("{}-{:08x}", short_hash, random_suffix)
 }
 
 impl ComposeService {

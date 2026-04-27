@@ -45,10 +45,10 @@ pub async fn alloy_container_run_capability(
         env: spec.env,
         cmd: spec.cmd,
         entrypoint: spec.entrypoint,
-        network: spec.network,
+        network: spec.network, tmpfs: Some(vec!["/tmp:rw,size=64m".to_string()]), cap_drop: Some(vec!["ALL".to_string()]),
         rm: spec.rm,
         read_only: spec.read_only,
-        labels: spec.labels,
+        labels: spec.labels, user: Some("nobody".to_string()),
         seccomp: spec.seccomp,
     }).await.map_err(|e| e.to_string())?;
 
