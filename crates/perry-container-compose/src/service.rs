@@ -15,7 +15,7 @@ pub fn generate_name(_service_name: &str, image_name: &str) -> String {
     let short_hash = &hex::encode(hash)[..8];
 
     let random_suffix: u32 = rand::random();
-    format!("{}_{:08x}", short_hash, random_suffix)
+    format!("{}-{:08x}", short_hash, random_suffix)
 }
 
 /// Compute a short hash of the service configuration.
@@ -131,8 +131,9 @@ mod tests {
     #[test]
     fn test_generate_name_format() {
         let name = generate_name("web", "nginx");
-        // Format: {short_hash}_{random_suffix_hex} -> 8 + 1 + 8 = 17
+        // Format: {short_hash}-{random_suffix_hex} -> 8 + 1 + 8 = 17
         assert_eq!(name.len(), 17);
+        assert!(name.contains('-'));
     }
 
     #[test]

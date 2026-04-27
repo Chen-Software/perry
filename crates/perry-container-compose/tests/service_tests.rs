@@ -3,8 +3,9 @@ use perry_container_compose::service::generate_name;
 #[test]
 fn test_generate_name_format() {
     let name = generate_name("web", "nginx");
-    // Format: {short_hash}_{random_suffix_hex}
+    // Format: {short_hash}-{random_suffix_hex}
     assert_eq!(name.len(), 17);
+    assert!(name.contains('-'));
 }
 
 #[test]
