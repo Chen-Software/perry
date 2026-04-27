@@ -109,7 +109,7 @@ thread_local! {
 // =============================================================================
 
 extern "C" {
-    fn js_string_from_bytes(ptr: *const u8, len: i32) -> i64;
+    fn js_string_from_bytes(ptr: *const u8, len: u32) -> i64;
     fn js_array_create() -> i64;
     fn js_array_push_f64(array_ptr: i64, value: f64);
 }

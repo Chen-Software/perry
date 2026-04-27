@@ -123,6 +123,11 @@ pub const NATIVE_MODULES: &[&str] = &[
     "perry/thread",
     // SQLite
     "better-sqlite3",
+    // Perry container and workloads
+    "perry/container",
+    "perry/container-compose",
+    "perry/compose",
+    "perry/workloads",
 ];
 
 /// Check if a module path refers to a native stdlib module

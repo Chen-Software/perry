@@ -1116,7 +1116,7 @@ pub extern "C" fn perry_system_preferences_get(key_ptr: i64) -> f64 {
         }
     }
     extern "C" {
-        fn js_string_from_bytes(ptr: *const u8, len: i64) -> *const u8;
+        fn js_string_from_bytes(ptr: *const u8, len: u32) -> i64;
         fn js_nanbox_string(ptr: i64) -> f64;
     }
     let key = str_from_header(key_ptr as *const u8);
@@ -1135,8 +1135,8 @@ pub extern "C" fn perry_system_preferences_get(key_ptr: i64) -> f64 {
                 let ns_str: &objc2_foundation::NSString = &*(obj as *const objc2_foundation::NSString);
                 let rust_str = ns_str.to_string();
                 let bytes = rust_str.as_bytes();
-                let str_ptr = js_string_from_bytes(bytes.as_ptr(), bytes.len() as i64);
-                return js_nanbox_string(str_ptr as i64);
+                let str_ptr = js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32);
+                js_nanbox_string(str_ptr)
             }
         }
         // Check if it's an NSNumber

@@ -1,7 +1,7 @@
 use std::ffi::c_void;
 
 extern "C" {
-    fn js_string_from_bytes(ptr: *const u8, len: i64) -> *const u8;
+    fn js_string_from_bytes(ptr: *const u8, len: u32) -> i64;
     fn js_nanbox_string(ptr: i64) -> f64;
 }
 
@@ -120,8 +120,8 @@ pub fn get(key_ptr: *const u8) -> f64 {
             let bytes: *const u8 = objc2::msg_send![data, bytes];
             let length: usize = objc2::msg_send![data, length];
 
-            let str_ptr = js_string_from_bytes(bytes, length as i64);
-            js_nanbox_string(str_ptr as i64)
+            let str_ptr = js_string_from_bytes(bytes, length as u32);
+            js_nanbox_string(str_ptr)
         } else {
             f64::from_bits(0x7FFC_0000_0000_0001) // TAG_UNDEFINED
         }
