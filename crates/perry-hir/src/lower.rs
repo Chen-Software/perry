@@ -3027,6 +3027,8 @@ fn lower_module_decl(
                                                             ("pg", "connect") => Some("Client"),
                                                             ("http" | "https", "request" | "get") => Some("ClientRequest"),
                                                             ("axios", "get" | "post" | "put" | "delete" | "patch" | "request") => Some("Response"),
+                                                            ("perry/container" | "perry/compose", "composeUp" | "up") => Some("ComposeHandle"),
+                                                            ("perry/workloads", "runGraph") => Some("GraphHandle"),
                                                             _ => None,
                                                         };
                                                         if let Some(class_name) = class_name {

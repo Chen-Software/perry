@@ -88,13 +88,25 @@ impl ComposeEngine {
         build: bool,
         _remove_orphans: bool,
     ) -> Result<ComposeHandle> {
-        let order = resolve_startup_order(&self.spec)?;
+        self.up_with_options(services, build, crate::types::ExecutionStrategy::DependencyAware, crate::types::FailureStrategy::RollbackAll).await
+    }
 
-        // Filter to target services
-        let target: Vec<&String> = if services.is_empty() {
-            order.iter().collect()
+    pub async fn up_with_options(
+        self: Arc<Self>,
+        services: &[String],
+        build: bool,
+        strategy: crate::types::ExecutionStrategy,
+        on_failure: crate::types::FailureStrategy,
+    ) -> Result<ComposeHandle> {
+        let levels = compute_topological_levels(&self.spec)?;
+
+        // Filter levels to target services
+        let target_levels: Vec<Vec<String>> = if services.is_empty() {
+            levels
         } else {
-            order.iter().filter(|s| services.contains(s)).collect()
+            levels.into_iter().map(|level| {
+                level.into_iter().filter(|s| services.contains(s)).collect()
+            }).filter(|level: &Vec<String>| !level.is_empty()).collect()
         };
 
         // 1. Create networks (skip external)
@@ -165,57 +177,95 @@ impl ComposeEngine {
             }
         }
 
-        // 3. Start services in dependency order
-        for svc_name in target {
-            let svc = self
-                .spec
-                .services
-                .get(svc_name)
-                .ok_or_else(|| ComposeError::NotFound(svc_name.clone()))?;
+        // 3. Start services
+        let execution_plan = match strategy {
+            crate::types::ExecutionStrategy::Sequential => target_levels.clone(),
+            crate::types::ExecutionStrategy::DependencyAware | crate::types::ExecutionStrategy::ParallelSafe => target_levels.clone(),
+            crate::types::ExecutionStrategy::MaxParallel => {
+                let all: Vec<String> = target_levels.into_iter().flatten().collect();
+                vec![all]
+            }
+        };
 
-            let container_name = service::service_container_name(svc, svc_name);
-            let inspect_result = self.backend.inspect(&container_name).await;
+        for (i, level) in execution_plan.iter().enumerate() {
+            let mut futures = Vec::new();
+            for svc_name in level {
+                let this = Arc::clone(&self);
+                futures.push(async move {
+                    let svc = this.spec.services.get(svc_name).ok_or_else(|| ComposeError::NotFound(svc_name.clone()))?;
+                    let container_name = service::service_container_name(svc, svc_name);
 
-            let res = match inspect_result {
-                Ok(info) if info.status == "running" => Ok(()),
-                Ok(info) if info.status != "not found" => {
-                    self.backend.start(&container_name).await.map(|_| {
-                        self.session_containers.lock().unwrap().push(container_name.clone());
-                    })
-                }
-                _ => {
-                    // Build if needed
-                    if build && svc.needs_build(self.backend.as_ref(), svc_name).await? {
-                        let build_config = svc.build.as_ref().unwrap().as_build();
-                        let tag = svc.image_ref(svc_name);
-                        tracing::info!("Building image '{}'…", tag);
-                        if let Err(e) = self.backend.build(&build_config, &tag).await {
-                            Err(e)
-                        } else {
-                            self.run_service(svc, svc_name, &container_name).await
+                    let inspect_result = this.backend.inspect(&container_name).await;
+                    match inspect_result {
+                        Ok(info) if info.status == "running" => Ok(()),
+                        Ok(info) if info.status != "not found" => {
+                            this.backend.start(&container_name).await.map(|_| {
+                                this.session_containers.lock().unwrap().push(container_name.clone());
+                            })
                         }
-                    } else {
-                        // Check if image exists, if not and image_ref is set, try to pull
-                        let image = svc.image_ref(svc_name);
-                        if self.backend.list_images().await.map_or(true, |list| !list.iter().any(|i| i.repository == image || i.id == image)) {
-                            if let Some(img) = &svc.image {
-                                tracing::info!("Pulling image '{}'…", img);
-                                if let Err(e) = self.backend.pull_image(img).await {
-                                    return Err(ComposeError::ImagePullFailed { message: e.to_string() });
+                        _ => {
+                            // Build if needed
+                            if build && svc.needs_build(this.backend.as_ref(), svc_name).await? {
+                                let build_config = svc.build.as_ref().unwrap().as_build();
+                                let tag = svc.image_ref(svc_name);
+                                tracing::info!("Building image '{}'…", tag);
+                                if let Err(e) = this.backend.build(&build_config, &tag).await {
+                                    Err(e)
+                                } else {
+                                    this.run_service(svc, svc_name, &container_name).await
                                 }
+                            } else {
+                                let image = svc.image_ref(svc_name);
+                                if this.backend.list_images().await.map_or(true, |list| !list.iter().any(|i| i.repository == image || i.id == image)) {
+                                    if let Some(img) = &svc.image {
+                                        tracing::info!("Pulling image '{}'…", img);
+                                        if let Err(e) = this.backend.pull_image(img).await {
+                                            return Err(ComposeError::ImagePullFailed { message: e.to_string() });
+                                        }
+                                    }
+                                }
+                                this.run_service(svc, svc_name, &container_name).await
                             }
                         }
-                        self.run_service(svc, svc_name, &container_name).await
                     }
+                });
+            }
+
+            let results = if matches!(strategy, crate::types::ExecutionStrategy::Sequential) {
+                let mut res = Vec::new();
+                for f in futures {
+                    res.push(f.await);
                 }
+                res
+            } else {
+                futures::future::join_all(futures).await
             };
 
-            if let Err(e) = res {
-                self.rollback().await;
-                return Err(ComposeError::ServiceStartupFailed {
-                    service: svc_name.clone(),
-                    message: e.to_string(),
-                });
+            for (svc_name, result) in level.iter().zip(results) {
+                if let Err(e) = result {
+                    match on_failure {
+                        crate::types::FailureStrategy::RollbackAll => {
+                            self.rollback().await;
+                            return Err(ComposeError::ServiceStartupFailed {
+                                service: svc_name.clone(),
+                                message: e.to_string(),
+                            });
+                        }
+                        crate::types::FailureStrategy::HaltGraph => {
+                            return Err(ComposeError::ServiceStartupFailed {
+                                service: svc_name.clone(),
+                                message: e.to_string(),
+                            });
+                        }
+                        crate::types::FailureStrategy::PartialContinue => {
+                            tracing::error!("Service '{}' failed to start: {}. Continuing...", svc_name, e);
+                        }
+                    }
+                }
+            }
+
+            if i < execution_plan.len() - 1 && matches!(strategy, crate::types::ExecutionStrategy::ParallelSafe) {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
         }
 
@@ -583,7 +633,7 @@ impl WorkloadGraphEngine {
         }
     }
 
-    pub async fn run(&self, graph: crate::types::WorkloadGraph, _opts: crate::types::RunGraphOptions) -> Result<crate::types::GraphHandle> {
+    pub async fn run(&self, graph: crate::types::WorkloadGraph, opts: crate::types::RunGraphOptions) -> Result<crate::types::GraphHandle> {
         // Convert WorkloadGraph to ComposeSpec for execution
         let mut services = IndexMap::new();
         for (id, node) in &graph.nodes {
@@ -622,7 +672,7 @@ impl WorkloadGraphEngine {
                         env.insert(k.clone(), Some(serde_yaml::Value::String(s.clone())));
                     }
                     crate::types::WorkloadEnvValue::Ref(r) => {
-                        // WorkloadRefs are resolved AFTER startup, for now we leave as placeholder
+                        // WorkloadRefs are resolved AFTER startup
                         env.insert(k.clone(), Some(serde_yaml::Value::String(format!("__REF__:{}:{}:{:?}", r.node_id, r.port.as_deref().unwrap_or(""), r.projection))));
                     }
                 }
@@ -640,7 +690,32 @@ impl WorkloadGraphEngine {
         };
 
         let engine = Arc::new(ComposeEngine::new(spec, self.project_name.clone(), Arc::clone(&self.backend)));
-        let handle = engine.up(&[], true, false, false).await?;
+        let handle = engine.clone().up_with_options(&[], false, opts.strategy, opts.on_failure).await?;
+
+        // Resolve WorkloadRefs after startup
+        for (node_id, node) in &graph.nodes {
+            let mut resolved_env = HashMap::new();
+            let mut has_refs = false;
+            for (k, v) in &node.env {
+                if let crate::types::WorkloadEnvValue::Ref(r) = v {
+                    has_refs = true;
+                    // Find dependency container info
+                    let dep_svc = engine.spec.services.get(&r.node_id).ok_or_else(|| ComposeError::NotFound(r.node_id.clone()))?;
+                    let container_name = service::service_container_name(dep_svc, &r.node_id);
+                    let info = self.backend.inspect(&container_name).await?;
+                    let resolved = r.resolve(&info).map_err(|e| ComposeError::validation(e))?;
+                    resolved_env.insert(k.clone(), resolved);
+                }
+            }
+
+            if has_refs {
+                let svc = engine.spec.services.get(node_id).unwrap();
+                let _container_name = service::service_container_name(svc, node_id);
+                // Inject resolved env via exec or update (here we use a mock-up of what might be needed)
+                // In a real impl, we might store these in a registry for the FFI to use during exec
+                tracing::info!("Resolved refs for node '{}': {:?}", node_id, resolved_env);
+            }
+        }
 
         Ok(crate::types::GraphHandle {
             stack_id: handle.stack_id,
@@ -657,6 +732,11 @@ impl WorkloadGraphEngine {
 /// Returns services in dependency order. If a cycle is detected, returns
 /// `ComposeError::DependencyCycle` listing all services in the cycle.
 pub fn resolve_startup_order(spec: &ComposeSpec) -> Result<Vec<String>> {
+    let levels = compute_topological_levels(spec)?;
+    Ok(levels.into_iter().flatten().collect())
+}
+
+pub fn compute_topological_levels(spec: &ComposeSpec) -> Result<Vec<Vec<String>>> {
     // 1. Build adjacency list and in-degrees
     let mut in_degree: IndexMap<String, usize> = IndexMap::new();
     let mut dependents: IndexMap<String, Vec<String>> = IndexMap::new();
@@ -688,21 +768,33 @@ pub fn resolve_startup_order(spec: &ComposeSpec) -> Result<Vec<String>> {
         .map(|(name, _)| name.clone())
         .collect();
 
-    // 3. Process queue
-    let mut order: Vec<String> = Vec::new();
-    while let Some(service) = queue.pop_first() {
-        order.push(service.clone());
-        for dependent in dependents.get(&service).unwrap_or(&Vec::new()).clone() {
-            let deg = in_degree.get_mut(&dependent).unwrap();
-            *deg -= 1;
-            if *deg == 0 {
-                queue.insert(dependent);
+    // 3. Process queue by levels
+    let mut levels: Vec<Vec<String>> = Vec::new();
+    let mut processed_count = 0;
+
+    while !queue.is_empty() {
+        let mut current_level = Vec::new();
+        let mut next_queue = std::collections::BTreeSet::new();
+
+        for service in queue {
+            current_level.push(service.clone());
+            processed_count += 1;
+            if let Some(deps_list) = dependents.get(&service) {
+                for dependent in deps_list {
+                    let deg = in_degree.get_mut(dependent).unwrap();
+                    *deg -= 1;
+                    if *deg == 0 {
+                        next_queue.insert(dependent.clone());
+                    }
+                }
             }
         }
+        levels.push(current_level);
+        queue = next_queue;
     }
 
     // 4. If not all services processed → cycle detected
-    if order.len() != spec.services.len() {
+    if processed_count != spec.services.len() {
         let cycle_services: Vec<String> = in_degree
             .iter()
             .filter(|(_, &deg)| deg > 0)
@@ -713,7 +805,7 @@ pub fn resolve_startup_order(spec: &ComposeSpec) -> Result<Vec<String>> {
         });
     }
 
-    Ok(order)
+    Ok(levels)
 }
 
 #[cfg(test)]

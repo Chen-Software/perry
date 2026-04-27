@@ -736,7 +736,7 @@ pub async fn detect_backend() -> std::result::Result<Arc<dyn ContainerBackend + 
 }
 
 fn platform_candidates() -> &'static [&'static str] {
-    if cfg!(target_os = "macos") {
+    if cfg!(target_os = "macos") || cfg!(target_os = "ios") {
         &[
             "apple/container",
             "orbstack",

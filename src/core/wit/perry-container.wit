@@ -84,6 +84,7 @@ interface container {
     remove: func(id: string, force: bool) -> result<_, string>;
     list: func(all: bool) -> result<list<container-info>, string>;
     inspect: func(id: string) -> result<container-info, string>;
+    inspect-image: func(reference: string) -> result<image-info, string>;
     logs: func(id: string, tail: option<u32>) -> result<container-logs, string>;
     exec: func(id: string, cmd: list<string>, env: option<list<tuple<string, string>>>, workdir: option<string>) -> result<container-logs, string>;
     pull-image: func(reference: string) -> result<_, string>;

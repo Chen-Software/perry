@@ -103,7 +103,7 @@ fn test_js_container_composeUp_malformed() {
 fn test_js_compose_ps_not_found() {
     unsafe {
         // Stack ID 99999 should not exist
-        let p = js_compose_ps(99999.0);
+        let p = js_compose_ps(99999);
         assert!(!p.is_null());
         drive_promise(p);
         assert_eq!(js_promise_state(p), PROMISE_STATE_REJECTED);
