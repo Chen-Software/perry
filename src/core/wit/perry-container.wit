@@ -11,6 +11,9 @@ interface container {
         entrypoint: option<list<string>>,
         network: option<string>,
         rm: option<bool>,
+        read-only: option<bool>,
+        seccomp: option<string>,
+        labels: option<list<tuple<string, string>>>,
     }
 
     record container-handle {
@@ -44,6 +47,8 @@ interface container {
         available: bool,
         reason: option<string>,
         version: option<string>,
+        mode: string,
+        isolation-level: string,
     }
 
     record workload-node {
@@ -52,6 +57,8 @@ interface container {
         image: option<string>,
         ports: list<string>,
         depends-on: list<string>,
+        runtime: string,
+        policy: string,
     }
 
     record workload-graph {

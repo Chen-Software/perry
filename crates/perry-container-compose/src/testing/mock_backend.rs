@@ -73,7 +73,29 @@ impl ContainerBackend for MockBackend {
     }
     async fn inspect(&self, id: &str) -> Result<ContainerInfo> {
         self.calls.lock().unwrap().push(RecordedCall::Inspect(id.to_string()));
-        Ok(ContainerInfo { id: id.to_string(), name: id.to_string(), image: "img".to_string(), status: "running".to_string(), ports: Vec::new(), created: "".to_string() })
+
+        let mut responses = self.responses.lock().unwrap();
+        if let Some(res) = responses.pop_front() {
+             match res {
+                 Ok(val) => {
+                     let info: ContainerInfo = serde_json::from_value(val).unwrap();
+                     return Ok(info);
+                 }
+                 Err(e) => return Err(e),
+             }
+        }
+
+        Ok(ContainerInfo {
+            id: id.to_string(),
+            name: id.to_string(),
+            image: "img".to_string(),
+            status: "running".to_string(),
+            ports: Vec::new(),
+            created: "".to_string(),
+            labels: HashMap::new(),
+            env: HashMap::new(),
+            ip_address: "127.0.0.1".to_string(),
+        })
     }
     async fn inspect_image(&self, reference: &str) -> Result<ImageInfo> {
         Ok(ImageInfo { id: "id".to_string(), repository: reference.to_string(), tag: "latest".to_string(), size: 0, created: "".to_string() })

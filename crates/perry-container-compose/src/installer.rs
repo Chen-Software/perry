@@ -74,7 +74,7 @@ impl BackendInstaller {
     }
 
     fn platform_options(&self) -> Vec<InstallOption> {
-        if cfg!(target_os = "macos") {
+        if cfg!(target_os = "macos") || cfg!(target_os = "ios") {
             vec![
                 InstallOption {
                     name: "apple/container",
@@ -83,21 +83,68 @@ impl BackendInstaller {
                     docs_url: "https://github.com/apple/container",
                 },
                 InstallOption {
+                    name: "orbstack",
+                    description: "Fast macOS VM with Docker-compatible API",
+                    install_command: "brew install --cask orbstack",
+                    docs_url: "https://orbstack.dev",
+                },
+                InstallOption {
+                    name: "colima",
+                    description: "Lightweight macOS container runtime",
+                    install_command: "brew install colima",
+                    docs_url: "https://github.com/abiosoft/colima",
+                },
+                InstallOption {
                     name: "podman",
                     description: "Daemonless, rootless OCI runtime",
                     install_command: "brew install podman && podman machine init && podman machine start",
                     docs_url: "https://podman.io",
                 },
+                InstallOption {
+                    name: "docker",
+                    description: "Docker Desktop for Mac",
+                    install_command: "brew install --cask docker",
+                    docs_url: "https://docs.docker.com/desktop/mac",
+                },
             ]
-        } else {
+        } else if cfg!(target_os = "linux") {
             vec![
                 InstallOption {
                     name: "podman",
                     description: "Daemonless, rootless OCI runtime (recommended)",
-                    install_command: "sudo apt-get install -y podman",
+                    install_command: "sudo apt-get install -y podman", // Simplified; ideally would detect distro
                     docs_url: "https://podman.io/getting-started/installation",
                 },
+                InstallOption {
+                    name: "nerdctl",
+                    description: "containerd CLI wrapper",
+                    install_command: "brew install nerdctl", // Or other methods
+                    docs_url: "https://github.com/containerd/nerdctl",
+                },
+                InstallOption {
+                    name: "docker",
+                    description: "Docker Engine",
+                    install_command: "curl -fsSL https://get.docker.com | sh",
+                    docs_url: "https://docs.docker.com/engine/install",
+                },
             ]
+        } else if cfg!(target_os = "windows") {
+            vec![
+                InstallOption {
+                    name: "podman",
+                    description: "Daemonless, rootless OCI runtime (recommended)",
+                    install_command: "winget install RedHat.Podman",
+                    docs_url: "https://podman.io/getting-started/installation",
+                },
+                InstallOption {
+                    name: "docker",
+                    description: "Docker Desktop for Windows",
+                    install_command: "winget install Docker.DockerDesktop",
+                    docs_url: "https://docs.docker.com/desktop/windows",
+                },
+            ]
+        } else {
+            vec![]
         }
     }
 

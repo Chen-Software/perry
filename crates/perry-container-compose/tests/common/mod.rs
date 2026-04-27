@@ -50,6 +50,8 @@ impl ContainerBackend for MockBackend {
             ports: spec.ports.clone().unwrap_or_default(),
             labels: spec.labels.clone().unwrap_or_default(),
             created: "2025-01-01T00:00:00Z".to_string(),
+            env: HashMap::new(),
+            ip_address: "127.0.0.1".to_string(),
         };
         state.containers.insert(name.clone(), info);
         Ok(ContainerHandle { id: name.clone(), name: Some(name) })
@@ -66,6 +68,8 @@ impl ContainerBackend for MockBackend {
             ports: spec.ports.clone().unwrap_or_default(),
             labels: spec.labels.clone().unwrap_or_default(),
             created: "2025-01-01T00:00:00Z".to_string(),
+            env: HashMap::new(),
+            ip_address: "127.0.0.1".to_string(),
         };
         state.containers.insert(name.clone(), info);
         Ok(ContainerHandle { id: name.clone(), name: Some(name) })

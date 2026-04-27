@@ -104,6 +104,17 @@ pub unsafe extern "C" fn js_handle_method_dispatch(
         return dispatch_net_socket(handle, method_name, args);
     }
 
+    // container management handles
+    #[cfg(feature = "container")]
+    if matches!(
+        method_name,
+        "down" | "ps" | "config" | "logs" | "exec" | "status" | "graph"
+    ) && (crate::container::types::CONTAINER_HANDLES.get().map(|m| m.contains_key(&(handle as u64))).unwrap_or(false)
+        || crate::container::types::COMPOSE_HANDLES.get().map(|m| m.contains_key(&(handle as u64))).unwrap_or(false))
+    {
+        return dispatch_container(handle, method_name, args);
+    }
+
     // Unknown handle type - return undefined
     f64::from_bits(0x7FF8_0000_0000_0001)
 }
@@ -499,4 +510,51 @@ pub unsafe extern "C" fn js_stdlib_init_dispatch() {
     js_register_handle_method_dispatch(js_handle_method_dispatch);
     js_register_handle_property_dispatch(js_handle_property_dispatch);
     js_register_handle_property_set_dispatch(js_handle_property_set_dispatch);
+}
+
+/// Dispatch method calls on container management handles
+#[cfg(feature = "container")]
+unsafe fn dispatch_container(handle: i64, method: &str, args: &[f64]) -> f64 {
+    fn unbox_to_i64(v: f64) -> i64 {
+        (v.to_bits() & 0x0000_FFFF_FFFF_FFFF) as i64
+    }
+
+    match method {
+        // ComposeHandle methods
+        "down" => {
+            let volumes = if !args.is_empty() { args[0] } else { 0.0 };
+            let promise = crate::container::js_container_compose_down(handle as f64, volumes);
+            f64::from_bits(0x7FFD_0000_0000_0000u64 | (promise as u64 & 0x0000_FFFF_FFFF_FFFF))
+        }
+        "ps" => {
+            let promise = crate::container::js_container_compose_ps(handle as f64);
+            f64::from_bits(0x7FFD_0000_0000_0000u64 | (promise as u64 & 0x0000_FFFF_FFFF_FFFF))
+        }
+        "config" => {
+            let promise = crate::container::js_container_compose_config(handle as f64);
+            f64::from_bits(0x7FFD_0000_0000_0000u64 | (promise as u64 & 0x0000_FFFF_FFFF_FFFF))
+        }
+        "logs" => {
+            let service = if !args.is_empty() { unbox_to_i64(args[0]) as *const perry_runtime::StringHeader } else { std::ptr::null() };
+            let tail = if args.len() >= 2 { args[1] } else { -1.0 };
+            let promise = crate::container::js_container_compose_logs(handle as f64, service, tail);
+            f64::from_bits(0x7FFD_0000_0000_0000u64 | (promise as u64 & 0x0000_FFFF_FFFF_FFFF))
+        }
+        "exec" if args.len() >= 2 => {
+            let service = unbox_to_i64(args[0]) as *const perry_runtime::StringHeader;
+            let cmd = unbox_to_i64(args[1]) as *const perry_runtime::StringHeader;
+            let opts = if args.len() >= 3 { unbox_to_i64(args[2]) as *const perry_runtime::StringHeader } else { std::ptr::null() };
+            let promise = crate::container::js_container_compose_exec(handle as f64, service, cmd, opts);
+            f64::from_bits(0x7FFD_0000_0000_0000u64 | (promise as u64 & 0x0000_FFFF_FFFF_FFFF))
+        }
+        "status" => {
+             let promise = crate::container::js_container_compose_status(handle as f64);
+             f64::from_bits(0x7FFD_0000_0000_0000u64 | (promise as u64 & 0x0000_FFFF_FFFF_FFFF))
+        }
+        "graph" => {
+             let str_ptr = crate::container::js_container_compose_graph(handle as f64);
+             f64::from_bits(0x7FFF_0000_0000_0000u64 | (str_ptr as u64 & 0x0000_FFFF_FFFF_FFFF))
+        }
+        _ => f64::from_bits(0x7FFC_0000_0000_0001)
+    }
 }

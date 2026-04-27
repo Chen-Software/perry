@@ -16,6 +16,7 @@ pub mod project;
 pub mod service;
 pub mod types;
 pub mod yaml;
+pub mod testing;
 
 pub use indexmap;
 

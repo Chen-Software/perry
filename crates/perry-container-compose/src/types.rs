@@ -728,9 +728,9 @@ impl WorkloadRef {
                     .find(|p| p.contains(target_port))
                     .and_then(|p| p.split(':').next())
                     .unwrap_or(target_port);
-                Ok(format!("{}:{}", info.id, port))
+                Ok(format!("{}:{}", info.ip_address, port))
             }
-            RefProjection::Ip => Ok(info.id.clone()),
+            RefProjection::Ip => Ok(info.ip_address.clone()),
             RefProjection::InternalUrl => {
                 let target_port = self.port.as_deref().unwrap_or("80");
                 let port = info
@@ -739,7 +739,7 @@ impl WorkloadRef {
                     .find(|p| p.contains(target_port))
                     .and_then(|p| p.split(':').next())
                     .unwrap_or(target_port);
-                Ok(format!("http://{}:{}", info.id, port))
+                Ok(format!("http://{}:{}", info.ip_address, port))
             }
         }
     }
@@ -921,6 +921,8 @@ pub struct ContainerInfo {
     pub ports: Vec<String>,
     pub created: String,
     pub labels: std::collections::HashMap<String, String>,
+    pub env: std::collections::HashMap<String, String>,
+    pub ip_address: String,
 }
 
 /// Logs from a container.

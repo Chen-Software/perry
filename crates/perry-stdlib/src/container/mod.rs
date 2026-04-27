@@ -11,10 +11,9 @@ use perry_container_compose::backend::{detect_backend, ContainerBackend};
 use perry_container_compose::error::compose_error_to_js;
 use perry_container_compose::ComposeEngine;
 use perry_runtime::{js_promise_new, Promise, StringHeader, JSValue};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use crate::container::types::*;
 use crate::common::spawn_for_promise_deferred;
-use dashmap::DashMap;
 
 pub mod context;
 pub use context::ContainerContext;
@@ -692,7 +691,55 @@ mod smoke_tests {
     fn test_smoke_module_init() {
         // Just verify it doesn't panic
         unsafe {
+            js_container_module_init();
             let _ = js_container_getBackend();
+        }
+    }
+
+    #[test]
+    fn test_smoke_ffi_symbols_resolve() {
+        // This test ensures that the FFI symbols are exported and visible.
+        // In a real link-time check, we'd use nm or similar, but here we
+        // can just reference them to ensure they exist in this crate.
+        let symbols: Vec<*const ()> = vec![
+            js_container_run as *const (),
+            js_container_create as *const (),
+            js_container_start as *const (),
+            js_container_stop as *const (),
+            js_container_remove as *const (),
+            js_container_list as *const (),
+            js_container_inspect as *const (),
+            js_container_logs as *const (),
+            js_container_exec as *const (),
+            js_container_pullImage as *const (),
+            js_container_listImages as *const (),
+            js_container_removeImage as *const (),
+            js_container_getBackend as *const (),
+            js_container_detectBackend as *const (),
+            js_container_composeUp as *const (),
+            js_container_compose_down as *const (),
+            js_container_compose_ps as *const (),
+            js_container_compose_logs as *const (),
+            js_container_compose_exec as *const (),
+            js_container_compose_config as *const (),
+            js_container_compose_start as *const (),
+            js_container_compose_stop as *const (),
+            js_container_compose_restart as *const (),
+            js_container_build as *const (),
+            js_workload_graph as *const (),
+            js_workload_node as *const (),
+            js_workload_runGraph as *const (),
+            js_workload_inspectGraph as *const (),
+            js_workload_handle_down as *const (),
+            js_workload_handle_status as *const (),
+            js_workload_handle_graph as *const (),
+            js_workload_handle_logs as *const (),
+            js_workload_handle_exec as *const (),
+            js_workload_handle_ps as *const (),
+        ];
+        assert!(!symbols.is_empty());
+        for sym in symbols {
+            assert!(!sym.is_null());
         }
     }
 }

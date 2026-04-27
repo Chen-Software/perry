@@ -16,28 +16,30 @@ mod tests {
 
     #[test]
     fn test_workload_ref_resolution() {
-        let mut nodes = HashMap::new();
-        nodes.insert("db".to_string(), ContainerInfo {
+        let db_info = ContainerInfo {
             id: "container-db-123".to_string(),
             name: "db".to_string(),
             image: "postgres".to_string(),
             status: "running".to_string(),
             ports: vec!["5432:5432".to_string()],
             created: "".to_string(),
-        });
+            labels: HashMap::new(),
+            env: HashMap::new(),
+            ip_address: "172.17.0.2".to_string(),
+        };
 
         let r = WorkloadRef {
             node_id: "db".to_string(),
             projection: RefProjection::Endpoint,
             port: Some("5432".to_string()),
         };
-        assert_eq!(r.resolve(&nodes).unwrap(), "container-db-123:5432");
+        assert_eq!(r.resolve(&db_info).unwrap(), "172.17.0.2:5432");
 
         let r2 = WorkloadRef {
             node_id: "db".to_string(),
             projection: RefProjection::Ip,
             port: None,
         };
-        assert_eq!(r2.resolve(&nodes).unwrap(), "container-db-123");
+        assert_eq!(r2.resolve(&db_info).unwrap(), "172.17.0.2");
     }
 }

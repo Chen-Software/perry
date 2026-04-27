@@ -7,15 +7,15 @@ use md5::{Digest, Md5};
 
 /// Generate a unique container name for a service.
 ///
-/// Format: `{service_name}_{md5(image)[0..8]}_{random_u32}`
-pub fn generate_name(image: &str, service_name: &str) -> String {
+/// Format: `{md5_8chars}-{random_hex8}`
+pub fn generate_name(image: &str) -> String {
     let mut hasher = Md5::new();
     hasher.update(image.as_bytes());
     let hash = hasher.finalize();
     let short_hash = &hex::encode(hash)[..8];
 
     let random_suffix: u32 = rand::random::<u32>();
-    format!("{}_{}_{:08x}", service_name, short_hash, random_suffix)
+    format!("{}-{:08x}", short_hash, random_suffix)
 }
 
 /// Compute a short hash of the service configuration.
@@ -53,7 +53,7 @@ pub fn service_container_name(svc: &ComposeService, service_name: &str) -> Strin
         return explicit.to_string();
     }
 
-    generate_name(&svc.image_ref(service_name), service_name)
+    generate_name(&svc.image_ref(service_name))
 }
 
 impl ComposeService {
@@ -152,13 +152,12 @@ mod tests {
 
     #[test]
     fn test_generate_name_format() {
-        let name = generate_name("nginx", "web");
-        // Format: {service_name}_{md5_8chars}_{random_hex}
-        let parts: Vec<&str> = name.split('_').collect();
-        assert_eq!(parts.len(), 3);
-        assert_eq!(parts[0], "web");
+        let name = generate_name("nginx");
+        // Format: {md5_8chars}-{random_hex}
+        let parts: Vec<&str> = name.split('-').collect();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].len(), 8);
         assert_eq!(parts[1].len(), 8);
-        assert_eq!(parts[2].len(), 8);
     }
 
     #[test]
