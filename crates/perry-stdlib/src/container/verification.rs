@@ -1,6 +1,5 @@
 //! Image signature verification using Sigstore/cosign.
 
-use super::types::ContainerLogs;
 use perry_container_compose::error::ComposeError;
 use std::collections::HashMap;
 use std::sync::{RwLock, OnceLock};
@@ -20,7 +19,7 @@ pub const CHAINGUARD_IDENTITY: &str =
     "https://github.com/chainguard-images/images/.github/workflows/sign.yaml@refs/heads/main";
 pub const CHAINGUARD_ISSUER: &str = "https://token.actions.githubusercontent.com";
 
-pub async fn verify_image(reference: &str, backend: &Arc<dyn ContainerBackend>) -> Result<String, ComposeError> {
+pub async fn verify_image(reference: &str, backend: &Arc<dyn ContainerBackend + Send + Sync>) -> Result<String, ComposeError> {
     let digest = fetch_image_digest(reference, backend).await?;
 
     let cache = VERIFICATION_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
@@ -53,7 +52,7 @@ pub async fn verify_image(reference: &str, backend: &Arc<dyn ContainerBackend>) 
     }
 }
 
-async fn fetch_image_digest(reference: &str, backend: &Arc<dyn ContainerBackend>) -> Result<String, ComposeError> {
+async fn fetch_image_digest(reference: &str, backend: &Arc<dyn ContainerBackend + Send + Sync>) -> Result<String, ComposeError> {
     let info = backend.inspect(reference).await?;
     Ok(info.id)
 }

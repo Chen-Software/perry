@@ -485,6 +485,7 @@ pub struct ComposeService {
     pub working_dir: Option<String>,
     pub privileged: Option<bool>,
     pub read_only: Option<bool>,
+    pub isolation: Option<String>,
     pub stdin_open: Option<bool>,
     pub tty: Option<bool>,
     pub stop_signal: Option<String>,
@@ -726,6 +727,7 @@ pub struct ContainerSpec {
     pub network: Option<String>,
     pub rm: Option<bool>,
     pub read_only: Option<bool>,
+    pub isolation_level: Option<IsolationLevel>,
     pub seccomp: Option<String>,
     pub labels: Option<std::collections::HashMap<String, String>>,
 }

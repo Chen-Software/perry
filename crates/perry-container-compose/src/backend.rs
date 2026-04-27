@@ -774,7 +774,7 @@ async fn probe_candidate(name: &str) -> std::result::Result<Arc<dyn ContainerBac
             let bin = which::which("orb")
                 .or_else(|_| which::which("docker"))
                 .map_err(|_| "binary not found".to_string())?;
-            check_orbstack_socket_or_version(&bin).await?;
+            check_orbstack_socket().await?;
             let backend = CliBackend::new(bin, DockerProtocol);
             backend.check_available().await.map_err(|e| e.to_string())?;
             Ok(Arc::new(backend))
@@ -826,17 +826,13 @@ async fn check_podman_machine_running(bin: &Path) -> std::result::Result<(), Str
     }
 }
 
-async fn check_orbstack_socket_or_version(bin: &Path) -> std::result::Result<(), String> {
-    let out = tokio::process::Command::new(bin)
-        .arg("--version")
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if out.status.success() {
+async fn check_orbstack_socket() -> std::result::Result<(), String> {
+    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    let socket = PathBuf::from(home).join(".orbstack/run/docker.sock");
+    if socket.exists() {
         Ok(())
     } else {
-        Err("orbstack not functional".to_string())
+        Err("orbstack socket not found".to_string())
     }
 }
 

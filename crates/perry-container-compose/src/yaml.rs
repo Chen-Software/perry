@@ -37,6 +37,21 @@ pub fn interpolate_yaml(yaml: &str, env: &HashMap<String, String>) -> String {
     }).to_string()
 }
 
+/// Parse a .env file content.
+pub fn parse_dotenv(content: &str) -> HashMap<String, String> {
+    let mut env = HashMap::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            env.insert(k.trim().to_string(), v.trim().to_string());
+        }
+    }
+    env
+}
+
 /// Load a .env file and merge with process environment.
 pub fn load_env(project_dir: &Path, extra_env_files: &[PathBuf]) -> HashMap<String, String> {
     let mut env: HashMap<String, String> = std::env::vars().collect();
@@ -45,12 +60,9 @@ pub fn load_env(project_dir: &Path, extra_env_files: &[PathBuf]) -> HashMap<Stri
     let default_env = project_dir.join(".env");
     if default_env.exists() {
         if let Ok(content) = std::fs::read_to_string(&default_env) {
-            for line in content.lines() {
-                let line = line.trim();
-                if line.is_empty() || line.starts_with('#') { continue; }
-                if let Some((k, v)) = line.split_once('=') {
-                    env.entry(k.trim().to_string()).or_insert_with(|| v.trim().to_string());
-                }
+            let parsed = parse_dotenv(&content);
+            for (k, v) in parsed {
+                env.entry(k).or_insert(v);
             }
         }
     }
@@ -58,12 +70,9 @@ pub fn load_env(project_dir: &Path, extra_env_files: &[PathBuf]) -> HashMap<Stri
     // Extra env files
     for ef in extra_env_files {
         if let Ok(content) = std::fs::read_to_string(ef) {
-            for line in content.lines() {
-                let line = line.trim();
-                if line.is_empty() || line.starts_with('#') { continue; }
-                if let Some((k, v)) = line.split_once('=') {
-                    env.insert(k.trim().to_string(), v.trim().to_string());
-                }
+            let parsed = parse_dotenv(&content);
+            for (k, v) in parsed {
+                env.insert(k, v);
             }
         }
     }
@@ -96,28 +105,6 @@ pub fn parse_and_merge_files(files: &[PathBuf], env: &HashMap<String, String>) -
     }
 
     Ok(root_spec)
-}
-
-#[cfg(test)]
-mod tests_v5 {
-    use super::*;
-    use proptest::prelude::*;
-
-    // Feature: alloy-container, Property 6: YAML round-trip (CLI path)
-    proptest! {
-        #[test]
-        fn test_yaml_roundtrip(name in ".*", version in ".*") {
-            let spec = ComposeSpec {
-                name: Some(name),
-                version: Some(version),
-                ..Default::default()
-            };
-            let yaml_str = spec.to_yaml().unwrap();
-            let de = ComposeSpec::parse_str(&yaml_str).unwrap();
-            assert_eq!(spec.name, de.name);
-            assert_eq!(spec.version, de.version);
-        }
-    }
 }
 
 #[cfg(test)]

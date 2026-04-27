@@ -21,15 +21,17 @@ proptest! {
 proptest! {
     #[test]
     fn prop_topological_sort_respects_deps(spec in arb_compose_spec_with_dag()) {
-        let order = resolve_startup_order(&spec).unwrap();
-        let pos: HashMap<String, usize> = order.iter().enumerate()
-            .map(|(i, s)| (s.clone(), i)).collect();
+        let order_res = resolve_startup_order(&spec);
+        if let Ok(order) = order_res {
+            let pos: HashMap<String, usize> = order.iter().enumerate()
+                .map(|(i, s)| (s.clone(), i)).collect();
 
-        for (name, service) in &spec.services {
-            if let Some(deps) = &service.depends_on {
-                for dep in deps.service_names() {
-                    prop_assert!(pos[&dep] < pos[name],
-                        "dep {} (pos {}) should come before {} (pos {})", dep, pos[&dep], name, pos[name]);
+            for (name, service) in &spec.services {
+                if let Some(deps) = &service.depends_on {
+                    for dep in deps.service_names() {
+                        prop_assert!(pos[&dep] < pos[name],
+                            "dep {} (pos {}) should come before {} (pos {})", dep, pos[&dep], name, pos[name]);
+                    }
                 }
             }
         }

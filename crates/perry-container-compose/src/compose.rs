@@ -177,8 +177,12 @@ impl ComposeEngine {
             let inspect_result = self.backend.inspect(&container_name).await;
 
             let res = match inspect_result {
-                Ok(info) if info.status == "running" => Ok(()),
+                Ok(info) if info.status == "running" => {
+                    tracing::debug!("Service '{}' is already running", svc_name);
+                    Ok(())
+                }
                 Ok(info) if info.status != "not found" => {
+                    tracing::info!("Restarting service '{}'…", svc_name);
                     self.backend.start(&container_name).await.map(|_| {
                         self.session_containers.lock().unwrap().push(container_name.clone());
                     })
@@ -387,6 +391,8 @@ impl ComposeEngine {
                     let _ = self.backend.remove_volume(resolved_name).await;
                 }
             }
+            // Also remove any volumes referenced in services (anonymous or named)
+            // though compose-spec usually handles this via the top-level volumes map.
             self.session_volumes.lock().unwrap().clear();
         }
 
