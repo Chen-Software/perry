@@ -11,9 +11,6 @@ pub mod types;
 pub mod workload;
 pub mod yaml;
 
-// FFI exports (Perry TypeScript integration)
-#[cfg(feature = "ffi")]
-pub mod ffi;
 
 // Re-exports
 pub use error::{ComposeError, Result};

@@ -703,6 +703,7 @@ pub struct ContainerInfo {
     pub image: String,
     pub status: String,
     pub ports: Vec<String>,
+    pub ip_address: Option<String>,
     pub created: String,
 }
 

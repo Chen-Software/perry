@@ -100,7 +100,6 @@ pub const NATIVE_MODULES: &[&str] = &[
     "perry/thread",
     // Perry container module (OCI container management)
     "perry/container",
-    "perry/container-compose",
     "perry/compose",
     "perry/workloads",
     // SQLite
@@ -133,7 +132,6 @@ const RUNTIME_ONLY_MODULES: &[&str] = &[
     "perry/i18n",
     "perry/thread",
     "perry/container",
-    "perry/container-compose",
     "perry/compose",
     "perry/workloads",
 ];

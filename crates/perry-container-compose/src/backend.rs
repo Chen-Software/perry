@@ -109,8 +109,16 @@ struct DockerListEntry {
     status: String,
     #[serde(rename = "Ports", default)]
     ports: Vec<String>,
+    #[serde(rename = "Networks", default)]
+    networks: HashMap<String, DockerListNetwork>,
     #[serde(rename = "Created", alias = "CreatedAt", default)]
     created: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DockerListNetwork {
+    #[serde(rename = "IPAddress")]
+    ip_address: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,8 +131,16 @@ struct DockerInspectOutput {
     config: DockerInspectConfig,
     #[serde(rename = "State")]
     state: DockerInspectState,
+    #[serde(rename = "NetworkSettings")]
+    network_settings: DockerInspectNetworkSettings,
     #[serde(rename = "Created")]
     created: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DockerInspectNetworkSettings {
+    #[serde(rename = "IPAddress")]
+    ip_address: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -305,6 +321,7 @@ impl CliProtocol for DockerProtocol {
             image: e.image,
             status: e.status,
             ports: e.ports,
+            ip_address: e.networks.values().next().map(|n| n.ip_address.clone()),
             created: e.created,
         }).collect())
     }
@@ -318,6 +335,7 @@ impl CliProtocol for DockerProtocol {
             image: e.config.image,
             status: e.state.status,
             ports: vec![],
+            ip_address: Some(e.network_settings.ip_address),
             created: e.created,
         })
     }

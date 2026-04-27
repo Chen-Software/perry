@@ -163,7 +163,7 @@ proptest! {
 
     #[test]
     fn prop_list_or_dict_to_map_dict(
-        keys in proptest::collection::vec("[A-Z][A-Z0-9_]{1,8}", 1..=8),
+        keys in proptest::collection::btree_set("[A-Z][A-Z0-9_]{1,8}", 1..=8),
         int_val in 0i64..1000,
         bool_val in proptest::bool::ANY,
         str_val in "[a-z0-9_]{1,10}",
@@ -394,6 +394,7 @@ proptest! {
                 image: img.clone(),
                 status: "running".to_string(),
                 ports: vec![],
+                ip_address: Some("172.17.0.2".to_string()),
                 created: "2025-01-01T00:00:00Z".to_string(),
             })
             .collect();

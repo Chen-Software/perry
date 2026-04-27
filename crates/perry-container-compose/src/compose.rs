@@ -111,6 +111,25 @@ impl ComposeEngine {
             let svc = self.spec.services.get(svc_name).unwrap();
             let container_name = service::service_container_name(svc, svc_name);
 
+            // Check if service is already running (idempotent up)
+            match self.backend.inspect(&container_name).await {
+                Ok(info) if info.status == "running" => {
+                    continue;
+                }
+                Ok(info) if info.status != "running" => {
+                    if let Err(e) = self.backend.start(&info.id).await {
+                        self.rollback(&started_containers, &created_networks, &created_volumes).await;
+                        return Err(ComposeError::ServiceStartupFailed {
+                            service: svc_name.clone(),
+                            message: e.to_string(),
+                        });
+                    }
+                    started_containers.push(container_name);
+                    continue;
+                }
+                _ => {} // Not found, proceed to run
+            }
+
             // Extract primary network if any
             let network = match &svc.networks {
                 Some(crate::types::ServiceNetworks::List(l)) => l.first().cloned(),

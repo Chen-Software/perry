@@ -98,7 +98,7 @@ impl WorkloadGraphEngine {
 
     pub async fn run(
         self: Arc<Self>,
-        strategy: ExecutionStrategy,
+        _strategy: ExecutionStrategy,
         on_failure: FailureStrategy,
     ) -> Result<u64> {
         let order = self.resolve_order()?;
@@ -161,15 +161,15 @@ impl WorkloadGraphEngine {
                     if let Some(id) = active.get(target_node) {
                         match self.backend.inspect(id).await {
                             Ok(info) => {
-                                // Simple resolution for IP
+                                let ip = info.ip_address.filter(|s| !s.is_empty()).unwrap_or_else(|| "127.0.0.1".to_string());
                                 if cap == "IP" {
-                                    *value = "127.0.0.1".to_string(); // In bridge mode, usually use 127.0.0.1 with port mapping
+                                    *value = ip;
                                 } else if cap == "ENDPOINT" && parts.len() >= 5 {
                                     let port = parts[4];
-                                    *value = format!("127.0.0.1:{}", port);
+                                    *value = format!("{}:{}", ip, port);
                                 } else if cap == "INTERNALURL" && parts.len() >= 5 {
                                     let port = parts[4];
-                                    *value = format!("http://127.0.0.1:{}", port);
+                                    *value = format!("http://{}:{}", ip, port);
                                 }
                             }
                             Err(_) => {}
