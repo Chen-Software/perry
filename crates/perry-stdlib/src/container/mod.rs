@@ -298,11 +298,11 @@ pub unsafe extern "C" fn js_container_start(id_ptr: *const StringHeader) -> *mut
 }
 
 /// Stop a running container
-/// FFI: js_container_stop(id: *const StringHeader, timeout: i32) -> *mut Promise
+/// FFI: js_container_stop(id: *const StringHeader, timeout: i64) -> *mut Promise
 #[no_mangle]
 pub unsafe extern "C" fn js_container_stop(
     id_ptr: *const StringHeader,
-    timeout: i32,
+    timeout: i64,
 ) -> *mut Promise {
     let promise = js_promise_new();
 
@@ -332,11 +332,11 @@ pub unsafe extern "C" fn js_container_stop(
 }
 
 /// Remove a container
-/// FFI: js_container_remove(id: *const StringHeader, force: i32) -> *mut Promise
+/// FFI: js_container_remove(id: *const StringHeader, force: i64) -> *mut Promise
 #[no_mangle]
 pub unsafe extern "C" fn js_container_remove(
     id_ptr: *const StringHeader,
-    force: i32,
+    force: i64,
 ) -> *mut Promise {
     let promise = js_promise_new();
 
@@ -365,9 +365,9 @@ pub unsafe extern "C" fn js_container_remove(
 }
 
 /// List containers
-/// FFI: js_container_list(all: i32) -> *mut Promise
+/// FFI: js_container_list(all: i64) -> *mut Promise
 #[no_mangle]
-pub unsafe extern "C" fn js_container_list(all: i32) -> *mut Promise {
+pub unsafe extern "C" fn js_container_list(all: i64) -> *mut Promise {
     let promise = js_promise_new();
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
@@ -478,9 +478,9 @@ pub unsafe extern "C" fn js_container_detectBackend() -> *mut Promise {
 // ============ Container Logs and Exec ============
 
 /// Get logs from a container
-/// FFI: js_container_logs(id: *const StringHeader, tail: i32) -> *mut Promise
+/// FFI: js_container_logs(id: *const StringHeader, tail: i64) -> *mut Promise
 #[no_mangle]
-pub unsafe extern "C" fn js_container_logs(id_ptr: *const StringHeader, tail: i32) -> *mut Promise {
+pub unsafe extern "C" fn js_container_logs(id_ptr: *const StringHeader, tail: i64) -> *mut Promise {
     let promise = js_promise_new();
 
     let id = match string_from_header(id_ptr) {
@@ -650,11 +650,11 @@ pub unsafe extern "C" fn js_container_build(
 }
 
 /// Remove an image
-/// FFI: js_container_removeImage(reference: *const StringHeader, force: i32) -> *mut Promise
+/// FFI: js_container_removeImage(reference: *const StringHeader, force: i64) -> *mut Promise
 #[no_mangle]
 pub unsafe extern "C" fn js_container_removeImage(
     reference_ptr: *const StringHeader,
-    force: i32,
+    force: i64,
 ) -> *mut Promise {
     let promise = js_promise_new();
 
@@ -675,6 +675,39 @@ pub unsafe extern "C" fn js_container_removeImage(
         };
         match backend.remove_image(&reference, force != 0).await {
             Ok(()) => Ok(0u64),
+            Err(e) => Err::<u64, String>(e.to_string()),
+        }
+    });
+
+    promise
+}
+
+/// Inspect an image
+/// FFI: js_container_inspectImage(reference: *const StringHeader) -> *mut Promise
+#[no_mangle]
+pub unsafe extern "C" fn js_container_inspectImage(reference_ptr: *const StringHeader) -> *mut Promise {
+    let promise = js_promise_new();
+
+    let reference = match string_from_header(reference_ptr) {
+        Some(s) => s,
+        None => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move {
+                Err::<u64, String>("Invalid image reference".to_string())
+            });
+            return promise;
+        }
+    };
+
+    crate::common::spawn_for_promise(promise as *mut u8, async move {
+        let backend = match get_global_backend().await {
+            Ok(b) => Arc::clone(b),
+            Err(e) => return Err::<u64, String>(e.to_string()),
+        };
+        match backend.inspect_image(&reference).await {
+            Ok(info) => {
+                let handle_id = types::register_image_info(info);
+                Ok(handle_id as u64)
+            }
             Err(e) => Err::<u64, String>(e.to_string()),
         }
     });
@@ -727,7 +760,7 @@ pub unsafe extern "C" fn js_compose_up(spec_ptr: *const StringHeader) -> *mut Pr
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_down(handle_id: i64, volumes: i32) -> *mut Promise {
+pub unsafe extern "C" fn js_compose_down(handle_id: i64, volumes: i64) -> *mut Promise {
     js_container_compose_down(handle_id, volumes)
 }
 
@@ -740,7 +773,7 @@ pub unsafe extern "C" fn js_compose_ps(handle_id: i64) -> *mut Promise {
 pub unsafe extern "C" fn js_compose_logs(
     handle_id: i64,
     service_ptr: *const StringHeader,
-    tail: i32,
+    tail: i64,
 ) -> *mut Promise {
     js_container_compose_logs(handle_id, service_ptr, tail)
 }
@@ -784,9 +817,9 @@ pub unsafe extern "C" fn js_compose_restart(
 }
 
 /// Stop and remove compose stack.
-/// FFI: js_container_compose_down(handle_id: i64, volumes: i32) -> *mut Promise
+/// FFI: js_container_compose_down(handle_id: i64, volumes: i64) -> *mut Promise
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_down(handle_id: i64, volumes: i32) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_down(handle_id: i64, volumes: i64) -> *mut Promise {
     let promise = js_promise_new();
 
     let handle = match types::take_compose_handle(handle_id as u64) {
@@ -849,12 +882,12 @@ pub unsafe extern "C" fn js_container_compose_ps(handle_id: i64) -> *mut Promise
 }
 
 /// Get logs from compose stack
-/// FFI: js_container_compose_logs(handle_id: i64, service: *const StringHeader, tail: i32) -> *mut Promise
+/// FFI: js_container_compose_logs(handle_id: i64, service: *const StringHeader, tail: i64) -> *mut Promise
 #[no_mangle]
 pub unsafe extern "C" fn js_container_compose_logs(
     handle_id: i64,
     service_ptr: *const StringHeader,
-    tail: i32,
+    tail: i64,
 ) -> *mut Promise {
     let promise = js_promise_new();
 
@@ -1061,9 +1094,9 @@ pub unsafe extern "C" fn js_workload_inspectGraph(handle_id: i64) -> *mut Promis
 }
 
 /// Stop and remove a workload graph
-/// FFI: js_workload_handle_down(handle_id: i64, force: i32) -> *mut Promise
+/// FFI: js_workload_handle_down(handle_id: i64, force: i64) -> *mut Promise
 #[no_mangle]
-pub unsafe extern "C" fn js_workload_handle_down(handle_id: i64, force: i32) -> *mut Promise {
+pub unsafe extern "C" fn js_workload_handle_down(handle_id: i64, force: i64) -> *mut Promise {
     let promise = js_promise_new();
     let id = handle_id as u64;
 
@@ -1120,12 +1153,12 @@ pub unsafe extern "C" fn js_workload_handle_status(handle_id: i64) -> *mut Promi
 }
 
 /// Get logs from a workload node
-/// FFI: js_workload_handle_logs(handle_id: i64, node_id: *const StringHeader, tail: i32) -> *mut Promise
+/// FFI: js_workload_handle_logs(handle_id: i64, node_id: *const StringHeader, tail: i64) -> *mut Promise
 #[no_mangle]
 pub unsafe extern "C" fn js_workload_handle_logs(
     handle_id: i64,
     node_id_ptr: *const StringHeader,
-    tail: i32,
+    tail: i64,
 ) -> *mut Promise {
     let promise = js_promise_new();
     let id = handle_id as u64;

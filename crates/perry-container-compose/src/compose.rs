@@ -55,12 +55,15 @@ impl ComposeEngine {
         self: Arc<Self>,
         services: &[String],
         _detach: bool,
-        _build: bool,
+        build: bool,
         _remove_orphans: bool,
     ) -> Result<ComposeHandle> {
-        // 1. Create networks
+        // 1. Create networks (skip external)
         if let Some(networks) = &self.spec.networks {
             for (name, config) in networks {
+                let is_external = config.as_ref().map(|c| c.external.unwrap_or(false)).unwrap_or(false);
+                if is_external { continue; }
+
                 if self.backend.inspect_network(name).await.is_err() {
                     if let Some(cfg) = config {
                         self.backend.create_network(name, cfg).await?;
@@ -72,9 +75,12 @@ impl ComposeEngine {
             }
         }
 
-        // 2. Create volumes
+        // 2. Create volumes (skip external)
         if let Some(volumes) = &self.spec.volumes {
             for (name, config) in volumes {
+                let is_external = config.as_ref().map(|c| c.external.unwrap_or(false)).unwrap_or(false);
+                if is_external { continue; }
+
                 if self.backend.inspect_volume(name).await.is_err() {
                     if let Some(cfg) = config {
                         self.backend.create_volume(name, cfg).await?;
@@ -94,64 +100,56 @@ impl ComposeEngine {
             order.iter().filter(|s| services.contains(s)).collect()
         };
 
-        let mut started = Vec::new();
         for svc_name in target {
             let svc = self.spec.services.get(svc_name).unwrap();
             let container_name = service::service_container_name(svc, svc_name);
 
-            // Extract primary network if any
-            let network = match &svc.networks {
-                Some(crate::types::ServiceNetworks::List(l)) => l.first().cloned(),
-                Some(crate::types::ServiceNetworks::Map(m)) => m.keys().next().cloned(),
-                None => None,
-            };
+            // Idempotency check
+            let mut skip = false;
+            if let Ok(info) = self.backend.inspect(&container_name).await {
+                if info.status.contains("running") || info.status.contains("Up") {
+                    tracing::debug!(service = %svc_name, "already running");
+                    skip = true;
+                } else {
+                    tracing::debug!(service = %svc_name, "restarting stopped container");
+                    self.backend.start(&container_name).await?;
+                    skip = true;
+                }
+            }
 
+            if skip { continue; }
+
+            // Build if needed
+            if build || svc.needs_build() {
+                if let Some(build_spec) = &svc.build {
+                    tracing::info!(service = %svc_name, "building image");
+                    let image_name = svc.image_ref(svc_name);
+                    self.backend.build(&build_spec.as_build(), &image_name).await?;
+                }
+            }
+
+            // Pull if no build and image not present
+            if !svc.needs_build() {
+                if let Some(image) = &svc.image {
+                    if self.backend.inspect_image(image).await.is_err() {
+                        tracing::info!(image = %image, "pulling image");
+                        self.backend.pull_image(image).await?;
+                    }
+                }
+            }
+
+            let network = svc.networks.as_ref().and_then(|n| n.names().first().cloned());
             let mut labels = svc.labels.as_ref().map(|l| l.to_map()).unwrap_or_default();
             labels.insert("perry.compose.project".to_string(), self.project_name.clone());
             labels.insert("perry.compose.service".to_string(), svc_name.clone());
 
             let container_spec = ContainerSpec {
-                image: svc.image.clone().unwrap_or_default(),
+                image: svc.image_ref(svc_name),
                 name: Some(container_name.clone()),
-                ports: Some(svc.ports.as_ref().map(|p| p.iter().map(|ps| match ps {
-                    crate::types::PortSpec::Short(v) => match v {
-                        serde_yaml::Value::String(s) => s.clone(),
-                        serde_yaml::Value::Number(n) => n.to_string(),
-                        _ => v.as_str().unwrap_or_default().to_string(),
-                    },
-                    crate::types::PortSpec::Long(lp) => {
-                        let publ = lp.published.as_ref().map(|v| match v {
-                            serde_yaml::Value::String(s) => s.clone(),
-                            serde_yaml::Value::Number(n) => n.to_string(),
-                            _ => v.as_str().unwrap_or_default().to_string(),
-                        }).unwrap_or_default();
-                        let target = match &lp.target {
-                            serde_yaml::Value::String(s) => s.clone(),
-                            serde_yaml::Value::Number(n) => n.to_string(),
-                            _ => lp.target.as_str().unwrap_or_default().to_string(),
-                        };
-                        format!("{}:{}", publ, target)
-                    },
-                }).collect()).unwrap_or_default()),
-                volumes: Some(svc.volumes.as_ref().map(|v| v.iter().map(|vs| match vs {
-                    serde_yaml::Value::String(s) => s.clone(),
-                    _ => vs.as_str().unwrap_or_default().to_string(),
-                }).collect()).unwrap_or_default()),
-                env: Some(match &svc.environment {
-                    Some(crate::types::ListOrDict::Dict(d)) => d.iter().map(|(k, v)| (k.clone(), v.as_ref().map(|vv| match vv {
-                        serde_yaml::Value::String(s) => s.clone(),
-                        serde_yaml::Value::Number(n) => n.to_string(),
-                        serde_yaml::Value::Bool(b) => b.to_string(),
-                        _ => vv.as_str().unwrap_or_default().to_string(),
-                    }).unwrap_or_default())).collect(),
-                    Some(crate::types::ListOrDict::List(l)) => l.iter().filter_map(|s| s.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect(),
-                    None => HashMap::new(),
-                }),
-                cmd: Some(match &svc.command {
-                    Some(serde_yaml::Value::String(s)) => vec![s.clone()],
-                    Some(serde_yaml::Value::Sequence(seq)) => seq.iter().map(|v| v.as_str().unwrap_or_default().to_string()).collect(),
-                    _ => vec![],
-                }),
+                ports: Some(svc.port_strings()),
+                volumes: Some(svc.volume_strings()),
+                env: Some(svc.resolved_env()),
+                cmd: svc.command_list(),
                 entrypoint: None,
                 network,
                 rm: None,
@@ -161,35 +159,22 @@ impl ComposeEngine {
 
             let profile = crate::backend::SecurityProfile {
                 read_only_root: svc.read_only.unwrap_or(false),
-                seccomp: None, // Could be parsed from security_opt
+                seccomp: svc.security_opt.as_ref().and_then(|opts| {
+                    opts.iter().find(|o| o.starts_with("seccomp=")).map(|o| o[8..].to_string())
+                }),
             };
 
-            // Idempotency: skip if already running
-            let mut skip = false;
-            if let Ok(info) = self.backend.inspect(&container_name).await {
-                if info.status == "running" {
-                    skip = true;
-                } else {
-                    // Start existing stopped container
-                    self.backend.start(&container_name).await?;
-                    skip = true;
+            match self.backend.run_with_security(&container_spec, &profile).await {
+                Ok(handle) => {
+                    self.session_containers.lock().unwrap().push(handle.id);
                 }
-            }
-
-            if !skip {
-                match self.backend.run_with_security(&container_spec, &profile).await {
-                    Ok(handle) => {
-                        self.session_containers.lock().unwrap().push(handle.id);
-                        started.push(container_name);
-                    }
-                    Err(e) => {
-                        // Rollback
-                        self.rollback().await;
-                        return Err(ComposeError::ServiceStartupFailed {
-                            service: svc_name.clone(),
-                            message: e.to_string(),
-                        });
-                    }
+                Err(e) => {
+                    tracing::error!(service = %svc_name, error = %e, "startup failed, rolling back");
+                    self.rollback().await;
+                    return Err(ComposeError::ServiceStartupFailed {
+                        service: svc_name.clone(),
+                        message: e.to_string(),
+                    });
                 }
             }
         }
@@ -226,49 +211,74 @@ impl ComposeEngine {
 
         // 2. Clean up requested services (even if not in session)
         let order = resolve_startup_order(&self.spec)?;
-        let target: Vec<&String> = if services.is_empty() {
+        let mut target: Vec<&String> = if services.is_empty() {
             order.iter().collect()
         } else {
             order.iter().filter(|s| services.contains(s)).collect()
         };
 
-        let mut final_order = target;
-        final_order.reverse();
+        // Teardown in reverse dependency order
+        target.reverse();
 
-        for svc_name in final_order {
-            let container_info = self.backend.list(true).await?;
-            let containers_to_remove: Vec<String> = container_info
-                .into_iter()
-                .filter(|c| {
-                    c.labels.get("perry.compose.project").map(|v| v == &self.project_name).unwrap_or(false) &&
-                    c.labels.get("perry.compose.service").map(|v| v == svc_name).unwrap_or(false)
-                })
-                .map(|c| c.id)
-                .collect();
-
-            for cid in containers_to_remove {
-                let _ = self.backend.stop(&cid, Some(10)).await;
-                let _ = self.backend.remove(&cid, true).await;
-            }
-
+        for svc_name in target {
             let svc = self.spec.services.get(svc_name).unwrap();
             let container_name = service::service_container_name(svc, svc_name);
+
+            // Try to stop and remove by name
             let _ = self.backend.stop(&container_name, Some(10)).await;
             let _ = self.backend.remove(&container_name, true).await;
-        }
 
-        if let Some(networks) = &self.spec.networks {
-            for name in networks.keys() {
-                let _ = self.backend.remove_network(name).await;
-            }
-        }
-
-        if remove_volumes {
-            if let Some(volumes) = &self.spec.volumes {
-                for name in volumes.keys() {
-                    let _ = self.backend.remove_volume(name).await;
+            // Also check for containers with project/service labels
+            if let Ok(all_containers) = self.backend.list(true).await {
+                for c in all_containers {
+                    let matches_project = c.labels.get("perry.compose.project").map(|v| v == &self.project_name).unwrap_or(false);
+                    let matches_service = c.labels.get("perry.compose.service").map(|v| v == svc_name).unwrap_or(false);
+                    if matches_project && matches_service {
+                        let _ = self.backend.stop(&c.id, Some(10)).await;
+                        let _ = self.backend.remove(&c.id, true).await;
+                    }
                 }
             }
+        }
+
+        // 3. Remove non-external networks
+        if let Some(networks) = &self.spec.networks {
+            for (name, config) in networks {
+                let is_external = config.as_ref().map(|c| c.external.unwrap_or(false)).unwrap_or(false);
+                if !is_external {
+                    let _ = self.backend.remove_network(name).await;
+                }
+            }
+        }
+
+        // 4. Remove non-external volumes if requested
+        if remove_volumes {
+            if let Some(volumes) = &self.spec.volumes {
+                for (name, config) in volumes {
+                    let is_external = config.as_ref().map(|c| c.external.unwrap_or(false)).unwrap_or(false);
+                    if !is_external {
+                        let _ = self.backend.remove_volume(name).await;
+                    }
+                }
+            }
+        }
+
+        // 5. Unregister engine
+        // We need to find our stack_id. We can do this by searching COMPOSE_ENGINES.
+        let mut engines = COMPOSE_ENGINES.lock().unwrap();
+        let mut to_remove = None;
+        for (id, engine) in engines.iter() {
+            if Arc::ptr_eq(engine, &Arc::new(ComposeEngine::new(self.spec.clone(), self.project_name.clone(), self.backend.clone()))) {
+                // This ptr_eq won't work easily because we're inside &self.
+                // We'll search by project name and spec instead.
+            }
+            if engine.project_name == self.project_name {
+                to_remove = Some(*id);
+                break;
+            }
+        }
+        if let Some(id) = to_remove {
+            engines.shift_remove(&id);
         }
 
         Ok(())
