@@ -439,6 +439,17 @@ fn map_ui_method(method: &str, class_name: Option<&str>) -> &'static str {
         "pickerAddItem" => "perry_ui_picker_add_item",
         "pickerSetSelected" => "perry_ui_picker_set_selected",
         "pickerGetSelected" => "perry_ui_picker_get_selected",
+        // Camera (issue #191) — Web has no live-camera FFI yet, so the
+        // wasm_runtime.js stubs return 0 / -1. The dispatch entries here
+        // exist so user code calling `CameraView()` from a browser build
+        // resolves rather than throwing "perry_ui_unknown".
+        "CameraView" | "camera_create" => "perry_ui_camera_create",
+        "cameraStart" => "perry_ui_camera_start",
+        "cameraStop" => "perry_ui_camera_stop",
+        "cameraFreeze" => "perry_ui_camera_freeze",
+        "cameraUnfreeze" => "perry_ui_camera_unfreeze",
+        "cameraSampleColor" => "perry_ui_camera_sample_color",
+        "cameraSetOnTap" => "perry_ui_camera_set_on_tap",
         // Image
         "imageSetSize" => "perry_ui_image_set_size",
         "imageSetTint" => "perry_ui_image_set_tint",

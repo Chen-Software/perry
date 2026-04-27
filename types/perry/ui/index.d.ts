@@ -499,6 +499,57 @@ export function tabbarAddTab(tabBar: Widget, title: string, content: Widget): vo
 export function tabbarSetSelected(tabBar: Widget, index: number): void;
 
 // ---------------------------------------------------------------------------
+// Camera (issue #191)
+// ---------------------------------------------------------------------------
+
+/**
+ * Live camera preview widget. Real capture is implemented on **iOS**
+ * (AVCaptureSession) and **Android** (Camera2). Other targets (macOS,
+ * Linux/GTK4, Windows, Web) link no-op stubs so cross-platform code
+ * compiles everywhere; on those targets `cameraSampleColor` returns `-1`
+ * and the start/stop/freeze setters are no-ops.
+ *
+ * The camera does not start automatically — call `cameraStart()` to begin
+ * capture. On iOS, the camera permission dialog is shown automatically on
+ * first use.
+ */
+export function CameraView(): Widget;
+
+/** Start the live camera feed. */
+export function cameraStart(camera: Widget): void;
+
+/** Stop the camera feed and release the capture session. */
+export function cameraStop(camera: Widget): void;
+
+/** Pause the live preview while keeping the capture session active. */
+export function cameraFreeze(camera: Widget): void;
+
+/** Resume the live preview after a freeze. */
+export function cameraUnfreeze(camera: Widget): void;
+
+/**
+ * Sample the pixel color at normalized coordinates (`x`, `y` in 0–1).
+ * Returns packed RGB as a number — `r * 65536 + g * 256 + b` — or `-1` if
+ * no frame is available. The color is averaged over a 5x5 pixel region
+ * around the sample point for noise reduction.
+ *
+ * To extract individual channels:
+ * ```text
+ * const r = Math.floor(rgb / 65536);
+ * const g = Math.floor((rgb % 65536) / 256);
+ * const b = Math.floor(rgb % 256);
+ * ```
+ */
+export function cameraSampleColor(x: number, y: number): number;
+
+/**
+ * Register a tap handler on the camera view. The callback receives the
+ * normalized coordinates of the tap location, which can be passed
+ * directly to `cameraSampleColor()`.
+ */
+export function cameraSetOnTap(camera: Widget, callback: (x: number, y: number) => void): void;
+
+// ---------------------------------------------------------------------------
 // Sheet
 // ---------------------------------------------------------------------------
 

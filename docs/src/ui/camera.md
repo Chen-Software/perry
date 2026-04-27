@@ -3,47 +3,23 @@
 The `perry/ui` module provides a live camera preview widget with color
 sampling capabilities.
 
-```text
-import { CameraView, cameraStart, cameraStop, cameraFreeze, cameraUnfreeze, cameraSampleColor, cameraSetOnTap } from "perry/ui";
+```ts
+{{#include ../../examples/ui/camera/snippets.ts:imports}}
 ```
 
-> **Status:** the underlying FFI is implemented in `perry-ui-ios` and
-> `perry-ui-android`, but the `CameraView` / `camera*` functions are **not
-> yet wired into any codegen path** (LLVM, JS, or WASM). The snippets below
-> describe the planned shape of the API; calling them from TS today produces
-> "unknown function" errors at compile time. Track progress under the
-> camera-widget issue.
+> **Platform support:** real capture is implemented on **iOS**
+> (AVCaptureSession) and **Android** (Camera2). On **macOS**, **Linux**
+> (GTK4), **Windows**, and the **Web** target the runtime exports no-op
+> stubs so cross-platform code compiles and links cleanly — `CameraView()`
+> returns handle 0 and `cameraSampleColor` returns `-1`. Wiring real
+> capture on those platforms (AVFoundation on macOS, GStreamer/V4L2 on
+> Linux, Media Foundation on Windows, `getUserMedia` on Web) is tracked as
+> a follow-up.
 
 ## Quick Example
 
-```text
-import { App, VStack, Text, State } from "perry/ui";
-import { CameraView, cameraStart, cameraStop, cameraSampleColor, cameraSetOnTap } from "perry/ui";
-
-const colorHex = State("#000000");
-
-const cam = CameraView();
-cameraStart(cam);
-
-cameraSetOnTap(cam, (x, y) => {
-  const rgb = cameraSampleColor(x, y);
-  if (rgb >= 0) {
-    const r = Math.floor(rgb / 65536);
-    const g = Math.floor((rgb % 65536) / 256);
-    const b = Math.floor(rgb % 256);
-    colorHex.set(`#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`);
-  }
-});
-
-App({
-  title: "Color Picker",
-  width: 400,
-  height: 600,
-  body: VStack(16, [
-    cam,
-    Text(`Color: ${colorHex.value}`),
-  ]),
-});
+```ts
+{{#include ../../examples/ui/camera/snippets.ts:quick-example}}
 ```
 
 ## API Reference
@@ -52,8 +28,8 @@ App({
 
 Create a live camera preview widget.
 
-```text
-const cam = CameraView();
+```ts
+{{#include ../../examples/ui/camera/snippets.ts:camera-create}}
 ```
 
 Returns a widget handle. The camera does not start automatically — call `cameraStart()` to begin capture.
@@ -62,8 +38,8 @@ Returns a widget handle. The camera does not start automatically — call `camer
 
 Start the live camera feed.
 
-```text
-cameraStart(cam);
+```ts
+{{#include ../../examples/ui/camera/snippets.ts:camera-start}}
 ```
 
 On iOS, the camera permission dialog is shown automatically on first use.
@@ -72,16 +48,16 @@ On iOS, the camera permission dialog is shown automatically on first use.
 
 Stop the camera feed and release the capture session.
 
-```text
-cameraStop(cam);
+```ts
+{{#include ../../examples/ui/camera/snippets.ts:camera-stop}}
 ```
 
 ### `cameraFreeze(handle)`
 
 Pause the live preview (freeze the current frame).
 
-```text
-cameraFreeze(cam);
+```ts
+{{#include ../../examples/ui/camera/snippets.ts:camera-freeze}}
 ```
 
 The camera session remains active but the preview stops updating. Useful for "capture" moments where you want to inspect the frozen frame.
@@ -90,16 +66,16 @@ The camera session remains active but the preview stops updating. Useful for "ca
 
 Resume the live preview after a freeze.
 
-```text
-cameraUnfreeze(cam);
+```ts
+{{#include ../../examples/ui/camera/snippets.ts:camera-unfreeze}}
 ```
 
 ### `cameraSampleColor(x, y)`
 
 Sample the pixel color at normalized coordinates.
 
-```text
-const rgb = cameraSampleColor(0.5, 0.5); // center of frame
+```ts
+{{#include ../../examples/ui/camera/snippets.ts:sample-color}}
 ```
 
 - `x`, `y` are normalized coordinates (0.0–1.0)
@@ -108,10 +84,8 @@ const rgb = cameraSampleColor(0.5, 0.5); // center of frame
 
 To extract individual channels:
 
-```text
-const r = Math.floor(rgb / 65536);
-const g = Math.floor((rgb % 65536) / 256);
-const b = Math.floor(rgb % 256);
+```ts
+{{#include ../../examples/ui/camera/snippets.ts:extract-channels}}
 ```
 
 The color is averaged over a 5x5 pixel region around the sample point for noise reduction.
@@ -120,11 +94,8 @@ The color is averaged over a 5x5 pixel region around the sample point for noise 
 
 Register a tap handler on the camera view.
 
-```text
-cameraSetOnTap(cam, (x, y) => {
-  // x, y are normalized coordinates (0.0-1.0)
-  const rgb = cameraSampleColor(x, y);
-});
+```ts
+{{#include ../../examples/ui/camera/snippets.ts:on-tap}}
 ```
 
 The callback receives normalized coordinates of the tap location, which can be passed directly to `cameraSampleColor()`.
@@ -132,6 +103,8 @@ The callback receives normalized coordinates of the tap location, which can be p
 ## Implementation
 
 On iOS, the camera uses AVCaptureSession with AVCaptureVideoPreviewLayer for GPU-accelerated live preview, and AVCaptureVideoDataOutput for frame capture. Color sampling reads pixel data from CVPixelBuffer.
+
+On Android, the camera uses Camera2 with a TextureView preview surface. Color sampling reads from the most recent ImageReader frame.
 
 ## Next Steps
 

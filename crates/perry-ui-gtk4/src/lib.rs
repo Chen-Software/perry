@@ -1409,3 +1409,29 @@ pub extern "C" fn __wrapper_hone_get_documents_dir(_closure_ptr: i64) -> f64 {
 pub extern "C" fn __wrapper_hone_get_app_files_dir(_closure_ptr: i64) -> f64 {
     nanbox_static_str(b"")
 }
+
+// --- Camera stubs (issue #191) ---
+// Real implementations live in `perry-ui-ios` and `perry-ui-android`. On
+// Linux, integrating GStreamer / V4L2 for live preview is a separate scope;
+// these no-ops let user code that targets multiple platforms link cleanly.
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_create() -> i64 { 0 }
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_start(_handle: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_stop(_handle: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_freeze(_handle: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_unfreeze(_handle: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_sample_color(_x: f64, _y: f64) -> f64 { -1.0 }
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_set_on_tap(_handle: i64, _callback: f64) {}

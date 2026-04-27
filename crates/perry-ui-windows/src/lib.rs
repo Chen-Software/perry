@@ -1502,6 +1502,32 @@ pub extern "C" fn hone_lsp_send(_handle: i64, _msg: i64) {}
 #[no_mangle]
 pub extern "C" fn hone_lsp_stop(_handle: i64) {}
 
+// --- Camera stubs (issue #191) ---
+// Real implementations live in `perry-ui-ios` and `perry-ui-android`. The
+// Windows backend doesn't have a camera capture pipeline yet; these no-ops
+// let user code that targets multiple platforms link cleanly.
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_create() -> i64 { 0 }
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_start(_handle: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_stop(_handle: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_freeze(_handle: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_unfreeze(_handle: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_sample_color(_x: f64, _y: f64) -> f64 { -1.0 }
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_set_on_tap(_handle: i64, _callback: f64) {}
+
 // Override setjmp with a no-op stub that always returns 0.
 // Perry's try/catch uses setjmp/longjmp but since we make readFileSync
 // return empty string instead of throwing, longjmp is never called.

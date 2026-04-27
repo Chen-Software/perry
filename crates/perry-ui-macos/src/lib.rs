@@ -1674,3 +1674,31 @@ pub extern "C" fn perry_ui_scrollview_set_refresh_control(_handle: i64, _callbac
 
 #[no_mangle]
 pub extern "C" fn perry_ui_scrollview_end_refreshing(_handle: i64) {}
+
+// --- Camera stubs (issue #191) ---
+// Real implementations live in `perry-ui-ios` (AVCaptureSession) and
+// `perry-ui-android` (Camera2). macOS has working AVFoundation but the
+// preview-layer plumbing isn't wired through perry-ui-macos yet — these
+// no-ops let cross-platform user code link cleanly today and can be
+// replaced incrementally.
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_create() -> i64 { 0 }
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_start(_handle: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_stop(_handle: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_freeze(_handle: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_unfreeze(_handle: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_sample_color(_x: f64, _y: f64) -> f64 { -1.0 }
+
+#[no_mangle]
+pub extern "C" fn perry_ui_camera_set_on_tap(_handle: i64, _callback: f64) {}

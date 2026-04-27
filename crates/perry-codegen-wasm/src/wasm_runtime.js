@@ -3185,6 +3185,34 @@ function perry_system_notification_send(title, body) {
 function perry_ui_frame_split_create() { return perry_ui_hstack_create(0); }
 function perry_ui_frame_split_add_child(splitH, childH) { perry_ui_widget_add_child(splitH, childH); }
 
+// ---------- Camera (issue #191) ----------
+// Browser stubs. The Web target has no `getUserMedia`-backed live preview
+// integrated yet, so these return sentinel values matching the documented
+// contract: `cameraSampleColor` returns `-1` when no frame is available, the
+// other setters are no-ops. User code calling `CameraView()` from a browser
+// build resolves the symbol cleanly; on iOS/Android the same source compiles
+// to the real AVCaptureSession / Camera2 backend.
+function perry_ui_camera_create() {
+  // Render a placeholder div so layout slots reserve space the same way
+  // they would for a real preview. No camera permission is requested.
+  const el = document.createElement("div");
+  el.style.background = "#000";
+  el.style.color = "#888";
+  el.style.display = "flex";
+  el.style.alignItems = "center";
+  el.style.justifyContent = "center";
+  el.style.minWidth = "200px";
+  el.style.minHeight = "200px";
+  el.textContent = "[camera preview not supported on web]";
+  return uiAlloc(el);
+}
+function perry_ui_camera_start(_h) {}
+function perry_ui_camera_stop(_h) {}
+function perry_ui_camera_freeze(_h) {}
+function perry_ui_camera_unfreeze(_h) {}
+function perry_ui_camera_sample_color(_x, _y) { return -1; }
+function perry_ui_camera_set_on_tap(_h, _cb) {}
+
 // ---------- UI Dispatch table (maps bridge function names to implementations) ----------
 const __perryUiDispatch = {
   // Widget creation
@@ -3273,6 +3301,10 @@ const __perryUiDispatch = {
   perry_system_keychain_delete, perry_system_notification_send,
   // Frame split
   perry_ui_frame_split_create, perry_ui_frame_split_add_child,
+  // Camera (issue #191) — browser stubs
+  perry_ui_camera_create, perry_ui_camera_start, perry_ui_camera_stop,
+  perry_ui_camera_freeze, perry_ui_camera_unfreeze,
+  perry_ui_camera_sample_color, perry_ui_camera_set_on_tap,
 };
 
 // Also expose as __perryUi for JS async function context

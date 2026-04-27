@@ -3062,6 +3062,17 @@ impl JsEmitter {
             "ProgressView" | "progressview_create" => "perry_ui_progressview_create",
             "Image" | "image_create" => "perry_ui_image_create",
             "Picker" | "picker_create" => "perry_ui_picker_create",
+            // Camera (issue #191) — browser stubs in wasm_runtime.js return
+            // 0 / -1 since there's no DOM equivalent for live capture; the
+            // dispatch entries here exist so the JS-target compile resolves
+            // the names rather than emitting `perry_ui_unknown`.
+            "CameraView" | "camera_create" => "perry_ui_camera_create",
+            "cameraStart" => "perry_ui_camera_start",
+            "cameraStop" => "perry_ui_camera_stop",
+            "cameraFreeze" => "perry_ui_camera_freeze",
+            "cameraUnfreeze" => "perry_ui_camera_unfreeze",
+            "cameraSampleColor" => "perry_ui_camera_sample_color",
+            "cameraSetOnTap" => "perry_ui_camera_set_on_tap",
             "Form" | "form_create" => "perry_ui_form_create",
             "Section" | "section_create" => "perry_ui_section_create",
             "NavigationStack" | "navigationstack_create" => "perry_ui_navigationstack_create",

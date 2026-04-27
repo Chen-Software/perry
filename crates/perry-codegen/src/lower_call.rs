@@ -5266,6 +5266,28 @@ const PERRY_UI_TABLE: &[UiSig] = &[
     UiSig { method: "scrollviewSetOffset", runtime: "perry_ui_scrollview_set_offset",
             args: &[UiArgKind::Widget, UiArgKind::F64], ret: UiReturnKind::Void },
 
+    // ---- Camera (issue #191) ----
+    // Live camera preview widget. Real implementations live in
+    // `perry-ui-ios` (AVCaptureSession) and `perry-ui-android` (Camera2).
+    // tvOS / visionOS / watchOS / macOS / GTK4 / Windows export no-op
+    // stubs so cross-platform user code links cleanly. `cameraSampleColor`
+    // returns packed RGB (`r*65536 + g*256 + b`) or `-1` if no frame is
+    // available — F64 return is preserved as a plain JS number.
+    UiSig { method: "CameraView", runtime: "perry_ui_camera_create",
+            args: &[], ret: UiReturnKind::Widget },
+    UiSig { method: "cameraStart", runtime: "perry_ui_camera_start",
+            args: &[UiArgKind::Widget], ret: UiReturnKind::Void },
+    UiSig { method: "cameraStop", runtime: "perry_ui_camera_stop",
+            args: &[UiArgKind::Widget], ret: UiReturnKind::Void },
+    UiSig { method: "cameraFreeze", runtime: "perry_ui_camera_freeze",
+            args: &[UiArgKind::Widget], ret: UiReturnKind::Void },
+    UiSig { method: "cameraUnfreeze", runtime: "perry_ui_camera_unfreeze",
+            args: &[UiArgKind::Widget], ret: UiReturnKind::Void },
+    UiSig { method: "cameraSampleColor", runtime: "perry_ui_camera_sample_color",
+            args: &[UiArgKind::F64, UiArgKind::F64], ret: UiReturnKind::F64 },
+    UiSig { method: "cameraSetOnTap", runtime: "perry_ui_camera_set_on_tap",
+            args: &[UiArgKind::Widget, UiArgKind::Closure], ret: UiReturnKind::Void },
+
     // ---- Canvas ----
     UiSig { method: "Canvas", runtime: "perry_ui_canvas_create",
             args: &[UiArgKind::F64, UiArgKind::F64], ret: UiReturnKind::Widget },
