@@ -709,15 +709,78 @@ pub unsafe extern "C" fn js_container_composeUp(
         };
         let wrapper = compose::ComposeWrapper::new(spec, backend);
         match wrapper.up().await {
-            Ok(_handle) => {
-                let handle_id = types::register_compose_handle(wrapper.engine().clone());
-                Ok(handle_id as u64)
-            }
+        Ok(_handle) => {
+            let handle_id = types::register_compose_handle(wrapper.engine().clone());
+            Ok(handle_id)
+        }
             Err(e) => Err::<u64, String>(e.to_string()),
         }
     });
 
     promise
+}
+
+/// Alias for js_container_composeUp
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_up(spec_ptr: *const StringHeader) -> *mut Promise {
+    js_container_composeUp(spec_ptr)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_down(handle_id: i64, volumes: i32) -> *mut Promise {
+    js_container_compose_down(handle_id, volumes)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_ps(handle_id: i64) -> *mut Promise {
+    js_container_compose_ps(handle_id)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_logs(
+    handle_id: i64,
+    service_ptr: *const StringHeader,
+    tail: i32,
+) -> *mut Promise {
+    js_container_compose_logs(handle_id, service_ptr, tail)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_exec(
+    handle_id: i64,
+    service_ptr: *const StringHeader,
+    cmd_json_ptr: *const StringHeader,
+) -> *mut Promise {
+    js_container_compose_exec(handle_id, service_ptr, cmd_json_ptr)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_config(handle_id: i64) -> *mut Promise {
+    js_container_compose_config(handle_id)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_start(
+    handle_id: i64,
+    services_json_ptr: *const StringHeader,
+) -> *mut Promise {
+    js_container_compose_start(handle_id, services_json_ptr)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_stop(
+    handle_id: i64,
+    services_json_ptr: *const StringHeader,
+) -> *mut Promise {
+    js_container_compose_stop(handle_id, services_json_ptr)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_restart(
+    handle_id: i64,
+    services_json_ptr: *const StringHeader,
+) -> *mut Promise {
+    js_container_compose_restart(handle_id, services_json_ptr)
 }
 
 /// Stop and remove compose stack.

@@ -6,7 +6,7 @@ use crate::types::{
 use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use crate::backend::ContainerBackend;
 
 static COMPOSE_ENGINES: once_cell::sync::Lazy<std::sync::Mutex<IndexMap<u64, Arc<ComposeEngine>>>> =
@@ -14,11 +14,13 @@ static COMPOSE_ENGINES: once_cell::sync::Lazy<std::sync::Mutex<IndexMap<u64, Arc
 
 static NEXT_STACK_ID: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Clone)]
 pub struct ComposeEngine {
     pub spec: ComposeSpec,
     pub project_name: String,
     pub backend: Arc<dyn ContainerBackend>,
+    session_containers: Mutex<Vec<String>>,
+    session_networks: Mutex<Vec<String>>,
+    session_volumes: Mutex<Vec<String>>,
 }
 
 impl ComposeEngine {
@@ -31,10 +33,13 @@ impl ComposeEngine {
             spec,
             project_name,
             backend,
+            session_containers: Mutex::new(Vec::new()),
+            session_networks: Mutex::new(Vec::new()),
+            session_volumes: Mutex::new(Vec::new()),
         }
     }
 
-    fn register(&self) -> ComposeHandle {
+    fn register(self: Arc<Self>) -> ComposeHandle {
         let stack_id = NEXT_STACK_ID.fetch_add(1, Ordering::SeqCst);
         let services: Vec<String> = self.spec.services.keys().cloned().collect();
         let handle = ComposeHandle {
@@ -42,16 +47,12 @@ impl ComposeEngine {
             project_name: self.project_name.clone(),
             services,
         };
-        COMPOSE_ENGINES.lock().unwrap().insert(stack_id, Arc::new(ComposeEngine::new(
-            self.spec.clone(),
-            self.project_name.clone(),
-            Arc::clone(&self.backend),
-        )));
+        COMPOSE_ENGINES.lock().unwrap().insert(stack_id, self);
         handle
     }
 
     pub async fn up(
-        &self,
+        self: Arc<Self>,
         services: &[String],
         _detach: bool,
         _build: bool,
@@ -66,6 +67,7 @@ impl ComposeEngine {
                     } else {
                         self.backend.create_network(name, &Default::default()).await?;
                     }
+                    self.session_networks.lock().unwrap().push(name.clone());
                 }
             }
         }
@@ -79,6 +81,7 @@ impl ComposeEngine {
                     } else {
                         self.backend.create_volume(name, &Default::default()).await?;
                     }
+                    self.session_volumes.lock().unwrap().push(name.clone());
                 }
             }
         }
@@ -161,25 +164,55 @@ impl ComposeEngine {
                 seccomp: None, // Could be parsed from security_opt
             };
 
-            match self.backend.run_with_security(&container_spec, &profile).await {
-                Ok(_) => {
-                    started.push(container_name);
+            // Idempotency: skip if already running
+            let mut skip = false;
+            if let Ok(info) = self.backend.inspect(&container_name).await {
+                if info.status == "running" {
+                    skip = true;
+                } else {
+                    // Start existing stopped container
+                    self.backend.start(&container_name).await?;
+                    skip = true;
                 }
-                Err(e) => {
-                    // Rollback
-                    for name in started.iter().rev() {
-                        let _ = self.backend.stop(name, Some(10)).await;
-                        let _ = self.backend.remove(name, true).await;
+            }
+
+            if !skip {
+                match self.backend.run_with_security(&container_spec, &profile).await {
+                    Ok(handle) => {
+                        self.session_containers.lock().unwrap().push(handle.id);
+                        started.push(container_name);
                     }
-                    return Err(ComposeError::ServiceStartupFailed {
-                        service: svc_name.clone(),
-                        message: e.to_string(),
-                    });
+                    Err(e) => {
+                        // Rollback
+                        self.rollback().await;
+                        return Err(ComposeError::ServiceStartupFailed {
+                            service: svc_name.clone(),
+                            message: e.to_string(),
+                        });
+                    }
                 }
             }
         }
 
         Ok(self.register())
+    }
+
+    async fn rollback(&self) {
+        let containers = self.session_containers.lock().unwrap().drain(..).collect::<Vec<_>>();
+        for id in containers.into_iter().rev() {
+            let _ = self.backend.stop(&id, Some(5)).await;
+            let _ = self.backend.remove(&id, true).await;
+        }
+
+        let networks = self.session_networks.lock().unwrap().drain(..).collect::<Vec<_>>();
+        for name in networks.into_iter().rev() {
+            let _ = self.backend.remove_network(&name).await;
+        }
+
+        let volumes = self.session_volumes.lock().unwrap().drain(..).collect::<Vec<_>>();
+        for name in volumes.into_iter().rev() {
+            let _ = self.backend.remove_volume(&name).await;
+        }
     }
 
     pub async fn down(
@@ -188,6 +221,10 @@ impl ComposeEngine {
         _remove_orphans: bool,
         remove_volumes: bool,
     ) -> Result<()> {
+        // 1. Clean up session tracked resources
+        self.rollback().await;
+
+        // 2. Clean up requested services (even if not in session)
         let order = resolve_startup_order(&self.spec)?;
         let target: Vec<&String> = if services.is_empty() {
             order.iter().collect()

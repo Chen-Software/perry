@@ -29,7 +29,7 @@ impl ComposeWrapper {
     }
 
     pub async fn up(&self) -> Result<ComposeHandle, ContainerError> {
-        self.engine.up(&[], true, false, false).await
+        self.engine.clone().up(&[], true, false, false).await
     }
 
     pub async fn down(&self, volumes: bool) -> Result<(), ContainerError> {
@@ -64,5 +64,21 @@ impl ComposeWrapper {
         cmd: &[String],
     ) -> Result<ContainerLogs, ContainerError> {
         self.engine.exec(service, cmd, None, None).await
+    }
+
+    pub fn config(&self) -> Result<String, ContainerError> {
+        self.engine.config()
+    }
+
+    pub async fn start(&self, services: &[String]) -> Result<(), ContainerError> {
+        self.engine.start(services).await
+    }
+
+    pub async fn stop(&self, services: &[String]) -> Result<(), ContainerError> {
+        self.engine.stop(services).await
+    }
+
+    pub async fn restart(&self, services: &[String]) -> Result<(), ContainerError> {
+        self.engine.restart(services).await
     }
 }

@@ -10,7 +10,7 @@ pub fn generate_name(input: &str) -> String {
     format!("{}-{:08x}", short_hash, random_suffix)
 }
 
-pub fn service_container_name(service: &crate::types::ComposeService, service_name: &str) -> String {
+pub fn service_container_name(service: &crate::types::ComposeService, _service_name: &str) -> String {
     if let Some(name) = service.container_name.as_ref() {
         return name.clone();
     }
@@ -23,12 +23,7 @@ pub fn service_container_name(service: &crate::types::ComposeService, service_na
 
     let random_suffix: u32 = rand::random();
 
-    let safe_name: String = service_name
-        .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
-        .collect();
-
-    format!("{}-{}-{:08x}", safe_name, short_hash, random_suffix)
+    format!("{}-{:08x}", short_hash, random_suffix)
 }
 
 pub struct ServiceState {
@@ -50,12 +45,11 @@ mod tests {
         };
         let name = service_container_name(&svc, "cache");
 
-        // Format: {service_name}-{image_hash_8}-{random_hex_8}
+        // Format: {md5_8chars}-{random_hex8}
         let parts: Vec<&str> = name.split('-').collect();
-        assert_eq!(parts.len(), 3);
-        assert_eq!(parts[0], "cache");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].len(), 8);
         assert_eq!(parts[1].len(), 8);
-        assert_eq!(parts[2].len(), 8);
     }
 
     #[test]
@@ -71,10 +65,10 @@ mod tests {
         let parts1: Vec<&str> = n1.split('-').collect();
         let parts2: Vec<&str> = n2.split('-').collect();
 
-        // Image hash (part 1) should be stable for the same image
-        assert_eq!(parts1[1], parts2[1]);
-        // Random suffix (part 2) should vary
-        assert_ne!(parts1[2], parts2[2]);
+        // Image hash (part 0) should be stable for the same image
+        assert_eq!(parts1[0], parts2[0]);
+        // Random suffix (part 1) should vary
+        assert_ne!(parts1[1], parts2[1]);
     }
 
     #[test]
