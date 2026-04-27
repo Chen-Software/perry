@@ -1,6 +1,6 @@
 use crate::error::{ComposeError, Result};
 use crate::types::{
-    ComposeNetwork, ComposeVolume, ContainerHandle, ContainerInfo,
+    ComposeNetwork, ComposeServiceBuild, ComposeVolume, ContainerHandle, ContainerInfo,
     ContainerLogs, ContainerSpec, ImageInfo,
 };
 use async_trait::async_trait;
@@ -15,6 +15,12 @@ pub struct BackendProbeResult {
     pub name: String,
     pub available: bool,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SecurityProfile {
+    pub read_only_root: bool,
+    pub seccomp: Option<String>,
 }
 
 #[async_trait]
@@ -43,6 +49,11 @@ pub trait ContainerBackend: Send + Sync {
     async fn remove_network(&self, name: &str) -> Result<()>;
     async fn create_volume(&self, name: &str, config: &ComposeVolume) -> Result<()>;
     async fn remove_volume(&self, name: &str) -> Result<()>;
+    async fn inspect_network(&self, name: &str) -> Result<()>;
+    async fn inspect_volume(&self, name: &str) -> Result<()>;
+    async fn inspect_image(&self, reference: &str) -> Result<ImageInfo>;
+    async fn build(&self, spec: &ComposeServiceBuild, image_name: &str) -> Result<()>;
+    async fn run_with_security(&self, spec: &ContainerSpec, profile: &SecurityProfile) -> Result<ContainerHandle>;
 }
 
 pub trait CliProtocol: Send + Sync {
@@ -64,6 +75,11 @@ pub trait CliProtocol: Send + Sync {
     fn remove_network_args(&self, name: &str) -> Vec<String>;
     fn create_volume_args(&self, name: &str, config: &ComposeVolume) -> Vec<String>;
     fn remove_volume_args(&self, name: &str) -> Vec<String>;
+    fn inspect_network_args(&self, name: &str) -> Vec<String>;
+    fn inspect_volume_args(&self, name: &str) -> Vec<String>;
+    fn inspect_image_args(&self, reference: &str) -> Vec<String>;
+    fn build_args(&self, spec: &ComposeServiceBuild, image_name: &str) -> Vec<String>;
+    fn security_args(&self, profile: &SecurityProfile) -> Vec<String>;
 
     fn parse_list_output(&self, stdout: &str) -> Result<Vec<ContainerInfo>>;
     fn parse_inspect_output(&self, stdout: &str) -> Result<ContainerInfo>;
@@ -83,6 +99,8 @@ struct DockerListEntry {
     status: String,
     #[serde(rename = "Ports", default)]
     ports: Vec<String>,
+    #[serde(rename = "Labels", default)]
+    labels: serde_json::Value,
     #[serde(rename = "Created", alias = "CreatedAt", default)]
     created: String,
 }
@@ -99,18 +117,36 @@ struct DockerInspectOutput {
     state: DockerInspectState,
     #[serde(rename = "Created")]
     created: String,
+    #[serde(rename = "NetworkSettings", default)]
+    network_settings: Option<DockerInspectNetworkSettings>,
 }
 
 #[derive(Debug, Deserialize)]
 struct DockerInspectConfig {
     #[serde(rename = "Image")]
     image: String,
+    #[serde(rename = "Labels", default)]
+    labels: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct DockerInspectState {
     #[serde(rename = "Status")]
     status: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DockerInspectNetworkSettings {
+    #[serde(rename = "IPAddress", default)]
+    ip_address: String,
+    #[serde(rename = "Networks", default)]
+    networks: HashMap<String, DockerInspectNetwork>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DockerInspectNetwork {
+    #[serde(rename = "IPAddress", default)]
+    ip_address: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,6 +172,7 @@ impl CliProtocol for DockerProtocol {
         for port in spec.ports.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["-p".into(), port.clone()]); }
         for vol in spec.volumes.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["-v".into(), vol.clone()]); }
         for (k, v) in spec.env.as_ref().iter().flat_map(|m| m.iter()) { args.extend(["-e".into(), format!("{k}={v}")]); }
+        for (k, v) in spec.labels.as_ref().iter().flat_map(|m| m.iter()) { args.extend(["--label".into(), format!("{k}={v}")]); }
         if let Some(net) = &spec.network { args.extend(["--network".into(), net.clone()]); }
         if spec.rm.unwrap_or(false) { args.push("--rm".into()); }
         if spec.read_only.unwrap_or(false) { args.push("--read-only".into()); }
@@ -154,6 +191,7 @@ impl CliProtocol for DockerProtocol {
         for port in spec.ports.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["-p".into(), port.clone()]); }
         for vol in spec.volumes.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["-v".into(), vol.clone()]); }
         for (k, v) in spec.env.as_ref().iter().flat_map(|m| m.iter()) { args.extend(["-e".into(), format!("{k}={v}")]); }
+        for (k, v) in spec.labels.as_ref().iter().flat_map(|m| m.iter()) { args.extend(["--label".into(), format!("{k}={v}")]); }
         if let Some(net) = &spec.network { args.extend(["--network".into(), net.clone()]); }
         if spec.read_only.unwrap_or(false) { args.push("--read-only".into()); }
         if let Some(ep) = &spec.entrypoint {
@@ -258,30 +296,96 @@ impl CliProtocol for DockerProtocol {
         vec!["volume".into(), "rm".into(), name.into()]
     }
 
+    fn inspect_network_args(&self, name: &str) -> Vec<String> {
+        vec!["network".into(), "inspect".into(), name.into()]
+    }
+
+    fn inspect_volume_args(&self, name: &str) -> Vec<String> {
+        vec!["volume".into(), "inspect".into(), name.into()]
+    }
+
+    fn inspect_image_args(&self, reference: &str) -> Vec<String> {
+        vec!["inspect".into(), "--format".into(), "json".into(), reference.into()]
+    }
+
+    fn build_args(&self, spec: &ComposeServiceBuild, image_name: &str) -> Vec<String> {
+        let mut args = vec!["build".into(), "-t".into(), image_name.to_string()];
+        if let Some(ref f) = spec.containerfile {
+            args.extend(["-f".into(), f.clone()]);
+        }
+        args.push(spec.context.as_deref().unwrap_or(".").to_string());
+        args
+    }
+
+    fn security_args(&self, profile: &SecurityProfile) -> Vec<String> {
+        let mut args = Vec::new();
+        if profile.read_only_root {
+            args.push("--read-only".into());
+        }
+        if let Some(seccomp) = &profile.seccomp {
+            args.extend(["--security-opt".into(), format!("seccomp={}", seccomp)]);
+        }
+        args
+    }
+
     fn parse_list_output(&self, stdout: &str) -> Result<Vec<ContainerInfo>> {
         let entries: Vec<DockerListEntry> = stdout.lines()
             .filter_map(|l| serde_json::from_str(l).ok())
             .collect();
-        Ok(entries.into_iter().map(|e| ContainerInfo {
-            id: e.id,
-            name: e.names.first().cloned().unwrap_or_default(),
-            image: e.image,
-            status: e.status,
-            ports: e.ports,
-            created: e.created,
+        Ok(entries.into_iter().map(|e| {
+            let mut labels = HashMap::new();
+            if let Some(map) = e.labels.as_object() {
+                for (k, v) in map {
+                    labels.insert(k.clone(), v.as_str().unwrap_or("").to_string());
+                }
+            } else if let Some(s) = e.labels.as_str() {
+                // Handle comma-separated labels if necessary
+                for pair in s.split(',') {
+                    let mut parts = pair.splitn(2, '=');
+                    if let (Some(k), Some(v)) = (parts.next(), parts.next()) {
+                        labels.insert(k.to_string(), v.to_string());
+                    }
+                }
+            }
+
+            ContainerInfo {
+                id: e.id,
+                name: e.names.first().cloned().unwrap_or_default(),
+                image: e.image,
+                status: e.status,
+                ports: e.ports,
+                labels,
+                created: e.created,
+                ip_address: String::new(),
+            }
         }).collect())
     }
 
     fn parse_inspect_output(&self, stdout: &str) -> Result<ContainerInfo> {
         let entries: Vec<DockerInspectOutput> = serde_json::from_str(stdout)?;
         let e = entries.into_iter().next().ok_or_else(|| ComposeError::NotFound("Inspect output empty".into()))?;
+
+        let mut ip_address = String::new();
+        if let Some(settings) = &e.network_settings {
+            if !settings.ip_address.is_empty() {
+                ip_address = settings.ip_address.clone();
+            } else {
+                // Try to get from first network
+                if let Some(net) = settings.networks.values().next() {
+                    ip_address = net.ip_address.clone();
+                }
+            }
+        }
+
         Ok(ContainerInfo {
             id: e.id,
             name: e.name,
             image: e.config.image,
             status: e.state.status,
             ports: vec![],
+            labels: e.config.labels,
             created: e.created,
+            ip_address,
         })
     }
 
@@ -335,6 +439,11 @@ impl CliProtocol for AppleContainerProtocol {
     fn remove_network_args(&self, name: &str) -> Vec<String> { DockerProtocol.remove_network_args(name) }
     fn create_volume_args(&self, name: &str, config: &ComposeVolume) -> Vec<String> { DockerProtocol.create_volume_args(name, config) }
     fn remove_volume_args(&self, name: &str) -> Vec<String> { DockerProtocol.remove_volume_args(name) }
+    fn inspect_network_args(&self, name: &str) -> Vec<String> { DockerProtocol.inspect_network_args(name) }
+    fn inspect_volume_args(&self, name: &str) -> Vec<String> { DockerProtocol.inspect_volume_args(name) }
+    fn inspect_image_args(&self, reference: &str) -> Vec<String> { DockerProtocol.inspect_image_args(reference) }
+    fn build_args(&self, spec: &ComposeServiceBuild, image_name: &str) -> Vec<String> { DockerProtocol.build_args(spec, image_name) }
+    fn security_args(&self, profile: &SecurityProfile) -> Vec<String> { DockerProtocol.security_args(profile) }
     fn parse_list_output(&self, stdout: &str) -> Result<Vec<ContainerInfo>> { DockerProtocol.parse_list_output(stdout) }
     fn parse_inspect_output(&self, stdout: &str) -> Result<ContainerInfo> { DockerProtocol.parse_inspect_output(stdout) }
     fn parse_list_images_output(&self, stdout: &str) -> Result<Vec<ImageInfo>> { DockerProtocol.parse_list_images_output(stdout) }
@@ -425,6 +534,31 @@ impl CliProtocol for LimaProtocol {
         let mut args = vec!["shell".into(), self.instance.clone(), "nerdctl".into()];
         args.extend(DockerProtocol.remove_volume_args(name));
         args
+    }
+    fn inspect_network_args(&self, name: &str) -> Vec<String> {
+        let mut args = vec!["shell".into(), self.instance.clone(), "nerdctl".into()];
+        args.extend(DockerProtocol.inspect_network_args(name));
+        args
+    }
+    fn inspect_volume_args(&self, name: &str) -> Vec<String> {
+        let mut args = vec!["shell".into(), self.instance.clone(), "nerdctl".into()];
+        args.extend(DockerProtocol.inspect_volume_args(name));
+        args
+    }
+    fn inspect_image_args(&self, reference: &str) -> Vec<String> {
+        let mut args = vec!["shell".into(), self.instance.clone(), "nerdctl".into()];
+        args.extend(DockerProtocol.inspect_image_args(reference));
+        args
+    }
+    fn build_args(&self, spec: &ComposeServiceBuild, image_name: &str) -> Vec<String> {
+        let mut args = vec!["shell".into(), self.instance.clone(), "nerdctl".into()];
+        args.extend(DockerProtocol.build_args(spec, image_name));
+        args
+    }
+    fn security_args(&self, profile: &SecurityProfile) -> Vec<String> {
+        // Return only the nerdctl flags, the caller (run_with_security) will insert them
+        // into the already prefixed run_args.
+        DockerProtocol.security_args(profile)
     }
     fn parse_list_output(&self, stdout: &str) -> Result<Vec<ContainerInfo>> { DockerProtocol.parse_list_output(stdout) }
     fn parse_inspect_output(&self, stdout: &str) -> Result<ContainerInfo> { DockerProtocol.parse_inspect_output(stdout) }
@@ -565,6 +699,45 @@ impl ContainerBackend for CliBackend {
     async fn remove_volume(&self, name: &str) -> Result<()> {
         let args = self.protocol.remove_volume_args(name);
         self.exec_raw(&args).await.map(|_| ())
+    }
+
+    async fn inspect_network(&self, name: &str) -> Result<()> {
+        let args = self.protocol.inspect_network_args(name);
+        self.exec_raw(&args).await.map(|_| ())
+    }
+
+    async fn inspect_volume(&self, name: &str) -> Result<()> {
+        let args = self.protocol.inspect_volume_args(name);
+        self.exec_raw(&args).await.map(|_| ())
+    }
+
+    async fn inspect_image(&self, reference: &str) -> Result<ImageInfo> {
+        let args = self.protocol.inspect_image_args(reference);
+        let (stdout, _) = self.exec_raw(&args).await?;
+        let images = self.protocol.parse_list_images_output(&stdout)?;
+        images.into_iter().next().ok_or_else(|| ComposeError::NotFound(reference.to_string()))
+    }
+
+    async fn build(&self, spec: &ComposeServiceBuild, image_name: &str) -> Result<()> {
+        let args = self.protocol.build_args(spec, image_name);
+        self.exec_raw(&args).await.map(|_| ())
+    }
+
+    async fn run_with_security(&self, spec: &ContainerSpec, profile: &SecurityProfile) -> Result<ContainerHandle> {
+        let mut args = self.protocol.run_args(spec);
+        // Find the image name to insert security args before it
+        if let Some(pos) = args.iter().position(|a| a == &spec.image) {
+            let sec_args = self.protocol.security_args(profile);
+            // If it's lima, we need to be careful with where we insert.
+            // But let's assume we can just insert before the image.
+            for (i, arg) in sec_args.into_iter().enumerate() {
+                args.insert(pos + i, arg);
+            }
+        }
+
+        let (stdout, _) = self.exec_raw(&args).await?;
+        let id = self.protocol.parse_container_id(&stdout)?;
+        Ok(ContainerHandle { id, name: spec.name.clone() })
     }
 }
 

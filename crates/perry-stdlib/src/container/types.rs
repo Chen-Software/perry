@@ -11,16 +11,73 @@ use perry_container_compose::ComposeEngine;
 
 // ============ Handle Registry ============
 
-pub struct ContainerHandle {
-    pub id: String,
-    pub name: Option<String>,
-}
-
 pub static CONTAINER_HANDLES: OnceLock<DashMap<u64, ContainerHandle>> = OnceLock::new();
 pub static COMPOSE_HANDLES: OnceLock<DashMap<u64, ArcComposeEngine>> = OnceLock::new();
+pub static WORKLOAD_HANDLES: OnceLock<
+    DashMap<u64, std::sync::Arc<perry_container_compose::WorkloadGraphEngine>>,
+> = OnceLock::new();
+
+pub static CONTAINER_INFO_LIST_REGISTRY: OnceLock<DashMap<u64, Vec<ContainerInfo>>> = OnceLock::new();
+pub static CONTAINER_INFO_REGISTRY: OnceLock<DashMap<u64, ContainerInfo>> = OnceLock::new();
+pub static CONTAINER_LOGS_REGISTRY: OnceLock<DashMap<u64, ContainerLogs>> = OnceLock::new();
+pub static IMAGE_INFO_LIST_REGISTRY: OnceLock<DashMap<u64, Vec<ImageInfo>>> = OnceLock::new();
+
 pub static NEXT_HANDLE_ID: AtomicU64 = AtomicU64::new(1);
 
 pub struct ArcComposeEngine(pub std::sync::Arc<ComposeEngine>);
+
+pub type ContainerError = perry_container_compose::error::ComposeError;
+pub use perry_container_compose::types::{ComposeSpec, ListOrDict};
+
+pub unsafe fn parse_container_spec(ptr: *const perry_runtime::StringHeader) -> Result<ContainerSpec, String> {
+    let json = string_from_header(ptr).ok_or("Invalid JSON")?;
+    serde_json::from_str(&json).map_err(|e| e.to_string())
+}
+
+pub unsafe fn parse_compose_spec(ptr: *const perry_runtime::StringHeader) -> Result<perry_container_compose::types::ComposeSpec, String> {
+    let json = string_from_header(ptr).ok_or("Invalid JSON")?;
+    serde_json::from_str(&json).map_err(|e| e.to_string())
+}
+
+pub fn take_compose_handle(id: u64) -> Option<std::sync::Arc<ComposeEngine>> {
+    COMPOSE_HANDLES.get()?.remove(&id).map(|(_, arc)| arc.0)
+}
+
+pub fn get_compose_handle(id: u64) -> Option<std::sync::Arc<ComposeEngine>> {
+    COMPOSE_HANDLES.get()?.get(&id).map(|arc| arc.0.clone())
+}
+
+pub fn register_container_info_list(list: Vec<ContainerInfo>) -> u64 {
+    let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
+    CONTAINER_INFO_LIST_REGISTRY
+        .get_or_init(DashMap::new)
+        .insert(id, list);
+    id
+}
+
+pub fn register_container_info(info: ContainerInfo) -> u64 {
+    let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
+    CONTAINER_INFO_REGISTRY
+        .get_or_init(DashMap::new)
+        .insert(id, info);
+    id
+}
+
+pub fn register_container_logs(logs: ContainerLogs) -> u64 {
+    let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
+    CONTAINER_LOGS_REGISTRY
+        .get_or_init(DashMap::new)
+        .insert(id, logs);
+    id
+}
+
+pub fn register_image_info_list(list: Vec<ImageInfo>) -> u64 {
+    let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
+    IMAGE_INFO_LIST_REGISTRY
+        .get_or_init(DashMap::new)
+        .insert(id, list);
+    id
+}
 
 pub fn register_container_handle(handle: ContainerHandle) -> u64 {
     let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
@@ -28,61 +85,27 @@ pub fn register_container_handle(handle: ContainerHandle) -> u64 {
     id
 }
 
-pub fn register_compose_handle(engine: ComposeEngine) -> u64 {
+pub fn register_compose_handle(engine: std::sync::Arc<ComposeEngine>) -> u64 {
     let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
-    COMPOSE_HANDLES.get_or_init(DashMap::new).insert(id, ArcComposeEngine(std::sync::Arc::new(engine)));
+    COMPOSE_HANDLES
+        .get_or_init(DashMap::new)
+        .insert(id, ArcComposeEngine(engine));
+    id
+}
+
+pub fn register_workload_handle(
+    engine: std::sync::Arc<perry_container_compose::WorkloadGraphEngine>,
+) -> u64 {
+    let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
+    WORKLOAD_HANDLES.get_or_init(DashMap::new).insert(id, engine);
     id
 }
 
 // ============ Core Container Types ============
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ContainerSpec {
-    pub image: String,
-    pub name: Option<String>,
-    pub ports: Option<Vec<String>>,
-    pub volumes: Option<Vec<String>>,
-    pub env: Option<HashMap<String, String>>,
-    pub cmd: Option<Vec<String>>,
-    pub entrypoint: Option<Vec<String>>,
-    pub network: Option<String>,
-    pub rm: Option<bool>,
-    pub read_only: Option<bool>,
-    pub seccomp: Option<String>,
-    pub labels: Option<HashMap<String, String>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContainerInfo {
-    pub id: String,
-    pub name: String,
-    pub image: String,
-    pub status: String,
-    pub ports: Vec<String>,
-    pub created: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ContainerLogs {
-    pub stdout: String,
-    pub stderr: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ImageInfo {
-    pub id: String,
-    pub repository: String,
-    pub tag: String,
-    pub size: u64,
-    pub created: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComposeHandle {
-    pub stack_id: u64,
-    pub project_name: String,
-    pub services: Vec<String>,
-}
+pub use perry_container_compose::types::{
+    ComposeHandle, ContainerHandle, ContainerInfo, ContainerLogs, ContainerSpec, ImageInfo,
+};
 
 // ============ Helper for StringHeader ============
 

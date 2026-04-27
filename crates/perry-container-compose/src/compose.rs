@@ -14,6 +14,7 @@ static COMPOSE_ENGINES: once_cell::sync::Lazy<std::sync::Mutex<IndexMap<u64, Arc
 
 static NEXT_STACK_ID: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Clone)]
 pub struct ComposeEngine {
     pub spec: ComposeSpec,
     pub project_name: String,
@@ -59,10 +60,12 @@ impl ComposeEngine {
         // 1. Create networks
         if let Some(networks) = &self.spec.networks {
             for (name, config) in networks {
-                if let Some(cfg) = config {
-                    self.backend.create_network(name, cfg).await?;
-                } else {
-                    self.backend.create_network(name, &Default::default()).await?;
+                if self.backend.inspect_network(name).await.is_err() {
+                    if let Some(cfg) = config {
+                        self.backend.create_network(name, cfg).await?;
+                    } else {
+                        self.backend.create_network(name, &Default::default()).await?;
+                    }
                 }
             }
         }
@@ -70,10 +73,12 @@ impl ComposeEngine {
         // 2. Create volumes
         if let Some(volumes) = &self.spec.volumes {
             for (name, config) in volumes {
-                if let Some(cfg) = config {
-                    self.backend.create_volume(name, cfg).await?;
-                } else {
-                    self.backend.create_volume(name, &Default::default()).await?;
+                if self.backend.inspect_volume(name).await.is_err() {
+                    if let Some(cfg) = config {
+                        self.backend.create_volume(name, cfg).await?;
+                    } else {
+                        self.backend.create_volume(name, &Default::default()).await?;
+                    }
                 }
             }
         }
@@ -97,6 +102,10 @@ impl ComposeEngine {
                 Some(crate::types::ServiceNetworks::Map(m)) => m.keys().next().cloned(),
                 None => None,
             };
+
+            let mut labels = svc.labels.as_ref().map(|l| l.to_map()).unwrap_or_default();
+            labels.insert("perry.compose.project".to_string(), self.project_name.clone());
+            labels.insert("perry.compose.service".to_string(), svc_name.clone());
 
             let container_spec = ContainerSpec {
                 image: svc.image.clone().unwrap_or_default(),
@@ -144,9 +153,15 @@ impl ComposeEngine {
                 network,
                 rm: None,
                 read_only: svc.read_only,
+                labels: Some(labels),
             };
 
-            match self.backend.run(&container_spec).await {
+            let profile = crate::backend::SecurityProfile {
+                read_only_root: svc.read_only.unwrap_or(false),
+                seccomp: None, // Could be parsed from security_opt
+            };
+
+            match self.backend.run_with_security(&container_spec, &profile).await {
                 Ok(_) => {
                     started.push(container_name);
                 }
@@ -180,8 +195,26 @@ impl ComposeEngine {
             order.iter().filter(|s| services.contains(s)).collect()
         };
 
-        for svc_name in target.iter().rev() {
-            let svc = self.spec.services.get(*svc_name).unwrap();
+        let mut final_order = target;
+        final_order.reverse();
+
+        for svc_name in final_order {
+            let container_info = self.backend.list(true).await?;
+            let containers_to_remove: Vec<String> = container_info
+                .into_iter()
+                .filter(|c| {
+                    c.labels.get("perry.compose.project").map(|v| v == &self.project_name).unwrap_or(false) &&
+                    c.labels.get("perry.compose.service").map(|v| v == svc_name).unwrap_or(false)
+                })
+                .map(|c| c.id)
+                .collect();
+
+            for cid in containers_to_remove {
+                let _ = self.backend.stop(&cid, Some(10)).await;
+                let _ = self.backend.remove(&cid, true).await;
+            }
+
+            let svc = self.spec.services.get(svc_name).unwrap();
             let container_name = service::service_container_name(svc, svc_name);
             let _ = self.backend.stop(&container_name, Some(10)).await;
             let _ = self.backend.remove(&container_name, true).await;

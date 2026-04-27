@@ -2436,7 +2436,11 @@ fn lower_module_decl(
             // Get the source module path
             let raw_source = import_decl.src.value.as_str().unwrap_or("").to_string();
             // Normalize "node:" prefix (e.g., "node:async_hooks" -> "async_hooks")
-            let source = raw_source.strip_prefix("node:").unwrap_or(&raw_source).to_string();
+            // and handle perry/compose alias.
+            let source = match raw_source.as_str() {
+                "perry/compose" => "perry/container-compose".to_string(),
+                s => s.strip_prefix("node:").unwrap_or(s).to_string(),
+            };
 
             // Check if this is a native module import
             let is_native = is_native_module(&source);
@@ -2457,47 +2461,9 @@ fn lower_module_decl(
                             })
                             .unwrap_or_else(|| local.clone());
                         if is_native {
-                            // Map perry/container and perry/compose imports to their FFI symbols
-                            let ffi_name = match source.as_str() {
-                                "perry/container" => match imported.as_str() {
-                                    "run" => Some("js_container_run"),
-                                    "create" => Some("js_container_create"),
-                                    "start" => Some("js_container_start"),
-                                    "stop" => Some("js_container_stop"),
-                                    "remove" => Some("js_container_remove"),
-                                    "list" => Some("js_container_list"),
-                                    "inspect" => Some("js_container_inspect"),
-                                    "logs" => Some("js_container_logs"),
-                                    "exec" => Some("js_container_exec"),
-                                    "pullImage" => Some("js_container_pullImage"),
-                                    "listImages" => Some("js_container_listImages"),
-                                    "removeImage" => Some("js_container_removeImage"),
-                                    "getBackend" => Some("js_container_getBackend"),
-                                    "composeUp" => Some("js_container_composeUp"),
-                                    _ => None,
-                                },
-                                "perry/compose" => match imported.as_str() {
-                                    "up" => Some("js_compose_up"),
-                                    "down" => Some("js_compose_down"),
-                                    "ps" => Some("js_compose_ps"),
-                                    "logs" => Some("js_compose_logs"),
-                                    "exec" => Some("js_compose_exec"),
-                                    "config" => Some("js_compose_config"),
-                                    "start" => Some("js_compose_start"),
-                                    "stop" => Some("js_compose_stop"),
-                                    "restart" => Some("js_compose_restart"),
-                                    _ => None,
-                                },
-                                _ => None,
-                            };
-
-                            if let Some(ffi) = ffi_name {
-                                ctx.register_imported_func(local.clone(), ffi.to_string());
-                            } else {
-                                // Register as native module function with the original method name
-                                // e.g., import { v4 as uuid } from 'uuid' -> uuid maps to uuid.v4
-                                ctx.register_native_module(local.clone(), source.clone(), Some(imported.clone()));
-                            }
+                            // Register as native module function with the original method name
+                            // e.g., import { v4 as uuid } from 'uuid' -> uuid maps to uuid.v4
+                            ctx.register_native_module(local.clone(), source.clone(), Some(imported.clone()));
 
                             // Auto-register parentPort from worker_threads as a native instance
                             // (it's a singleton, not created via `new`)
@@ -2691,7 +2657,8 @@ fn lower_module_decl(
                                                         // `job.stop()` falls through to dynamic dispatch and the
                                                         // stop never reaches js_cron_job_stop.
                                                         ("node-cron", "schedule") => Some("CronJob"),
-                                                        ("perry/container" | "perry/container-compose", "composeUp") => Some("ComposeHandle"),
+                                                        ("perry/container" | "perry/compose" | "perry/container-compose", "composeUp") => Some("ComposeHandle"),
+                                                        ("perry/workloads", "runGraph") => Some("WorkloadHandle"),
                                                         _ => None,
                                                     };
                                                     if let Some(class_name) = class_name {
@@ -2748,7 +2715,8 @@ fn lower_module_decl(
                                                             ("pg", "connect") => Some("Client"),
                                                             ("http" | "https", "request" | "get") => Some("ClientRequest"),
                                                             ("axios", "get" | "post" | "put" | "delete" | "patch" | "request") => Some("Response"),
-                                                            ("perry/container" | "perry/container-compose", "composeUp") => Some("ComposeHandle"),
+                                                            ("perry/container" | "perry/compose" | "perry/container-compose", "composeUp") => Some("ComposeHandle"),
+                                                            ("perry/workloads", "runGraph") => Some("WorkloadHandle"),
                                                             _ => None,
                                                         };
                                                         if let Some(class_name) = class_name {
@@ -4650,7 +4618,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
             } else if let Some((module_name, method_name)) = ctx.lookup_native_module(&name) {
                 // Feature: perry-container | Layer: HIR | Req: 1.1, 11.2
                 // Special handling for container and compose named imports
-                if module_name == "perry/container" || module_name == "perry/compose" || module_name == "perry/container-compose" {
+                if module_name == "perry/container" || module_name == "perry/compose" || module_name == "perry/container-compose" || module_name == "perry/workloads" {
                     if let Some(method) = method_name {
                         return Ok(Expr::ExternFuncRef {
                             name: method.to_string(),

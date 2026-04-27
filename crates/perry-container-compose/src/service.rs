@@ -1,6 +1,15 @@
 use crate::error::Result;
 use md5::{Digest, Md5};
 
+pub fn generate_name(input: &str) -> String {
+    let mut hasher = Md5::new();
+    hasher.update(input.as_bytes());
+    let hash = hex::encode(hasher.finalize());
+    let short_hash = &hash[..8];
+    let random_suffix: u32 = rand::random();
+    format!("{}-{:08x}", short_hash, random_suffix)
+}
+
 pub fn service_container_name(service: &crate::types::ComposeService, service_name: &str) -> String {
     if let Some(name) = service.container_name.as_ref() {
         return name.clone();

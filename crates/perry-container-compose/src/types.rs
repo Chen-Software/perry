@@ -705,6 +705,7 @@ pub struct ContainerSpec {
     pub network: Option<String>,
     pub rm: Option<bool>,
     pub read_only: Option<bool>,
+    pub labels: Option<std::collections::HashMap<String, String>>,
 }
 
 /// Handle returned after creating/running a container.
@@ -722,7 +723,10 @@ pub struct ContainerInfo {
     pub image: String,
     pub status: String,
     pub ports: Vec<String>,
+    pub labels: std::collections::HashMap<String, String>,
     pub created: String,
+    #[serde(default)]
+    pub ip_address: String,
 }
 
 /// Logs from a container.

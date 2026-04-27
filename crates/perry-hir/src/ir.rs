@@ -1032,6 +1032,10 @@ pub enum Expr {
     ProcessChdir(Box<Expr>),
     // process.kill(pid, signal?) -> void
     ProcessKill { pid: Box<Expr>, signal: Option<Box<Expr>> },
+    // process.exit(code?) -> void
+    ProcessExit(Option<Box<Expr>>),
+    // process.env -> object
+    ProcessEnv,
     // process.stdin -> stub object { write: fn }
     ProcessStdin,
     // process.stdout -> stub object { write: fn }
@@ -1143,6 +1147,7 @@ pub enum Expr {
     MathAtan2(Box<Expr>, Box<Expr>),     // Math.atan2(y, x) -> number
     MathCbrt(Box<Expr>),                 // Math.cbrt(x) -> number
     MathHypot(Vec<Expr>),                // Math.hypot(...values) -> number
+    MathExp(Box<Expr>),                  // Math.exp(x) -> number
     MathFround(Box<Expr>),               // Math.fround(x) -> number
     MathClz32(Box<Expr>),                // Math.clz32(x) -> number
     MathExpm1(Box<Expr>),                // Math.expm1(x) -> number

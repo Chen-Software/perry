@@ -2553,11 +2553,18 @@ pub(crate) fn lower_native_method_call(
     // perry/ui instance method calls: `windowHandle.show()`, `windowHandle.setBody(w)`, etc.
     // The HIR produces these with `object: Some(handle)` and `module: "perry/ui"`.
     // Lower the receiver to get the widget/window handle, then dispatch.
-    if module == "perry/ui" {
+    if module == "perry/ui" || module == "perry/workloads" {
         let recv_val = lower_expr(ctx, recv)?;
         let blk = ctx.block();
         let handle = unbox_to_i64(blk, &recv_val);
-        if let Some(sig) = perry_ui_instance_method_lookup(method) {
+
+        let sig_opt = if module == "perry/ui" {
+            perry_ui_instance_method_lookup(method)
+        } else {
+            perry_workloads_table_lookup(method)
+        };
+
+        if let Some(sig) = sig_opt {
             // Build args: handle is the first arg, then the call args.
             let mut llvm_args: Vec<(crate::types::LlvmType, String)> = Vec::with_capacity(1 + args.len());
             let mut runtime_param_types: Vec<crate::types::LlvmType> = Vec::with_capacity(1 + args.len());
@@ -3914,6 +3921,18 @@ static PERRY_WORKLOADS_TABLE: &[UiSig] = &[
     UiSig { method: "node", runtime: "js_workload_node", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Str },
     UiSig { method: "runGraph", runtime: "js_workload_runGraph", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Widget },
     UiSig { method: "inspectGraph", runtime: "js_workload_inspectGraph", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
+
+    // ---- WorkloadHandle instance methods ----
+    UiSig { method: "handleDown", runtime: "js_workload_handle_down",
+            args: &[UiArgKind::I64Raw], ret: UiReturnKind::Widget },
+    UiSig { method: "handleStatus", runtime: "js_workload_handle_status",
+            args: &[], ret: UiReturnKind::Widget },
+    UiSig { method: "handleLogs", runtime: "js_workload_handle_logs",
+            args: &[UiArgKind::Str, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
+    UiSig { method: "handleExec", runtime: "js_workload_handle_exec",
+            args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "handlePs", runtime: "js_workload_handle_ps",
+            args: &[], ret: UiReturnKind::Widget },
 ];
 
 fn perry_container_table_lookup(method: &str) -> Option<&'static UiSig> {
@@ -4111,6 +4130,8 @@ enum NativeArgKind {
     /// similar — the callee expects the full NaN-boxed value, not an
     /// unboxed raw pointer. Common pattern in fastify context methods.
     JsvalI64,
+    /// Boolean: convert f64 bits to i32 (0 or 1).
+    Bool,
 }
 
 /// What the runtime function returns.
@@ -4151,6 +4172,7 @@ const NA_F64: NativeArgKind = NativeArgKind::F64;
 const NA_STR: NativeArgKind = NativeArgKind::StrPtr;
 const NA_PTR: NativeArgKind = NativeArgKind::PtrI64;
 const NA_JSV: NativeArgKind = NativeArgKind::JsvalI64;
+const NA_BOOL: NativeArgKind = NativeArgKind::Bool;
 const NR_PTR: NativeRetKind = NativeRetKind::Ptr;
 const NR_STR: NativeRetKind = NativeRetKind::Str;
 const NR_F64: NativeRetKind = NativeRetKind::F64;
@@ -4703,16 +4725,16 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
         runtime: "js_container_composeUp", args: &[NA_STR], ret: NR_PTR },
     NativeModSig { module: "perry/container-compose", has_receiver: false, method: "composeDown",
         class_filter: None,
-        runtime: "js_container_compose_down", args: &[NA_JSV, NA_F64], ret: NR_PTR },
+        runtime: "js_container_compose_down", args: &[NA_PTR, NA_BOOL], ret: NR_PTR },
     NativeModSig { module: "perry/container-compose", has_receiver: false, method: "composePs",
         class_filter: None,
-        runtime: "js_container_compose_ps", args: &[NA_JSV], ret: NR_PTR },
+        runtime: "js_container_compose_ps", args: &[NA_PTR], ret: NR_PTR },
     NativeModSig { module: "perry/container-compose", has_receiver: false, method: "composeLogs",
         class_filter: None,
-        runtime: "js_container_compose_logs", args: &[NA_JSV, NA_STR, NA_F64], ret: NR_PTR },
+        runtime: "js_container_compose_logs", args: &[NA_PTR, NA_STR, NA_F64], ret: NR_PTR },
     NativeModSig { module: "perry/container-compose", has_receiver: false, method: "composeExec",
         class_filter: None,
-        runtime: "js_container_compose_exec", args: &[NA_JSV, NA_STR, NA_STR], ret: NR_PTR },
+        runtime: "js_container_compose_exec", args: &[NA_PTR, NA_STR, NA_STR], ret: NR_PTR },
     // ComposeHandle instance methods
     NativeModSig { module: "perry/container-compose", has_receiver: true, method: "down",
         class_filter: Some("ComposeHandle"),
@@ -4726,6 +4748,36 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
     NativeModSig { module: "perry/container-compose", has_receiver: true, method: "exec",
         class_filter: Some("ComposeHandle"),
         runtime: "js_container_compose_exec", args: &[NA_STR, NA_STR], ret: NR_PTR },
+
+    // ========== perry/workloads ==========
+    NativeModSig { module: "perry/workloads", has_receiver: false, method: "graph",
+        class_filter: None,
+        runtime: "js_workload_graph", args: &[NA_STR, NA_STR], ret: NR_STR },
+    NativeModSig { module: "perry/workloads", has_receiver: false, method: "node",
+        class_filter: None,
+        runtime: "js_workload_node", args: &[NA_STR, NA_STR], ret: NR_STR },
+    NativeModSig { module: "perry/workloads", has_receiver: false, method: "runGraph",
+        class_filter: None,
+        runtime: "js_workload_runGraph", args: &[NA_STR, NA_STR], ret: NR_PTR },
+    NativeModSig { module: "perry/workloads", has_receiver: false, method: "inspectGraph",
+        class_filter: None,
+        runtime: "js_workload_inspectGraph", args: &[NA_PTR], ret: NR_PTR },
+    // WorkloadHandle instance methods
+    NativeModSig { module: "perry/workloads", has_receiver: true, method: "handleDown",
+        class_filter: Some("WorkloadHandle"),
+        runtime: "js_workload_handle_down", args: &[NA_F64], ret: NR_PTR },
+    NativeModSig { module: "perry/workloads", has_receiver: true, method: "handleStatus",
+        class_filter: Some("WorkloadHandle"),
+        runtime: "js_workload_handle_status", args: &[], ret: NR_PTR },
+    NativeModSig { module: "perry/workloads", has_receiver: true, method: "handleLogs",
+        class_filter: Some("WorkloadHandle"),
+        runtime: "js_workload_handle_logs", args: &[NA_STR, NA_F64], ret: NR_PTR },
+    NativeModSig { module: "perry/workloads", has_receiver: true, method: "handleExec",
+        class_filter: Some("WorkloadHandle"),
+        runtime: "js_workload_handle_exec", args: &[NA_STR, NA_STR], ret: NR_PTR },
+    NativeModSig { module: "perry/workloads", has_receiver: true, method: "handlePs",
+        class_filter: Some("WorkloadHandle"),
+        runtime: "js_workload_handle_ps", args: &[], ret: NR_PTR },
 ];
 
 /// Look up a native module method in the static dispatch table.
@@ -4798,6 +4850,12 @@ fn lower_native_module_dispatch(
                 llvm_args.push((I64, bits));
                 arg_types.push(I64);
             }
+            NativeArgKind::Bool => {
+                let blk = ctx.block();
+                let i32_v = blk.call(I32, "js_stdlib_to_bool", &[(DOUBLE, &lowered)]);
+                llvm_args.push((I32, i32_v));
+                arg_types.push(I32);
+            }
         }
     }
     // If fewer args than sig expects, pad with undefined / 0.
@@ -4810,6 +4868,10 @@ fn lower_native_module_dispatch(
             NativeArgKind::StrPtr | NativeArgKind::PtrI64 | NativeArgKind::JsvalI64 => {
                 llvm_args.push((I64, "0".to_string()));
                 arg_types.push(I64);
+            }
+            NativeArgKind::Bool => {
+                llvm_args.push((I32, "0".to_string()));
+                arg_types.push(I32);
             }
         }
     }

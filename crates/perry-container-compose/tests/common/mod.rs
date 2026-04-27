@@ -1,8 +1,8 @@
 use async_trait::async_trait;
-use perry_container_compose::backend::{ContainerBackend, NetworkConfig, VolumeConfig};
+use perry_container_compose::backend::{ContainerBackend, SecurityProfile};
 use perry_container_compose::types::{
-    ContainerHandle, ContainerInfo, ContainerLogs, ImageInfo,
-    ContainerSpec
+    ComposeNetwork, ComposeServiceBuild, ComposeVolume, ContainerHandle, ContainerInfo,
+    ContainerLogs, ContainerSpec, ImageInfo,
 };
 use perry_container_compose::error::{ComposeError, Result};
 use std::collections::HashMap;
@@ -50,6 +50,7 @@ impl ContainerBackend for MockBackend {
             ports: spec.ports.clone().unwrap_or_default(),
             labels: spec.labels.clone().unwrap_or_default(),
             created: "2025-01-01T00:00:00Z".to_string(),
+            ip_address: "127.0.0.1".to_string(),
         };
         state.containers.insert(name.clone(), info);
         Ok(ContainerHandle { id: name.clone(), name: Some(name) })
@@ -66,6 +67,7 @@ impl ContainerBackend for MockBackend {
             ports: spec.ports.clone().unwrap_or_default(),
             labels: spec.labels.clone().unwrap_or_default(),
             created: "2025-01-01T00:00:00Z".to_string(),
+            ip_address: "".to_string(),
         };
         state.containers.insert(name.clone(), info);
         Ok(ContainerHandle { id: name.clone(), name: Some(name) })
@@ -113,16 +115,33 @@ impl ContainerBackend for MockBackend {
         Ok(ContainerLogs { stdout: "logs".into(), stderr: "".into() })
     }
 
-    async fn exec(&self, _id: &str, _cmd: &[String], _env: Option<&HashMap<String, String>>, _workdir: Option<&str>) -> Result<ContainerLogs> {
-        Ok(ContainerLogs { stdout: "exec".into(), stderr: "".into() })
+    async fn exec(
+        &self,
+        _id: &str,
+        _cmd: &[String],
+        _env: Option<&HashMap<String, String>>,
+        _workdir: Option<&str>,
+    ) -> Result<ContainerLogs> {
+        Ok(ContainerLogs {
+            stdout: "exec".into(),
+            stderr: "".into(),
+        })
     }
 
-    async fn build(&self, _spec: &perry_container_compose::types::ComposeServiceBuild, _image_name: &str) -> Result<()> { Ok(()) }
-    async fn pull_image(&self, _reference: &str) -> Result<()> { Ok(()) }
-    async fn list_images(&self) -> Result<Vec<ImageInfo>> { Ok(vec![]) }
-    async fn remove_image(&self, _reference: &str, _force: bool) -> Result<()> { Ok(()) }
+    async fn build(&self, _spec: &ComposeServiceBuild, _image_name: &str) -> Result<()> {
+        Ok(())
+    }
+    async fn pull_image(&self, _reference: &str) -> Result<()> {
+        Ok(())
+    }
+    async fn list_images(&self) -> Result<Vec<ImageInfo>> {
+        Ok(vec![])
+    }
+    async fn remove_image(&self, _reference: &str, _force: bool) -> Result<()> {
+        Ok(())
+    }
 
-    async fn create_network(&self, name: &str, _config: &NetworkConfig) -> Result<()> {
+    async fn create_network(&self, name: &str, _config: &ComposeNetwork) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         state.actions.push(format!("create_network:{}", name));
         state.networks.push(name.to_string());
@@ -136,7 +155,7 @@ impl ContainerBackend for MockBackend {
         Ok(())
     }
 
-    async fn create_volume(&self, name: &str, _config: &VolumeConfig) -> Result<()> {
+    async fn create_volume(&self, name: &str, _config: &ComposeVolume) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         state.actions.push(format!("create_volume:{}", name));
         state.volumes.push(name.to_string());
@@ -150,20 +169,36 @@ impl ContainerBackend for MockBackend {
         Ok(())
     }
 
-    async fn wait(&self, _id: &str) -> Result<i32> { Ok(0) }
     async fn inspect_image(&self, _reference: &str) -> Result<ImageInfo> {
         Ok(ImageInfo {
-            id: "id".into(),
-            repository: "repo".into(),
-            tag: "tag".into(),
+            id: "sha256:mock".into(),
+            repository: "mock".into(),
+            tag: "latest".into(),
             size: 0,
             created: "".into(),
         })
     }
 
+    async fn run_with_security(
+        &self,
+        spec: &ContainerSpec,
+        _profile: &SecurityProfile,
+    ) -> Result<ContainerHandle> {
+        self.run(spec).await
+    }
+
     async fn inspect_network(&self, _name: &str) -> Result<()> {
         let state = self.state.lock().unwrap();
         if state.networks.contains(&_name.to_string()) {
+            Ok(())
+        } else {
+            Err(ComposeError::NotFound(_name.to_string()))
+        }
+    }
+
+    async fn inspect_volume(&self, _name: &str) -> Result<()> {
+        let state = self.state.lock().unwrap();
+        if state.volumes.contains(&_name.to_string()) {
             Ok(())
         } else {
             Err(ComposeError::NotFound(_name.to_string()))

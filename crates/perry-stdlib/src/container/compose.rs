@@ -20,21 +20,33 @@ impl ComposeWrapper {
         }
     }
 
+    pub fn new_from_engine(engine: Arc<ComposeEngine>) -> Self {
+        Self { engine }
+    }
+
+    pub fn engine(&self) -> &Arc<ComposeEngine> {
+        &self.engine
+    }
+
     pub async fn up(&self) -> Result<ComposeHandle, ContainerError> {
-        self.engine.up(&[], true, false, false).await.map_err(Into::into)
+        self.engine.up(&[], true, false, false).await
     }
 
-    pub async fn down(&self, _handle: &ComposeHandle, volumes: bool) -> Result<(), ContainerError> {
-        self.engine.down(&[], false, volumes).await.map_err(Into::into)
+    pub async fn down(&self, volumes: bool) -> Result<(), ContainerError> {
+        self.engine.down(&[], false, volumes).await
     }
 
-    pub async fn ps(&self, _handle: &ComposeHandle) -> Result<Vec<ContainerInfo>, ContainerError> {
-        self.engine.ps().await.map_err(Into::into)
+    pub async fn ps(&self) -> Result<Vec<ContainerInfo>, ContainerError> {
+        self.engine.ps().await
     }
 
-    pub async fn logs(&self, _handle: &ComposeHandle, service: Option<&str>, tail: Option<u32>) -> Result<ContainerLogs, ContainerError> {
+    pub async fn logs(
+        &self,
+        service: Option<&str>,
+        tail: Option<u32>,
+    ) -> Result<ContainerLogs, ContainerError> {
         let services = service.map(|s| vec![s.to_string()]).unwrap_or_default();
-        let logs_map = self.engine.logs(&services, tail).await.map_err(ContainerError::from)?;
+        let logs_map = self.engine.logs(&services, tail).await?;
 
         let mut stdout = String::new();
         let mut stderr = String::new();
@@ -46,7 +58,11 @@ impl ComposeWrapper {
         Ok(ContainerLogs { stdout, stderr })
     }
 
-    pub async fn exec(&self, _handle: &ComposeHandle, service: &str, cmd: &[String]) -> Result<ContainerLogs, ContainerError> {
-        self.engine.exec(service, cmd, None, None).await.map_err(Into::into)
+    pub async fn exec(
+        &self,
+        service: &str,
+        cmd: &[String],
+    ) -> Result<ContainerLogs, ContainerError> {
+        self.engine.exec(service, cmd, None, None).await
     }
 }
