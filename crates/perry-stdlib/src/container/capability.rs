@@ -32,6 +32,7 @@ pub async fn alloy_container_run_capability(
         // Read-only root filesystem
         rm: Some(true),  // Always remove on exit
         read_only: Some(true),
+        seccomp: Some("default".to_string()),
         env: grants.env.clone(),
         cmd: Some(cmd.iter().map(|s| s.to_string()).collect()),
         ..Default::default()

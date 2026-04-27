@@ -4049,6 +4049,7 @@ static PERRY_CONTAINER_TABLE: &[UiSig] = &[
     UiSig { method: "removeImage", runtime: "js_container_removeImage", args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
     UiSig { method: "getBackend", runtime: "js_container_getBackend", args: &[], ret: UiReturnKind::Str },
     UiSig { method: "detectBackend", runtime: "js_container_detectBackend", args: &[], ret: UiReturnKind::Promise },
+    UiSig { method: "inspectImage", runtime: "js_container_inspectImage", args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
     UiSig { method: "build", runtime: "js_container_build", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Promise },
 ];
 

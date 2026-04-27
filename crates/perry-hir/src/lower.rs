@@ -2473,7 +2473,8 @@ fn lower_module_decl(
                                     "listImages" => Some("js_container_listImages"),
                                     "removeImage" => Some("js_container_removeImage"),
                                     "getBackend" => Some("js_container_getBackend"),
-                                    "composeUp" => Some("js_container_composeUp"),
+                                    "inspectImage" => Some("js_container_inspectImage"),
+                                    "composeUp" => Some("js_compose_up"),
                                     _ => None,
                                 },
                                 "perry/compose" => match imported.as_str() {
@@ -7956,7 +7957,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             Expr::ArrayMap { .. } | Expr::ArrayFilter { .. } | Expr::ArraySort { .. } |
                                             Expr::ArraySlice { .. } | Expr::Array(_) | Expr::ArraySpread(_) |
                                             Expr::ArrayFrom(_) | Expr::ArrayFromMapped { .. } |
-                                            Expr::ArrayFlat { .. } | Expr::StringSplit(_, _) |
+                                            Expr::ArrayFlat { .. } | Expr::StringSplit(_, _) | Expr::ProcessArgv |
                                             Expr::ArrayToReversed { .. } | Expr::ArrayToSorted { .. } |
                                             Expr::ArrayToSpliced { .. } | Expr::ArrayWith { .. } |
                                             Expr::ArrayEntries(_) | Expr::ArrayKeys(_) | Expr::ArrayValues(_) |
@@ -7991,7 +7992,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                         if matches!(&array_expr,
                                             Expr::ArrayMap { .. } | Expr::ArrayFilter { .. } | Expr::ArraySort { .. } |
                                             Expr::ArraySlice { .. } | Expr::Array(_) |
-                                            Expr::ArrayFrom(_) | Expr::StringSplit(_, _) |
+                                            Expr::ArrayFrom(_) | Expr::StringSplit(_, _) | Expr::ProcessArgv |
                                             Expr::ObjectKeys(_) | Expr::ObjectValues(_) |
                                             Expr::PropertyGet { .. }
                                         ) {
@@ -8012,7 +8013,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                         if !is_error_string_prop && matches!(&array_expr,
                                             Expr::ArrayMap { .. } | Expr::ArrayFilter { .. } | Expr::ArraySort { .. } |
                                             Expr::ArraySlice { .. } | Expr::Array(_) |
-                                            Expr::ArrayFrom(_) | Expr::StringSplit(_, _) |
+                                            Expr::ArrayFrom(_) | Expr::StringSplit(_, _) | Expr::ProcessArgv |
                                             Expr::ObjectKeys(_) | Expr::ObjectValues(_) |
                                             Expr::PropertyGet { .. }
                                         ) {
@@ -9209,7 +9210,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                     // Specialize for Uint8Array/Buffer variables → byte-level access
                     if let Expr::LocalGet(id) = &*object {
                         if let Some((_, _, ty)) = ctx.locals.iter().find(|(_, lid, _)| lid == id) {
-                            if matches!(ty, Type::Named(n) if n == "Uint8Array") {
+                            if matches!(ty, Type::Named(n) if n == "Uint8Array" || n == "Buffer") {
                                 return Ok(Expr::Uint8ArrayGet { array: object, index });
                             }
                         }
@@ -9498,7 +9499,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                             // Specialize for Uint8Array/Buffer variables → byte-level access
                             if let Expr::LocalGet(id) = &*object {
                                 if let Some((_, _, ty)) = ctx.locals.iter().find(|(_, lid, _)| lid == id) {
-                                    if matches!(ty, Type::Named(n) if n == "Uint8Array") {
+                                    if matches!(ty, Type::Named(n) if n == "Uint8Array" || n == "Buffer") {
                                         return Ok(Expr::Uint8ArraySet { array: object, index, value });
                                     }
                                 }

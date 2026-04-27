@@ -31,8 +31,7 @@ dashmap = "5"
 which = "6"
 
 [dev-dependencies]
-tokio = { workspace = true }
-proptest = "1"
+proptest = "1.4"
 
 [features]
 default = []
