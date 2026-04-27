@@ -176,6 +176,18 @@ impl CliProtocol for DockerProtocol {
         if let Some(net) = &spec.network { args.extend(["--network".into(), net.clone()]); }
         if spec.rm.unwrap_or(false) { args.push("--rm".into()); }
         if spec.read_only.unwrap_or(false) { args.push("--read-only".into()); }
+        if spec.privileged.unwrap_or(false) { args.push("--privileged".into()); }
+        if let Some(user) = &spec.user { args.extend(["--user".into(), user.clone()]); }
+        if let Some(workdir) = &spec.workdir { args.extend(["--workdir".into(), workdir.clone()]); }
+        for cap in spec.cap_add.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["--cap-add".into(), cap.clone()]); }
+        for cap in spec.cap_drop.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["--cap-drop".into(), cap.clone()]); }
+        if let Some(seccomp) = &spec.seccomp { args.extend(["--security-opt".into(), format!("seccomp={}", seccomp)]); }
+        if spec.privileged.unwrap_or(false) { args.push("--privileged".into()); }
+        if let Some(user) = &spec.user { args.extend(["--user".into(), user.clone()]); }
+        if let Some(workdir) = &spec.workdir { args.extend(["--workdir".into(), workdir.clone()]); }
+        for cap in spec.cap_add.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["--cap-add".into(), cap.clone()]); }
+        for cap in spec.cap_drop.as_ref().iter().flat_map(|v| v.iter()) { args.extend(["--cap-drop".into(), cap.clone()]); }
+        if let Some(seccomp) = &spec.seccomp { args.extend(["--security-opt".into(), format!("seccomp={}", seccomp)]); }
         if let Some(ep) = &spec.entrypoint {
             args.push("--entrypoint".into());
             args.push(ep.join(" "));
