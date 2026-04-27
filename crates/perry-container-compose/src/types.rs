@@ -6,6 +6,7 @@
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Convert a `serde_yaml::Value` to a string representation.
 fn yaml_value_to_str(v: &serde_yaml::Value) -> String {
@@ -518,14 +519,10 @@ pub struct ComposeService {
     pub extends: Option<serde_yaml::Value>,
     pub post_start: Option<Vec<serde_yaml::Value>>,
     pub pre_stop: Option<Vec<serde_yaml::Value>>,
+    pub isolation_level: Option<IsolationLevel>,
 }
 
 impl ComposeService {
-    /// Whether the service needs to build an image before running.
-    pub fn needs_build(&self) -> bool {
-        self.build.is_some() && self.image.is_none()
-    }
-
     /// Return the image tag to use for this service.
     pub fn image_ref(&self, service_name: &str) -> String {
         if let Some(image) = &self.image {
@@ -671,6 +668,179 @@ impl ComposeSpec {
     }
 }
 
+// ============ Workload Graph Types ============
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum RuntimeSpec {
+    Oci,
+    Microvm { config: Option<serde_json::Value> },
+    Wasm { module: Option<String> },
+    Auto,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PolicyTier {
+    Default,
+    Isolated,
+    Hardened,
+    Untrusted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicySpec {
+    pub tier: PolicyTier,
+    #[serde(default)]
+    pub no_network: bool,
+    #[serde(default)]
+    pub read_only_root: bool,
+    #[serde(default)]
+    pub seccomp: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RefProjection {
+    Endpoint,
+    Ip,
+    InternalUrl,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkloadRef {
+    pub node_id: String,
+    pub projection: RefProjection,
+    pub port: Option<String>,
+}
+
+impl WorkloadRef {
+    pub fn resolve(&self, info: &ContainerInfo) -> Result<String, String> {
+        match self.projection {
+            RefProjection::Endpoint => {
+                // Find host port mapping if it exists, otherwise use container port
+                let target_port = self.port.as_deref().unwrap_or("80");
+                let port = info
+                    .ports
+                    .iter()
+                    .find(|p| p.contains(target_port))
+                    .and_then(|p| p.split(':').next())
+                    .unwrap_or(target_port);
+                Ok(format!("{}:{}", info.id, port))
+            }
+            RefProjection::Ip => Ok(info.id.clone()),
+            RefProjection::InternalUrl => {
+                let target_port = self.port.as_deref().unwrap_or("80");
+                let port = info
+                    .ports
+                    .iter()
+                    .find(|p| p.contains(target_port))
+                    .and_then(|p| p.split(':').next())
+                    .unwrap_or(target_port);
+                Ok(format!("http://{}:{}", info.id, port))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum WorkloadEnvValue {
+    Literal(String),
+    Ref(WorkloadRef),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkloadNode {
+    pub id: String,
+    pub name: String,
+    pub image: Option<String>,
+    pub resources: Option<serde_json::Value>,
+    pub ports: Vec<String>,
+    pub env: HashMap<String, WorkloadEnvValue>,
+    pub depends_on: Vec<String>,
+    pub runtime: RuntimeSpec,
+    pub policy: PolicySpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkloadEdge {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkloadGraph {
+    pub name: String,
+    pub nodes: IndexMap<String, WorkloadNode>,
+    pub edges: Vec<WorkloadEdge>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExecutionStrategy {
+    Sequential,
+    MaxParallel,
+    DependencyAware,
+    ParallelSafe,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FailureStrategy {
+    RollbackAll,
+    PartialContinue,
+    HaltGraph,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunGraphOptions {
+    pub strategy: ExecutionStrategy,
+    pub on_failure: FailureStrategy,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum NodeState {
+    Running,
+    Stopped,
+    Failed,
+    Pending,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphStatus {
+    pub nodes: HashMap<String, NodeState>,
+    pub healthy: bool,
+    pub errors: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeInfo {
+    pub node_id: String,
+    pub name: String,
+    pub container_id: Option<String>,
+    pub state: NodeState,
+    pub image: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphHandle {
+    pub stack_id: u64,
+    pub graph_name: String,
+    pub nodes: Vec<String>,
+}
+
 // ============ ComposeHandle ============
 
 /// Opaque handle to a running compose stack.
@@ -713,6 +883,9 @@ pub struct ServiceStatus {
 // ============ Container types (for single-container API) ============
 
 /// Specification for running a single container.
+///
+/// SPEC.md §2.3: exactly 9 canonical fields.
+/// read_only and seccomp are DESIGN-layer additions for policy enforcement.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ContainerSpec {
@@ -725,8 +898,10 @@ pub struct ContainerSpec {
     pub entrypoint: Option<Vec<String>>,
     pub network: Option<String>,
     pub rm: Option<bool>,
+    // DESIGN layer additions
     pub read_only: Option<bool>,
     pub seccomp: Option<String>,
+    pub labels: Option<std::collections::HashMap<String, String>>,
 }
 
 /// Handle returned after creating/running a container.
@@ -745,6 +920,7 @@ pub struct ContainerInfo {
     pub status: String,
     pub ports: Vec<String>,
     pub created: String,
+    pub labels: std::collections::HashMap<String, String>,
 }
 
 /// Logs from a container.

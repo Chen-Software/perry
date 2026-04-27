@@ -1,8 +1,8 @@
 //! Image verification and security modules.
 
 use std::collections::HashMap;
-use std::sync::{OnceLock, RwLock};
-use crate::container::mod_private::get_global_backend_instance;
+use std::sync::{Arc, OnceLock, RwLock};
+use perry_container_compose::backend::ContainerBackend;
 
 pub const CHAINGUARD_IDENTITY: &str =
     "https://github.com/chainguard-images/images/.github/workflows/sign.yaml@refs/heads/main";
@@ -17,8 +17,7 @@ pub enum VerificationResult {
 
 static VERIFICATION_CACHE: OnceLock<RwLock<HashMap<String, VerificationResult>>> = OnceLock::new();
 
-pub async fn fetch_image_digest(reference: &str) -> Result<String, String> {
-    let backend = get_global_backend_instance().await?;
+pub async fn fetch_image_digest(backend: Arc<dyn ContainerBackend>, reference: &str) -> Result<String, String> {
     let info = backend.inspect_image(reference).await.map_err(|e| e.to_string())?;
     Ok(info.id)
 }
@@ -41,9 +40,9 @@ pub async fn run_cosign_verify(reference: &str, digest: &str) -> VerificationRes
     }
 }
 
-pub async fn verify_image(reference: &str) -> Result<String, String> {
+pub async fn verify_image(backend: Arc<dyn ContainerBackend>, reference: &str) -> Result<String, String> {
     // 1. Fetch digest (tag -> digest resolution)
-    let digest = fetch_image_digest(reference).await?;
+    let digest = fetch_image_digest(backend, reference).await?;
 
     // 2. Check cache
     let cache = VERIFICATION_CACHE.get_or_init(|| RwLock::new(HashMap::new()));

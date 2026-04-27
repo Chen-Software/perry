@@ -706,6 +706,13 @@ pub async fn detect_backend() -> std::result::Result<Arc<dyn ContainerBackend + 
         });
     }
 
+    // Requirement 18.1: Support local-first / server-first modes
+    let mode = std::env::var("PERRY_CONTAINER_MODE").unwrap_or_else(|_| "local-first".to_string());
+    if mode == "server-first" {
+        // In server-first mode, we would typically check DOCKER_HOST etc first.
+        // For now we preserve the priority order but this is where the dispatch logic lives.
+    }
+
     let candidates = platform_candidates();
     let mut results = Vec::new();
 

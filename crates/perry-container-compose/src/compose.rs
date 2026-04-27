@@ -25,7 +25,7 @@ static NEXT_STACK_ID: AtomicU64 = AtomicU64::new(1);
 pub struct ComposeEngine {
     pub spec: ComposeSpec,
     pub project_name: String,
-    pub backend: Arc<dyn ContainerBackend>,
+    pub backend: Arc<dyn ContainerBackend + Send + Sync>,
     /// Resources that were created in this session
     session_containers: std::sync::Mutex<Vec<String>>,
     session_networks: std::sync::Mutex<Vec<String>>,
@@ -37,7 +37,7 @@ impl ComposeEngine {
     pub fn new(
         spec: ComposeSpec,
         project_name: String,
-        backend: Arc<dyn ContainerBackend>,
+        backend: Arc<dyn ContainerBackend + Send + Sync>,
     ) -> Self {
         ComposeEngine {
             spec,
@@ -185,7 +185,7 @@ impl ComposeEngine {
                 }
                 _ => {
                     // Build if needed
-                    if build && svc.needs_build() {
+                    if build && svc.needs_build(self.backend.as_ref(), svc_name).await? {
                         let build_config = svc.build.as_ref().unwrap().as_build();
                         let tag = svc.image_ref(svc_name);
                         tracing::info!("Building image '{}'…", tag);
@@ -470,6 +470,53 @@ impl ComposeEngine {
         resolve_startup_order(&self.spec)
     }
 
+    pub fn graph(&self) -> Result<crate::types::ServiceGraph> {
+        let nodes = self.resolve_startup_order()?;
+        let mut edges = Vec::new();
+        for (name, svc) in &self.spec.services {
+            if let Some(deps) = &svc.depends_on {
+                for dep in deps.service_names() {
+                    edges.push(crate::types::ServiceEdge {
+                        from: name.clone(),
+                        to: dep,
+                    });
+                }
+            }
+        }
+        Ok(crate::types::ServiceGraph { nodes, edges })
+    }
+
+    pub async fn status(&self) -> Result<crate::types::StackStatus> {
+        let mut services = Vec::new();
+        let mut healthy = true;
+
+        for (svc_name, svc) in &self.spec.services {
+            let container_name = service::service_container_name(svc, svc_name);
+            let (state, container_id, error) = match self.backend.inspect(&container_name).await {
+                Ok(info) => {
+                    let s = info.status.to_lowercase();
+                    if s != "running" {
+                        healthy = false;
+                    }
+                    (s, Some(info.id), None)
+                }
+                Err(e) => {
+                    healthy = false;
+                    ("not found".to_string(), None, Some(e.to_string()))
+                }
+            };
+
+            services.push(crate::types::ServiceStatus {
+                service: svc_name.clone(),
+                state,
+                container_id,
+                error,
+            });
+        }
+
+        Ok(crate::types::StackStatus { services, healthy })
+    }
+
     // ============ start / stop / restart ============
 
     /// Start existing stopped services.
@@ -518,6 +565,88 @@ impl ComposeEngine {
     pub async fn restart(&self, services: &[String]) -> Result<()> {
         self.stop(services).await?;
         self.start(services).await
+    }
+}
+
+// ============ Workload Graph Engine ============
+
+pub struct WorkloadGraphEngine {
+    pub backend: Arc<dyn ContainerBackend + Send + Sync>,
+    pub project_name: String,
+}
+
+impl WorkloadGraphEngine {
+    pub fn new(backend: Arc<dyn ContainerBackend + Send + Sync>, project_name: String) -> Self {
+        Self {
+            backend,
+            project_name,
+        }
+    }
+
+    pub async fn run(&self, graph: crate::types::WorkloadGraph, _opts: crate::types::RunGraphOptions) -> Result<crate::types::GraphHandle> {
+        // Convert WorkloadGraph to ComposeSpec for execution
+        let mut services = IndexMap::new();
+        for (id, node) in &graph.nodes {
+            let mut svc = crate::types::ComposeService::default();
+            svc.image = node.image.clone();
+            svc.ports = Some(node.ports.iter().map(|p| crate::types::PortSpec::Short(serde_yaml::Value::String(p.clone()))).collect());
+
+            // Convert workload policy to service flags
+            match node.policy.tier {
+                crate::types::PolicyTier::Untrusted => {
+                    svc.read_only = Some(true);
+                    svc.network_mode = Some("none".into());
+                    // untrusted forces microvm isolation
+                    svc.isolation_level = Some(crate::types::IsolationLevel::MicroVm);
+                }
+                crate::types::PolicyTier::Hardened => {
+                    svc.read_only = Some(true);
+                }
+                crate::types::PolicyTier::Isolated => {
+                    svc.network_mode = Some("none".into());
+                }
+                _ => {}
+            }
+
+            if node.policy.read_only_root {
+                svc.read_only = Some(true);
+            }
+            if node.policy.no_network {
+                svc.network_mode = Some("none".into());
+            }
+
+            let mut env = IndexMap::new();
+            for (k, v) in &node.env {
+                match v {
+                    crate::types::WorkloadEnvValue::Literal(s) => {
+                        env.insert(k.clone(), Some(serde_yaml::Value::String(s.clone())));
+                    }
+                    crate::types::WorkloadEnvValue::Ref(r) => {
+                        // WorkloadRefs are resolved AFTER startup, for now we leave as placeholder
+                        env.insert(k.clone(), Some(serde_yaml::Value::String(format!("__REF__:{}:{}:{:?}", r.node_id, r.port.as_deref().unwrap_or(""), r.projection))));
+                    }
+                }
+            }
+            svc.environment = Some(crate::types::ListOrDict::Dict(env));
+            svc.depends_on = Some(crate::types::DependsOnSpec::List(node.depends_on.clone()));
+
+            services.insert(id.clone(), svc);
+        }
+
+        let spec = ComposeSpec {
+            name: Some(graph.name.clone()),
+            services,
+            ..Default::default()
+        };
+
+        let engine = Arc::new(ComposeEngine::new(spec, self.project_name.clone(), Arc::clone(&self.backend)));
+        let handle = engine.up(&[], true, false, false).await?;
+
+        Ok(crate::types::GraphHandle {
+            stack_id: handle.stack_id,
+            graph_name: graph.name,
+            nodes: graph.nodes.keys().cloned().collect(),
+        })
     }
 }
 

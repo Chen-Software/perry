@@ -16,36 +16,38 @@ use crate::container::types::*;
 use crate::common::spawn_for_promise_deferred;
 use dashmap::DashMap;
 
-pub(crate) mod mod_private {
-    use super::*;
-    use tokio::sync::Mutex;
+pub mod context;
+pub use context::ContainerContext;
 
-    pub static BACKEND: OnceLock<Arc<dyn ContainerBackend + Send + Sync>> = OnceLock::new();
-    static INIT_MUTEX: Mutex<()> = Mutex::const_new(());
+pub async fn get_global_backend_instance() -> Result<Arc<dyn ContainerBackend + Send + Sync>, String> {
+    let ctx = ContainerContext::global();
+    if let Some(b) = ctx.backend.get() {
+        return Ok(Arc::clone(b));
+    }
 
-    pub async fn get_global_backend_instance() -> Result<Arc<dyn ContainerBackend + Send + Sync>, String> {
-        if let Some(b) = BACKEND.get() {
-            return Ok(Arc::clone(b));
+    let _guard = ctx.init_lock.lock().await;
+    if let Some(b) = ctx.backend.get() {
+        return Ok(Arc::clone(b));
+    }
+
+    match detect_backend().await {
+        Ok(b) => {
+            let _ = ctx.backend.set(Arc::clone(&b));
+            Ok(b)
         }
-
-        let _guard = INIT_MUTEX.lock().await;
-        if let Some(b) = BACKEND.get() {
-            return Ok(Arc::clone(b));
-        }
-
-        let backend_res = detect_backend().await;
-
-        match backend_res {
-            Ok(b) => {
-                let _ = BACKEND.set(Arc::clone(&b));
-                Ok(b)
+        Err(probed) => {
+            // Requirement 20.10: Invoke interactive installer if NoBackendFound and TTY
+            if (perry_container_compose::error::ComposeError::NoBackendFound { probed: probed.clone() }).to_string().contains("No container backend found") {
+                 let installer = perry_container_compose::installer::BackendInstaller::new();
+                 if let Ok(b) = installer.run().await {
+                     let _ = ctx.backend.set(Arc::clone(&b));
+                     return Ok(b);
+                 }
             }
-            Err(probed) => Err(format!("No backend found: {:?}", probed)),
+            Err(format!("No backend found: {:?}", probed))
         }
     }
 }
-
-use mod_private::get_global_backend_instance;
 
 #[no_mangle]
 pub unsafe extern "C" fn js_container_run(spec_json_ptr: *const StringHeader) -> *mut Promise {
@@ -374,7 +376,8 @@ pub unsafe extern "C" fn js_container_removeImage(ref_ptr: *const StringHeader, 
 
 #[no_mangle]
 pub unsafe extern "C" fn js_container_getBackend() -> *const StringHeader {
-    let name = if let Some(backend) = mod_private::BACKEND.get() {
+    let ctx = ContainerContext::global();
+    let name = if let Some(backend) = ctx.backend.get() {
         backend.backend_name()
     } else {
         "unknown"
@@ -386,10 +389,11 @@ pub unsafe extern "C" fn js_container_getBackend() -> *const StringHeader {
 pub unsafe extern "C" fn js_container_detectBackend() -> *mut Promise {
     let promise = js_promise_new();
     spawn_for_promise_deferred(promise as *mut u8, async move {
+        let ctx = ContainerContext::global();
         match detect_backend().await {
             Ok(backend) => {
                 let name = backend.backend_name().to_string();
-                let _ = mod_private::BACKEND.set(Arc::clone(&backend));
+                let _ = ctx.backend.set(Arc::clone(&backend));
                 Ok(vec![perry_container_compose::error::BackendProbeResult {
                     name,
                     available: true,
@@ -670,9 +674,12 @@ pub unsafe extern "C" fn js_workload_runGraph(graph_json_ptr: *const StringHeade
     let opts_json = string_from_header(opts_json_ptr).unwrap_or_default();
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
+        let graph: perry_container_compose::types::WorkloadGraph = serde_json::from_str(&graph_json).map_err(|e| e.to_string())?;
+        let opts: perry_container_compose::types::RunGraphOptions = serde_json::from_str(&opts_json).map_err(|e| e.to_string())?;
         let backend = get_global_backend_instance().await.map_err(|e| e.to_string())?;
-        let engine = perry_container_compose::compose::WorkloadGraphEngine::new(backend);
-        engine.run(&graph_json, &opts_json).await.map_err(|e| e.to_string())
+        let engine = perry_container_compose::compose::WorkloadGraphEngine::new(backend, "default".to_string());
+        let handle = engine.run(graph, opts).await.map_err(|e| e.to_string())?;
+        Ok(handle.stack_id)
     });
     promise
 }
@@ -745,14 +752,17 @@ pub unsafe extern "C" fn js_workload_handle_ps(handle_id: f64) -> *mut Promise {
 
 #[no_mangle]
 pub unsafe extern "C" fn js_container_module_init() {
-    // Initialise the container module
+    // Requirement 11.6: force backend selection at module init
+    tokio::task::spawn(async move {
+        let _ = get_global_backend_instance().await;
+    });
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn js_container_compose_graph(handle_id: f64) -> *const StringHeader {
     let id = handle_id as u64;
-    let json = if let Some(engine) = COMPOSE_HANDLES.get_or_init(DashMap::new).get(&id) {
-        if let Ok(graph) = engine.0.graph() {
+    let json = if let Some(engine) = ComposeEngine::get_engine(id) {
+        if let Ok(graph) = engine.graph() {
             serde_json::to_string(&graph).unwrap_or_else(|_| "{}".to_string())
         } else {
             "{}".to_string()
@@ -768,9 +778,7 @@ pub unsafe extern "C" fn js_container_compose_status(handle_id: f64) -> *mut Pro
     let promise = js_promise_new();
     let id = handle_id as u64;
     spawn_for_promise_deferred(promise as *mut u8, async move {
-        let engine = COMPOSE_HANDLES.get_or_init(DashMap::new)
-            .get(&id)
-            .map(|e| Arc::clone(&e.0))
+        let engine = ComposeEngine::get_engine(id)
             .ok_or_else(|| format!("Compose stack {} not found", id))?;
         engine.status().await.map_err(|e| e.to_string())
     }, |status| {

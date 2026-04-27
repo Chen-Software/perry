@@ -24,7 +24,7 @@ pub async fn orchestrate_service(
         tracing::info!(service = %service_name, "exists but stopped, starting");
         service.start_command(backend, service_name).await?;
     } else {
-        if service.needs_build() {
+        if service.needs_build(backend, service_name).await? {
             tracing::info!(service = %service_name, "building image");
             service.build_command(backend, service_name).await?;
         }

@@ -2,20 +2,20 @@
 
 use crate::backend::ContainerBackend;
 use crate::error::Result;
-use crate::types::{ComposeService, ContainerSpec};
+use crate::types::{ComposeService, ContainerInfo, ContainerSpec};
 use md5::{Digest, Md5};
 
-/// Generate a stable container name for a service.
+/// Generate a unique container name for a service.
 ///
-/// Format: `{md5_8chars}-{random_hex}`
-pub fn generate_name(service_yaml: &str) -> String {
+/// Format: `{service_name}_{md5(image)[0..8]}_{random_u32}`
+pub fn generate_name(image: &str, service_name: &str) -> String {
     let mut hasher = Md5::new();
-    hasher.update(service_yaml.as_bytes());
+    hasher.update(image.as_bytes());
     let hash = hasher.finalize();
     let short_hash = &hex::encode(hash)[..8];
 
-    let random_suffix: u32 = rand::random();
-    format!("{}-{:08x}", short_hash, random_suffix)
+    let random_suffix: u32 = rand::random::<u32>();
+    format!("{}_{}_{:08x}", service_name, short_hash, random_suffix)
 }
 
 /// Compute a short hash of the service configuration.
@@ -48,13 +48,12 @@ impl ServiceState {
 }
 
 /// Generate a container name for a service, using explicit name if set.
-pub fn service_container_name(svc: &ComposeService, _service_name: &str) -> String {
+pub fn service_container_name(svc: &ComposeService, service_name: &str) -> String {
     if let Some(explicit) = svc.explicit_name() {
         return explicit.to_string();
     }
 
-    let service_yaml = serde_yaml::to_string(svc).unwrap_or_default();
-    generate_name(&service_yaml)
+    generate_name(&svc.image_ref(service_name), service_name)
 }
 
 impl ComposeService {
@@ -72,8 +71,26 @@ impl ComposeService {
     pub async fn is_running(&self, backend: &dyn ContainerBackend, service_name: &str) -> Result<bool> {
         let name = service_container_name(self, service_name);
         match backend.inspect(&name).await {
-            Ok(info) => Ok(info.status == "running"),
+            Ok(info) => Ok(info.status == "running" || info.status == "Running"),
             Err(crate::error::ComposeError::NotFound(_)) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Returns true if the service requires a build.
+    pub async fn needs_build(&self, backend: &dyn ContainerBackend, service_name: &str) -> Result<bool> {
+        if self.build.is_none() {
+            return Ok(false);
+        }
+        if self.image.is_none() {
+            return Ok(true);
+        }
+
+        // If image is set and build is set, check if image exists locally
+        let image_ref = self.image_ref(service_name);
+        match backend.inspect_image(&image_ref).await {
+            Ok(_) => Ok(false),
+            Err(crate::error::ComposeError::NotFound(_)) => Ok(true),
             Err(e) => Err(e),
         }
     }
@@ -99,6 +116,12 @@ impl ComposeService {
         } else {
             Ok(())
         }
+    }
+
+    /// Returns ContainerInfo for the service's container.
+    pub async fn inspect_command(&self, backend: &dyn ContainerBackend, service_name: &str) -> Result<ContainerInfo> {
+        let name = service_container_name(self, service_name);
+        backend.inspect(&name).await
     }
 
     /// Create a `ContainerSpec` from this service definition.
@@ -129,12 +152,13 @@ mod tests {
 
     #[test]
     fn test_generate_name_format() {
-        let name = generate_name("image: nginx");
-        // Format: {md5_8chars}-{random_hex}
-        let parts: Vec<&str> = name.split('-').collect();
-        assert_eq!(parts.len(), 2);
-        assert_eq!(parts[0].len(), 8);
+        let name = generate_name("nginx", "web");
+        // Format: {service_name}_{md5_8chars}_{random_hex}
+        let parts: Vec<&str> = name.split('_').collect();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0], "web");
         assert_eq!(parts[1].len(), 8);
+        assert_eq!(parts[2].len(), 8);
     }
 
     #[test]

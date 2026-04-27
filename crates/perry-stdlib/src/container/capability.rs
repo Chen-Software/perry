@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use crate::container::types::{ContainerSpec, ContainerLogs};
 use crate::container::verification;
-use crate::container::mod_private::get_global_backend_instance;
+use crate::container::get_global_backend_instance;
 
 pub struct CapabilityGrants {
     pub network: bool,
@@ -16,8 +16,10 @@ pub async fn alloy_container_run_capability(
     cmd: &[&str],
     grants: &CapabilityGrants,
 ) -> Result<ContainerLogs, String> {
+    let backend = get_global_backend_instance().await.map_err(|e| e.to_string())?;
+
     // 1. Verify image signature before running
-    let digest = verification::verify_image(image).await?;
+    let digest = verification::verify_image(backend.clone(), image).await?;
 
     // 2. Build ephemeral ContainerSpec with security constraints
     let spec = ContainerSpec {
