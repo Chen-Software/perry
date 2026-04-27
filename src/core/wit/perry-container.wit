@@ -1,0 +1,72 @@
+package perry:container;
+
+interface types {
+    record container-spec {
+        image: string,
+        name: option<string>,
+        ports: option<list<string>>,
+        volumes: option<list<string>>,
+        env: option<list<tuple<string, string>>>,
+        cmd: option<list<string>>,
+        entrypoint: option<list<string>>,
+        network: option<string>,
+        rm: option<bool>,
+    }
+
+    record container-info {
+        id: string,
+        name: string,
+        image: string,
+        status: string,
+        ports: list<string>,
+        created: string,
+    }
+
+    record container-logs {
+        stdout: string,
+        stderr: string,
+    }
+
+    record image-info {
+        id: string,
+        repository: string,
+        tag: string,
+        size: u64,
+        created: string,
+    }
+
+    record backend-info {
+        name: string,
+        available: bool,
+        reason: option<string>,
+        version: option<string>,
+        mode: string,
+    }
+}
+
+world container {
+    import types;
+
+    export run: func(spec: types.container-spec) -> s64;
+    export create: func(spec: types.container-spec) -> s64;
+    export start: func(id: string) -> s64;
+    export stop: func(id: string, timeout: option<u32>) -> s64;
+    export remove: func(id: string, force: option<bool>) -> s64;
+    export list: func(all: option<bool>) -> s64;
+    export inspect: func(id: string) -> s64;
+    export logs: func(id: string, tail: option<u32>) -> s64;
+    export exec: func(id: string, cmd: list<string>, env: option<list<tuple<string, string>>>, workdir: option<string>) -> s64;
+
+    export pull-image: func(reference: string) -> s64;
+    export list-images: func() -> s64;
+    export remove-image: func(reference: string, force: option<bool>) -> s64;
+
+    export get-backend: func() -> string;
+    export detect-backend: func() -> s64;
+
+    export compose-up: func(spec-json: string) -> s64;
+    export compose-down: func(handle: s64, volumes: option<bool>) -> s64;
+    export compose-ps: func(handle: s64) -> s64;
+    export compose-logs: func(handle: s64, opts-json: string) -> s64;
+    export compose-exec: func(handle: s64, service: string, cmd: list<string>, opts-json: string) -> s64;
+}
