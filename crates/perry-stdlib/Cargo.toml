@@ -18,6 +18,9 @@ full = ["http-server", "http-client", "database", "crypto", "compression", "emai
 # Minimal core - just what's needed for basic programs
 core = []
 
+# Container orchestration (perry/container, perry/workloads)
+container = ["dep:perry-container-compose", "async-runtime"]
+
 # HTTP server (hyper-based native framework)
 # Note: dashmap is now always-on (used by core handle registry), no longer listed here.
 http-server = ["dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:bytes", "async-runtime"]
@@ -82,6 +85,8 @@ perry-runtime = { workspace = true, features = ["stdlib"] }
 
 thiserror.workspace = true
 anyhow.workspace = true
+
+perry-container-compose = { path = "../perry-container-compose", optional = true }
 
 # Always needed
 serde = { version = "1.0", features = ["derive"] }
