@@ -415,6 +415,7 @@ fn read_banner(path: &Path) -> Result<Banner> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading {}", path.display()))?;
     let mut b = Banner::default();
+    let mut platforms_seen = false;
     for line in text.lines().take(15) {
         let line = line.trim_start();
         if !line.starts_with("//") {
@@ -422,6 +423,7 @@ fn read_banner(path: &Path) -> Result<Banner> {
         }
         let body = line.trim_start_matches("//").trim();
         if let Some(rest) = body.strip_prefix("platforms:") {
+            platforms_seen = true;
             for item in rest.split(',') {
                 let t = item.trim();
                 if !t.is_empty() {
@@ -447,8 +449,13 @@ fn read_banner(path: &Path) -> Result<Banner> {
             }
         }
     }
-    // Default to "all hosts" if banner didn't specify.
-    if b.platforms.is_empty() {
+    // Default to "all hosts" only when no `platforms:` directive was given.
+    // An explicit empty `// platforms:` (no values) is the way an example
+    // opts out of the host run phase entirely — used by examples whose
+    // `declare function` FFI imports only resolve under `--target wasm` /
+    // `--target web`, where they lower to WASM imports instead of host
+    // linker externs.
+    if !platforms_seen {
         for p in ["macos", "linux", "windows"] {
             b.platforms.insert(p.to_string());
         }

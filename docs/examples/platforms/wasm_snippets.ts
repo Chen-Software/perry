@@ -1,14 +1,18 @@
 // demonstrates: per-API wasm/web snippets shown in docs/src/platforms/wasm.md
 // docs: docs/src/platforms/wasm.md
-// platforms: macos, linux, windows
+// platforms:
+// targets: wasm, web
 // run: false
 
-// `run: false` because the snippets here either declare external FFI
-// functions whose host implementations live only in the browser bridge,
-// or call `fetch()` against a non-existent telemetry endpoint. The harness
-// still compiles + links the file on every PR, which catches API drift in
-// `declare function`, `fetch()`'s options shape, and `parallelMap` (whose
-// FFI lives in perry-runtime + perry-stdlib).
+// Empty `// platforms:` opts out of the host run phase. The `declare function`
+// FFI imports (`bloom_init_window`, `bloom_draw_rect`) lower to WASM imports
+// under `--target wasm` / `--target web`, but resolve through the host linker
+// on a native compile — and the host has no `bloom_*` symbols, so a native
+// link fails with `undefined reference`. The cross-compile phase still drives
+// `--target wasm` and `--target web` to catch API drift in `declare function`,
+// `fetch()`'s options shape, and `parallelMap` (whose FFI lives in
+// perry-runtime + perry-stdlib). `run: false` keeps the cross-compile artifact
+// from being executed.
 
 import { parallelMap } from "perry/thread"
 
