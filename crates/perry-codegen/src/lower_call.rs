@@ -2642,20 +2642,6 @@ pub(crate) fn lower_native_method_call(
         }
     }
 
-    // perry/container dispatch
-    if (module == "perry/container" || module == "perry/container-compose") && object.is_none() {
-        if let Some(sig) = perry_container_table_lookup(method) {
-            return lower_perry_ui_table_call(ctx, sig, args);
-        }
-    }
-
-    // perry/compose dispatch
-    if module == "perry/compose" && object.is_none() {
-        if let Some(sig) = perry_compose_table_lookup(method) {
-            return lower_perry_ui_table_call(ctx, sig, args);
-        }
-    }
-
     // perry/workloads dispatch
     if (module == "perry/workloads" || module == "perry/workload") && object.is_none() {
         if let Some(sig) = perry_workloads_table_lookup(method) {
@@ -4848,6 +4834,8 @@ enum UiReturnKind {
     /// i64 result converted to plain JS number via `sitofp`. Used for integer
     /// counts/IDs that the TS caller should see as a JS number (not a handle).
     I64AsF64,
+    /// Returns a Promise handle (i64 pointer) -> NaN-box as POINTER.
+    Promise,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -4939,73 +4927,24 @@ const PERRY_COMPOSE_TABLE: &[UiSig] = &[
 const PERRY_WORKLOADS_TABLE: &[UiSig] = &[
     UiSig { method: "graph", runtime: "js_workload_graph",
             args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Str },
-    UiSig { method: "runGraph", runtime: "js_workload_runGraph",
-            args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Promise },
-];
-
-const PERRY_CONTAINER_TABLE: &[UiSig] = &[
-    UiSig { method: "run", runtime: "js_container_run",
-            args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "create", runtime: "js_container_create",
-            args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "start", runtime: "js_container_start",
-            args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "stop", runtime: "js_container_stop",
-            args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "remove", runtime: "js_container_remove",
-            args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "list", runtime: "js_container_list",
-            args: &[UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "inspect", runtime: "js_container_inspect",
-            args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "logs", runtime: "js_container_logs",
-            args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "exec", runtime: "js_container_exec",
-            args: &[UiArgKind::Str, UiArgKind::Str, UiArgKind::Str, UiArgKind::Str],
-            ret: UiReturnKind::Promise },
-    UiSig { method: "pullImage", runtime: "js_container_pullImage",
-            args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "listImages", runtime: "js_container_listImages",
-            args: &[], ret: UiReturnKind::Promise },
-    UiSig { method: "removeImage", runtime: "js_container_removeImage",
-            args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "getBackend", runtime: "js_container_getBackend",
-            args: &[], ret: UiReturnKind::Str },
-    UiSig { method: "detectBackend", runtime: "js_container_detectBackend",
-            args: &[], ret: UiReturnKind::Promise },
-    UiSig { method: "build", runtime: "js_container_build",
-            args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "composeUp", runtime: "js_container_composeUp",
-            args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
-];
-
-const PERRY_COMPOSE_TABLE: &[UiSig] = &[
-    UiSig { method: "up", runtime: "js_compose_up",
-            args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "down", runtime: "js_compose_down",
-            args: &[UiArgKind::F64, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "ps", runtime: "js_compose_ps",
-            args: &[UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "logs", runtime: "js_compose_logs",
-            args: &[UiArgKind::F64, UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "exec", runtime: "js_compose_exec",
-            args: &[UiArgKind::F64, UiArgKind::Str, UiArgKind::Str, UiArgKind::Str],
-            ret: UiReturnKind::Promise },
-    UiSig { method: "config", runtime: "js_compose_config",
-            args: &[UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "start", runtime: "js_compose_start",
-            args: &[UiArgKind::F64, UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "stop", runtime: "js_compose_stop",
-            args: &[UiArgKind::F64, UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "restart", runtime: "js_compose_restart",
-            args: &[UiArgKind::F64, UiArgKind::Str], ret: UiReturnKind::Promise },
-];
-
-const PERRY_WORKLOADS_TABLE: &[UiSig] = &[
-    UiSig { method: "graph", runtime: "js_workload_graph",
+    UiSig { method: "node", runtime: "js_workload_node",
             args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Str },
     UiSig { method: "runGraph", runtime: "js_workload_runGraph",
             args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Promise },
+    UiSig { method: "inspectGraph", runtime: "js_workload_inspectGraph",
+            args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
+    UiSig { method: "down", runtime: "js_workload_handle_down",
+            args: &[UiArgKind::F64, UiArgKind::Str], ret: UiReturnKind::Promise },
+    UiSig { method: "status", runtime: "js_workload_handle_status",
+            args: &[UiArgKind::F64], ret: UiReturnKind::Promise },
+    UiSig { method: "getGraph", runtime: "js_workload_handle_graph",
+            args: &[UiArgKind::F64], ret: UiReturnKind::Str },
+    UiSig { method: "logs", runtime: "js_workload_handle_logs",
+            args: &[UiArgKind::F64, UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Promise },
+    UiSig { method: "exec", runtime: "js_workload_handle_exec",
+            args: &[UiArgKind::F64, UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Promise },
+    UiSig { method: "ps", runtime: "js_workload_handle_ps",
+            args: &[UiArgKind::F64], ret: UiReturnKind::Promise },
 ];
 
 const PERRY_UI_TABLE: &[UiSig] = &[
@@ -5578,18 +5517,6 @@ fn perry_workloads_table_lookup(method: &str) -> Option<&'static UiSig> {
     PERRY_WORKLOADS_TABLE.iter().find(|s| s.method == method)
 }
 
-fn perry_container_table_lookup(method: &str) -> Option<&'static UiSig> {
-    PERRY_CONTAINER_TABLE.iter().find(|s| s.method == method)
-}
-
-fn perry_compose_table_lookup(method: &str) -> Option<&'static UiSig> {
-    PERRY_COMPOSE_TABLE.iter().find(|s| s.method == method)
-}
-
-fn perry_workloads_table_lookup(method: &str) -> Option<&'static UiSig> {
-    PERRY_WORKLOADS_TABLE.iter().find(|s| s.method == method)
-}
-
 // =============================================================================
 // perry/system dispatch table
 // =============================================================================
@@ -5915,12 +5842,6 @@ fn lower_perry_ui_table_call(
             let blk = ctx.block();
             let raw = blk.call(I64, sig.runtime, &arg_slices);
             Ok(blk.sitofp(I64, &raw, DOUBLE))
-        }
-        UiReturnKind::Promise => {
-            let blk = ctx.block();
-            let raw = blk.call(I64, sig.runtime, &arg_slices);
-            // Promise handles are I64 (pointers), NaN-box them as POINTER
-            Ok(nanbox_pointer_inline(blk, &raw))
         }
         UiReturnKind::Promise => {
             let blk = ctx.block();
