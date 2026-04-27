@@ -184,6 +184,50 @@ pub(crate) fn infer_type_from_expr(expr: &ast::Expr, ctx: &LoweringContext) -> T
     }
 }
 
+/// Walk return statements in a function body and unify their types.
+pub(crate) fn infer_body_return_type(stmts: &[ast::Stmt], ctx: &LoweringContext) -> Option<Type> {
+    let mut return_types = Vec::new();
+    for stmt in stmts {
+        match stmt {
+            ast::Stmt::Return(ret) => {
+                if let Some(arg) = &ret.arg {
+                    return_types.push(infer_type_from_expr(arg, ctx));
+                } else {
+                    return_types.push(Type::Void);
+                }
+            }
+            ast::Stmt::If(if_stmt) => {
+                if let Some(ty) = infer_body_return_type(&[(*if_stmt.cons).clone()], ctx) {
+                    return_types.push(ty);
+                }
+                if let Some(alt) = &if_stmt.alt {
+                    if let Some(ty) = infer_body_return_type(&[(*alt.as_ref()).clone()], ctx) {
+                        return_types.push(ty);
+                    }
+                }
+            }
+            ast::Stmt::Block(block) => {
+                if let Some(ty) = infer_body_return_type(&block.stmts, ctx) {
+                    return_types.push(ty);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if return_types.is_empty() {
+        None
+    } else {
+        // Simple unification: if all types are same, return it, else Any
+        let first = &return_types[0];
+        if return_types.iter().all(|t| t == first) {
+            Some(first.clone())
+        } else {
+            Some(Type::Any)
+        }
+    }
+}
+
 /// Infer the return type of a function/method call expression.
 pub(crate) fn infer_call_return_type(callee: &ast::Expr, ctx: &LoweringContext) -> Type {
     match callee {
