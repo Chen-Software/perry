@@ -446,6 +446,30 @@ pub unsafe extern "C" fn js_container_composeUp(spec_json_ptr: *const StringHead
     promise
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn js_compose_up(spec_json_ptr: *const StringHeader) -> *mut Promise {
+    js_container_composeUp(spec_json_ptr)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn js_container_inspectNetwork(name_ptr: *const StringHeader) -> *mut Promise {
+    let promise = js_promise_new();
+    let name = match string_from_header(name_ptr) {
+        Some(s) => s,
+        None => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move { Err::<u64, String>("Invalid network name".to_string()) });
+            return promise;
+        }
+    };
+
+    crate::common::spawn_for_promise(promise as *mut u8, async move {
+        let backend = get_global_backend_instance().await.map_err(|e| e.to_string())?;
+        backend.inspect_network(&name).await.map_err(|e| compose_error_to_js(&e))?;
+        Ok(0)
+    });
+    promise
+}
+
 
 #[no_mangle]
 pub unsafe extern "C" fn js_compose_down(handle_id: f64, volumes: f64) -> *mut Promise {
