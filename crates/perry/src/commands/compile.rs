@@ -7056,6 +7056,13 @@ pub fn run_with_parse_cache(
            .arg("bcrypt.lib")
            .arg("ntdll.lib")
            .arg("userenv.lib")
+           // secur32.lib exports `GetUserNameExW`, called by the `whoami`
+           // crate (transitively pulled in via `sqlx-mysql`/`sqlx-postgres`
+           // through `perry-stdlib`). Without it, every doc-test that
+           // touches stdlib fails on the Windows runner with
+           // `LNK2019: unresolved external symbol __imp_GetUserNameExW`.
+           // Closes #220.
+           .arg("secur32.lib")
            .arg("oleaut32.lib")
            .arg("propsys.lib")
            .arg("runtimeobject.lib")
