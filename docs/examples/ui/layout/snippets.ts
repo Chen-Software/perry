@@ -127,7 +127,11 @@ widgetSetHugging(stretchy, 1) // Low priority — stretch to fill
 // ANCHOR_END: hugging
 
 // ANCHOR: overlay
-const container = VStack(16, [Text("Main content")])
+// Overlay parent must be a ZStack — macOS NSView allows `addSubview` on
+// any view, but GTK4 can only float children above siblings inside
+// `gtk::Overlay` (which is what ZStack is backed by).
+const container = ZStack()
+widgetAddChild(container, VStack(16, [Text("Main content")])) // main child
 
 const badge = Text("3")
 setCornerRadius(badge, 10)
@@ -176,7 +180,10 @@ const searchPage = VStack(12, [searchInput, results])
 // ANCHOR_END: pattern-search-row
 
 // ANCHOR: pattern-floating-badge
-const icon = ImageSymbol("bell")
+// Wrap the icon in a ZStack so the badge can float above it on every
+// platform (see `// ANCHOR: overlay` for the GTK4 vs macOS rationale).
+const icon = ZStack()
+widgetAddChild(icon, ImageSymbol("bell"))
 const dotBadge = Text("3")
 widgetAddOverlay(icon, dotBadge)
 widgetSetOverlayFrame(dotBadge, 20, -5, 16, 16)
