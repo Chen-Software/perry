@@ -340,12 +340,21 @@ impl WorkloadGraphEngine {
             image: node.image.clone().unwrap_or_default(),
             name: Some(node.name.clone()),
             ports: Some(node.ports.clone()),
+            env: Some(node.env.iter().map(|(k, v)| {
+                let val = match v {
+                    WorkloadEnvValue::Literal(s) => s.clone(),
+                    WorkloadEnvValue::Ref(r) => format!("REF:{}", r.node_id), // Placeholder for late-binding
+                };
+                (k.clone(), val)
+            }).collect()),
             ..Default::default()
         };
 
         match node.policy.tier {
             PolicyTier::Untrusted => {
-                // Should force MicroVm, but not implemented yet
+                spec.isolation_level = Some(crate::types::IsolationLevel::MicroVm);
+                spec.read_only = Some(true);
+                spec.network = Some("none".to_string());
             }
             PolicyTier::Hardened => {
                 spec.read_only = Some(true);

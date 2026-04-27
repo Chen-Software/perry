@@ -1019,8 +1019,9 @@ fn platform_candidates() -> &'static [&'static str] {
             "orbstack",
             "colima",
             "rancher-desktop",
-            "podman",
             "lima",
+            "podman",
+            "nerdctl",
             "docker",
         ]
     }
