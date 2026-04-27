@@ -15,6 +15,7 @@ fn make_string_header(s: &str) -> Vec<u8> {
         byte_len: len,
         capacity: len,
         refcount: 0,
+        flags: 0,
     };
 
     unsafe {

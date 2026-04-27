@@ -940,6 +940,8 @@ fn native_instance_from_return_type(ty: &Type) -> Option<(&'static str, &'static
             "PoolConnection" => Some(("mysql2/promise", "PoolConnection")),
             "WebSocket" => Some(("ws", "WebSocket")),
             "WebSocketServer" => Some(("ws", "WebSocketServer")),
+            "ComposeHandle" => Some(("perry/container", "ComposeHandle")),
+            "GraphHandle" => Some(("perry/workloads", "GraphHandle")),
             _ => None,
         };
     }

@@ -113,6 +113,8 @@ pub unsafe fn string_from_header(header: *const StringHeader) -> Option<String> 
     if header.is_null() || (header as usize) < 0x1000 {
         return None;
     }
-    let s = (*header).as_str();
-    Some(s.to_string())
+    let len = (*header).byte_len as usize;
+    let data_ptr = (header as *const u8).add(std::mem::size_of::<StringHeader>());
+    let bytes = std::slice::from_raw_parts(data_ptr, len);
+    Some(String::from_utf8_lossy(bytes).to_string())
 }

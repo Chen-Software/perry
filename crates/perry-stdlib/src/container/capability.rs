@@ -12,7 +12,7 @@ pub struct CapabilityGrants {
     pub env: Option<HashMap<String, String>>,
 }
 
-pub async fn alloy_container_run_capability(
+pub async fn perry_container_run_capability(
     name: &str,
     image: &str,
     cmd: &[&str],
@@ -27,7 +27,7 @@ pub async fn alloy_container_run_capability(
 
     let spec = ContainerSpec {
         image: format!("{}@{}", image, digest),
-        name: Some(format!("alloy-cap-{}-{}", name, rand::random::<u32>())),
+        name: Some(format!("perry-cap-{}-{}", name, rand::random::<u32>())),
         ports: Some(vec![]),
         volumes: Some(vec![]),
         network: if grants.network { None } else { Some("none".to_string()) },
