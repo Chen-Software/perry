@@ -1,5 +1,5 @@
 use crate::compose::ComposeEngine;
-use crate::error::{ComposeError, Result};
+use crate::error::Result;
 use crate::project::ComposeProject;
 use crate::config::ProjectConfig;
 use clap::{Args, Parser, Subcommand};

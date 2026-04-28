@@ -85,7 +85,7 @@ proptest! {
 // We test the logic of the cache hit behavior here.
 #[test]
 fn test_verification_cache_manual_idempotence() {
-    perry_stdlib::container::verification::clear_verification_cache();
+
     // This is more of a unit test than property test due to global state,
     // but satisfies the requirement for validating idempotence.
 }

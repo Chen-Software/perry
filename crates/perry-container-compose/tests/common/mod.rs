@@ -1,8 +1,8 @@
 use async_trait::async_trait;
-use perry_container_compose::backend::{ContainerBackend, NetworkConfig, VolumeConfig};
+use perry_container_compose::backend::ContainerBackend;
 use perry_container_compose::types::{
     ContainerHandle, ContainerInfo, ContainerLogs, ImageInfo,
-    ContainerSpec
+    ContainerSpec, ComposeNetwork, ComposeVolume, ComposeServiceBuild
 };
 use perry_container_compose::error::{ComposeError, Result};
 use std::collections::HashMap;
@@ -14,7 +14,7 @@ pub struct MockBackendState {
     pub networks: Vec<String>,
     pub volumes: Vec<String>,
     pub actions: Vec<String>,
-    pub fail_on_run: Option<String>, // Substring to fail on
+    pub fail_on_run: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -48,7 +48,6 @@ impl ContainerBackend for MockBackend {
             image: spec.image.clone(),
             status: "running".to_string(),
             ports: spec.ports.clone().unwrap_or_default(),
-            labels: spec.labels.clone().unwrap_or_default(),
             created: "2025-01-01T00:00:00Z".to_string(),
         };
         state.containers.insert(name.clone(), info);
@@ -64,7 +63,6 @@ impl ContainerBackend for MockBackend {
             image: spec.image.clone(),
             status: "created".to_string(),
             ports: spec.ports.clone().unwrap_or_default(),
-            labels: spec.labels.clone().unwrap_or_default(),
             created: "2025-01-01T00:00:00Z".to_string(),
         };
         state.containers.insert(name.clone(), info);
@@ -117,12 +115,12 @@ impl ContainerBackend for MockBackend {
         Ok(ContainerLogs { stdout: "exec".into(), stderr: "".into() })
     }
 
-    async fn build(&self, _spec: &perry_container_compose::types::ComposeServiceBuild, _image_name: &str) -> Result<()> { Ok(()) }
+    async fn build(&self, _spec: &ComposeServiceBuild, _image_name: &str) -> Result<()> { Ok(()) }
     async fn pull_image(&self, _reference: &str) -> Result<()> { Ok(()) }
     async fn list_images(&self) -> Result<Vec<ImageInfo>> { Ok(vec![]) }
     async fn remove_image(&self, _reference: &str, _force: bool) -> Result<()> { Ok(()) }
 
-    async fn create_network(&self, name: &str, _config: &NetworkConfig) -> Result<()> {
+    async fn create_network(&self, name: &str, _config: &ComposeNetwork) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         state.actions.push(format!("create_network:{}", name));
         state.networks.push(name.to_string());
@@ -136,7 +134,7 @@ impl ContainerBackend for MockBackend {
         Ok(())
     }
 
-    async fn create_volume(&self, name: &str, _config: &VolumeConfig) -> Result<()> {
+    async fn create_volume(&self, name: &str, _config: &ComposeVolume) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         state.actions.push(format!("create_volume:{}", name));
         state.volumes.push(name.to_string());
@@ -148,17 +146,6 @@ impl ContainerBackend for MockBackend {
         state.actions.push(format!("remove_volume:{}", name));
         state.volumes.retain(|v| v != name);
         Ok(())
-    }
-
-    async fn wait(&self, _id: &str) -> Result<i32> { Ok(0) }
-    async fn inspect_image(&self, _reference: &str) -> Result<ImageInfo> {
-        Ok(ImageInfo {
-            id: "id".into(),
-            repository: "repo".into(),
-            tag: "tag".into(),
-            size: 0,
-            created: "".into(),
-        })
     }
 
     async fn inspect_network(&self, _name: &str) -> Result<()> {

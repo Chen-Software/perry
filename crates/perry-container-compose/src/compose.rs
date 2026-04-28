@@ -89,7 +89,7 @@ impl ComposeEngine {
         let mut started = Vec::new();
         for svc_name in target {
             let svc = self.spec.services.get(svc_name).unwrap();
-            let container_name = service::service_container_name(svc, svc_name);
+            let container_name = service::generate_name(&self.project_name, svc_name, svc);
 
             // Extract primary network if any
             let network = match &svc.networks {
@@ -182,7 +182,7 @@ impl ComposeEngine {
 
         for svc_name in target.iter().rev() {
             let svc = self.spec.services.get(*svc_name).unwrap();
-            let container_name = service::service_container_name(svc, svc_name);
+            let container_name = service::generate_name(&self.project_name, svc_name, svc);
             let _ = self.backend.stop(&container_name, Some(10)).await;
             let _ = self.backend.remove(&container_name, true).await;
         }
@@ -207,7 +207,7 @@ impl ComposeEngine {
     pub async fn ps(&self) -> Result<Vec<ContainerInfo>> {
         let mut infos = Vec::new();
         for (svc_name, svc) in &self.spec.services {
-            let container_name = service::service_container_name(svc, svc_name);
+            let container_name = service::generate_name(&self.project_name, svc_name, svc);
             if let Ok(info) = self.backend.inspect(&container_name).await {
                 infos.push(info);
             }
@@ -229,7 +229,7 @@ impl ComposeEngine {
 
         for svc_name in target {
             let svc = self.spec.services.get(svc_name).unwrap();
-            let container_name = service::service_container_name(svc, svc_name);
+            let container_name = service::generate_name(&self.project_name, svc_name, svc);
             if let Ok(logs) = self.backend.logs(&container_name, tail).await {
                 all_logs.insert(svc_name.clone(), format!("STDOUT:\n{}\nSTDERR:\n{}", logs.stdout, logs.stderr));
             }
@@ -245,7 +245,7 @@ impl ComposeEngine {
         workdir: Option<&str>,
     ) -> Result<ContainerLogs> {
         let svc = self.spec.services.get(service).ok_or_else(|| ComposeError::NotFound(service.into()))?;
-        let container_name = service::service_container_name(svc, service);
+        let container_name = service::generate_name(&self.project_name, service, svc);
         self.backend.exec(&container_name, cmd, env, workdir).await
     }
 
@@ -261,7 +261,7 @@ impl ComposeEngine {
         };
         for svc_name in target {
             let svc = self.spec.services.get(svc_name).unwrap();
-            let container_name = service::service_container_name(svc, svc_name);
+            let container_name = service::generate_name(&self.project_name, svc_name, svc);
             self.backend.start(&container_name).await?;
         }
         Ok(())
@@ -275,7 +275,7 @@ impl ComposeEngine {
         };
         for svc_name in target {
             let svc = self.spec.services.get(svc_name).unwrap();
-            let container_name = service::service_container_name(svc, svc_name);
+            let container_name = service::generate_name(&self.project_name, svc_name, svc);
             self.backend.stop(&container_name, None).await?;
         }
         Ok(())

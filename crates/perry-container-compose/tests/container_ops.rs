@@ -56,10 +56,10 @@ async fn test_network_volume_lifecycle() {
     let mock = MockBackend::default();
     let state_ref = Arc::clone(&mock.state);
     let backend: Arc<dyn ContainerBackend> = Arc::new(mock);
-    use perry_container_compose::backend::{NetworkConfig, VolumeConfig};
+    use perry_container_compose::types::{ComposeNetwork, ComposeVolume};
 
-    backend.create_network("test-net", &NetworkConfig::default()).await.unwrap();
-    backend.create_volume("test-vol", &VolumeConfig::default()).await.unwrap();
+    backend.create_network("test-net", &ComposeNetwork::default()).await.unwrap();
+    backend.create_volume("test-vol", &ComposeVolume::default()).await.unwrap();
 
     {
         let state = state_ref.lock().unwrap();

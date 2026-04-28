@@ -65,9 +65,11 @@ validation = ["dep:validator", "dep:regex"]
 
 # UUID/nanoid
 ids = ["dep:uuid", "dep:nanoid"]
+testing = ["dep:proptest"]
 
 # Container module (OCI container management)
-container = ["dep:async-trait", "dep:tokio", "async-runtime", "perry-container-compose", "dep:indexmap", "dep:serde_yaml"]
+container = ["dep:proptest", "dep:async-trait", "dep:tokio", "async-runtime", "perry-container-compose", "dep:serde_yaml"]
+proptest = ["dep:proptest"]
 
 # Async runtime (tokio) - internal feature
 async-runtime = ["dep:tokio"]
@@ -166,7 +168,6 @@ indexmap = { version = "2.2", features = ["serde"] }
 
 # Container module
 async-trait = { version = "0.1", optional = true }
-indexmap = { version = "2.2", optional = true }
 serde_yaml = { version = "0.9", optional = true }
 
 # LRU Cache
@@ -177,3 +178,4 @@ clap = { version = "4.4", features = ["derive"] }
 
 # Decimal math (Big.js / Decimal.js)
 rust_decimal = { version = "1.33", features = ["maths"] }
+proptest = { version = "1.4", optional = true }

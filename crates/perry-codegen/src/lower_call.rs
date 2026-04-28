@@ -3881,11 +3881,11 @@ static PERRY_CONTAINER_TABLE: &[UiSig] = &[
     UiSig { method: "run", runtime: "js_container_run", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
     UiSig { method: "create", runtime: "js_container_create", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
     UiSig { method: "start", runtime: "js_container_start", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
-    UiSig { method: "stop", runtime: "js_container_stop", args: &[UiArgKind::Str, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
-    UiSig { method: "remove", runtime: "js_container_remove", args: &[UiArgKind::Str, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
-    UiSig { method: "list", runtime: "js_container_list", args: &[UiArgKind::I64Raw], ret: UiReturnKind::Widget },
+    UiSig { method: "stop", runtime: "js_container_stop", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "remove", runtime: "js_container_remove", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "list", runtime: "js_container_list", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
     UiSig { method: "inspect", runtime: "js_container_inspect", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
-    UiSig { method: "logs", runtime: "js_container_logs", args: &[UiArgKind::Str, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
+    UiSig { method: "logs", runtime: "js_container_logs", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Widget },
     UiSig { method: "exec", runtime: "js_container_exec", args: &[UiArgKind::Str, UiArgKind::Str, UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Widget },
     UiSig { method: "pullImage", runtime: "js_container_pullImage", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
     UiSig { method: "listImages", runtime: "js_container_listImages", args: &[], ret: UiReturnKind::Widget },
@@ -3897,23 +3897,23 @@ static PERRY_CONTAINER_TABLE: &[UiSig] = &[
 
 /// Dispatch table for perry/compose module.
 static PERRY_COMPOSE_TABLE: &[UiSig] = &[
-    UiSig { method: "up", runtime: "js_compose_up", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
-    UiSig { method: "down", runtime: "js_compose_down", args: &[UiArgKind::I64Raw, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
-    UiSig { method: "ps", runtime: "js_compose_ps", args: &[UiArgKind::I64Raw], ret: UiReturnKind::Widget },
-    UiSig { method: "logs", runtime: "js_compose_logs", args: &[UiArgKind::I64Raw, UiArgKind::Str, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
-    UiSig { method: "exec", runtime: "js_compose_exec", args: &[UiArgKind::I64Raw, UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Widget },
-    UiSig { method: "config", runtime: "js_compose_config", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
-    UiSig { method: "start", runtime: "js_compose_start", args: &[UiArgKind::I64Raw, UiArgKind::Str], ret: UiReturnKind::Widget },
-    UiSig { method: "stop", runtime: "js_compose_stop", args: &[UiArgKind::I64Raw, UiArgKind::Str], ret: UiReturnKind::Widget },
-    UiSig { method: "restart", runtime: "js_compose_restart", args: &[UiArgKind::I64Raw, UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "up", runtime: "js_container_composeUp", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "down", runtime: "js_container_compose_down", args: &[UiArgKind::I64Raw, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
+    UiSig { method: "ps", runtime: "js_container_compose_ps", args: &[UiArgKind::I64Raw], ret: UiReturnKind::Widget },
+    UiSig { method: "logs", runtime: "js_container_compose_logs", args: &[UiArgKind::I64Raw, UiArgKind::Str, UiArgKind::I64Raw], ret: UiReturnKind::Widget },
+    UiSig { method: "exec", runtime: "js_container_compose_exec", args: &[UiArgKind::I64Raw, UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "config", runtime: "js_container_compose_config", args: &[UiArgKind::I64Raw], ret: UiReturnKind::Widget },
+    UiSig { method: "start", runtime: "js_container_compose_start", args: &[UiArgKind::I64Raw, UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "stop", runtime: "js_container_compose_stop", args: &[UiArgKind::I64Raw, UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "restart", runtime: "js_container_compose_restart", args: &[UiArgKind::I64Raw, UiArgKind::Str], ret: UiReturnKind::Widget },
 ];
 
 /// Dispatch table for perry/workloads module.
 static PERRY_WORKLOADS_TABLE: &[UiSig] = &[
-    UiSig { method: "graph", runtime: "js_workload_graph", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Str },
+    UiSig { method: "graph", runtime: "js_workload_graph", args: &[UiArgKind::Str, UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Str },
     UiSig { method: "node", runtime: "js_workload_node", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Str },
     UiSig { method: "runGraph", runtime: "js_workload_runGraph", args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Widget },
-    UiSig { method: "inspectGraph", runtime: "js_workload_inspectGraph", args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "inspectGraph", runtime: "js_workload_inspectGraph", args: &[UiArgKind::I64Raw], ret: UiReturnKind::Widget },
 ];
 
 fn perry_container_table_lookup(method: &str) -> Option<&'static UiSig> {
@@ -4109,6 +4109,10 @@ enum NativeArgKind {
     /// unboxing). Use for Rust signatures where the function receives
     /// `name: i64` and internally calls `string_from_nanboxed(name)` or
     /// similar — the callee expects the full NaN-boxed value, not an
+    /// Truncate NaN-boxed f64 to i32 via fptosi.
+    I32,
+    /// Truncate NaN-boxed f64 to i64 via fptosi.
+    I64,
     /// unboxed raw pointer. Common pattern in fastify context methods.
     JsvalI64,
 }
@@ -4151,6 +4155,8 @@ const NA_F64: NativeArgKind = NativeArgKind::F64;
 const NA_STR: NativeArgKind = NativeArgKind::StrPtr;
 const NA_PTR: NativeArgKind = NativeArgKind::PtrI64;
 const NA_JSV: NativeArgKind = NativeArgKind::JsvalI64;
+const NA_I32: NativeArgKind = NativeArgKind::I32;
+const NA_I64: NativeArgKind = NativeArgKind::I64;
 const NR_PTR: NativeRetKind = NativeRetKind::Ptr;
 const NR_STR: NativeRetKind = NativeRetKind::Str;
 const NR_F64: NativeRetKind = NativeRetKind::F64;
@@ -4665,13 +4671,13 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
         runtime: "js_container_start", args: &[NA_STR], ret: NR_PTR },
     NativeModSig { module: "perry/container", has_receiver: false, method: "stop",
         class_filter: None,
-        runtime: "js_container_stop", args: &[NA_STR, NA_F64], ret: NR_PTR },
+        runtime: "js_container_stop", args: &[NA_STR, NA_STR], ret: NR_PTR },
     NativeModSig { module: "perry/container", has_receiver: false, method: "remove",
         class_filter: None,
-        runtime: "js_container_remove", args: &[NA_STR, NA_F64], ret: NR_PTR },
+        runtime: "js_container_remove", args: &[NA_STR, NA_STR], ret: NR_PTR },
     NativeModSig { module: "perry/container", has_receiver: false, method: "list",
         class_filter: None,
-        runtime: "js_container_list", args: &[NA_F64], ret: NR_PTR },
+        runtime: "js_container_list", args: &[NA_STR], ret: NR_PTR },
     NativeModSig { module: "perry/container", has_receiver: false, method: "inspect",
         class_filter: None,
         runtime: "js_container_inspect", args: &[NA_STR], ret: NR_PTR },
@@ -4683,7 +4689,7 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
         runtime: "js_container_detectBackend", args: &[], ret: NR_PTR },
     NativeModSig { module: "perry/container", has_receiver: false, method: "logs",
         class_filter: None,
-        runtime: "js_container_logs", args: &[NA_STR, NA_F64], ret: NR_PTR },
+        runtime: "js_container_logs", args: &[NA_STR, NA_STR], ret: NR_PTR },
     NativeModSig { module: "perry/container", has_receiver: false, method: "exec",
         class_filter: None,
         runtime: "js_container_exec", args: &[NA_STR, NA_STR, NA_STR, NA_STR], ret: NR_PTR },
@@ -4695,7 +4701,7 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
         runtime: "js_container_listImages", args: &[], ret: NR_PTR },
     NativeModSig { module: "perry/container", has_receiver: false, method: "removeImage",
         class_filter: None,
-        runtime: "js_container_removeImage", args: &[NA_STR, NA_F64], ret: NR_PTR },
+        runtime: "js_container_removeImage", args: &[NA_STR, NA_I32], ret: NR_PTR },
 
     // ========== perry/container-compose ==========
     NativeModSig { module: "perry/container-compose", has_receiver: false, method: "composeUp",
@@ -4703,43 +4709,55 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
         runtime: "js_container_composeUp", args: &[NA_STR], ret: NR_PTR },
     NativeModSig { module: "perry/container-compose", has_receiver: false, method: "composeDown",
         class_filter: None,
-        runtime: "js_container_compose_down", args: &[NA_JSV, NA_F64], ret: NR_PTR },
+        runtime: "js_container_compose_down", args: &[NA_I64, NA_I32], ret: NR_PTR },
     NativeModSig { module: "perry/container-compose", has_receiver: false, method: "composePs",
         class_filter: None,
-        runtime: "js_container_compose_ps", args: &[NA_JSV], ret: NR_PTR },
+        runtime: "js_container_compose_ps", args: &[NA_I64], ret: NR_PTR },
     NativeModSig { module: "perry/container-compose", has_receiver: false, method: "composeLogs",
         class_filter: None,
-        runtime: "js_container_compose_logs", args: &[NA_JSV, NA_STR, NA_F64], ret: NR_PTR },
+        runtime: "js_container_compose_logs", args: &[NA_I64, NA_STR, NA_I32], ret: NR_PTR },
     NativeModSig { module: "perry/container-compose", has_receiver: false, method: "composeExec",
         class_filter: None,
-        runtime: "js_container_compose_exec", args: &[NA_JSV, NA_STR, NA_STR], ret: NR_PTR },
+        runtime: "js_container_compose_exec", args: &[NA_I64, NA_STR, NA_STR], ret: NR_PTR },
+    NativeModSig { module: "perry/container-compose", has_receiver: false, method: "composeConfig",
+        class_filter: None,
+        runtime: "js_container_compose_config", args: &[NA_I64], ret: NR_PTR },
+    NativeModSig { module: "perry/container-compose", has_receiver: false, method: "composeStart",
+        class_filter: None,
+        runtime: "js_container_compose_start", args: &[NA_I64, NA_STR], ret: NR_PTR },
+    NativeModSig { module: "perry/container-compose", has_receiver: false, method: "composeStop",
+        class_filter: None,
+        runtime: "js_container_compose_stop", args: &[NA_I64, NA_STR], ret: NR_PTR },
+    NativeModSig { module: "perry/container-compose", has_receiver: false, method: "composeRestart",
+        class_filter: None,
+        runtime: "js_container_compose_restart", args: &[NA_I64, NA_STR], ret: NR_PTR },
     // ComposeHandle instance methods
     NativeModSig { module: "perry/container-compose", has_receiver: true, method: "down",
         class_filter: Some("ComposeHandle"),
-        runtime: "js_container_compose_down", args: &[NA_F64], ret: NR_PTR },
+        runtime: "js_container_compose_down", args: &[NA_I32], ret: NR_PTR },
     NativeModSig { module: "perry/container-compose", has_receiver: true, method: "ps",
         class_filter: Some("ComposeHandle"),
         runtime: "js_container_compose_ps", args: &[], ret: NR_PTR },
     NativeModSig { module: "perry/container-compose", has_receiver: true, method: "logs",
         class_filter: Some("ComposeHandle"),
-        runtime: "js_container_compose_logs", args: &[NA_STR, NA_F64], ret: NR_PTR },
+        runtime: "js_container_compose_logs", args: &[NA_STR, NA_I32], ret: NR_PTR },
     NativeModSig { module: "perry/container-compose", has_receiver: true, method: "exec",
         class_filter: Some("ComposeHandle"),
         runtime: "js_container_compose_exec", args: &[NA_STR, NA_STR], ret: NR_PTR },
-];
 
-/// Look up a native module method in the static dispatch table.
-/// Entries with `class_filter: Some("Pool")` only match when
-/// `class_name == Some("Pool")`; entries with `class_filter: None`
-/// match any class_name. More-specific entries (with class_filter)
-/// are checked first.
-fn native_module_lookup(module: &str, has_receiver: bool, method: &str, class_name: Option<&str>) -> Option<&'static NativeModSig> {
-    // First pass: look for an exact class_filter match.
-    let exact = NATIVE_MODULE_TABLE.iter().find(|sig| {
-        sig.module == module && sig.has_receiver == has_receiver && sig.method == method
-            && sig.class_filter.is_some() && sig.class_filter == class_name
-    });
-    if exact.is_some() {
+    // ========== perry/workloads ==========
+    NativeModSig { module: "perry/workloads", has_receiver: false, method: "graph",
+        class_filter: None,
+        runtime: "js_workload_graph", args: &[NA_STR, NA_STR, NA_STR], ret: NR_STR },
+    NativeModSig { module: "perry/workloads", has_receiver: false, method: "node",
+        class_filter: None,
+        runtime: "js_workload_node", args: &[NA_STR, NA_STR], ret: NR_STR },
+    NativeModSig { module: "perry/workloads", has_receiver: false, method: "runGraph",
+        class_filter: None,
+        runtime: "js_workload_runGraph", args: &[NA_STR, NA_STR], ret: NR_PTR },
+    NativeModSig { module: "perry/workloads", has_receiver: false, method: "inspectGraph",
+        class_filter: None,
+        runtime: "js_workload_inspectGraph", args: &[NA_I64], ret: NR_PTR },
         return exact;
     }
     // Second pass: generic (class_filter == None) entries.
@@ -4796,6 +4814,18 @@ fn lower_native_module_dispatch(
                 let blk = ctx.block();
                 let bits = blk.bitcast_double_to_i64(&lowered);
                 llvm_args.push((I64, bits));
+                arg_types.push(I64);
+            }
+            NativeArgKind::I32 => {
+                let blk = ctx.block();
+                let i = blk.fptosi(DOUBLE, &lowered, I32);
+                llvm_args.push((I32, i));
+                arg_types.push(I32);
+            }
+            NativeArgKind::I64 => {
+                let blk = ctx.block();
+                let i = blk.fptosi(DOUBLE, &lowered, I64);
+                llvm_args.push((I64, i));
                 arg_types.push(I64);
             }
         }

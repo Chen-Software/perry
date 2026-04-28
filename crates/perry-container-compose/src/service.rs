@@ -1,7 +1,6 @@
-use crate::error::Result;
 use md5::{Digest, Md5};
 
-pub fn service_container_name(service: &crate::types::ComposeService, service_name: &str) -> String {
+pub fn generate_name(project_name: &str, service_name: &str, service: &crate::types::ComposeService) -> String {
     if let Some(name) = service.container_name.as_ref() {
         return name.clone();
     }
@@ -10,16 +9,21 @@ pub fn service_container_name(service: &crate::types::ComposeService, service_na
     let mut hasher = Md5::new();
     hasher.update(image.as_bytes());
     let hash = hex::encode(hasher.finalize());
-    let short_hash = &hash[..8];
+    let short_image_hash = &hash[..8];
 
-    let random_suffix: u32 = rand::random();
+    // Deterministic suffix based on project and service name
+    let mut hasher = Md5::new();
+    hasher.update(project_name.as_bytes());
+    hasher.update(service_name.as_bytes());
+    let hash = hex::encode(hasher.finalize());
+    let short_project_hash = &hash[..8];
 
     let safe_name: String = service_name
         .chars()
         .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
         .collect();
 
-    format!("{}-{}-{:08x}", safe_name, short_hash, random_suffix)
+    format!("{}-{}-{}", safe_name, short_image_hash, short_project_hash)
 }
 
 pub struct ServiceState {
@@ -34,14 +38,14 @@ mod tests {
     use crate::types::ComposeService;
 
     #[test]
-    fn test_service_container_name_format() {
+    fn test_generate_name_format() {
         let svc = ComposeService {
             image: Some("redis:7".to_string()),
             ..Default::default()
         };
-        let name = service_container_name(&svc, "cache");
+        let name = generate_name("test-proj", "cache", &svc);
 
-        // Format: {service_name}-{image_hash_8}-{random_hex_8}
+        // Format: {service_name}-{image_hash_8}-{project_service_hash_8}
         let parts: Vec<&str> = name.split('-').collect();
         assert_eq!(parts.len(), 3);
         assert_eq!(parts[0], "cache");
@@ -50,31 +54,28 @@ mod tests {
     }
 
     #[test]
-    fn test_service_container_name_stability() {
+    fn test_generate_name_stability() {
         let svc = ComposeService {
             image: Some("postgres:16".to_string()),
             ..Default::default()
         };
 
-        let n1 = service_container_name(&svc, "db");
-        let n2 = service_container_name(&svc, "db");
+        let n1 = generate_name("test-proj", "db", &svc);
+        let n2 = generate_name("test-proj", "db", &svc);
 
-        let parts1: Vec<&str> = n1.split('-').collect();
-        let parts2: Vec<&str> = n2.split('-').collect();
+        assert_eq!(n1, n2);
 
-        // Image hash (part 1) should be stable for the same image
-        assert_eq!(parts1[1], parts2[1]);
-        // Random suffix (part 2) should vary
-        assert_ne!(parts1[2], parts2[2]);
+        let n3 = generate_name("other-proj", "db", &svc);
+        assert_ne!(n1, n3);
     }
 
     #[test]
-    fn test_service_container_name_override() {
+    fn test_generate_name_override() {
         let svc = ComposeService {
             container_name: Some("my-custom-name".to_string()),
             ..Default::default()
         };
-        let name = service_container_name(&svc, "ignored");
+        let name = generate_name("proj", "ignored", &svc);
         assert_eq!(name, "my-custom-name");
     }
 }

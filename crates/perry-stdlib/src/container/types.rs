@@ -1,87 +1,60 @@
 //! Type definitions for the perry/container module.
 
 use perry_runtime::StringHeader;
+pub use perry_container_compose::types::{
+    ComposeHandle, ComposeService, ComposeSpec, ContainerHandle, ContainerInfo,
+    ContainerLogs, ContainerSpec, ImageInfo,
+};
+pub use perry_container_compose::error::ComposeError as ContainerError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
-use dashmap::DashMap;
-
+use std::sync::Arc;
 use perry_container_compose::ComposeEngine;
+use crate::common::handle::{register_handle, take_handle, get_handle};
 
 // ============ Handle Registry ============
 
-pub struct ContainerHandle {
-    pub id: String,
-    pub name: Option<String>,
-}
-
-pub static CONTAINER_HANDLES: OnceLock<DashMap<u64, ContainerHandle>> = OnceLock::new();
-pub static COMPOSE_HANDLES: OnceLock<DashMap<u64, ArcComposeEngine>> = OnceLock::new();
-pub static NEXT_HANDLE_ID: AtomicU64 = AtomicU64::new(1);
-
-pub struct ArcComposeEngine(pub std::sync::Arc<ComposeEngine>);
-
 pub fn register_container_handle(handle: ContainerHandle) -> u64 {
-    let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
-    CONTAINER_HANDLES.get_or_init(DashMap::new).insert(id, handle);
-    id
+    register_handle(handle) as u64
 }
 
-pub fn register_compose_handle(engine: ComposeEngine) -> u64 {
-    let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
-    COMPOSE_HANDLES.get_or_init(DashMap::new).insert(id, ArcComposeEngine(std::sync::Arc::new(engine)));
-    id
+pub fn register_compose_handle(engine: Arc<ComposeEngine>) -> u64 {
+    register_handle(engine) as u64
 }
 
-// ============ Core Container Types ============
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ContainerSpec {
-    pub image: String,
-    pub name: Option<String>,
-    pub ports: Option<Vec<String>>,
-    pub volumes: Option<Vec<String>>,
-    pub env: Option<HashMap<String, String>>,
-    pub cmd: Option<Vec<String>>,
-    pub entrypoint: Option<Vec<String>>,
-    pub network: Option<String>,
-    pub rm: Option<bool>,
-    pub read_only: Option<bool>,
-    pub seccomp: Option<String>,
-    pub labels: Option<HashMap<String, String>>,
+pub fn get_compose_handle(id: u64) -> Option<&'static Arc<ComposeEngine>> {
+    get_handle::<Arc<ComposeEngine>>(id as i64)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContainerInfo {
-    pub id: String,
-    pub name: String,
-    pub image: String,
-    pub status: String,
-    pub ports: Vec<String>,
-    pub created: String,
+pub fn take_compose_handle(id: u64) -> Option<Arc<ComposeEngine>> {
+    take_handle::<Arc<ComposeEngine>>(id as i64)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ContainerLogs {
-    pub stdout: String,
-    pub stderr: String,
+pub fn register_container_info_list(list: Vec<ContainerInfo>) -> u64 {
+    register_handle(list) as u64
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ImageInfo {
-    pub id: String,
-    pub repository: String,
-    pub tag: String,
-    pub size: u64,
-    pub created: String,
+pub fn register_container_info(info: ContainerInfo) -> u64 {
+    register_handle(info) as u64
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComposeHandle {
-    pub stack_id: u64,
-    pub project_name: String,
-    pub services: Vec<String>,
+pub fn register_container_logs(logs: ContainerLogs) -> u64 {
+    register_handle(logs) as u64
+}
+
+pub fn register_image_info_list(list: Vec<ImageInfo>) -> u64 {
+    register_handle(list) as u64
+}
+
+
+pub fn parse_container_spec(ptr: *const StringHeader) -> Result<ContainerSpec, String> {
+    let s = unsafe { string_from_header(ptr) }.ok_or("Invalid StringHeader pointer")?;
+    serde_json::from_str(&s).map_err(|e| format!("JSON error: {}", e))
+}
+
+pub fn parse_compose_spec(ptr: *const StringHeader) -> Result<ComposeSpec, String> {
+    let s = unsafe { string_from_header(ptr) }.ok_or("Invalid StringHeader pointer")?;
+    serde_json::from_str(&s).map_err(|e| format!("JSON error: {}", e))
 }
 
 // ============ Helper for StringHeader ============
