@@ -93,6 +93,61 @@ unsafe fn string_to_js(s: &str) -> *const StringHeader {
     perry_runtime::js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
 }
 
+/// `POINTER_TAG` for NaN-boxing a handle id as an opaque pointer. This is
+/// what every codegen `unbox_to_i64` call expects to find at the receiver
+/// slot of a `has_receiver: true` dispatch row — the lower 48 bits are
+/// masked off (`POINTER_MASK = 0x0000_FFFF_FFFF_FFFF`) and used as the
+/// handle id directly. Matches `perry_runtime::value::POINTER_TAG`.
+const POINTER_TAG_BITS: u64 = 0x7FFD_0000_0000_0000;
+
+/// Encode a u64 handle id as the f64 bits a Promise resolution slot expects.
+///
+/// The async-bridge stores `result_bits: u64` and resolves the Promise via
+/// `f64::from_bits(result_bits)`. Two things have to be true of those bits:
+///
+/// 1. **`${handle}` interpolation must produce something sane.** Pre-fix
+///    `Ok(1u64)` resolved with f64 = `5e-324` (subnormal), which prints as
+///    `"0"` — the user can't tell their handle from a void-resolution.
+///
+/// 2. **`down(stack, …)` / `stack.down(…)` dispatch must be able to recover
+///    the original handle id.** The codegen lowers `stack` via
+///    `unbox_to_i64` which expects a NaN-boxed value: it does
+///    `bits & POINTER_MASK` (lower 48 bits) and treats that as the i64
+///    handle. A bare `(id as f64).to_bits()` produces `0x3FF0_0000_…` for
+///    id=1 — masked to lower 48, that's 0, and the FFI sees "Invalid
+///    compose handle".
+///
+/// Both invariants are satisfied by NaN-boxing the handle with
+/// `POINTER_TAG = 0x7FFD` in the upper 16 bits and the id in the lower
+/// 48: `unbox_to_i64` recovers the id verbatim, and `JSValue::format`
+/// (called by template-string coercion) sees the POINTER_TAG and prints
+/// the id as a numeric handle.
+#[inline]
+fn handle_to_promise_bits(id: u64) -> u64 {
+    POINTER_TAG_BITS | (id & 0x0000_FFFF_FFFF_FFFF)
+}
+
+/// `TAG_UNDEFINED` as raw f64 bits. Used by `Promise<void>` FFIs to resolve
+/// with `undefined` rather than `0` (matches JS semantics).
+const PROMISE_VOID_BITS: u64 = 0x7FFC_0000_0000_0001;
+
+/// Decode a NaN-boxed f64 receiver/handle back to its registry id (i64).
+///
+/// The codegen `NA_F64` arg-coercion rule passes the user's `stack` variable
+/// through to the FFI as `double`. So when `js_compose_down` etc. take the
+/// handle as their first parameter, the LLVM declare emits `double`, the
+/// f64 lands in XMM0, and Rust must read it as `f64` to match the calling
+/// convention (declaring the arg as `i64` makes Rust read RDI instead and
+/// the FFI sees garbage).
+///
+/// `handle_to_promise_bits` NaN-boxes the id with POINTER_TAG, so the f64
+/// the user receives carries the id in its lower 48 bits. This helper
+/// reverses that boxing — masking off the tag and reading the id verbatim.
+#[inline]
+fn handle_id_from_f64(boxed: f64) -> i64 {
+    (boxed.to_bits() & 0x0000_FFFF_FFFF_FFFF) as i64
+}
+
 /// Optionally verify a container image's signature before pulling/running.
 ///
 /// Gated on `PERRY_CONTAINER_VERIFY_IMAGES=1` so the default path stays
@@ -147,7 +202,7 @@ pub unsafe extern "C" fn js_container_run(spec_ptr: *const StringHeader) -> *mut
         match backend.run(&spec).await {
             Ok(handle) => {
                 let handle_id = types::register_container_handle(handle);
-                Ok(handle_id as u64)
+                Ok(handle_to_promise_bits(handle_id as u64))
             }
             Err(e) => Err::<u64, String>(e.to_string()),
         }
@@ -156,16 +211,18 @@ pub unsafe extern "C" fn js_container_run(spec_ptr: *const StringHeader) -> *mut
     promise
 }
 
-/// Start compose services
-/// FFI: js_container_compose_start(handle_id: i64, services_json: *const StringHeader) -> *mut Promise
+/// Start compose services.
+///
+/// FFI: `js_container_compose_start(handle: f64, services_json: *const StringHeader) -> *mut Promise`
 #[no_mangle]
 pub unsafe extern "C" fn js_container_compose_start(
-    handle_id: i64,
+    handle: f64,
     services_json_ptr: *const StringHeader,
 ) -> *mut Promise {
     let promise = js_promise_new();
+    let handle_id = handle_id_from_f64(handle);
 
-    let handle = match types::get_compose_handle(handle_id as u64) {
+    let engine = match types::get_compose_handle(handle_id as u64) {
         Some(h) => h.clone(),
         None => {
             crate::common::spawn_for_promise(promise as *mut u8, async move {
@@ -182,22 +239,28 @@ pub unsafe extern "C" fn js_container_compose_start(
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
 
-        handle.start(&services).await.map(|_| 0u64).map_err(|e| e.to_string())
+        engine
+            .start(&services)
+            .await
+            .map(|_| PROMISE_VOID_BITS)
+            .map_err(|e| e.to_string())
     });
 
     promise
 }
 
-/// Stop compose services
-/// FFI: js_container_compose_stop(handle_id: i64, services_json: *const StringHeader) -> *mut Promise
+/// Stop compose services.
+///
+/// FFI: `js_container_compose_stop(handle: f64, services_json: *const StringHeader) -> *mut Promise`
 #[no_mangle]
 pub unsafe extern "C" fn js_container_compose_stop(
-    handle_id: i64,
+    handle: f64,
     services_json_ptr: *const StringHeader,
 ) -> *mut Promise {
     let promise = js_promise_new();
+    let handle_id = handle_id_from_f64(handle);
 
-    let handle = match types::get_compose_handle(handle_id as u64) {
+    let engine = match types::get_compose_handle(handle_id as u64) {
         Some(h) => h.clone(),
         None => {
             crate::common::spawn_for_promise(promise as *mut u8, async move {
@@ -214,22 +277,28 @@ pub unsafe extern "C" fn js_container_compose_stop(
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
 
-        handle.stop(&services).await.map(|_| 0u64).map_err(|e| e.to_string())
+        engine
+            .stop(&services)
+            .await
+            .map(|_| PROMISE_VOID_BITS)
+            .map_err(|e| e.to_string())
     });
 
     promise
 }
 
-/// Restart compose services
-/// FFI: js_container_compose_restart(handle_id: i64, services_json: *const StringHeader) -> *mut Promise
+/// Restart compose services.
+///
+/// FFI: `js_container_compose_restart(handle: f64, services_json: *const StringHeader) -> *mut Promise`
 #[no_mangle]
 pub unsafe extern "C" fn js_container_compose_restart(
-    handle_id: i64,
+    handle: f64,
     services_json_ptr: *const StringHeader,
 ) -> *mut Promise {
     let promise = js_promise_new();
+    let handle_id = handle_id_from_f64(handle);
 
-    let handle = match types::get_compose_handle(handle_id as u64) {
+    let engine = match types::get_compose_handle(handle_id as u64) {
         Some(h) => h.clone(),
         None => {
             crate::common::spawn_for_promise(promise as *mut u8, async move {
@@ -246,19 +315,26 @@ pub unsafe extern "C" fn js_container_compose_restart(
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
 
-        handle.restart(&services).await.map(|_| 0u64).map_err(|e| e.to_string())
+        engine
+            .restart(&services)
+            .await
+            .map(|_| PROMISE_VOID_BITS)
+            .map_err(|e| e.to_string())
     });
 
     promise
 }
 
 /// Get compose configuration
-/// FFI: js_container_compose_config(handle_id: i64) -> *mut Promise
+/// Get the resolved compose YAML configuration.
+///
+/// FFI: `js_container_compose_config(handle: f64) -> *mut Promise`
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_config(handle_id: i64) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_config(handle: f64) -> *mut Promise {
     let promise = js_promise_new();
+    let handle_id = handle_id_from_f64(handle);
 
-    let handle = match types::get_compose_handle(handle_id as u64) {
+    let engine = match types::get_compose_handle(handle_id as u64) {
         Some(h) => h.clone(),
         None => {
             crate::common::spawn_for_promise(promise as *mut u8, async move {
@@ -270,7 +346,7 @@ pub unsafe extern "C" fn js_container_compose_config(handle_id: i64) -> *mut Pro
 
     crate::common::spawn_for_promise_deferred(
         promise as *mut u8,
-        async move { handle.config().map_err(|e| e.to_string()) },
+        async move { engine.config().map_err(|e| e.to_string()) },
         |yaml| {
             let str_ptr = perry_runtime::js_string_from_bytes(yaml.as_ptr(), yaml.len() as u32);
             perry_runtime::JSValue::string_ptr(str_ptr).bits()
@@ -307,7 +383,7 @@ pub unsafe extern "C" fn js_container_create(spec_ptr: *const StringHeader) -> *
         match backend.create(&spec).await {
             Ok(handle) => {
                 let handle_id = types::register_container_handle(handle);
-                Ok(handle_id as u64)
+                Ok(handle_to_promise_bits(handle_id as u64))
             }
             Err(e) => Err::<u64, String>(e.to_string()),
         }
@@ -338,7 +414,7 @@ pub unsafe extern "C" fn js_container_start(id_ptr: *const StringHeader) -> *mut
             Err(e) => return Err::<u64, String>(e.to_string()),
         };
         match backend.start(&id).await {
-            Ok(()) => Ok(0u64),
+            Ok(()) => Ok(PROMISE_VOID_BITS),
             Err(e) => Err::<u64, String>(e.to_string()),
         }
     });
@@ -372,7 +448,7 @@ pub unsafe extern "C" fn js_container_stop(
             Err(e) => return Err::<u64, String>(e.to_string()),
         };
         match backend.stop(&id, timeout_opt).await {
-            Ok(()) => Ok(0u64),
+            Ok(()) => Ok(PROMISE_VOID_BITS),
             Err(e) => Err::<u64, String>(e.to_string()),
         }
     });
@@ -405,7 +481,7 @@ pub unsafe extern "C" fn js_container_remove(
             Err(e) => return Err::<u64, String>(e.to_string()),
         };
         match backend.remove(&id, force != 0).await {
-            Ok(()) => Ok(0u64),
+            Ok(()) => Ok(PROMISE_VOID_BITS),
             Err(e) => Err::<u64, String>(e.to_string()),
         }
     });
@@ -427,7 +503,7 @@ pub unsafe extern "C" fn js_container_list(all: i32) -> *mut Promise {
         match backend.list(all != 0).await {
             Ok(containers) => {
                 let handle_id = types::register_container_info_list(containers);
-                Ok(handle_id as u64)
+                Ok(handle_to_promise_bits(handle_id as u64))
             }
             Err(e) => Err::<u64, String>(e.to_string()),
         }
@@ -460,7 +536,7 @@ pub unsafe extern "C" fn js_container_inspect(id_ptr: *const StringHeader) -> *m
         match backend.inspect(&id).await {
             Ok(info) => {
                 let handle_id = types::register_container_info(info);
-                Ok(handle_id as u64)
+                Ok(handle_to_promise_bits(handle_id as u64))
             }
             Err(e) => Err::<u64, String>(e.to_string()),
         }
@@ -469,15 +545,66 @@ pub unsafe extern "C" fn js_container_inspect(id_ptr: *const StringHeader) -> *m
     promise
 }
 
-/// Get the current backend name
-/// FFI: js_container_getBackend() -> *const StringHeader
+/// Get the current backend name.
+///
+/// FFI: `js_container_getBackend() -> *const StringHeader`
+///
+/// Returns the canonical backend name (e.g. `"docker"` / `"podman"` /
+/// `"apple/container"` / `"colima"` / `"orbstack"` / `"lima"`) when the
+/// backend singleton is initialised. If not yet initialised, performs a
+/// synchronous in-place detection so user code that calls `getBackend()`
+/// at module scope (before any `await` has triggered `get_global_backend`)
+/// gets the live name instead of the misleading `"unknown"` sentinel.
+///
+/// The synchronous probe uses `tokio::runtime::Handle::try_current()` +
+/// `block_in_place` when called from inside a tokio worker, falling back
+/// to a one-shot `Runtime::new().block_on(...)` otherwise. Returns
+/// `"unknown"` only when detection genuinely fails (no backend installed
+/// + non-interactive). Detection latency is bounded by the same 2-second
+/// per-candidate timeout as `detect_backend()`.
 #[no_mangle]
 pub unsafe extern "C" fn js_container_getBackend() -> *const StringHeader {
-    // Note: this is synchronous and might return "unknown" if not initialized
     if let Some(b) = BACKEND.get() {
         return string_to_js(b.backend_name());
     }
-    string_to_js("unknown")
+
+    // No backend yet — try to populate the singleton synchronously.
+    // Strategy:
+    //   1. If we're inside a tokio worker, `block_in_place` lets us call
+    //      the async detect_backend() without deadlocking the runtime.
+    //   2. If we're on the main thread with no runtime active, spin up
+    //      a fresh single-threaded runtime for the probe.
+    //   3. On any failure (no runtime + main-thread-bound, detection
+    //      error, etc.), fall back to the legacy "unknown" sentinel.
+    let resolved = if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        match handle.runtime_flavor() {
+            tokio::runtime::RuntimeFlavor::CurrentThread => {
+                // current_thread runtimes can't `block_in_place`; the only
+                // safe move is to skip the sync probe and let the next
+                // async FFI call populate BACKEND. Return "unknown".
+                None
+            }
+            _ => Some(tokio::task::block_in_place(|| {
+                handle.block_on(get_global_backend())
+            })),
+        }
+    } else {
+        // No active runtime — spin up a temp one purely for detection.
+        // The result is stored in the OnceLock so subsequent FFI calls
+        // see it; the temp runtime is dropped immediately after.
+        match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => Some(rt.block_on(get_global_backend())),
+            Err(_) => None,
+        }
+    };
+
+    match resolved {
+        Some(Ok(b)) => string_to_js(b.backend_name()),
+        _ => string_to_js("unknown"),
+    }
 }
 
 /// Detect backend and return probed info
@@ -552,7 +679,7 @@ pub unsafe extern "C" fn js_container_logs(id_ptr: *const StringHeader, tail: i3
         match backend.logs(&id, tail_opt).await {
             Ok(logs) => {
                 let handle_id = types::register_container_logs(logs);
-                Ok(handle_id as u64)
+                Ok(handle_to_promise_bits(handle_id as u64))
             }
             Err(e) => Err::<u64, String>(e.to_string()),
         }
@@ -604,7 +731,7 @@ pub unsafe extern "C" fn js_container_exec(
         {
             Ok(logs) => {
                 let handle_id = types::register_container_logs(logs);
-                Ok(handle_id as u64)
+                Ok(handle_to_promise_bits(handle_id as u64))
             }
             Err(e) => Err::<u64, String>(e.to_string()),
         }
@@ -640,7 +767,7 @@ pub unsafe extern "C" fn js_container_pullImage(reference_ptr: *const StringHead
             Err(e) => return Err::<u64, String>(e.to_string()),
         };
         match backend.pull_image(&reference).await {
-            Ok(()) => Ok(0u64),
+            Ok(()) => Ok(PROMISE_VOID_BITS),
             Err(e) => Err::<u64, String>(e.to_string()),
         }
     });
@@ -662,7 +789,7 @@ pub unsafe extern "C" fn js_container_listImages() -> *mut Promise {
         match backend.list_images().await {
             Ok(images) => {
                 let handle_id = types::register_image_info_list(images);
-                Ok(handle_id as u64)
+                Ok(handle_to_promise_bits(handle_id as u64))
             }
             Err(e) => Err::<u64, String>(e.to_string()),
         }
@@ -693,7 +820,7 @@ pub unsafe extern "C" fn js_container_build(
         };
 
         match backend.build(&spec, &image_name).await {
-            Ok(()) => Ok(0u64),
+            Ok(()) => Ok(PROMISE_VOID_BITS),
             Err(e) => Err::<u64, String>(e.to_string()),
         }
     });
@@ -726,7 +853,7 @@ pub unsafe extern "C" fn js_container_removeImage(
             Err(e) => return Err::<u64, String>(e.to_string()),
         };
         match backend.remove_image(&reference, force != 0).await {
-            Ok(()) => Ok(0u64),
+            Ok(()) => Ok(PROMISE_VOID_BITS),
             Err(e) => Err::<u64, String>(e.to_string()),
         }
     });
@@ -763,7 +890,7 @@ pub unsafe extern "C" fn js_container_composeUp(
         match wrapper.up().await {
         Ok(_handle) => {
             let handle_id = types::register_compose_handle(wrapper.engine().clone());
-            Ok(handle_id)
+            Ok(handle_to_promise_bits(handle_id))
         }
             Err(e) => Err::<u64, String>(e.to_string()),
         }
@@ -779,69 +906,106 @@ pub unsafe extern "C" fn js_compose_up(spec_ptr: *const StringHeader) -> *mut Pr
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_down(handle_id: i64, volumes: i32) -> *mut Promise {
-    js_container_compose_down(handle_id, volumes)
+pub unsafe extern "C" fn js_compose_down(
+    handle: f64,
+    opts_ptr: *const StringHeader,
+) -> *mut Promise {
+    js_container_compose_down(handle, opts_ptr)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_ps(handle_id: i64) -> *mut Promise {
-    js_container_compose_ps(handle_id)
+pub unsafe extern "C" fn js_compose_ps(handle: f64) -> *mut Promise {
+    js_container_compose_ps(handle)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn js_compose_logs(
-    handle_id: i64,
+    handle: f64,
     service_ptr: *const StringHeader,
-    tail: i32,
+    tail: f64,
 ) -> *mut Promise {
-    js_container_compose_logs(handle_id, service_ptr, tail)
+    js_container_compose_logs(handle, service_ptr, tail)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn js_compose_exec(
-    handle_id: i64,
+    handle: f64,
     service_ptr: *const StringHeader,
     cmd_json_ptr: *const StringHeader,
 ) -> *mut Promise {
-    js_container_compose_exec(handle_id, service_ptr, cmd_json_ptr)
+    js_container_compose_exec(handle, service_ptr, cmd_json_ptr)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_config(handle_id: i64) -> *mut Promise {
-    js_container_compose_config(handle_id)
+pub unsafe extern "C" fn js_compose_config(handle: f64) -> *mut Promise {
+    js_container_compose_config(handle)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn js_compose_start(
-    handle_id: i64,
+    handle: f64,
     services_json_ptr: *const StringHeader,
 ) -> *mut Promise {
-    js_container_compose_start(handle_id, services_json_ptr)
+    js_container_compose_start(handle, services_json_ptr)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn js_compose_stop(
-    handle_id: i64,
+    handle: f64,
     services_json_ptr: *const StringHeader,
 ) -> *mut Promise {
-    js_container_compose_stop(handle_id, services_json_ptr)
+    js_container_compose_stop(handle, services_json_ptr)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn js_compose_restart(
-    handle_id: i64,
+    handle: f64,
     services_json_ptr: *const StringHeader,
 ) -> *mut Promise {
-    js_container_compose_restart(handle_id, services_json_ptr)
+    js_container_compose_restart(handle, services_json_ptr)
 }
 
 /// Stop and remove compose stack.
-/// FFI: js_container_compose_down(handle_id: i64, volumes: i32) -> *mut Promise
+///
+/// FFI: `js_container_compose_down(handle: f64, opts_json: *const StringHeader)
+///       -> *mut Promise`
+///
+/// `opts_json` is a JSON-encoded `DownOptions` object — the codegen's
+/// `js_value_to_str_ptr_for_ffi` helper auto-stringifies the TS object
+/// literal `{ volumes: bool, ...}`. Pre-fix the dispatch took the
+/// options as `f64` (NA_F64), which only worked when the caller passed a
+/// plain numeric flag — every TS user passing `down(handle, { volumes:
+/// false })` got `remove_volumes = true` because the NaN-boxed object
+/// pointer is non-zero. Same fix shape as `composeUp({...})` from
+/// v0.5.370.
+///
+/// Recognised keys (all optional):
+///   - `volumes: boolean`        remove named volumes (default `false`)
+///   - `removeOrphans: boolean`  remove orphaned containers (default `false`)
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_down(handle_id: i64, volumes: i32) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_down(
+    handle: f64,
+    opts_ptr: *const StringHeader,
+) -> *mut Promise {
     let promise = js_promise_new();
+    let handle_id = handle_id_from_f64(handle);
 
-    let handle = match types::take_compose_handle(handle_id as u64) {
+    let opts_json = unsafe { string_from_header(opts_ptr) };
+    let (remove_volumes, _remove_orphans) = match opts_json.as_deref() {
+        Some(s) if !s.is_empty() && s != "undefined" && s != "null" => {
+            let v: serde_json::Value =
+                serde_json::from_str(s).unwrap_or(serde_json::Value::Null);
+            (
+                v.get("volumes").and_then(|x| x.as_bool()).unwrap_or(false),
+                v.get("removeOrphans")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false),
+            )
+        }
+        _ => (false, false),
+    };
+
+    let engine = match types::take_compose_handle(handle_id as u64) {
         Some(h) => h,
         None => {
             crate::common::spawn_for_promise(promise as *mut u8, async move {
@@ -856,9 +1020,9 @@ pub unsafe extern "C" fn js_container_compose_down(handle_id: i64, volumes: i32)
             Ok(b) => Arc::clone(b),
             Err(e) => return Err::<u64, String>(e.to_string()),
         };
-        let wrapper = compose::ComposeWrapper::new_from_engine(handle);
-        match wrapper.down(volumes != 0).await {
-            Ok(()) => Ok(0u64),
+        let wrapper = compose::ComposeWrapper::new_from_engine(engine);
+        match wrapper.down(remove_volumes).await {
+            Ok(()) => Ok(PROMISE_VOID_BITS),
             Err(e) => Err::<u64, String>(e.to_string()),
         }
     });
@@ -866,13 +1030,15 @@ pub unsafe extern "C" fn js_container_compose_down(handle_id: i64, volumes: i32)
     promise
 }
 
-/// Get container info for compose stack
-/// FFI: js_container_compose_ps(handle_id: i64) -> *mut Promise
+/// Get container info for compose stack.
+///
+/// FFI: `js_container_compose_ps(handle: f64) -> *mut Promise`
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_ps(handle_id: i64) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_ps(handle: f64) -> *mut Promise {
     let promise = js_promise_new();
+    let handle_id = handle_id_from_f64(handle);
 
-    let handle = match types::get_compose_handle(handle_id as u64) {
+    let engine = match types::get_compose_handle(handle_id as u64) {
         Some(h) => h.clone(),
         None => {
             crate::common::spawn_for_promise(promise as *mut u8, async move {
@@ -887,11 +1053,11 @@ pub unsafe extern "C" fn js_container_compose_ps(handle_id: i64) -> *mut Promise
             Ok(b) => Arc::clone(b),
             Err(e) => return Err::<u64, String>(e.to_string()),
         };
-        let wrapper = compose::ComposeWrapper::new_from_engine(handle);
+        let wrapper = compose::ComposeWrapper::new_from_engine(engine);
         match wrapper.ps().await {
             Ok(containers) => {
                 let h = types::register_container_info_list(containers);
-                Ok(h as u64)
+                Ok(handle_to_promise_bits(h as u64))
             }
             Err(e) => Err::<u64, String>(e.to_string()),
         }
@@ -900,17 +1066,21 @@ pub unsafe extern "C" fn js_container_compose_ps(handle_id: i64) -> *mut Promise
     promise
 }
 
-/// Get logs from compose stack
-/// FFI: js_container_compose_logs(handle_id: i64, service: *const StringHeader, tail: i32) -> *mut Promise
+/// Get logs from compose stack.
+///
+/// FFI: `js_container_compose_logs(handle: f64, service: *const StringHeader, tail: f64) -> *mut Promise`
+///
+/// `tail < 0.0` (or NaN / undefined sentinels) means "no limit".
 #[no_mangle]
 pub unsafe extern "C" fn js_container_compose_logs(
-    handle_id: i64,
+    handle: f64,
     service_ptr: *const StringHeader,
-    tail: i32,
+    tail: f64,
 ) -> *mut Promise {
     let promise = js_promise_new();
+    let handle_id = handle_id_from_f64(handle);
 
-    let handle = match types::get_compose_handle(handle_id as u64) {
+    let engine = match types::get_compose_handle(handle_id as u64) {
         Some(h) => h.clone(),
         None => {
             crate::common::spawn_for_promise(promise as *mut u8, async move {
@@ -921,18 +1091,22 @@ pub unsafe extern "C" fn js_container_compose_logs(
     };
 
     let service = unsafe { string_from_header(service_ptr) };
-    let tail_opt = if tail >= 0 { Some(tail as u32) } else { None };
+    let tail_opt = if tail.is_finite() && tail >= 0.0 {
+        Some(tail as u32)
+    } else {
+        None
+    };
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         let _backend = match get_global_backend().await {
             Ok(b) => Arc::clone(b),
             Err(e) => return Err::<u64, String>(e.to_string()),
         };
-        let wrapper = compose::ComposeWrapper::new_from_engine(handle);
+        let wrapper = compose::ComposeWrapper::new_from_engine(engine);
         match wrapper.logs(service.as_deref(), tail_opt).await {
             Ok(logs) => {
                 let h = types::register_container_logs(logs);
-                Ok(h as u64)
+                Ok(handle_to_promise_bits(h as u64))
             }
             Err(e) => Err::<u64, String>(e.to_string()),
         }
@@ -941,17 +1115,19 @@ pub unsafe extern "C" fn js_container_compose_logs(
     promise
 }
 
-/// Execute command in compose service
-/// FFI: js_container_compose_exec(handle_id: i64, service: *const StringHeader, cmd_json: *const StringHeader) -> *mut Promise
+/// Execute command in compose service.
+///
+/// FFI: `js_container_compose_exec(handle: f64, service: *const StringHeader, cmd_json: *const StringHeader) -> *mut Promise`
 #[no_mangle]
 pub unsafe extern "C" fn js_container_compose_exec(
-    handle_id: i64,
+    handle: f64,
     service_ptr: *const StringHeader,
     cmd_json_ptr: *const StringHeader,
 ) -> *mut Promise {
     let promise = js_promise_new();
+    let handle_id = handle_id_from_f64(handle);
 
-    let handle = match types::get_compose_handle(handle_id as u64) {
+    let engine = match types::get_compose_handle(handle_id as u64) {
         Some(h) => h.clone(),
         None => {
             crate::common::spawn_for_promise(promise as *mut u8, async move {
@@ -978,11 +1154,11 @@ pub unsafe extern "C" fn js_container_compose_exec(
             Ok(b) => Arc::clone(b),
             Err(e) => return Err::<u64, String>(e.to_string()),
         };
-        let wrapper = compose::ComposeWrapper::new_from_engine(handle);
+        let wrapper = compose::ComposeWrapper::new_from_engine(engine);
         match wrapper.exec(&service, &cmd).await {
             Ok(logs) => {
                 let h = types::register_container_logs(logs);
-                Ok(h as u64)
+                Ok(handle_to_promise_bits(h as u64))
             }
             Err(e) => Err::<u64, String>(e.to_string()),
         }
@@ -1071,7 +1247,7 @@ pub unsafe extern "C" fn js_workload_runGraph(
         match engine.run(opts).await {
             Ok(_) => {
                 let handle_id = types::register_workload_handle(engine);
-                Ok(handle_id)
+                Ok(handle_to_promise_bits(handle_id))
             }
             Err(e) => Err::<u64, String>(e.to_string()),
         }
@@ -1130,7 +1306,7 @@ pub unsafe extern "C" fn js_workload_handle_down(handle_id: i64, force: i32) -> 
                 if let Some(handles) = types::WORKLOAD_HANDLES.get() {
                     handles.remove(&id);
                 }
-                Ok(0u64)
+                Ok(PROMISE_VOID_BITS)
             }
             Err(e) => Err::<u64, String>(e.to_string()),
         }
@@ -1193,7 +1369,7 @@ pub unsafe extern "C" fn js_workload_handle_logs(
         match engine.logs(&node_id, tail_opt).await {
             Ok(logs) => {
                 let handle_id = types::register_container_logs(logs);
-                Ok(handle_id)
+                Ok(handle_to_promise_bits(handle_id))
             }
             Err(e) => Err::<u64, String>(e.to_string()),
         }
@@ -1225,7 +1401,7 @@ pub unsafe extern "C" fn js_workload_handle_exec(
         match engine.exec(&node_id, &cmd).await {
             Ok(logs) => {
                 let handle_id = types::register_container_logs(logs);
-                Ok(handle_id)
+                Ok(handle_to_promise_bits(handle_id))
             }
             Err(e) => Err::<u64, String>(e.to_string()),
         }
@@ -1266,7 +1442,7 @@ pub unsafe extern "C" fn js_workload_handle_ps(handle_id: i64) -> *mut Promise {
                         })
                         .collect(),
                 );
-                Ok(handle_id)
+                Ok(handle_to_promise_bits(handle_id))
             }
             Err(e) => Err::<u64, String>(e.to_string()),
         }
