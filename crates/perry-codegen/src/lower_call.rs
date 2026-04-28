@@ -2652,7 +2652,11 @@ pub(crate) fn lower_native_method_call(
                         runtime_param_types.push(I64);
                     }
                     UiArgKind::Json => {
-                        let json_expr = Expr::JsonStringifyFull(Box::new(arg.clone()), None, None);
+                        let json_expr = Expr::JsonStringifyFull(
+                            Box::new(arg.clone()),
+                            Box::new(Expr::Null),
+                            Box::new(Expr::Null),
+                        );
                         let json_box = lower_expr(ctx, &json_expr)?;
                         let blk = ctx.block();
                         let ptr = blk.call(I64, "js_get_string_pointer_unified", &[(DOUBLE, &json_box)]);
@@ -4050,15 +4054,15 @@ static PERRY_CONTAINER_TABLE: &[UiSig] = &[
     UiSig { method: "run", runtime: "js_container_run", args: &[UiArgKind::Json], ret: UiReturnKind::Promise },
     UiSig { method: "create", runtime: "js_container_create", args: &[UiArgKind::Json], ret: UiReturnKind::Promise },
     UiSig { method: "start", runtime: "js_container_start", args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "stop", runtime: "js_container_stop", args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "remove", runtime: "js_container_remove", args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "list", runtime: "js_container_list", args: &[UiArgKind::F64], ret: UiReturnKind::Promise },
+    UiSig { method: "stop", runtime: "js_container_stop", args: &[UiArgKind::Str, UiArgKind::Json], ret: UiReturnKind::Promise },
+    UiSig { method: "remove", runtime: "js_container_remove", args: &[UiArgKind::Str, UiArgKind::Json], ret: UiReturnKind::Promise },
+    UiSig { method: "list", runtime: "js_container_list", args: &[UiArgKind::Json], ret: UiReturnKind::Promise },
     UiSig { method: "inspect", runtime: "js_container_inspect", args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
-    UiSig { method: "logs", runtime: "js_container_logs", args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
-    UiSig { method: "exec", runtime: "js_container_exec", args: &[UiArgKind::Str, UiArgKind::Json, UiArgKind::Json, UiArgKind::Str], ret: UiReturnKind::Promise },
+    UiSig { method: "logs", runtime: "js_container_logs", args: &[UiArgKind::Str, UiArgKind::Json], ret: UiReturnKind::Promise },
+    UiSig { method: "exec", runtime: "js_container_exec", args: &[UiArgKind::Str, UiArgKind::Json, UiArgKind::Json], ret: UiReturnKind::Promise },
     UiSig { method: "pullImage", runtime: "js_container_pullImage", args: &[UiArgKind::Str], ret: UiReturnKind::Promise },
     UiSig { method: "listImages", runtime: "js_container_listImages", args: &[], ret: UiReturnKind::Promise },
-    UiSig { method: "removeImage", runtime: "js_container_removeImage", args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Promise },
+    UiSig { method: "removeImage", runtime: "js_container_removeImage", args: &[UiArgKind::Str, UiArgKind::Json], ret: UiReturnKind::Promise },
     UiSig { method: "getBackend", runtime: "js_container_getBackend", args: &[], ret: UiReturnKind::Str },
     UiSig { method: "detectBackend", runtime: "js_container_detectBackend", args: &[], ret: UiReturnKind::Promise },
     UiSig { method: "build", runtime: "js_container_build", args: &[UiArgKind::Json, UiArgKind::Str], ret: UiReturnKind::Promise },
@@ -4095,23 +4099,14 @@ fn perry_compose_table_lookup(method: &str) -> Option<&'static UiSig> {
 /// lazy-declares the runtime function, emits the call, and boxes the
 /// return value per `sig.ret`.
 ///
-/// Args length mismatch (caller passed wrong number of args) → falls
-/// back to lowering all args for side effects + returning the
-/// zero-sentinel. The catch-all is intentional: TS users may write
-/// `Text()` (no arg) or `Text(s, extra)` and we don't want to bail
-/// the entire compilation.
+/// If caller passes fewer args than the table entry declares, they are
+/// padded with TAG_UNDEFINED/null (see arity padding below). If caller
+/// passes MORE args, the extras are ignored.
 fn lower_perry_ui_table_call(
     ctx: &mut FnCtx<'_>,
     sig: &UiSig,
     args: &[Expr],
 ) -> Result<String> {
-    if args.len() != sig.args.len() {
-        // Mismatched arity — fall back to side-effect lowering only.
-        for a in args {
-            let _ = lower_expr(ctx, a)?;
-        }
-        return Ok(double_literal(0.0));
-    }
 
     // Lower each arg according to its declared kind. Build two parallel
     // vectors so we can pass them through to `blk.call(...)` in one shot
@@ -4161,11 +4156,34 @@ fn lower_perry_ui_table_call(
                 runtime_param_types.push(I64);
             }
             UiArgKind::Json => {
-                let json_expr = Expr::JsonStringifyFull(Box::new(arg.clone()), None, None);
+                let json_expr = Expr::JsonStringifyFull(
+                    Box::new(arg.clone()),
+                    Box::new(Expr::Null),
+                    Box::new(Expr::Null),
+                );
                 let json_box = lower_expr(ctx, &json_expr)?;
                 let blk = ctx.block();
                 let ptr = blk.call(I64, "js_get_string_pointer_unified", &[(DOUBLE, &json_box)]);
                 llvm_args.push((I64, ptr));
+                runtime_param_types.push(I64);
+            }
+        }
+    }
+
+    // Arity padding: if caller passed fewer args than the table entry
+    // declares, pad with TAG_UNDEFINED (for doubles/closures) or null
+    // (for string/widget pointers). Without this, the native function
+    // reads garbage from stale registers/stack slots.
+    for i in args.len()..sig.args.len() {
+        let kind = sig.args[i];
+        match kind {
+            UiArgKind::F64 | UiArgKind::Closure => {
+                let undef = crate::nanbox::double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED));
+                llvm_args.push((DOUBLE, undef));
+                runtime_param_types.push(DOUBLE);
+            }
+            UiArgKind::Str | UiArgKind::Widget | UiArgKind::Json | UiArgKind::I64Raw => {
+                llvm_args.push((I64, "0".to_string()));
                 runtime_param_types.push(I64);
             }
         }

@@ -22,6 +22,11 @@ impl WorkloadGraphEngine {
 
     pub async fn run(&self, graph_json: &str, _opts_json: &str) -> Result<ComposeHandle> {
         let graph: WorkloadGraph = serde_json::from_str(graph_json).map_err(crate::error::ComposeError::JsonError)?;
+        let opts: crate::types::RunGraphOptions = serde_json::from_str(_opts_json).unwrap_or_default();
+        self.run_graph(&graph, &opts).await
+    }
+
+    pub async fn run_graph(&self, graph: &WorkloadGraph, _opts: &crate::types::RunGraphOptions) -> Result<ComposeHandle> {
         let spec = graph.to_compose_spec();
         let engine = Arc::new(ComposeEngine::new(spec, graph.name.clone(), Arc::clone(&self.backend)));
 
@@ -71,10 +76,9 @@ impl WorkloadGraph {
                     Some(DependsOnSpec::List(node.depends_on.clone()))
                 },
                 read_only: Some(node.policy.read_only_root),
-                privileged: Some(node.policy.tier == crate::types::PolicyTier::Untrusted),
-                cap_drop: if node.policy.seccomp { Some(vec!["ALL".to_string()]) } else { None },
                 network_mode: if node.policy.no_network { Some("none".to_string()) } else { None },
-                isolation: match &node.runtime {
+                security_opt: if node.policy.seccomp { Some(vec!["no-new-privileges".to_string()]) } else { None },
+                isolation: match node.runtime {
                     crate::types::RuntimeSpec::Microvm { .. } => Some("hyperv".to_string()),
                     crate::types::RuntimeSpec::Wasm { .. } => Some("wasm".to_string()),
                     _ => None,

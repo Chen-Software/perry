@@ -147,21 +147,27 @@ impl ComposeEngine {
                     .and_then(|c| c.name.as_deref())
                     .unwrap_or(vol_name.as_str());
 
-                // State-aware: only create if not exists
+                // State-aware: only create if not exists (idempotent)
                 let spec_config = vol_config_opt.clone().unwrap_or_default();
                 let config = crate::backend::VolumeConfig {
                     driver: spec_config.driver,
                     labels: spec_config.labels.map(|l| l.to_map()).unwrap_or_default(),
                 };
                 tracing::info!("Creating volume '{}'…", resolved_name);
-                if let Err(e) = self.backend.create_volume(resolved_name, &config).await {
-                    self.rollback().await;
-                    return Err(ComposeError::ServiceStartupFailed {
-                        service: format!("volume/{}", vol_name),
-                        message: e.to_string(),
-                    });
+                match self.backend.create_volume(resolved_name, &config).await {
+                    Ok(_) => {
+                        self.session_volumes.lock().unwrap().push(resolved_name.to_string());
+                    }
+                    Err(e) => {
+                        if !e.to_string().contains("already exists") {
+                            self.rollback().await;
+                            return Err(ComposeError::ServiceStartupFailed {
+                                service: format!("volume/{}", vol_name),
+                                message: e.to_string(),
+                            });
+                        }
+                    }
                 }
-                self.session_volumes.lock().unwrap().push(resolved_name.to_string());
             }
         }
 
@@ -359,15 +365,20 @@ impl ComposeEngine {
             let _ = self.backend.remove_network(&net_name).await;
         }
 
-        // 3. Remove session volumes (if requested)
+        // 3. Remove volumes (if requested)
         if remove_volumes {
-            let volumes = {
-                let mut guard = self.session_volumes.lock().unwrap();
-                std::mem::take(&mut *guard)
-            };
-            for vol_name in volumes {
-                let _ = self.backend.remove_volume(&vol_name).await;
+            // Remove volumes defined in spec (if not external)
+            if let Some(volumes) = &self.spec.volumes {
+                for (vol_name, vol_config_opt) in volumes {
+                    let external = vol_config_opt.as_ref().map_or(false, |c| c.external.unwrap_or(false));
+                    if external { continue; }
+                    let resolved_name = vol_config_opt.as_ref().and_then(|c| c.name.as_deref()).unwrap_or(vol_name.as_str());
+                    let _ = self.backend.remove_volume(resolved_name).await;
+                }
             }
+            // Also ensure session volumes are cleared
+            let mut guard = self.session_volumes.lock().unwrap();
+            guard.clear();
         }
 
         Ok(())

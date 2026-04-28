@@ -797,28 +797,36 @@ pub struct WorkloadGraph {
     pub edges: Vec<WorkloadEdge>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum ExecutionStrategy {
+    #[default]
+    DependencyAware,
     Sequential,
     MaxParallel,
-    DependencyAware,
     ParallelSafe,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum FailureStrategy {
+    #[default]
     RollbackAll,
     PartialContinue,
     HaltGraph,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RunGraphOptions {
     pub strategy: ExecutionStrategy,
     pub on_failure: FailureStrategy,
+}
+
+impl RunGraphOptions {
+    pub fn new(strategy: ExecutionStrategy, on_failure: FailureStrategy) -> Self {
+        Self { strategy, on_failure }
+    }
 }
 
 // ============ Container types (for single-container API) ============
