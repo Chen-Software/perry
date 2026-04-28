@@ -800,3 +800,12 @@ pub(crate) fn lower_decorators(_ctx: &mut LoweringContext, decorators: &[ast::De
     }).collect()
 }
 
+
+pub(crate) fn infer_body_return_type(stmts: &[ast::Stmt], ctx: &LoweringContext) -> Option<Type> {
+    for stmt in stmts {
+        if let ast::Stmt::Return(ret) = stmt {
+            return ret.arg.as_ref().map(|arg| infer_type_from_expr(arg, ctx));
+        }
+    }
+    None
+}

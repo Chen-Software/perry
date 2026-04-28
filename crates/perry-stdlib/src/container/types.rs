@@ -96,3 +96,34 @@ pub unsafe fn string_from_header(header: *const StringHeader) -> Option<String> 
     let s = (*header).as_str();
     Some(s.to_string())
 }
+
+// ============ Workload Types ============
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkloadGraph {
+    pub name: String,
+    pub nodes: std::collections::HashMap<String, WorkloadNode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkloadNode {
+    pub id: String,
+    pub name: String,
+    pub image: Option<String>,
+    pub ports: Vec<String>,
+    pub env: HashMap<String, String>,
+    pub depends_on: Vec<String>,
+    pub runtime: String,
+    pub policy: PolicySpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicySpec {
+    pub tier: String,
+    pub no_network: bool,
+    pub read_only_root: bool,
+    pub seccomp: bool,
+}

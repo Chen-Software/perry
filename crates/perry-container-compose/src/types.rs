@@ -780,6 +780,37 @@ pub struct BackendInfo {
     pub isolation_level: IsolationLevel,
 }
 
+
+// ============ Workload Graph Types ============
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkloadGraph {
+    pub name: String,
+    pub nodes: indexmap::IndexMap<String, WorkloadNode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkloadNode {
+    pub id: String,
+    pub name: String,
+    pub image: Option<String>,
+    pub ports: Vec<String>,
+    pub env: std::collections::HashMap<String, String>,
+    pub depends_on: Vec<String>,
+    pub runtime: String, // "oci" | "microvm" | "wasm" | "auto"
+    pub policy: PolicySpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicySpec {
+    pub tier: String, // "default" | "isolated" | "hardened" | "untrusted"
+    pub no_network: bool,
+    pub read_only_root: bool,
+    pub seccomp: bool,
+}
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -523,6 +523,65 @@ impl ComposeEngine {
 
 // ============ Dependency resolution (Kahn's algorithm) ============
 
+// ============ WorkloadGraphEngine ============
+
+pub struct WorkloadGraphEngine {
+    pub project_name: String,
+    pub backend: Arc<dyn ContainerBackend>,
+    pub session_containers: std::sync::Mutex<Vec<String>>,
+}
+
+impl WorkloadGraphEngine {
+    pub fn new(project_name: String, backend: Arc<dyn ContainerBackend>) -> Self {
+        WorkloadGraphEngine {
+            project_name,
+            backend,
+            session_containers: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    pub async fn run_graph(
+        &self,
+        graph: &crate::types::WorkloadGraph,
+    ) -> Result<Vec<String>> {
+        let mut started = Vec::new();
+        for (id, node) in &graph.nodes {
+            let spec = ContainerSpec {
+                image: node.image.clone().unwrap_or_default(),
+                name: Some(node.name.clone()),
+                ports: Some(node.ports.clone()),
+                env: Some(node.env.clone()),
+                read_only: Some(node.policy.read_only_root),
+                network: if node.policy.no_network { Some("none".into()) } else { None },
+                ..Default::default()
+            };
+
+            match self.backend.run(&spec).await {
+                Ok(_) => {
+                    self.session_containers.lock().unwrap().push(node.name.clone());
+                    started.push(id.clone());
+                }
+                Err(e) => {
+                    self.rollback().await;
+                    return Err(e);
+                }
+            }
+        }
+        Ok(started)
+    }
+
+    async fn rollback(&self) {
+        let containers = {
+            let mut guard = self.session_containers.lock().unwrap();
+            std::mem::take(&mut *guard)
+        };
+        for name in containers.iter().rev() {
+            let _ = self.backend.stop(name, None).await;
+            let _ = self.backend.remove(name, true).await;
+        }
+    }
+}
+
 /// Resolve the startup order of services using Kahn's algorithm (BFS topological sort).
 ///
 /// Returns services in dependency order. If a cycle is detected, returns

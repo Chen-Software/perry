@@ -1,8 +1,8 @@
 //! Property-based tests for the perry-stdlib container module.
 
 use proptest::prelude::*;
-use serde_json::{json, Value};
-use perry_container_compose::indexmap::IndexMap;
+use serde_json::Value;
+
 use perry_stdlib::container::types::*;
 
 // ============ Property 2: ContainerSpec CLI argument round-trip ============
