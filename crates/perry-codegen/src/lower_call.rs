@@ -4886,8 +4886,17 @@ pub(super) fn lower_native_module_dispatch(
                 arg_types.push(DOUBLE);
             }
             NativeArgKind::StrPtr => {
+                // `js_value_to_str_ptr_for_ffi` (vs. the older
+                // `js_get_string_pointer_unified`) gracefully handles
+                // non-string arguments: object literals, arrays, numbers,
+                // and bools auto-stringify via `js_json_stringify`. This
+                // matches user expectation for FFIs like `composeUp({…})`
+                // where the TS surface accepts an object but the FFI
+                // boundary takes a JSON-encoded `Str`. Pre-fix, the raw
+                // object pointer was passed through and the FFI's
+                // `serde_json::from_str` failed at column 0.
                 let blk = ctx.block();
-                let ptr = blk.call(I64, "js_get_string_pointer_unified", &[(DOUBLE, &lowered)]);
+                let ptr = blk.call(I64, "js_value_to_str_ptr_for_ffi", &[(DOUBLE, &lowered)]);
                 llvm_args.push((I64, ptr));
                 arg_types.push(I64);
             }

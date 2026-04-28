@@ -19,6 +19,16 @@ pub struct ComposeEngine {
     session_containers: Mutex<Vec<String>>,
     session_networks: Mutex<Vec<String>>,
     session_volumes: Mutex<Vec<String>>,
+    /// Cached `service_name → container_name` map, populated by `up()`.
+    ///
+    /// `service::service_container_name` regenerates a fresh random suffix
+    /// per call (`{md5_8}-{random_hex8}`), so any post-`up` operation
+    /// (`exec`, `logs`, `down`, `ps`) that recomputes the name from the
+    /// service spec ends up with a different name than the one the
+    /// container was actually created with → "No such container" errors.
+    /// `up()` resolves the name once at startup and stores it here; later
+    /// methods read this map instead of regenerating.
+    service_container_names: Mutex<HashMap<String, String>>,
 }
 
 impl ComposeEngine {
@@ -34,7 +44,36 @@ impl ComposeEngine {
             session_containers: Mutex::new(Vec::new()),
             session_networks: Mutex::new(Vec::new()),
             session_volumes: Mutex::new(Vec::new()),
+            service_container_names: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Resolve the container name for a given service, preferring the cached
+    /// name set during `up()` and falling back to a fresh derivation only
+    /// when no entry exists yet (e.g. for callers that operate on services
+    /// before `up()` registered them — rare).
+    pub fn resolve_container_name(&self, service_name: &str) -> String {
+        if let Some(cached) = self
+            .service_container_names
+            .lock()
+            .unwrap()
+            .get(service_name)
+            .cloned()
+        {
+            return cached;
+        }
+        let svc = self.spec.services.get(service_name);
+        match svc {
+            Some(s) => service::service_container_name(s, service_name),
+            None => format!("{}-unknown", service_name),
+        }
+    }
+
+    fn cache_container_name(&self, service_name: &str, container_name: &str) {
+        self.service_container_names
+            .lock()
+            .unwrap()
+            .insert(service_name.to_string(), container_name.to_string());
     }
 
     fn register(self: Arc<Self>) -> ComposeHandle {
@@ -99,7 +138,18 @@ impl ComposeEngine {
         let mut started = Vec::new();
         for svc_name in target {
             let svc = self.spec.services.get(svc_name).unwrap();
-            let container_name = service::service_container_name(svc, svc_name);
+            // Generate the container name ONCE per service per session and
+            // cache it so later methods (`exec`, `logs`, `down`) see the
+            // same name we actually `run`'d the container with. The
+            // underlying `service_container_name` re-randomises per call.
+            let container_name = self
+                .service_container_names
+                .lock()
+                .unwrap()
+                .get(svc_name)
+                .cloned()
+                .unwrap_or_else(|| service::service_container_name(svc, svc_name));
+            self.cache_container_name(svc_name, &container_name);
 
             // Extract primary network if any
             let network = match &svc.networks {
@@ -325,8 +375,7 @@ impl ComposeEngine {
                 let _ = self.backend.remove(&cid, true).await;
             }
 
-            let svc = self.spec.services.get(svc_name).unwrap();
-            let container_name = service::service_container_name(svc, svc_name);
+            let container_name = self.resolve_container_name(svc_name);
             let _ = self.backend.stop(&container_name, Some(10)).await;
             let _ = self.backend.remove(&container_name, true).await;
         }
@@ -350,8 +399,8 @@ impl ComposeEngine {
 
     pub async fn ps(&self) -> Result<Vec<ContainerInfo>> {
         let mut infos = Vec::new();
-        for (svc_name, svc) in &self.spec.services {
-            let container_name = service::service_container_name(svc, svc_name);
+        for svc_name in self.spec.services.keys() {
+            let container_name = self.resolve_container_name(svc_name);
             if let Ok(info) = self.backend.inspect(&container_name).await {
                 infos.push(info);
             }
@@ -372,8 +421,7 @@ impl ComposeEngine {
         };
 
         for svc_name in target {
-            let svc = self.spec.services.get(svc_name).unwrap();
-            let container_name = service::service_container_name(svc, svc_name);
+            let container_name = self.resolve_container_name(svc_name);
             if let Ok(logs) = self.backend.logs(&container_name, tail).await {
                 all_logs.insert(
                     svc_name.clone(),
@@ -391,12 +439,10 @@ impl ComposeEngine {
         env: Option<&HashMap<String, String>>,
         workdir: Option<&str>,
     ) -> Result<ContainerLogs> {
-        let svc = self
-            .spec
-            .services
-            .get(service)
-            .ok_or_else(|| ComposeError::NotFound(service.into()))?;
-        let container_name = service::service_container_name(svc, service);
+        if !self.spec.services.contains_key(service) {
+            return Err(ComposeError::NotFound(service.into()));
+        }
+        let container_name = self.resolve_container_name(service);
         self.backend.exec(&container_name, cmd, env, workdir).await
     }
 
@@ -411,8 +457,7 @@ impl ComposeEngine {
             services.iter().collect()
         };
         for svc_name in target {
-            let svc = self.spec.services.get(svc_name).unwrap();
-            let container_name = service::service_container_name(svc, svc_name);
+            let container_name = self.resolve_container_name(svc_name);
             self.backend.start(&container_name).await?;
         }
         Ok(())
@@ -425,8 +470,7 @@ impl ComposeEngine {
             services.iter().collect()
         };
         for svc_name in target {
-            let svc = self.spec.services.get(svc_name).unwrap();
-            let container_name = service::service_container_name(svc, svc_name);
+            let container_name = self.resolve_container_name(svc_name);
             self.backend.stop(&container_name, None).await?;
         }
         Ok(())

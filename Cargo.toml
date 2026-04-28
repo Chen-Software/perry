@@ -31,6 +31,7 @@ members = [
     "crates/perry-ui-testkit",
     "crates/perry-doc-tests",
     "crates/perry-updater",
+    "crates/perry-container-compose",
 ]
 # Only build platform-independent crates by default.
 # Platform-specific UI crates (perry-ui-macos, perry-ui-ios, etc.) must be built
@@ -54,6 +55,7 @@ default-members = [
     "crates/perry-codegen-wear-tiles",
     "crates/perry-codegen-wasm",
     "crates/perry-updater",
+    "crates/perry-container-compose",
 ]
 
 # Aggressive release optimizations for small, fast binaries
@@ -109,11 +111,17 @@ codegen-units = 16
 [profile.release.package.perry-stdlib]
 opt-level = "s"       # Optimize for size in stdlib
 
+# perry-container-compose exports #[no_mangle] FFI symbols when its `ffi`
+# feature is on; don't strip them.
+[profile.release.package.perry-container-compose]
+strip = false
+codegen-units = 16
+
 [profile.release.package.perry-jsruntime]
 opt-level = 3
 
 [workspace.package]
-version = "0.5.369"
+version = "0.5.370"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/PerryTS/perry"
@@ -190,3 +198,4 @@ perry-codegen-wear-tiles = { path = "crates/perry-codegen-wear-tiles" }
 perry-codegen-wasm = { path = "crates/perry-codegen-wasm" }
 perry-ui-testkit = { path = "crates/perry-ui-testkit" }
 perry-updater = { path = "crates/perry-updater" }
+perry-container-compose = { path = "crates/perry-container-compose" }
