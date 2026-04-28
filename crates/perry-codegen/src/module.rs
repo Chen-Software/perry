@@ -104,6 +104,14 @@ impl LlModule {
             .push(format!("@{} = internal constant {} {}", name, ty, init));
     }
 
+    /// Push a fully-formed `@<name> = ...` line into the module's globals
+    /// list. Used for constants whose type is not in the `LlvmType` enum
+    /// (e.g. `[N x i32]` flat constant arrays for issue #50's folded
+    /// module-level 2D int arrays).
+    pub fn add_raw_global(&mut self, line: String) {
+        self.globals.push(line);
+    }
+
     /// Add a string constant with a caller-controlled name. Used by the
     /// `StringPool` so that emission order matches the pool's interned
     /// indices and the bytes globals can be referenced by name from
@@ -204,6 +212,15 @@ impl LlModule {
             // constraint isn't lost via inlining into a caller.
             ir.push_str("attributes #1 = { noinline optnone }\n");
         }
+
+        // Issue #52: `!0 = !{}` metadata node referenced by
+        // `load_invariant` (via `!invariant.load !0`). LLVM's GVN + LICM
+        // hoist loads tagged with `!invariant.load` out of their
+        // enclosing loops when the loop body can't write to the same
+        // address; without this, the per-access Buffer / Array length
+        // reload stays pinned inside every bounds check even when the
+        // buffer is loop-invariant.
+        ir.push_str("\n!0 = !{}\n");
 
         ir
     }

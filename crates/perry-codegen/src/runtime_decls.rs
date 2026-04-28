@@ -408,6 +408,15 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_dynamic_mul", DOUBLE, &[DOUBLE, DOUBLE]);
     module.declare_function("js_dynamic_div", DOUBLE, &[DOUBLE, DOUBLE]);
     module.declare_function("js_dynamic_mod", DOUBLE, &[DOUBLE, DOUBLE]);
+    // Dynamic bigint bitwise ops — lowered from `Expr::Binary` when
+    // either operand is statically bigint-typed. Unbox, call the raw
+    // `js_bigint_<op>`, re-box with BIGINT_TAG. Fall through to i32
+    // ToInt32 semantics for the pure-number case (closes #39).
+    module.declare_function("js_dynamic_bitand", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_dynamic_bitor", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_dynamic_bitxor", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_dynamic_shl", DOUBLE, &[DOUBLE, DOUBLE]);
+    module.declare_function("js_dynamic_shr", DOUBLE, &[DOUBLE, DOUBLE]);
     module.declare_function("js_instanceof", DOUBLE, &[DOUBLE, I32]);
     module.declare_function("js_register_class_extends_error", VOID, &[I32]);
     // Inline-allocator class registration: emitted once per class
@@ -521,6 +530,9 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     // Uint8Array constructor wrapper that flags the resulting buffer so the
     // formatter prints `Uint8Array(N) [ ... ]` instead of `<Buffer ...>`.
     module.declare_function("js_uint8array_from_array", I64, &[I64]);
+    // `new Uint8Array(x)` runtime dispatch — handles the non-literal case
+    // where `x` could be a number (length) or an array (source data).
+    module.declare_function("js_uint8array_new", I64, &[DOUBLE]);
     // Generic typed array runtime (Int8/16/32, Uint16/32, Float32/64).
     // Uint8Array piggybacks on the BufferHeader path.
     module.declare_function("js_typed_array_new_empty", I64, &[I32, I32]);
@@ -843,6 +855,7 @@ pub fn declare_phase_b_objects(module: &mut LlModule) {
     module.declare_function("js_object_alloc", I64, &[I32, I32]);
     module.declare_function("js_object_set_field_by_name", VOID, &[I64, I64, DOUBLE]);
     module.declare_function("js_object_get_field_by_name_f64", DOUBLE, &[I64, I64]);
+    module.declare_function("js_object_get_field_ic_miss", DOUBLE, &[I64, I64, PTR]);
     // Object rest destructuring: copy all properties from src except excluded keys.
     // Takes a src object ptr and an array of NaN-boxed strings (the excluded keys),
     // returns a new object pointer.

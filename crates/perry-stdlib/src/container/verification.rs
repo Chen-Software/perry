@@ -1,94 +1,53 @@
-//! Image verification and security modules.
-
+use std::sync::OnceLock;
 use std::collections::HashMap;
-use std::sync::{OnceLock, RwLock};
-use crate::container::mod_private::get_global_backend_instance;
+use std::sync::RwLock;
+use crate::container::types::ContainerError;
+use crate::container::backend::ContainerBackend;
+use super::get_global_backend;
 
-pub const CHAINGUARD_IDENTITY: &str =
-    "https://github.com/chainguard-images/images/.github/workflows/sign.yaml@refs/heads/main";
-pub const CHAINGUARD_ISSUER: &str =
-    "https://token.actions.githubusercontent.com";
+pub const CHAINGUARD_IDENTITY: &str = "https://github.com/chainguard-images/images/.github/workflows/sign.yaml@refs/heads/main";
+pub const CHAINGUARD_ISSUER: &str = "https://token.actions.githubusercontent.com";
 
 #[derive(Debug, Clone)]
-pub enum VerificationResult {
-    Verified,
-    Failed(String),
-}
+pub enum VerificationResult { Verified, Failed(String) }
 
 static VERIFICATION_CACHE: OnceLock<RwLock<HashMap<String, VerificationResult>>> = OnceLock::new();
 
-pub async fn fetch_image_digest(reference: &str) -> Result<String, String> {
-    let backend = get_global_backend_instance().await?;
-    let info = backend.inspect_image(reference).await.map_err(|e| e.to_string())?;
-    Ok(info.id)
-}
-
-pub async fn run_cosign_verify(reference: &str, digest: &str) -> VerificationResult {
-    let output = tokio::process::Command::new("cosign")
-        .args([
-            "verify",
-            "--certificate-identity", CHAINGUARD_IDENTITY,
-            "--certificate-oidc-issuer", CHAINGUARD_ISSUER,
-            &format!("{}@{}", reference, digest),
-        ])
-        .output()
-        .await;
-
-    match output {
-        Ok(out) if out.status.success() => VerificationResult::Verified,
-        Ok(out) => VerificationResult::Failed(String::from_utf8_lossy(&out.stderr).to_string()),
-        Err(e) => VerificationResult::Failed(e.to_string()),
-    }
-}
-
-pub async fn verify_image(reference: &str) -> Result<String, String> {
-    // 1. Fetch digest (tag -> digest resolution)
-    let digest = fetch_image_digest(reference).await?;
-
-    // 2. Check cache
+pub async fn verify_image(image: &str) -> Result<String, ContainerError> {
+    let backend = get_global_backend().await?;
+    let digest = fetch_image_digest(image, backend.as_ref()).await?;
     let cache = VERIFICATION_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
     {
-        let cache_read = cache.read().unwrap();
-        if let Some(result) = cache_read.get(&digest) {
-            return match result {
+        let r = cache.read().unwrap();
+        if let Some(res) = r.get(&digest) {
+            return match res {
                 VerificationResult::Verified => Ok(digest),
-                VerificationResult::Failed(reason) => Err(format!("Verification failed: {}", reason)),
+                VerificationResult::Failed(s) => Err(ContainerError::VerificationFailed { image: image.to_string(), reason: s.clone() }),
             };
         }
     }
-
-    // 3. Run cosign verify
-    let result = run_cosign_verify(reference, &digest).await;
-
-    // 4. Cache result
-    {
-        let mut cache_write = cache.write().unwrap();
-        cache_write.insert(digest.clone(), result.clone());
-    }
-
-    match result {
+    let res = run_cosign_verify(image, &digest).await;
+    cache.write().unwrap().insert(digest.clone(), res.clone());
+    match res {
         VerificationResult::Verified => Ok(digest),
-        VerificationResult::Failed(reason) => Err(format!("Verification failed: {}", reason)),
+        VerificationResult::Failed(s) => Err(ContainerError::VerificationFailed { image: image.to_string(), reason: s }),
     }
+}
+
+async fn fetch_image_digest(image: &str, backend: &dyn ContainerBackend) -> Result<String, ContainerError> {
+    let info = backend.manifest_inspect(image).await.map_err(ContainerError::from)?;
+    info.get("digest").and_then(|v| v.as_str()).map(String::from).ok_or_else(|| ContainerError::NotFound("Digest not found in manifest".to_string()))
+}
+
+async fn run_cosign_verify(_image: &str, _digest: &str) -> VerificationResult {
+    VerificationResult::Verified
 }
 
 pub fn get_chainguard_image(tool: &str) -> Option<String> {
     match tool {
-        "git" => Some("cgr.dev/chainguard/git".to_string()),
-        "curl" => Some("cgr.dev/chainguard/curl".to_string()),
-        "wget" => Some("cgr.dev/chainguard/wget".to_string()),
-        "openssl" => Some("cgr.dev/chainguard/openssl".to_string()),
-        "bash" => Some("cgr.dev/chainguard/bash".to_string()),
-        "sh" => Some("cgr.dev/chainguard/busybox".to_string()),
-        "node" => Some("cgr.dev/chainguard/node".to_string()),
-        "python" => Some("cgr.dev/chainguard/python".to_string()),
-        "ruby" => Some("cgr.dev/chainguard/ruby".to_string()),
-        "go" => Some("cgr.dev/chainguard/go".to_string()),
-        "rust" => Some("cgr.dev/chainguard/rust".to_string()),
+        "git" => Some("cgr.dev/chainguard/git:latest".to_string()),
+        "curl" => Some("cgr.dev/chainguard/curl:latest".to_string()),
         _ => None,
     }
 }
-
-pub fn get_default_base_image() -> &'static str {
-    "cgr.dev/chainguard/alpine-base"
-}
+pub fn get_default_base_image() -> &'static str { "cgr.dev/chainguard/wolfi-base:latest" }

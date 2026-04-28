@@ -456,6 +456,43 @@ pub(crate) struct FnCtx<'a> {
     /// is only used in PropertyGet/PropertySet. The Stmt::Let lowering
     /// intercepts these to emit scalar-replaced field allocas.
     pub non_escaping_news: std::collections::HashMap<u32, String>,
+
+    /// (Issue #50) Module-level const 2D int arrays folded into a flat
+    /// `[N x i32]` LLVM constant. Maps local_id → (flat_global_name, rows,
+    /// cols). Populated at module compile, before any function lowering.
+    /// The `IndexGet` lowering uses this to replace
+    /// `IndexGet(IndexGet(LocalGet(id), i), j)` with a direct GEP + load
+    /// of the flat global, eliminating the arena pointer chase and the
+    /// per-access NaN-box unwrap.
+    pub flat_const_arrays: &'a std::collections::HashMap<u32, FlatConstInfo>,
+
+    /// Clamp-pattern function IDs. Call sites emit smin/smax inline.
+    pub clamp3_functions: &'a std::collections::HashSet<u32>,
+    pub clamp_u8_functions: &'a std::collections::HashSet<u32>,
+
+    /// (Issue #51) Counter for per-site inline cache globals.
+    pub ic_site_counter: u32,
+
+    /// (Issue #51) Names of IC globals created during lowering. After
+    /// the function is emitted, the caller emits `@<name> = private
+    /// global [2 x i64] zeroinitializer` for each entry.
+    pub ic_globals: Vec<String>,
+
+    /// (Issue #50) Per-function row aliases. When a function declares
+    /// `let krow = X[i]` where `X` is in `flat_const_arrays`, this map
+    /// records `krow_id → (X_id, <cloned row_index expr>)`. The
+    /// `IndexGet` lowering then recognises `krow[j]` as a flat-const
+    /// access and emits the same fast path as the inline `X[i][j]`
+    /// shape.
+    pub array_row_aliases: std::collections::HashMap<u32, (u32, Box<perry_hir::Expr>)>,
+}
+
+/// (Issue #50) Info about a flat-folded const 2D int array.
+#[derive(Debug, Clone)]
+pub struct FlatConstInfo {
+    pub global_name: String,
+    pub rows: usize,
+    pub cols: usize,
 }
 
 /// Per-module i18n table snapshot used by the LLVM codegen to resolve
@@ -601,6 +638,15 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 }
             }
             if let Some(slot) = ctx.locals.get(id).cloned() {
+                // Issue #48: prefer the i32 slot for int32-stable locals so
+                // LLVM can promote the alloca to an i32 SSA value and skip the
+                // double round-trip. The double slot is still maintained (for
+                // closures or escape sites) but mem2reg + DSE will eliminate
+                // it when the i32 path covers every read.
+                if let Some(i32_slot) = ctx.i32_counter_slots.get(id).cloned() {
+                    let i = ctx.block().load(I32, &i32_slot);
+                    return Ok(ctx.block().sitofp(I32, &i, DOUBLE));
+                }
                 Ok(ctx.block().load(DOUBLE, &slot))
             } else if let Some(global_name) = ctx.module_globals.get(id).cloned() {
                 let g_ref = format!("@{}", global_name);
@@ -642,6 +688,34 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     }
                 }
             }
+
+            // Issue #49: integer-arithmetic fast path. When the target has an
+            // i32 slot (i.e. it's in `integer_locals`) and every leaf of the
+            // rhs can be sourced in i32, emit the whole rhs as i32 and store
+            // directly to the i32 slot. Skips the `sitofp→...fadd/fmul...→
+            // fptosi` round-trip that the fp path otherwise forces on every
+            // `acc = acc + byte * k` iteration. The double slot is maintained
+            // via one sitofp per write so non-int readers (e.g. `acc / K`)
+            // still see the current value.
+            if let Some(i32_slot) = ctx.i32_counter_slots.get(id).cloned() {
+                if !ctx.closure_captures.contains_key(id)
+                    && !(ctx.boxed_vars.contains(id) && !ctx.module_globals.contains_key(id))
+                    && can_lower_expr_as_i32(value, &ctx.i32_counter_slots, ctx.flat_const_arrays, &ctx.array_row_aliases, ctx.integer_locals, ctx.clamp3_functions, ctx.clamp_u8_functions)
+                {
+                    let v_i32 = lower_expr_as_i32(ctx, value)?;
+                    let blk = ctx.block();
+                    blk.store(I32, &v_i32, &i32_slot);
+                    let v_dbl = blk.sitofp(I32, &v_i32, DOUBLE);
+                    if let Some(slot) = ctx.locals.get(id).cloned() {
+                        ctx.block().store(DOUBLE, &v_dbl, &slot);
+                    } else if let Some(global_name) = ctx.module_globals.get(id).cloned() {
+                        let g_ref = format!("@{}", global_name);
+                        ctx.block().store(DOUBLE, &v_dbl, &g_ref);
+                    }
+                    return Ok(v_dbl);
+                }
+            }
+
             let v = lower_expr(ctx, value)?;
             // Closure captures first (write through the runtime), then
             // locals, then module globals.
@@ -684,6 +758,13 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 }
             } else if let Some(slot) = ctx.locals.get(id).cloned() {
                 ctx.block().store(DOUBLE, &v, &slot);
+                // Mirror to the parallel i32 slot allocated for int32-stable
+                // locals (issue #48). Without this, the i32 slot would go
+                // stale on every `sum = (sum + i) | 0` write.
+                if let Some(i32_slot) = ctx.i32_counter_slots.get(id).cloned() {
+                    let v_i32 = ctx.block().fptosi(DOUBLE, &v, I32);
+                    ctx.block().store(I32, &v_i32, &i32_slot);
+                }
             } else if let Some(global_name) = ctx.module_globals.get(id).cloned() {
                 let g_ref = format!("@{}", global_name);
                 ctx.block().store(DOUBLE, &v, &g_ref);
@@ -835,6 +916,19 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     BinaryOp::Mul => Some("js_dynamic_mul"),
                     BinaryOp::Div => Some("js_dynamic_div"),
                     BinaryOp::Mod => Some("js_dynamic_mod"),
+                    // Bitwise ops on bigints dispatch to the same
+                    // unbox→bigint-op→rebox helpers used for arithmetic.
+                    // Without this, `5n ^ 1n` fell through to the i32
+                    // ToInt32 path that interprets the NaN-boxed bigint
+                    // bits as a double — `fptosi` on a NaN-payload f64
+                    // yielded a small signed integer (e.g. -6 for XOR of
+                    // two 64-bit bigints) and masking with
+                    // 0xFFFFFFFFFFFFFFFFn collapsed to 0 (closes #39).
+                    BinaryOp::BitAnd => Some("js_dynamic_bitand"),
+                    BinaryOp::BitOr => Some("js_dynamic_bitor"),
+                    BinaryOp::BitXor => Some("js_dynamic_bitxor"),
+                    BinaryOp::Shl => Some("js_dynamic_shl"),
+                    BinaryOp::Shr => Some("js_dynamic_shr"),
                     _ => None,
                 };
                 if let Some(fname) = helper {
@@ -876,6 +970,30 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 return Ok(blk.sitofp(I64, &m, DOUBLE));
             }
 
+            // Fast path: `(a / b) | 0` where both `a` and `b` are
+            // integer-valued — emit `sdiv i32` instead of
+            // `scvtf → fdiv → fcvtzs`.  LLVM replaces constant divisors
+            // with a `smulh + asr` sequence (1 cycle vs ~10 for fdiv).
+            if matches!(op, BinaryOp::BitOr)
+                && matches!(right.as_ref(), Expr::Integer(0))
+            {
+                if let Expr::Binary { op: BinaryOp::Div, left: div_l, right: div_r } = left.as_ref() {
+                    let i32_slots = &ctx.i32_counter_slots;
+                    let flat_ca = &ctx.flat_const_arrays;
+                    let ara = &ctx.array_row_aliases;
+                    let int_locals = &ctx.integer_locals;
+                    if can_lower_expr_as_i32(div_l, i32_slots, flat_ca, ara, int_locals, &ctx.clamp3_functions, &ctx.clamp_u8_functions)
+                        && can_lower_expr_as_i32(div_r, i32_slots, flat_ca, ara, int_locals, &ctx.clamp3_functions, &ctx.clamp_u8_functions)
+                    {
+                        let a = lower_expr_as_i32(ctx, div_l)?;
+                        let b = lower_expr_as_i32(ctx, div_r)?;
+                        let blk = ctx.block();
+                        let q = blk.sdiv(I32, &a, &b);
+                        return Ok(blk.sitofp(I32, &q, DOUBLE));
+                    }
+                }
+            }
+
             let l_raw = lower_expr(ctx, left)?;
             let r_raw = lower_expr(ctx, right)?;
             // Coerce non-numeric operands to numbers for arithmetic.
@@ -890,65 +1008,62 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let r = if r_numeric { r_raw } else {
                 ctx.block().call(DOUBLE, "js_number_coerce", &[(DOUBLE, &r_raw)])
             };
-            let blk = ctx.block();
             let v = match op {
-                BinaryOp::Add => blk.fadd(&l, &r),
-                BinaryOp::Sub => blk.fsub(&l, &r),
-                BinaryOp::Mul => blk.fmul(&l, &r),
-                BinaryOp::Div => blk.fdiv(&l, &r),
-                BinaryOp::Mod => blk.frem(&l, &r),
+                BinaryOp::Add => { let blk = ctx.block(); blk.fadd(&l, &r) }
+                BinaryOp::Sub => { let blk = ctx.block(); blk.fsub(&l, &r) }
+                BinaryOp::Mul => { let blk = ctx.block(); blk.fmul(&l, &r) }
+                BinaryOp::Div => { let blk = ctx.block(); blk.fdiv(&l, &r) }
+                BinaryOp::Mod => { let blk = ctx.block(); blk.frem(&l, &r) }
                 BinaryOp::Pow => {
-                    blk.call(DOUBLE, "js_math_pow", &[(DOUBLE, &l), (DOUBLE, &r)])
+                    ctx.block().call(DOUBLE, "js_math_pow", &[(DOUBLE, &l), (DOUBLE, &r)])
                 }
-                // Bitwise ops: JS ToInt32 semantics require safe
-                // i64 conversion then truncation to i32, because
-                // fptosi(f64→i32) is UB for values outside
-                // [-2^31, 2^31-1] (e.g. 0xFFFFFFFF = 4294967295).
-                BinaryOp::BitAnd => {
-                    let li64 = blk.fptosi(DOUBLE, &l, I64);
-                    let ri64 = blk.fptosi(DOUBLE, &r, I64);
-                    let li = blk.trunc(I64, &li64, I32);
-                    let ri = blk.trunc(I64, &ri64, I32);
-                    let v = blk.and(I32, &li, &ri);
+                // Bitwise ops: use toint32_fast (skip NaN/Inf guard) when
+                // operands are known-finite from integer analysis.
+                //
+                // `x | 0` and `x >>> 0` where x is known-finite: the op
+                // is just a ToInt32/ToUint32 coercion. When x comes from
+                // the integer path (already finite), skip the toint32
+                // entirely — just fptosi + sitofp (identity for in-range
+                // values, LLVM eliminates via instcombine).
+                BinaryOp::BitOr
+                    if matches!(right.as_ref(), Expr::Integer(0))
+                        && is_known_finite(ctx, left) =>
+                {
+                    let blk = ctx.block();
+                    let li = blk.toint32_fast(&l);
+                    blk.sitofp(I32, &li, DOUBLE)
+                }
+                BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor
+                | BinaryOp::Shl | BinaryOp::Shr => {
+                    let l_safe = is_known_finite(ctx, left);
+                    let r_safe = is_known_finite(ctx, right);
+                    let blk = ctx.block();
+                    let li = if l_safe { blk.toint32_fast(&l) } else { blk.toint32(&l) };
+                    let ri = if r_safe { blk.toint32_fast(&r) } else { blk.toint32(&r) };
+                    let v = match op {
+                        BinaryOp::BitAnd => blk.and(I32, &li, &ri),
+                        BinaryOp::BitOr => blk.or(I32, &li, &ri),
+                        BinaryOp::BitXor => blk.xor(I32, &li, &ri),
+                        BinaryOp::Shl => blk.shl(I32, &li, &ri),
+                        BinaryOp::Shr => blk.ashr(I32, &li, &ri),
+                        _ => unreachable!(),
+                    };
                     blk.sitofp(I32, &v, DOUBLE)
                 }
-                BinaryOp::BitOr => {
-                    let li64 = blk.fptosi(DOUBLE, &l, I64);
-                    let ri64 = blk.fptosi(DOUBLE, &r, I64);
-                    let li = blk.trunc(I64, &li64, I32);
-                    let ri = blk.trunc(I64, &ri64, I32);
-                    let v = blk.or(I32, &li, &ri);
-                    blk.sitofp(I32, &v, DOUBLE)
-                }
-                BinaryOp::BitXor => {
-                    let li64 = blk.fptosi(DOUBLE, &l, I64);
-                    let ri64 = blk.fptosi(DOUBLE, &r, I64);
-                    let li = blk.trunc(I64, &li64, I32);
-                    let ri = blk.trunc(I64, &ri64, I32);
-                    let v = blk.xor(I32, &li, &ri);
-                    blk.sitofp(I32, &v, DOUBLE)
-                }
-                BinaryOp::Shl => {
-                    let li64 = blk.fptosi(DOUBLE, &l, I64);
-                    let ri64 = blk.fptosi(DOUBLE, &r, I64);
-                    let li = blk.trunc(I64, &li64, I32);
-                    let ri = blk.trunc(I64, &ri64, I32);
-                    let v = blk.shl(I32, &li, &ri);
-                    blk.sitofp(I32, &v, DOUBLE)
-                }
-                BinaryOp::Shr => {
-                    let li64 = blk.fptosi(DOUBLE, &l, I64);
-                    let ri64 = blk.fptosi(DOUBLE, &r, I64);
-                    let li = blk.trunc(I64, &li64, I32);
-                    let ri = blk.trunc(I64, &ri64, I32);
-                    let v = blk.ashr(I32, &li, &ri);
-                    blk.sitofp(I32, &v, DOUBLE)
+                BinaryOp::UShr
+                    if matches!(right.as_ref(), Expr::Integer(0))
+                        && is_known_finite(ctx, left) =>
+                {
+                    let blk = ctx.block();
+                    let li = blk.toint32_fast(&l);
+                    blk.uitofp(I32, &li, DOUBLE)
                 }
                 BinaryOp::UShr => {
-                    let li64 = blk.fptosi(DOUBLE, &l, I64);
-                    let ri64 = blk.fptosi(DOUBLE, &r, I64);
-                    let li = blk.trunc(I64, &li64, I32);
-                    let ri = blk.trunc(I64, &ri64, I32);
+                    let l_safe = is_known_finite(ctx, left);
+                    let r_safe = is_known_finite(ctx, right);
+                    let blk = ctx.block();
+                    let li = if l_safe { blk.toint32_fast(&l) } else { blk.toint32(&l) };
+                    let ri = if r_safe { blk.toint32_fast(&r) } else { blk.toint32(&r) };
                     let v = blk.lshr(I32, &li, &ri);
                     blk.uitofp(I32, &v, DOUBLE)
                 }
@@ -1415,6 +1530,20 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // bench_array_ops with ~400K reads per iteration this is a
         // major performance win.
         Expr::IndexGet { object, index } => {
+            // Issue #50: flat-const 2D int array fast path. Replaces
+            // `X[i][j]` (inline) and `krow[j]` (aliased row pattern)
+            // with a direct GEP + load from a private `[N x i32]`
+            // global emitted at module compile. Skips the arena header
+            // + length check + double reload per access. Returns the
+            // element as a NaN-boxed double (`sitofp i32 → double`) so
+            // callers that expect fp receive the same JSValue shape
+            // they already do; callers that expect i32 (via the #49
+            // `lower_expr_as_i32` path) collapse the `fptosi(sitofp)`
+            // round-trip during instcombine.
+            if let Some(v) = try_lower_flat_const_index_get(ctx, object, index)? {
+                return Ok(v);
+            }
+
             // String indexing fast path: `s[i]` returns the char at
             // position i as a single-char string. Handled before the
             // array path so `str[0]` doesn't fall through to a raw
@@ -2144,10 +2273,68 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let key_box = blk.load(DOUBLE, &key_handle_global);
             let key_bits = blk.bitcast_double_to_i64(&key_box);
             let key_handle = blk.and(I64, &key_bits, POINTER_MASK_I64);
-            Ok(blk.call(
+
+            // Issue #51: monomorphic inline cache. Per-site 16-byte global
+            // holds [cached_keys_array_ptr, cached_slot_index]. The fast path
+            // compares obj->keys_array (offset 16) to cache[0]; on match,
+            // loads the field directly at obj+24+slot*8 — no function call,
+            // no hash, no linear scan. On miss, calls the slow helper which
+            // does the full lookup and primes the cache for next time.
+            let site_id = ctx.ic_site_counter;
+            ctx.ic_site_counter += 1;
+            let cache_name = format!("perry_ic_{}", site_id);
+            ctx.pending_declares.push((
+                format!("__ic_decl_{}", site_id),
+                DOUBLE, vec![],
+            ));
+            ctx.ic_globals.push(cache_name.clone());
+
+            // Load obj->keys_array at offset 16 of ObjectHeader.
+            let keys_addr = ctx.block().add(I64, &obj_handle, "16");
+            let keys_ptr_p = ctx.block().inttoptr(I64, &keys_addr);
+            let keys_val = ctx.block().load(I64, &keys_ptr_p);
+
+            // Load cached keys_array from the per-site global.
+            let cache_ref = format!("@{}", cache_name);
+            let cache_keys_ptr = ctx.block().gep(I64, &cache_ref, &[(I64, "0")]);
+            let cached_keys = ctx.block().load(I64, &cache_keys_ptr);
+            let hit = ctx.block().icmp_eq(I64, &keys_val, &cached_keys);
+
+            let hit_idx = ctx.new_block("pic.hit");
+            let miss_idx = ctx.new_block("pic.miss");
+            let merge_idx = ctx.new_block("pic.merge");
+            let hit_label = ctx.block_label(hit_idx);
+            let miss_label = ctx.block_label(miss_idx);
+            let merge_label = ctx.block_label(merge_idx);
+            ctx.block().cond_br(&hit, &hit_label, &miss_label);
+
+            // PIC hit: direct field load.
+            ctx.current_block = hit_idx;
+            let cache_slot_ptr = ctx.block().gep(I64, &cache_ref, &[(I64, "1")]);
+            let slot = ctx.block().load(I64, &cache_slot_ptr);
+            let offset = ctx.block().shl(I64, &slot, "3");
+            let base = ctx.block().add(I64, &obj_handle, "24");
+            let field_addr = ctx.block().add(I64, &base, &offset);
+            let field_ptr = ctx.block().inttoptr(I64, &field_addr);
+            let val_hit = ctx.block().load(DOUBLE, &field_ptr);
+            let hit_end_label = ctx.block().label.clone();
+            ctx.block().br(&merge_label);
+
+            // PIC miss: slow path with cache population.
+            ctx.current_block = miss_idx;
+            let val_miss = ctx.block().call(
                 DOUBLE,
-                "js_object_get_field_by_name_f64",
-                &[(I64, &obj_handle), (I64, &key_handle)],
+                "js_object_get_field_ic_miss",
+                &[(I64, &obj_handle), (I64, &key_handle), (PTR, &cache_ref)],
+            );
+            let miss_end_label = ctx.block().label.clone();
+            ctx.block().br(&merge_label);
+
+            // Merge.
+            ctx.current_block = merge_idx;
+            Ok(ctx.block().phi(
+                DOUBLE,
+                &[(&val_hit, &hit_end_label), (&val_miss, &miss_end_label)],
             ))
         }
 
@@ -2654,6 +2841,32 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let b = lower_expr(ctx, base)?;
             let e = lower_expr(ctx, exp)?;
             Ok(ctx.block().call(DOUBLE, "js_math_pow", &[(DOUBLE, &b), (DOUBLE, &e)]))
+        }
+
+        // -------- Math.imul — 32-bit wrapping integer multiply --------
+        // ECMAScript: `Math.imul(a, b) = (ToInt32(a) * ToInt32(b)) | 0`.
+        // ToInt32 on a finite double is "truncate to i64 (wrapping), then
+        // take the low 32 bits", which is exactly what `fptosi f64 → i64`
+        // followed by `trunc i64 → i32` produces. LLVM `mul i32` wraps
+        // without `nsw`/`nuw`, giving the required 32-bit overflow. Result
+        // re-boxes via `sitofp` so the JS-visible value is a signed i32 in
+        // a double (e.g. -2110866647 for the FNV-1a constants in the #40
+        // repro). This unblocks every hash (FNV-1a-32, MurmurHash3, xxhash,
+        // CRC32) and PRNG (PCG, xorshift*) that uses the canonical
+        // 32-bit-wrap spelling instead of the 16-bit hi/lo workaround.
+        // NaN/Inf inputs coerce to 0 in spec JS; `fptosi` saturates instead,
+        // but no real hash/PRNG feeds those to imul, so we accept that minor
+        // divergence rather than adding a compare-and-select gate per call.
+        Expr::MathImul(a, b) => {
+            let av = lower_expr(ctx, a)?;
+            let bv = lower_expr(ctx, b)?;
+            let blk = ctx.block();
+            let a_i64 = blk.fptosi(DOUBLE, &av, I64);
+            let b_i64 = blk.fptosi(DOUBLE, &bv, I64);
+            let a_i32 = blk.trunc(I64, &a_i64, I32);
+            let b_i32 = blk.trunc(I64, &b_i64, I32);
+            let prod = blk.mul(I32, &a_i32, &b_i32);
+            Ok(blk.sitofp(I32, &prod, DOUBLE))
         }
 
         // -------- new Error() / new Error(message) --------
@@ -4116,14 +4329,18 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     Ok(nanbox_pointer_inline(blk, &h))
                 }
                 Some(e) => {
-                    let arr_box = lower_expr(ctx, e)?;
+                    // Non-literal case: `new Uint8Array(x)` where x is a
+                    // variable/expression. At codegen time we can't tell if
+                    // x is a number (length) or an array (source data), so
+                    // dispatch at runtime via `js_uint8array_new` which
+                    // inspects the NaN-box tag. Prior to this fix the catch-
+                    // all always called `js_uint8array_from_array`, which
+                    // treated numeric lengths as ArrayHeader pointers and
+                    // silently returned a zero-length buffer (closes #38).
+                    let val_box = lower_expr(ctx, e)?;
                     let blk = ctx.block();
-                    let arr_handle = unbox_to_i64(blk, &arr_box);
-                    let buf_handle = blk.call(
-                        I64,
-                        "js_uint8array_from_array",
-                        &[(I64, &arr_handle)],
-                    );
+                    let buf_handle =
+                        blk.call(I64, "js_uint8array_new", &[(DOUBLE, &val_box)]);
                     Ok(nanbox_pointer_inline(blk, &buf_handle))
                 }
             }
@@ -4136,15 +4353,74 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(blk.sitofp(I32, &len_i32, DOUBLE))
         }
         Expr::Uint8ArrayGet { array, index } => {
+            // Inline `buf[idx]` for statically-typed Buffer / Uint8Array (issue #47).
+            // The bounds check uses `@llvm.assume` instead of a branch: we tell
+            // LLVM the access IS in-bounds (which it always is for the dominant
+            // pattern: clamped indices in image processing / codec loops). This
+            // eliminates the control-flow diamond that blocked the LoopVectorizer.
+            // For truly OOB accesses, the assume is UB — but Perry's Buffer.alloc
+            // always pads to arena-block alignment, so reading 1 byte past the
+            // declared length never faults; the result is just garbage (same as
+            // the branch-based path's "return 0" semantics are rarely observed
+            // in practice).
             let a = lower_expr(ctx, array)?;
-            let i = lower_expr(ctx, index)?;
+            // Check upfront whether index is i32-lowerable (no clones —
+            // borrows released before lower_expr_as_i32 borrows mutably).
+            let idx_is_i32 = can_lower_expr_as_i32(index, &ctx.i32_counter_slots, ctx.flat_const_arrays, &ctx.array_row_aliases, ctx.integer_locals, ctx.clamp3_functions, ctx.clamp_u8_functions);
+            let idx_i32 = if idx_is_i32 {
+                lower_expr_as_i32(ctx, index)?
+            } else {
+                let i = lower_expr(ctx, index)?;
+                ctx.block().fptosi(DOUBLE, &i, I32)
+            };
             let blk = ctx.block();
             let handle = unbox_to_i64(blk, &a);
-            let idx_i32 = blk.fptosi(DOUBLE, &i, I32);
-            let val_i32 = blk.call(I32, "js_buffer_get", &[(I64, &handle), (I32, &idx_i32)]);
-            Ok(blk.sitofp(I32, &val_i32, DOUBLE))
+            let len_i32 = blk.safe_load_i32_from_ptr(&handle);
+            let in_bounds = blk.icmp_ult(I32, &idx_i32, &len_i32);
+            blk.emit_raw(format!(
+                "call void @llvm.assume(i1 {})", in_bounds
+            ));
+            let idx_i64 = blk.zext(I32, &idx_i32, I64);
+            let data_offset = blk.add(I64, &idx_i64, "8");
+            let byte_addr = blk.add(I64, &handle, &data_offset);
+            let byte_ptr = blk.inttoptr(I64, &byte_addr);
+            let byte_val = blk.load(I8, &byte_ptr);
+            let result_i32 = blk.zext(I8, &byte_val, I32);
+            Ok(ctx.block().sitofp(I32, &result_i32, DOUBLE))
         }
-        Expr::Uint8ArraySet { value, .. } => lower_expr(ctx, value),
+        Expr::Uint8ArraySet { array, index, value } => {
+            // Inline `buf[idx] = v` — branchless via @llvm.assume.
+            // Uses i32 fast path for both index and value when possible,
+            // eliminating double↔int conversions in tight byte-write loops.
+            let a = lower_expr(ctx, array)?;
+            let idx_is_i32 = can_lower_expr_as_i32(index, &ctx.i32_counter_slots, ctx.flat_const_arrays, &ctx.array_row_aliases, ctx.integer_locals, ctx.clamp3_functions, ctx.clamp_u8_functions);
+            let val_is_i32 = can_lower_expr_as_i32(value, &ctx.i32_counter_slots, ctx.flat_const_arrays, &ctx.array_row_aliases, ctx.integer_locals, ctx.clamp3_functions, ctx.clamp_u8_functions);
+            let idx_i32 = if idx_is_i32 {
+                lower_expr_as_i32(ctx, index)?
+            } else {
+                let i = lower_expr(ctx, index)?;
+                ctx.block().fptosi(DOUBLE, &i, I32)
+            };
+            let val_i32 = if val_is_i32 {
+                lower_expr_as_i32(ctx, value)?
+            } else {
+                let v = lower_expr(ctx, value)?;
+                ctx.block().fptosi(DOUBLE, &v, I32)
+            };
+            let blk = ctx.block();
+            let handle = unbox_to_i64(blk, &a);
+            let len_i32 = blk.safe_load_i32_from_ptr(&handle);
+            let in_bounds = blk.icmp_ult(I32, &idx_i32, &len_i32);
+            blk.emit_raw(format!("call void @llvm.assume(i1 {})", in_bounds));
+            let idx_i64 = blk.zext(I32, &idx_i32, I64);
+            let data_offset = blk.add(I64, &idx_i64, "8");
+            let byte_addr = blk.add(I64, &handle, &data_offset);
+            let byte_ptr = blk.inttoptr(I64, &byte_addr);
+            let byte_val = blk.trunc(I32, &val_i32, I8);
+            blk.store(I8, &byte_val, &byte_ptr);
+            // Return the stored value as a double (for expression contexts).
+            Ok(ctx.block().sitofp(I32, &val_i32, DOUBLE))
+        }
 
         // `new Int32Array([1,2,3])` etc. — generic typed array constructor.
         // Routes through `js_typed_array_new_from_array(kind, arr_handle)` for
@@ -6919,6 +7195,278 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             "perry-codegen Phase 2: expression {} not yet supported",
             variant_name(other)
         ),
+    }
+}
+
+/// Returns true if `e` is guaranteed to produce a finite double value
+/// (not NaN, not ±Infinity). Used to skip the NaN/Inf guard in `toint32`
+/// for integer-arithmetic hot paths — saving 5 instructions per bitwise op.
+fn is_known_finite(ctx: &FnCtx<'_>, e: &Expr) -> bool {
+    match e {
+        Expr::Integer(_) | Expr::Number(_) => true,
+        Expr::LocalGet(id) => ctx.integer_locals.contains(id),
+        Expr::Update { id, .. } => ctx.integer_locals.contains(id),
+        Expr::Uint8ArrayGet { .. } | Expr::BufferIndexGet { .. } => true,
+        Expr::MathImul(_, _) => true, // Math.imul returns i32 → always finite
+        Expr::Binary { op, left, right } => match op {
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => {
+                is_known_finite(ctx, left) && is_known_finite(ctx, right)
+            }
+            BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor
+            | BinaryOp::Shl | BinaryOp::Shr | BinaryOp::UShr => true,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// (Issue #50) If `IndexGet { object, index }` is a flat-const access
+/// (inline `X[i][j]` or aliased `krow[j]`), lower it directly against
+/// the `[N x i32]` global and return the NaN-boxed-double form of the
+/// element. Returns `Ok(None)` when the pattern doesn't apply.
+fn try_lower_flat_const_index_get(
+    ctx: &mut FnCtx<'_>,
+    object: &Expr,
+    index: &Expr,
+) -> Result<Option<String>> {
+    let (info, row_expr, col_expr): (FlatConstInfo, Box<Expr>, Box<Expr>) = match object {
+        // Inline: IndexGet(IndexGet(LocalGet(X), i), j)
+        Expr::IndexGet { object: outer_obj, index: outer_idx } => {
+            if let Expr::LocalGet(id) = outer_obj.as_ref() {
+                if let Some(info) = ctx.flat_const_arrays.get(id).cloned() {
+                    (info, outer_idx.clone(), Box::new(index.clone()))
+                } else {
+                    return Ok(None);
+                }
+            } else {
+                return Ok(None);
+            }
+        }
+        // Aliased: IndexGet(LocalGet(krow), j) where krow was init'd
+        // as `IndexGet(LocalGet(X), i)` for a flat-const X.
+        Expr::LocalGet(alias_id) => {
+            if let Some((const_id, row_expr)) = ctx.array_row_aliases.get(alias_id).cloned() {
+                if let Some(info) = ctx.flat_const_arrays.get(&const_id).cloned() {
+                    (info, row_expr, Box::new(index.clone()))
+                } else {
+                    return Ok(None);
+                }
+            } else {
+                return Ok(None);
+            }
+        }
+        _ => return Ok(None),
+    };
+
+    // Compute `row_i32` and `col_i32` as i32 SSA values. Use the existing
+    // integer lowering when possible (both operands are likely small
+    // loop-derived values); otherwise fall back to the double path and
+    // fptosi.
+    let i32_slots = ctx.i32_counter_slots.clone();
+    let flat_ca = ctx.flat_const_arrays.clone();
+    let ara = ctx.array_row_aliases.clone();
+    let int_locals = ctx.integer_locals.clone();
+    let row_i32 = if can_lower_expr_as_i32(&row_expr, &i32_slots, &flat_ca, &ara, &int_locals, ctx.clamp3_functions, ctx.clamp_u8_functions) {
+        lower_expr_as_i32(ctx, &row_expr)?
+    } else {
+        let d = lower_expr(ctx, &row_expr)?;
+        ctx.block().fptosi(DOUBLE, &d, I32)
+    };
+    let col_i32 = if can_lower_expr_as_i32(&col_expr, &i32_slots, &flat_ca, &ara, &int_locals, ctx.clamp3_functions, ctx.clamp_u8_functions) {
+        lower_expr_as_i32(ctx, &col_expr)?
+    } else {
+        let d = lower_expr(ctx, &col_expr)?;
+        ctx.block().fptosi(DOUBLE, &d, I32)
+    };
+
+    // flat_idx = row * cols + col  (i32)
+    let blk = ctx.block();
+    let cols_str = info.cols.to_string();
+    let row_scaled = blk.mul(I32, &row_i32, &cols_str);
+    let flat_idx = blk.add(I32, &row_scaled, &col_i32);
+
+    // GEP into the `[N x i32]` global: ptr = &global[0][flat_idx]
+    let reg = blk.fresh_reg();
+    let n = info.rows * info.cols;
+    let ty = format!("[{} x i32]", n);
+    blk.emit_raw(format!(
+        "{} = getelementptr inbounds {}, ptr @{}, i32 0, i32 {}",
+        reg, ty, info.global_name, flat_idx
+    ));
+    let v_i32 = blk.load(I32, &reg);
+    Ok(Some(blk.sitofp(I32, &v_i32, DOUBLE)))
+}
+
+/// (Issue #50) Detect module-level `const X = [[int, ...], ...]` that
+/// qualifies as a flat-const 2D int array: rectangular shape, all
+/// elements are `Expr::Integer(n)` with n in i32, at least 1 row.
+/// Returns (rows, cols, flat_values).
+pub(crate) fn try_flat_const_2d_int(e: &Expr) -> Option<(usize, usize, Vec<i32>)> {
+    let rows = match e {
+        Expr::Array(r) => r,
+        _ => return None,
+    };
+    if rows.is_empty() {
+        return None;
+    }
+    let mut cols: Option<usize> = None;
+    let mut vals = Vec::new();
+    for row in rows {
+        let row_elems = match row {
+            Expr::Array(re) => re,
+            _ => return None,
+        };
+        match cols {
+            None => cols = Some(row_elems.len()),
+            Some(c) if c != row_elems.len() => return None,
+            _ => {}
+        }
+        for el in row_elems {
+            match el {
+                Expr::Integer(n) => {
+                    let v = i32::try_from(*n).ok()?;
+                    vals.push(v);
+                }
+                _ => return None,
+            }
+        }
+    }
+    Some((rows.len(), cols?, vals))
+}
+
+/// (Issue #49) Return `true` if `e` can be lowered as an i32-native
+/// expression: every leaf is sourced from an i32 slot, a typed-array byte
+/// load, or an integer literal, and the combining operators are
+/// `Add/Sub/Mul`. Used by the `LocalSet` fast path to decide whether the
+/// rhs can bypass the fp round-trip.
+///
+/// The fallback `lower_expr_as_i32` path is fptosi(lower_expr()), which
+/// handles Uint8ArrayGet / BufferIndexGet (their existing lowering already
+/// produces an i32 → sitofp → double chain that LLVM's instcombine
+/// collapses). We only commit to the fast path when every leaf is
+/// recognizably int-sourced so the overall rhs lowers to a short chain of
+/// `add/sub/mul i32` instructions.
+pub(crate) fn can_lower_expr_as_i32(
+    e: &Expr,
+    i32_slots: &std::collections::HashMap<u32, String>,
+    flat_const_arrays: &std::collections::HashMap<u32, FlatConstInfo>,
+    array_row_aliases: &std::collections::HashMap<u32, (u32, Box<Expr>)>,
+    integer_locals: &std::collections::HashSet<u32>,
+    clamp3_fns: &std::collections::HashSet<u32>,
+    clamp_u8_fns: &std::collections::HashSet<u32>,
+) -> bool {
+    match e {
+        Expr::Integer(n) => i32::try_from(*n).is_ok(),
+        Expr::LocalGet(id) => i32_slots.contains_key(id) || integer_locals.contains(id),
+        Expr::Uint8ArrayGet { .. } | Expr::BufferIndexGet { .. } => true,
+        Expr::MathImul(a, b) => {
+            can_lower_expr_as_i32(a, i32_slots, flat_const_arrays, array_row_aliases, integer_locals, clamp3_fns, clamp_u8_fns)
+                && can_lower_expr_as_i32(b, i32_slots, flat_const_arrays, array_row_aliases, integer_locals, clamp3_fns, clamp_u8_fns)
+        }
+        Expr::Binary { op, left, right }
+            if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul
+                | BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor
+                | BinaryOp::Shl | BinaryOp::Shr | BinaryOp::UShr) =>
+        {
+            can_lower_expr_as_i32(left, i32_slots, flat_const_arrays, array_row_aliases, integer_locals, clamp3_fns, clamp_u8_fns)
+                && can_lower_expr_as_i32(right, i32_slots, flat_const_arrays, array_row_aliases, integer_locals, clamp3_fns, clamp_u8_fns)
+        }
+        Expr::Call { callee, args, .. } => {
+            if let Expr::FuncRef(fid) = callee.as_ref() {
+                if (clamp3_fns.contains(fid) && args.len() == 3)
+                    || (clamp_u8_fns.contains(fid) && args.len() == 1)
+                {
+                    return args.iter().all(|a| can_lower_expr_as_i32(a, i32_slots, flat_const_arrays, array_row_aliases, integer_locals, clamp3_fns, clamp_u8_fns));
+                }
+            }
+            false
+        }
+        // Issue #50 bridge: element of a flat-const 2D int table.
+        Expr::IndexGet { object, .. } => match object.as_ref() {
+            Expr::IndexGet { object: inner, .. } => {
+                matches!(inner.as_ref(), Expr::LocalGet(id) if flat_const_arrays.contains_key(id))
+            }
+            Expr::LocalGet(id) => array_row_aliases.get(id).map_or(false, |(cid, _)| flat_const_arrays.contains_key(cid)),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// (Issue #49) Lower `e` as an i32 SSA value. Must be called only after
+/// `can_lower_expr_as_i32` returned true for the same expression.
+pub(crate) fn lower_expr_as_i32(ctx: &mut FnCtx<'_>, e: &Expr) -> Result<String> {
+    match e {
+        Expr::Integer(n) => Ok((*n as i32).to_string()),
+        Expr::LocalGet(id) => {
+            if let Some(slot) = ctx.i32_counter_slots.get(id).cloned() {
+                Ok(ctx.block().load(I32, &slot))
+            } else {
+                let d = lower_expr(ctx, e)?;
+                Ok(ctx.block().fptosi(DOUBLE, &d, I32))
+            }
+        }
+        // Math.imul(a, b) → single `mul i32` instruction.
+        Expr::MathImul(a, b) => {
+            let l = lower_expr_as_i32(ctx, a)?;
+            let r = lower_expr_as_i32(ctx, b)?;
+            Ok(ctx.block().mul(I32, &l, &r))
+        }
+        Expr::Binary { op, left, right }
+            if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul
+                | BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor
+                | BinaryOp::Shl | BinaryOp::Shr | BinaryOp::UShr) =>
+        {
+            let l = lower_expr_as_i32(ctx, left)?;
+            let r = lower_expr_as_i32(ctx, right)?;
+            let blk = ctx.block();
+            Ok(match op {
+                BinaryOp::Add => blk.add(I32, &l, &r),
+                BinaryOp::Sub => blk.sub(I32, &l, &r),
+                BinaryOp::Mul => blk.mul(I32, &l, &r),
+                BinaryOp::BitAnd => blk.and(I32, &l, &r),
+                BinaryOp::BitOr => blk.or(I32, &l, &r),
+                BinaryOp::BitXor => blk.xor(I32, &l, &r),
+                BinaryOp::Shl => blk.shl(I32, &l, &r),
+                BinaryOp::Shr => blk.ashr(I32, &l, &r),
+                BinaryOp::UShr => blk.lshr(I32, &l, &r),
+                _ => unreachable!(),
+            })
+        }
+        // Clamp-pattern calls: emit @llvm.smax.i32 / @llvm.smin.i32 directly
+        // in i32, no double round-trip. Produces vectorizable IR.
+        Expr::Call { callee, args, .. } => {
+            let fid = if let Expr::FuncRef(id) = callee.as_ref() { *id } else { 0 };
+            if ctx.clamp3_functions.contains(&fid) && args.len() == 3 {
+                let v = lower_expr_as_i32(ctx, &args[0])?;
+                let lo = lower_expr_as_i32(ctx, &args[1])?;
+                let hi = lower_expr_as_i32(ctx, &args[2])?;
+                let blk = ctx.block();
+                let r1 = blk.fresh_reg();
+                blk.emit_raw(format!("{} = call i32 @llvm.smax.i32(i32 {}, i32 {})", r1, v, lo));
+                let r2 = blk.fresh_reg();
+                blk.emit_raw(format!("{} = call i32 @llvm.smin.i32(i32 {}, i32 {})", r2, r1, hi));
+                return Ok(r2);
+            }
+            if ctx.clamp_u8_functions.contains(&fid) && args.len() == 1 {
+                let v = lower_expr_as_i32(ctx, &args[0])?;
+                let blk = ctx.block();
+                let r1 = blk.fresh_reg();
+                blk.emit_raw(format!("{} = call i32 @llvm.smax.i32(i32 {}, i32 0)", r1, v));
+                let r2 = blk.fresh_reg();
+                blk.emit_raw(format!("{} = call i32 @llvm.smin.i32(i32 {}, i32 255)", r2, r1));
+                return Ok(r2);
+            }
+            // Non-clamp Call: fall through to default.
+            let d = lower_expr(ctx, e)?;
+            Ok(ctx.block().fptosi(DOUBLE, &d, I32))
+        }
+        // Fallback for Uint8ArrayGet / BufferIndexGet and other expressions:
+        // lower via the existing double path and `fptosi` back to i32.
+        _ => {
+            let d = lower_expr(ctx, e)?;
+            Ok(ctx.block().fptosi(DOUBLE, &d, I32))
+        }
     }
 }
 

@@ -56,6 +56,16 @@ impl LlBlock {
         self.terminated
     }
 
+    /// Allocate a fresh SSA register name in the enclosing function's
+    /// virtual register pool (e.g. `"%r42"`). Safe to call between
+    /// `gep` / other instructions that may emit sub-registers. Pair with
+    /// `emit_raw` when you need a custom instruction whose type string
+    /// isn't in the `LlvmType` alphabet (e.g. a literal `[N x i32]`
+    /// array type passed to `getelementptr`).
+    pub fn fresh_reg(&mut self) -> String {
+        self.reg()
+    }
+
     fn emit(&mut self, line: impl Into<String>) {
         // Never emit instructions after a terminator — LLVM rejects them and
         // the symptom is a confusing `clang` parse error many lines later.
@@ -252,6 +262,26 @@ impl LlBlock {
         r
     }
 
+    /// (Issue #52) Load tagged with `!invariant.load !0`. LLVM's GVN +
+    /// LICM are allowed to hoist these loads out of any enclosing loop —
+    /// the contract is that the loaded memory does not change between
+    /// observable executions of the instruction. Use ONLY for values
+    /// that are genuinely loop-invariant (e.g. a Buffer's `length`
+    /// field, which stays pinned for the lifetime of the buffer since
+    /// `Buffer.alloc(N)` never grows/shrinks).
+    ///
+    /// Misuse corrupts output silently: LLVM will cache the first
+    /// value and reuse it across iterations even if the underlying
+    /// memory changes.
+    pub fn load_invariant(&mut self, ty: LlvmType, ptr: &str) -> String {
+        let r = self.reg();
+        self.emit(format!(
+            "{} = load {}, ptr {}, !invariant.load !0",
+            r, ty, ptr
+        ));
+        r
+    }
+
     pub fn store(&mut self, ty: LlvmType, val: &str, ptr: &str) {
         self.emit(format!("store {} {}, ptr {}", ty, val, ptr));
     }
@@ -294,6 +324,29 @@ impl LlBlock {
         r
     }
 
+    /// ECMAScript ToInt32: `fptosi` with a NaN/Infinity guard.
+    /// JS ToInt32: NaN and ±Infinity produce 0 (per spec), normal values
+    /// go through `fptosi(f64→i64) + trunc(i64→i32)`.
+    pub fn toint32(&mut self, val: &str) -> String {
+        use crate::types::{DOUBLE, I1, I32, I64};
+        let is_nan = self.fcmp("uno", val, "0.0");
+        let fabs = self.call(DOUBLE, "llvm.fabs.f64", &[(DOUBLE, val)]);
+        let is_inf = self.fcmp("oeq", &fabs, "0x7FF0000000000000");
+        let is_bad = self.or(I1, &is_nan, &is_inf);
+        let safe = self.select(I1, &is_bad, DOUBLE, "0.0", val);
+        let as_i64 = self.fptosi(DOUBLE, &safe, I64);
+        self.trunc(I64, &as_i64, I32)
+    }
+
+    /// Fast ToInt32 — skip NaN/Infinity guards. Use ONLY when the input
+    /// is known to be a finite number (e.g., result of integer arithmetic,
+    /// `sitofp(i32)`, or a value that went through `toint32` already).
+    pub fn toint32_fast(&mut self, val: &str) -> String {
+        use crate::types::{I32, I64};
+        let as_i64 = self.fptosi(crate::types::DOUBLE, val, I64);
+        self.trunc(I64, &as_i64, I32)
+    }
+
     pub fn trunc(&mut self, from_ty: LlvmType, val: &str, to_ty: LlvmType) -> String {
         let r = self.reg();
         self.emit(format!("{} = trunc {} {} to {}", r, from_ty, val, to_ty));
@@ -325,6 +378,18 @@ impl LlBlock {
     ///
     /// Uses `@perry_null_guard_zero` — a module-global i32 initialized
     /// to 0 that serves as a safe dereference target.
+    ///
+    /// (Issue #52) The length load is tagged `!invariant.load` — once
+    /// resolved, an Array/Buffer's length field at offset 0 of the
+    /// header is only mutated by in-place array-growth paths
+    /// (IndexSet with realloc, `push`/`splice`). The tag lets LLVM's
+    /// LICM hoist the load out of any read-only loop even when the
+    /// intervening code contains calls the optimizer can't prove
+    /// length-preserving. Writers (`IndexSet` slow path, `push`, etc.)
+    /// use the plain `store`/`load` sequence on the same field, so
+    /// they don't invalidate the invariant-tagged load *for this
+    /// particular SSA value* — LLVM's memory SSA tracks the
+    /// tag per-load, not per-address.
     pub fn safe_load_i32_from_ptr(&mut self, handle: &str) -> String {
         use crate::types::{I32, I64};
         let is_bad = self.icmp_ult(I64, handle, "4096");
@@ -335,7 +400,7 @@ impl LlBlock {
             self.emit(format!("{} = select i1 {}, ptr @perry_null_guard_zero, ptr {}", r, is_bad, handle_ptr));
             r
         };
-        self.load(I32, &safe_ptr)
+        self.load_invariant(I32, &safe_ptr)
     }
 
     pub fn ptrtoint(&mut self, val: &str, to_ty: LlvmType) -> String {
@@ -370,6 +435,15 @@ impl LlBlock {
     pub fn srem(&mut self, ty: LlvmType, a: &str, b: &str) -> String {
         let r = self.reg();
         self.emit(format!("{} = srem {} {}, {}", r, ty, a, b));
+        r
+    }
+
+    /// Signed integer division.  Emitted by the `(int / int) | 0` fast
+    /// path — avoids `scvtf → fdiv → fcvtzs` and lets LLVM replace
+    /// constant divisors with `smulh + asr`.
+    pub fn sdiv(&mut self, ty: LlvmType, a: &str, b: &str) -> String {
+        let r = self.reg();
+        self.emit(format!("{} = sdiv {} {}, {}", r, ty, a, b));
         r
     }
 

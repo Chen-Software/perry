@@ -65,7 +65,7 @@ fn str_from_header(ptr: *const StringHeader) -> Option<&'static str> {
     }
     unsafe {
         let header = ptr as *const perry_runtime::string::StringHeader;
-        let len = (*header).length as usize;
+        let len = (*header).byte_len as usize;
         let data = (ptr as *const u8).add(std::mem::size_of::<perry_runtime::string::StringHeader>());
         Some(std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len)))
     }

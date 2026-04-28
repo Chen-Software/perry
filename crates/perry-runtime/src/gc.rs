@@ -42,6 +42,14 @@ pub const GC_TYPE_MAP: u8 = 8;
 pub const GC_FLAG_MARKED: u8 = 0x01;
 pub const GC_FLAG_ARENA: u8 = 0x02;
 pub const GC_FLAG_PINNED: u8 = 0x04;
+/// Set on a keys-array that was handed out by `shape_cache_insert`.
+/// `js_object_set_field_by_name` reads this bit to decide whether it
+/// must clone before mutating (shared arrays can't be mutated in
+/// place; fresh arrays allocated in the `keys.is_null()` branch can).
+/// Without the bit the clone fires on every property added to every
+/// fresh object literal — a 20-property row object allocates 19
+/// throwaway keys_array clones per row.
+pub const GC_FLAG_SHAPE_SHARED: u8 = 0x08;
 
 // Object flags stored in GcHeader._reserved (u16) for Object.freeze/seal/preventExtensions
 pub const OBJ_FLAG_FROZEN: u16 = 0x01;
@@ -200,6 +208,55 @@ pub fn gc_malloc(size: usize, obj_type: u8) -> *mut u8 {
 
         user_ptr
     }
+}
+
+/// Batch-allocate multiple GC-tracked malloc objects in one go.
+/// Amortises overhead: one `gc_check_trigger` call, one `MALLOC_OBJECTS`
+/// extend, one `MALLOC_SET` extend — instead of N of each.
+/// `sizes` contains the *payload* size for each object (excluding GcHeader).
+/// Returns a Vec of user pointers (past the header), one per entry.
+pub fn gc_malloc_batch(sizes: &[usize], obj_type: u8) -> Vec<*mut u8> {
+    gc_check_trigger(); // once, not N times
+
+    let n = sizes.len();
+    let mut results = Vec::with_capacity(n);
+    let mut headers = Vec::with_capacity(n);
+
+    unsafe {
+        GC_IN_ALLOC.with(|f| f.set(true));
+
+        for &size in sizes {
+            let total = GC_HEADER_SIZE + size;
+            let layout = Layout::from_size_align(total, 8).unwrap();
+            let raw = alloc(layout);
+            if raw.is_null() {
+                panic!("gc_malloc_batch: failed to allocate {} bytes", total);
+            }
+            let header = raw as *mut GcHeader;
+            (*header).obj_type = obj_type;
+            (*header).gc_flags = 0;
+            (*header)._reserved = 0;
+            (*header).size = total as u32;
+
+            headers.push(header);
+            results.push(raw.add(GC_HEADER_SIZE));
+        }
+
+        MALLOC_OBJECTS.with(|list| {
+            let mut list = list.borrow_mut();
+            list.extend_from_slice(&headers);
+        });
+        MALLOC_SET.with(|set| {
+            let mut set = set.borrow_mut();
+            for &h in &headers {
+                set.insert(h as usize);
+            }
+        });
+
+        GC_IN_ALLOC.with(|f| f.set(false));
+    }
+
+    results
 }
 
 /// Reallocate a malloc-tracked object, preserving GcHeader.
@@ -433,6 +490,12 @@ fn gc_collect_inner() {
 
     // 4. Trace from marked roots (iterative worklist)
     trace_marked_objects(&valid_ptrs);
+
+    // 5. Block-persistence pass: arena blocks survive whole or not at all, so
+    //    arena objects sharing a block with a root-reachable object persist
+    //    even when not themselves reachable. Their malloc children must stay
+    //    alive too (issues #43 / #44).
+    mark_block_persisting_arena_objects(&valid_ptrs);
 
     // === SWEEP PHASE ===
     // sweep() now clears mark bits on surviving objects inline,
@@ -740,6 +803,30 @@ fn mark_registered_roots(valid_ptrs: &ValidPointerSet) {
     }
 }
 
+/// Process a worklist of already-marked headers: follow references iteratively,
+/// marking newly-reached objects and pushing them onto the worklist.
+fn drain_trace_worklist(worklist: &mut Vec<*mut GcHeader>, valid_ptrs: &ValidPointerSet) {
+    let mut i = 0;
+    while i < worklist.len() {
+        let header = worklist[i];
+        i += 1;
+
+        unsafe {
+            let user_ptr = (header as *mut u8).add(GC_HEADER_SIZE);
+            match (*header).obj_type {
+                GC_TYPE_ARRAY => trace_array(user_ptr, valid_ptrs, worklist),
+                GC_TYPE_OBJECT => trace_object(user_ptr, valid_ptrs, worklist),
+                GC_TYPE_CLOSURE => trace_closure(user_ptr, valid_ptrs, worklist),
+                GC_TYPE_PROMISE => trace_promise(user_ptr, valid_ptrs, worklist),
+                GC_TYPE_ERROR => trace_error(user_ptr, valid_ptrs, worklist),
+                GC_TYPE_MAP => trace_map(user_ptr, valid_ptrs, worklist),
+                GC_TYPE_STRING | GC_TYPE_BIGINT => {}
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Trace from marked objects: follow references iteratively using a worklist.
 fn trace_marked_objects(valid_ptrs: &ValidPointerSet) {
     // Collect all currently-marked objects into a worklist
@@ -767,39 +854,69 @@ fn trace_marked_objects(valid_ptrs: &ValidPointerSet) {
         }
     });
 
-    // Process worklist
-    let mut i = 0;
-    while i < worklist.len() {
-        let header = worklist[i];
-        i += 1;
+    drain_trace_worklist(&mut worklist, valid_ptrs);
+}
 
-        unsafe {
-            let user_ptr = (header as *mut u8).add(GC_HEADER_SIZE);
-            match (*header).obj_type {
-                GC_TYPE_ARRAY => {
-                    trace_array(user_ptr, valid_ptrs, &mut worklist);
+/// Block-persistence pass: arena block reset is all-or-nothing, so any arena
+/// object in a block that has at least one reachable object will persist in
+/// memory whether or not the object itself was reached from a root. Any
+/// malloc children referenced by those persisting arena objects must therefore
+/// be kept alive — otherwise they get freed by sweep and the persisting arena
+/// object holds dangling pointers.
+///
+/// Why this matters: during `arr.push(new_obj)`, the new object is in a
+/// caller-saved register between its allocation and the write into `arr`.
+/// If array growth triggers GC in that window, conservative stack scanning
+/// (setjmp only captures callee-saved regs) doesn't see the new object as a
+/// root. The arena block containing the new object still survives (other
+/// objects in that block are reachable from `arr`), so the new object's
+/// memory is intact. But its malloc-allocated string fields ("Record X",
+/// email, etc.) get swept, and JSON.stringify later reads freed memory.
+/// Repro: issues #43 / #44.
+///
+/// Iterates until fixed point because marking an arena object may trace a
+/// child in a previously-dead block, making it live in the next round.
+fn mark_block_persisting_arena_objects(valid_ptrs: &ValidPointerSet) {
+    let mut worklist: Vec<*mut GcHeader> = Vec::new();
+    loop {
+        let n_blocks = crate::arena::arena_block_count();
+        let mut block_has_live: Vec<bool> = vec![false; n_blocks];
+
+        // Pass 1: compute which blocks have any reachable (marked/pinned) object.
+        crate::arena::arena_walk_objects_with_block_index(|header_ptr, block_idx| {
+            let header = header_ptr as *mut GcHeader;
+            unsafe {
+                if (*header).gc_flags & (GC_FLAG_MARKED | GC_FLAG_PINNED) != 0 {
+                    if block_idx < block_has_live.len() {
+                        block_has_live[block_idx] = true;
+                    }
                 }
-                GC_TYPE_OBJECT => {
-                    trace_object(user_ptr, valid_ptrs, &mut worklist);
-                }
-                GC_TYPE_CLOSURE => {
-                    trace_closure(user_ptr, valid_ptrs, &mut worklist);
-                }
-                GC_TYPE_PROMISE => {
-                    trace_promise(user_ptr, valid_ptrs, &mut worklist);
-                }
-                GC_TYPE_ERROR => {
-                    trace_error(user_ptr, valid_ptrs, &mut worklist);
-                }
-                GC_TYPE_MAP => {
-                    trace_map(user_ptr, valid_ptrs, &mut worklist);
-                }
-                GC_TYPE_STRING | GC_TYPE_BIGINT => {
-                    // Leaf nodes - no children to trace
-                }
-                _ => {}
             }
+        });
+
+        // Pass 2: mark any unmarked arena object in a live block and enqueue.
+        let mut newly_marked = 0usize;
+        crate::arena::arena_walk_objects_with_block_index(|header_ptr, block_idx| {
+            if block_idx >= block_has_live.len() || !block_has_live[block_idx] {
+                return;
+            }
+            let header = header_ptr as *mut GcHeader;
+            unsafe {
+                if (*header).gc_flags & (GC_FLAG_MARKED | GC_FLAG_PINNED) == 0 {
+                    (*header).gc_flags |= GC_FLAG_MARKED;
+                    worklist.push(header);
+                    newly_marked += 1;
+                }
+            }
+        });
+
+        if newly_marked == 0 {
+            break;
         }
+
+        // Trace newly marked; may mark children in previously-dead blocks,
+        // requiring another round to pick them up.
+        drain_trace_worklist(&mut worklist, valid_ptrs);
     }
 }
 
@@ -866,8 +983,10 @@ unsafe fn trace_array(user_ptr: *mut u8, valid_ptrs: &ValidPointerSet, worklist:
     let length = (*arr).length;
     let capacity = (*arr).capacity;
 
-    // Sanity checks: reject corrupt length/capacity to avoid scanning wild memory
-    if length > capacity || length > 65536 {
+    // Sanity check: reject corrupt length/capacity to avoid scanning wild memory.
+    // The 16M cap is a garbage-recognition guard (no realistic array exceeds it);
+    // real programs routinely push >65k items into arrays (issue #44 repro hits 100k).
+    if length > capacity || length > 16_000_000 {
         return;
     }
 
@@ -896,8 +1015,8 @@ unsafe fn trace_object(user_ptr: *mut u8, valid_ptrs: &ValidPointerSet, worklist
     let field_count = (*obj).field_count;
 
     // Sanity check: reject corrupt field_count to avoid scanning wild memory.
-    // Object fields start after ObjectHeader (24 bytes). Max reasonable: ~64K fields.
-    if field_count > 65536 {
+    // 1M is a garbage-recognition guard — legitimate objects never have that many fields.
+    if field_count > 1_000_000 {
         return;
     }
 
@@ -1261,9 +1380,24 @@ pub fn shape_cache_root_scanner(mark: &mut dyn FnMut(f64)) {
     crate::object::scan_shape_cache_roots(mark);
 }
 
+/// Root scanner for the shape-transition cache used by the dynamic-key
+/// write path (`obj[name] = value`). Same role as `shape_cache_root_scanner`
+/// — without it, GC would free cached target keys_arrays that no live
+/// object currently references directly.
+pub fn transition_cache_root_scanner(mark: &mut dyn FnMut(f64)) {
+    crate::object::scan_transition_cache_roots(mark);
+}
+
 /// Root scanner for OVERFLOW_FIELDS (per-object extra properties beyond inline slots)
 pub fn overflow_fields_root_scanner(mark: &mut dyn FnMut(f64)) {
     crate::object::scan_overflow_fields_roots(mark);
+}
+
+/// Root scanner for in-progress JSON.parse frames (issue #46).
+/// Without this, GC triggered mid-parse would sweep in-progress arrays/objects
+/// and the fresh string/object values about to be pushed into them.
+pub fn json_parse_root_scanner(mark: &mut dyn FnMut(f64)) {
+    crate::json::scan_parse_roots(mark);
 }
 
 /// Initialize GC root scanners. Called once at runtime startup.
@@ -1272,7 +1406,9 @@ pub fn gc_init() {
     gc_register_root_scanner(timer_root_scanner);
     gc_register_root_scanner(exception_root_scanner);
     gc_register_root_scanner(shape_cache_root_scanner);
+    gc_register_root_scanner(transition_cache_root_scanner);
     gc_register_root_scanner(overflow_fields_root_scanner);
+    gc_register_root_scanner(json_parse_root_scanner);
 }
 
 /// FFI: initialize GC (called from compiled code startup)

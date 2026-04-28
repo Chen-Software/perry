@@ -276,6 +276,37 @@ pub extern "C" fn js_uint8array_alloc(length: i32) -> *mut BufferHeader {
     buf
 }
 
+/// `new Uint8Array(x)` runtime dispatch.
+///
+/// The codegen can't always statically distinguish `new Uint8Array(n)` (numeric
+/// length) from `new Uint8Array(arr)` (source array) when `n` is not a literal,
+/// so this entry point inspects the NaN-box tag on the incoming value and
+/// routes accordingly. Before this helper the catch-all codegen arm always
+/// called `js_uint8array_from_array`, which treated numeric lengths as
+/// `ArrayHeader*` and silently produced a zero-length buffer (closes #38).
+#[no_mangle]
+pub extern "C" fn js_uint8array_new(val: f64) -> *mut BufferHeader {
+    let bits = val.to_bits();
+    let top16 = (bits >> 48) as u16;
+    // POINTER_TAG (0x7FFD) — an object/array pointer. Treat as source array.
+    if top16 == 0x7FFD {
+        let ptr = (bits & 0x0000_FFFF_FFFF_FFFF) as *const ArrayHeader;
+        return js_uint8array_from_array(ptr);
+    }
+    // Plain IEEE double (upper16 < 0x7FFC or > 0x7FFF) — numeric length.
+    if top16 < 0x7FFC || top16 > 0x7FFF {
+        let len = if val.is_finite() && val >= 0.0 {
+            val as i32
+        } else {
+            0
+        };
+        return js_uint8array_alloc(len);
+    }
+    // Any other tag (undefined/null/bool/string/bigint) → empty buffer,
+    // matching the JS semantics of `new Uint8Array(undefined)` et al.
+    js_uint8array_alloc(0)
+}
+
 /// Allocate a zero-filled buffer
 #[no_mangle]
 pub extern "C" fn js_buffer_alloc(size: i32, fill: i32) -> *mut BufferHeader {
@@ -840,8 +871,8 @@ fn buffer_index_of_bytes(buf: *const BufferHeader, needle: &[u8], start: i32) ->
     }
 }
 
-/// `buf.indexOf(needle, start?)` where `needle` is a string or buffer
-/// (NaN-boxed value).
+/// `buf.indexOf(needle, start?)` where `needle` is a string, buffer,
+/// or numeric byte value (NaN-boxed value).
 #[no_mangle]
 pub extern "C" fn js_buffer_index_of(buf_ptr: f64, needle: f64, start: i32) -> i32 {
     let buf = unbox_buffer_ptr(buf_ptr.to_bits()) as *const BufferHeader;
@@ -876,7 +907,18 @@ pub extern "C" fn js_buffer_index_of(buf_ptr: f64, needle: f64, start: i32) -> i
             }
         }
     }
-    -1
+    // Numeric byte needle — INT32_TAG or plain double
+    let byte_val = if top16 == 0x7FFE {
+        // INT32_TAG: lower 32 bits are an i32
+        (needle_bits as u32) & 0xFF
+    } else if top16 < 0x7FF8 || (top16 == 0x7FF8 && needle_bits == 0x7FF8_0000_0000_0000) {
+        // Raw double — convert to byte
+        ((needle as i64) & 0xFF) as u32
+    } else {
+        return -1;
+    };
+    let byte = [byte_val as u8];
+    buffer_index_of_bytes(buf, &byte, start)
 }
 
 /// `buf.includes(needle, start?)` — boolean i32.

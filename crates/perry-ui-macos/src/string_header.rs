@@ -3,8 +3,10 @@
 /// which would cause duplicate symbol errors when linking with libperry_stdlib.a.
 #[repr(C)]
 pub struct StringHeader {
-    /// Length in bytes (not chars - we store UTF-8)
-    pub length: u32,
+    /// Length in UTF-16 code units (JS `.length` semantics)
+    pub utf16_len: u32,
+    /// Length in UTF-8 bytes
+    pub byte_len: u32,
     /// Capacity (allocated space for data)
     pub capacity: u32,
     /// Reference hint for in-place append optimization (0=shared, 1=unique)

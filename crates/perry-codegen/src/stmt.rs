@@ -67,7 +67,7 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
             Ok(())
         }
 
-        Stmt::Let { id, name, init, ty, .. } => {
+        Stmt::Let { id, name, init, ty, mutable, .. } => {
             // `let C = SomeClass` aliases the local `C` to the class
             // `SomeClass` for `new C()` site rerouting. The HIR lowers
             // class identifiers referenced as values to `Expr::ClassRef`,
@@ -111,6 +111,25 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
                     }
                 }
                 _ => {}
+            }
+
+            // Issue #50: row-alias detection. When `let krow = X[i]` where
+            // `X` is a folded flat-const 2D int array, record
+            // `krow_id → (X_id, i)` so a later `krow[j]` can lower through
+            // the same flat `[N x i32]` load path as an inline `X[i][j]`.
+            // Only fires for non-mutable lets (reassignment would invalidate
+            // the alias relationship).
+            if !*mutable {
+                if let Some(perry_hir::Expr::IndexGet { object, index }) = init.as_ref() {
+                    if let perry_hir::Expr::LocalGet(const_id) = object.as_ref() {
+                        if ctx.flat_const_arrays.contains_key(const_id) {
+                            ctx.array_row_aliases.insert(
+                                *id,
+                                (*const_id, Box::new((**index).clone())),
+                            );
+                        }
+                    }
+                }
             }
             // Refine the declared type from the initializer when the
             // declared type is Any. The HIR's destructuring lowering
@@ -299,9 +318,43 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
             }
             ctx.locals.insert(*id, slot.clone());
             ctx.local_types.insert(*id, refined_ty);
+            // Int32 specialization (issue #48): if this local qualifies as
+            // integer-valued (all writes are `| 0` / `>>> 0` / bitwise / int
+            // literal / ++/--), allocate a parallel i32 slot. Update/LocalSet
+            // mirror writes to it; IndexGet and hot-loop consumers prefer it
+            // over the double slot — skipping the `fadd → fcvtzs → scvtf`
+            // round-trip per iteration of `sum = (sum + i) | 0`.
+            //
+            // Only fire on `mutable` locals: an immutable `const SEED = 0xDEAD_BEEF`
+            // never benefits from i32 specialization (no per-iteration cost), and
+            // its initializer may legitimately exceed i32 range (e.g. 0x9E3779B9
+            // = 2654435769 > INT32_MAX) — fptosi'ing it saturates to INT32_MAX
+            // and silently corrupts every read of the i32 slot. Mutable locals
+            // are always written through paths we control (Update, `(expr) | 0`)
+            // which produce in-range int32 values per JS ToInt32 semantics.
+            let init_in_i32_range = match init.as_ref() {
+                Some(perry_hir::Expr::Integer(n)) => i32::try_from(*n).is_ok(),
+                _ => true, // non-Integer init: writes will always go via i32-coercing paths
+            };
+            let needs_i32_slot = ctx.integer_locals.contains(id)
+                && *mutable
+                && init_in_i32_range
+                && !ctx.boxed_vars.contains(id)
+                && !ctx.module_globals.contains_key(id)
+                && !ctx.i32_counter_slots.contains_key(id);
+            if needs_i32_slot {
+                let i32_slot = ctx.func.alloca_entry(I32);
+                ctx.func.entry_allocas_push_store(I32, "0", &i32_slot);
+                ctx.i32_counter_slots.insert(*id, i32_slot);
+            }
             if let Some(init_expr) = init {
                 let v = lower_expr(ctx, init_expr)?;
                 ctx.block().store(DOUBLE, &v, &slot);
+                // Seed the i32 slot from the init value when the local has one.
+                if let Some(i32_slot) = ctx.i32_counter_slots.get(id).cloned() {
+                    let v_i32 = ctx.block().fptosi(DOUBLE, &v, I32);
+                    ctx.block().store(I32, &v_i32, &i32_slot);
+                }
             } else if let Some(cv) = ctx.compile_time_constants.get(id) {
                 // Compile-time constants (e.g. `declare const __platform__: number`)
                 // have no init expression but their value is known. Store the

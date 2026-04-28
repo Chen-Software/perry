@@ -7,7 +7,7 @@
 use indexmap::IndexMap;
 use perry_container_compose::compose::resolve_startup_order;
 use perry_container_compose::error::ComposeError;
-use perry_container_compose::backend::{CliProtocol, DockerProtocol};
+use perry_container_compose::backend::OciCommandBuilder;
 use perry_container_compose::error::compose_error_to_js;
 use perry_container_compose::types::{
     ComposeService, ComposeSpec, ContainerSpec, DependsOnCondition, DependsOnSpec, VolumeType,
@@ -165,14 +165,12 @@ fn arb_container_spec() -> impl Strategy<Value = ContainerSpec> {
         proptest::option::of(arb_service_name()),
         proptest::option::of(proptest::collection::vec("[0-9]{2,5}:[0-9]{2,5}", 0..=3)),
         proptest::option::of(proptest::collection::vec("/[a-z]:/[a-z]", 0..=3)),
-        proptest::bool::ANY,
     )
-        .prop_map(|(image, name, ports, volumes, read_only)| ContainerSpec {
+        .prop_map(|(image, name, ports, volumes)| ContainerSpec {
             image,
             name,
             ports,
             volumes,
-            read_only: Some(read_only),
             ..Default::default()
         })
 }
@@ -206,16 +204,13 @@ proptest! {
 
     #[test]
     fn prop_container_spec_cli_round_trip(spec in arb_container_spec()) {
-        let protocol = DockerProtocol;
-        let args = protocol.run_args(&spec);
+        let drv = perry_container_compose::backend::BackendDriver::Docker { bin: "docker".into() };
+        let args = OciCommandBuilder::run_args(&drv, &spec);
 
         // Manual verification of some fields since we don't have a full inverse parser yet
         if let Some(name) = &spec.name {
             prop_assert!(args.contains(&"--name".to_string()));
             prop_assert!(args.contains(name));
-        }
-        if spec.read_only.unwrap_or(false) {
-            prop_assert!(args.contains(&"--read-only".to_string()));
         }
         prop_assert!(args.contains(&spec.image));
     }

@@ -920,7 +920,7 @@ pub extern "C" fn perry_ui_widget_set_tooltip(handle: i64, text_ptr: i64) {
         if ptr.is_null() { return ""; }
         unsafe {
             let header = ptr as *const crate::string_header::StringHeader;
-            let len = (*header).length as usize;
+            let len = (*header).byte_len as usize;
             let data = ptr.add(std::mem::size_of::<crate::string_header::StringHeader>());
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
         }
@@ -981,7 +981,7 @@ pub extern "C" fn perry_system_open_url(url_ptr: i64) {
         if ptr.is_null() { return ""; }
         unsafe {
             let header = ptr as *const crate::string_header::StringHeader;
-            let len = (*header).length as usize;
+            let len = (*header).byte_len as usize;
             let data = ptr.add(std::mem::size_of::<crate::string_header::StringHeader>());
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
         }
@@ -1038,7 +1038,7 @@ pub extern "C" fn perry_system_preferences_set(key_ptr: i64, value: f64) {
         if ptr.is_null() { return ""; }
         unsafe {
             let header = ptr as *const crate::string_header::StringHeader;
-            let len = (*header).length as usize;
+            let len = (*header).byte_len as usize;
             let data = ptr.add(std::mem::size_of::<crate::string_header::StringHeader>());
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
         }
@@ -1074,7 +1074,7 @@ pub extern "C" fn perry_system_preferences_get(key_ptr: i64) -> f64 {
         if ptr.is_null() { return ""; }
         unsafe {
             let header = ptr as *const crate::string_header::StringHeader;
-            let len = (*header).length as usize;
+            let len = (*header).byte_len as usize;
             let data = ptr.add(std::mem::size_of::<crate::string_header::StringHeader>());
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
         }
@@ -1122,7 +1122,7 @@ pub extern "C" fn perry_ui_text_set_font_family(handle: i64, family_ptr: i64) {
         if ptr.is_null() { return ""; }
         unsafe {
             let header = ptr as *const crate::string_header::StringHeader;
-            let len = (*header).length as usize;
+            let len = (*header).byte_len as usize;
             let data = ptr.add(std::mem::size_of::<crate::string_header::StringHeader>());
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len))
         }

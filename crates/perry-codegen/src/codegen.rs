@@ -219,6 +219,18 @@ pub(crate) struct CrossModuleCtx {
     /// dead branches (which may reference FFI functions that don't exist on
     /// the current target).
     pub compile_time_constants: std::collections::HashMap<u32, f64>,
+    /// Functions with a 3-param clamp pattern: fid → true. Call sites
+    /// emit `@llvm.smax.i32` + `@llvm.smin.i32` instead of a function call.
+    pub clamp3_functions: std::collections::HashSet<u32>,
+    /// Functions with clampU8 pattern (1 param, clamp to [0, 255]).
+    pub clamp_u8_functions: std::collections::HashSet<u32>,
+    /// Functions that always return integer (all returns end with `| 0` etc).
+    pub returns_int_functions: std::collections::HashSet<u32>,
+    /// (Issue #50) Module-level `const` 2D int arrays folded into flat
+    /// `[N x i32]` LLVM constants. Maps local_id → info. Populated by
+    /// scanning `hir.init`; threaded through every FnCtx so the IndexGet
+    /// lowering can intercept `X[i][j]` / `krow[j]` patterns.
+    pub flat_const_arrays: std::collections::HashMap<u32, crate::expr::FlatConstInfo>,
 }
 
 /// Compile a Perry HIR module to an object file via LLVM IR.
@@ -550,6 +562,87 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         ),
         imported_vars: opts.imported_vars,
         compile_time_constants,
+        clamp3_functions: hir.functions.iter()
+            .filter_map(|f| crate::collectors::detect_clamp3(f).map(|_| f.id))
+            .collect(),
+        clamp_u8_functions: hir.functions.iter()
+            .filter(|f| crate::collectors::detect_clamp_u8(f))
+            .map(|f| f.id)
+            .collect(),
+        returns_int_functions: hir.functions.iter()
+            .filter(|f| crate::collectors::returns_integer(f))
+            .map(|f| f.id)
+            .collect(),
+        flat_const_arrays: {
+            // Issue #50: fold module-level `const X: number[][] = [[int, ...], ...]`
+            // into a flat `[N x i32]` LLVM constant so `X[i][j]` / `krow[j]` can
+            // load directly from `.rodata` instead of chasing the arena array
+            // header. Qualifying locals are `Let { mutable: false }`, have a
+            // rectangular int-literal 2D init, and are never mutated anywhere
+            // in the module (LocalSet/Update/IndexSet/mutating methods).
+            let mut map: std::collections::HashMap<u32, crate::expr::FlatConstInfo> =
+                std::collections::HashMap::new();
+            for s in &hir.init {
+                if let perry_hir::Stmt::Let {
+                    id, init: Some(init), mutable: false, ..
+                } = s
+                {
+                    if let Some((rows, cols, vals)) =
+                        crate::expr::try_flat_const_2d_int(init)
+                    {
+                        let mut mutated = false;
+                        if crate::collectors::has_any_mutation(&hir.init, *id) {
+                            mutated = true;
+                        }
+                        if !mutated {
+                            for f in &hir.functions {
+                                if crate::collectors::has_any_mutation(&f.body, *id) {
+                                    mutated = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if !mutated {
+                            'outer: for c in &hir.classes {
+                                for m in &c.methods {
+                                    if crate::collectors::has_any_mutation(&m.body, *id) {
+                                        mutated = true;
+                                        break 'outer;
+                                    }
+                                }
+                                if let Some(ctor) = &c.constructor {
+                                    if crate::collectors::has_any_mutation(&ctor.body, *id) {
+                                        mutated = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if !mutated {
+                            let gname = format!("perry_flat_{}__{}", module_prefix, id);
+                            let init_str = format!(
+                                "[{}]",
+                                vals.iter()
+                                    .map(|v| format!("i32 {}", v))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            );
+                            let ty = format!("[{} x i32]", rows * cols);
+                            llmod.add_raw_global(format!(
+                                "@{} = private unnamed_addr constant {} {}",
+                                gname, ty, init_str
+                            ));
+                            map.insert(*id, crate::expr::FlatConstInfo {
+                                global_name: gname,
+                                rows,
+                                cols,
+                            });
+                        }
+                    }
+                }
+            }
+            map
+        },
     };
 
     // Module-level globals registry. Pre-walk:
@@ -1000,9 +1093,12 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
                 let i64_name = format!("{}_i64", llvm_name);
                 crate::collectors::emit_i64_function(&mut llmod, f, &i64_name);
                 // Emit the f64 wrapper that calls the i64 version.
+                // Mark as alwaysinline so LLVM exposes the integer ops
+                // to callers — critical for vectorizing clamp patterns.
                 let params: Vec<(LlvmType, String)> = f
                     .params.iter().map(|p| (DOUBLE, format!("%arg{}", p.id))).collect();
                 let wrapper = llmod.define_function(llvm_name, DOUBLE, params);
+                wrapper.force_inline = true;
                 let _ = wrapper.create_block("entry");
                 let blk = wrapper.block_mut(0).unwrap();
                 let mut i64_args: Vec<(LlvmType, String)> = Vec::new();
@@ -1285,6 +1381,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         &module_boxed_vars,
         &closure_rest_params,
         &cross_module,
+        &opts.output_type,
     )
     .with_context(|| format!("lowering entry of module '{}'", hir.name))?;
 
@@ -1348,6 +1445,12 @@ fn compile_function(
         .collect();
 
     let lf = llmod.define_function(&llvm_name, DOUBLE, params);
+    // Small leaf functions (≤ 8 statements) get alwaysinline so LLVM
+    // exposes their operations to the caller's optimizer context — critical
+    // for vectorizing clamp helpers and similar patterns.
+    if f.body.len() <= 8 && !f.is_async && !f.is_generator {
+        lf.force_inline = true;
+    }
     let _ = lf.create_block("entry");
 
     // Store each param into an alloca slot, collecting LocalId → slot
@@ -1385,7 +1488,9 @@ fn compile_function(
 
     // Pre-walk: which locals are provably integer-valued? Used by
     // `BinaryOp::Mod` to emit integer modulo instead of libm `fmod()`.
-    let integer_locals = crate::collectors::collect_integer_locals(&f.body);
+    let clamp_fn_ids: std::collections::HashSet<u32> = cross_module.clamp3_functions
+        .union(&cross_module.clamp_u8_functions).chain(cross_module.returns_int_functions.iter()).copied().collect();
+    let integer_locals = crate::collectors::collect_integer_locals(&f.body, &cross_module.flat_const_arrays.keys().copied().collect(), &clamp_fn_ids);
 
     // Pre-walk: which `let x = new Class(...)` locals never escape?
     let non_escaping_news = crate::collectors::collect_non_escaping_news(
@@ -1441,6 +1546,12 @@ fn compile_function(
         scalar_replaced: std::collections::HashMap::new(),
         scalar_ctor_target: Vec::new(),
         non_escaping_news,
+        flat_const_arrays: &cross_module.flat_const_arrays,
+        array_row_aliases: HashMap::new(),
+        clamp3_functions: &cross_module.clamp3_functions,
+        clamp_u8_functions: &cross_module.clamp_u8_functions,
+        ic_site_counter: 0,
+        ic_globals: Vec::new(),
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of '{}'", f.name))?;
@@ -1460,10 +1571,14 @@ fn compile_function(
             ctx.block().ret(DOUBLE, "0.0");
         }
     }
+    let ic_globals = std::mem::take(&mut ctx.ic_globals);
     let pending = std::mem::take(&mut ctx.pending_declares);
     drop(ctx); // releases &mut LlFunction borrow on llmod
     for (name, ret, params) in pending {
         llmod.declare_function(&name, ret, &params);
+    }
+    for ic_name in &ic_globals {
+        llmod.add_raw_global(format!("@{} = private global [2 x i64] zeroinitializer", ic_name));
     }
     Ok(())
 }
@@ -1626,7 +1741,9 @@ fn compile_closure(
     // the closure body just sees them via the capture mechanism.
     let closure_boxed_vars = module_boxed_vars.clone();
 
-    let integer_locals = crate::collectors::collect_integer_locals(body);
+    let clamp_fn_ids: std::collections::HashSet<u32> = cross_module.clamp3_functions
+        .union(&cross_module.clamp_u8_functions).chain(cross_module.returns_int_functions.iter()).copied().collect();
+    let integer_locals = crate::collectors::collect_integer_locals(body, &cross_module.flat_const_arrays.keys().copied().collect(), &clamp_fn_ids);
 
     let non_escaping_news = crate::collectors::collect_non_escaping_news(
         body, &closure_boxed_vars, module_globals,
@@ -1685,6 +1802,12 @@ fn compile_closure(
         scalar_replaced: std::collections::HashMap::new(),
         scalar_ctor_target: Vec::new(),
         non_escaping_news,
+        flat_const_arrays: &cross_module.flat_const_arrays,
+        array_row_aliases: HashMap::new(),
+        clamp3_functions: &cross_module.clamp3_functions,
+        clamp_u8_functions: &cross_module.clamp_u8_functions,
+        ic_site_counter: 0,
+        ic_globals: Vec::new(),
     };
 
     stmt::lower_stmts(&mut ctx, body)
@@ -1693,10 +1816,14 @@ fn compile_closure(
     if !ctx.block().is_terminated() {
         ctx.block().ret(DOUBLE, "0.0");
     }
+    let ic_globals = std::mem::take(&mut ctx.ic_globals);
     let pending = std::mem::take(&mut ctx.pending_declares);
     drop(ctx);
     for (name, ret, params) in pending {
         llmod.declare_function(&name, ret, &params);
+    }
+    for ic_name in &ic_globals {
+        llmod.add_raw_global(format!("@{} = private global [2 x i64] zeroinitializer", ic_name));
     }
     Ok(())
 }
@@ -1771,7 +1898,9 @@ fn compile_method(
 
     let method_boxed_vars = module_boxed_vars.clone();
 
-    let integer_locals = crate::collectors::collect_integer_locals(&method.body);
+    let clamp_fn_ids: std::collections::HashSet<u32> = cross_module.clamp3_functions
+        .union(&cross_module.clamp_u8_functions).chain(cross_module.returns_int_functions.iter()).copied().collect();
+    let integer_locals = crate::collectors::collect_integer_locals(&method.body, &cross_module.flat_const_arrays.keys().copied().collect(), &clamp_fn_ids);
 
     let non_escaping_news = crate::collectors::collect_non_escaping_news(
         &method.body, &method_boxed_vars, module_globals,
@@ -1826,6 +1955,12 @@ fn compile_method(
         scalar_replaced: std::collections::HashMap::new(),
         scalar_ctor_target: Vec::new(),
         non_escaping_news,
+        flat_const_arrays: &cross_module.flat_const_arrays,
+        array_row_aliases: HashMap::new(),
+        clamp3_functions: &cross_module.clamp3_functions,
+        clamp_u8_functions: &cross_module.clamp_u8_functions,
+        ic_site_counter: 0,
+        ic_globals: Vec::new(),
     };
 
     // Constructors emitted as standalone cross-module LLVM functions (named
@@ -1846,10 +1981,14 @@ fn compile_method(
     if !ctx.block().is_terminated() {
         ctx.block().ret(DOUBLE, "0.0");
     }
+    let ic_globals = std::mem::take(&mut ctx.ic_globals);
     let pending = std::mem::take(&mut ctx.pending_declares);
     drop(ctx);
     for (name, ret, params) in pending {
         llmod.declare_function(&name, ret, &params);
+    }
+    for ic_name in &ic_globals {
+        llmod.add_raw_global(format!("@{} = private global [2 x i64] zeroinitializer", ic_name));
     }
     Ok(())
 }
@@ -1889,8 +2028,11 @@ fn compile_module_entry(
     module_boxed_vars: &std::collections::HashSet<u32>,
     closure_rest_params: &HashMap<u32, usize>,
     cross_module: &CrossModuleCtx,
+    output_type: &str,
 ) -> Result<()> {
     let strings_init_name = format!("__perry_init_strings_{}", module_prefix);
+
+    let is_dylib = output_type == "dylib";
 
     if is_entry {
         // Pre-declare each non-entry module's init function as an
@@ -1901,7 +2043,17 @@ fn compile_module_entry(
             llmod.declare_function(&format!("{}__init", prefix), VOID, &[]);
         }
 
-        let main = llmod.define_function("main", I32, vec![]);
+        // For dylib output, emit `void perry_module_init()` instead of
+        // `int main()`. The host process calls this once after dlopen to
+        // initialize the GC, string pools, module globals (including GC
+        // root registration), and run top-level statements. Without this,
+        // module-level Maps/Arrays would never be registered as GC roots
+        // and the first GC cycle after connect() would free them (issue #54).
+        let main = if is_dylib {
+            llmod.define_function("perry_module_init", VOID, vec![])
+        } else {
+            llmod.define_function("main", I32, vec![])
+        };
         let _ = main.create_block("entry");
         {
             let blk = main.block_mut(0).unwrap();
@@ -1925,7 +2077,9 @@ fn compile_module_entry(
         main.mark_entry_init_boundary();
 
         let main_boxed_vars = module_boxed_vars.clone();
-        let main_integer_locals = crate::collectors::collect_integer_locals(&hir.init);
+        let clamp_fn_ids: std::collections::HashSet<u32> = cross_module.clamp3_functions
+            .union(&cross_module.clamp_u8_functions).chain(cross_module.returns_int_functions.iter()).copied().collect();
+        let main_integer_locals = crate::collectors::collect_integer_locals(&hir.init, &cross_module.flat_const_arrays.keys().copied().collect(), &clamp_fn_ids);
         let main_non_escaping_news = crate::collectors::collect_non_escaping_news(
             &hir.init, &main_boxed_vars, module_globals,
         );
@@ -1978,6 +2132,12 @@ fn compile_module_entry(
             scalar_replaced: std::collections::HashMap::new(),
             scalar_ctor_target: Vec::new(),
             non_escaping_news: main_non_escaping_news,
+            flat_const_arrays: &cross_module.flat_const_arrays,
+            array_row_aliases: HashMap::new(),
+        clamp3_functions: &cross_module.clamp3_functions,
+        clamp_u8_functions: &cross_module.clamp_u8_functions,
+        ic_site_counter: 0,
+        ic_globals: Vec::new(),
         };
         // Register every module-level global's ADDRESS as a GC root so
         // the mark phase can discover pointer-typed values (Maps, Arrays,
@@ -1999,67 +2159,79 @@ fn compile_module_entry(
             .with_context(|| format!("lowering init statements of module '{}'", hir.name))?;
 
         if !ctx.block().is_terminated() {
-            // Event loop: keep running while there are active event
-            // sources (timers, intervals, WS servers, pending stdlib
-            // async ops). Without this, event-driven servers (WS,
-            // setInterval-based) exit immediately after init.
-            //
-            // Structure:
-            //   loop_header: check if any source is active → body or exit
-            //   loop_body:   tick all queues, sleep 10ms, jump to header
-            //   loop_exit:   ret 0
-            let header_idx = ctx.new_block("event_loop.header");
-            let body_idx = ctx.new_block("event_loop.body");
-            let exit_idx = ctx.new_block("event_loop.exit");
-            let header_label = ctx.block_label(header_idx);
-            let body_label = ctx.block_label(body_idx);
-            let exit_label = ctx.block_label(exit_idx);
+            if is_dylib {
+                // Dylib: no event loop — the host manages its own event
+                // loop and calls perry_fn_* entry points as needed. Just
+                // return after running top-level statements (which set up
+                // module-level state like Maps, class registrations, etc.).
+                ctx.block().ret_void();
+            } else {
+                // Event loop: keep running while there are active event
+                // sources (timers, intervals, WS servers, pending stdlib
+                // async ops). Without this, event-driven servers (WS,
+                // setInterval-based) exit immediately after init.
+                //
+                // Structure:
+                //   loop_header: check if any source is active → body or exit
+                //   loop_body:   tick all queues, sleep 10ms, jump to header
+                //   loop_exit:   ret 0
+                let header_idx = ctx.new_block("event_loop.header");
+                let body_idx = ctx.new_block("event_loop.body");
+                let exit_idx = ctx.new_block("event_loop.exit");
+                let header_label = ctx.block_label(header_idx);
+                let body_label = ctx.block_label(body_idx);
+                let exit_label = ctx.block_label(exit_idx);
 
-            // Initial microtask flush (4 rounds) before entering the
-            // event loop — handles fire-and-forget .then() chains that
-            // don't need the full event loop.
-            for _ in 0..4 {
+                // Initial microtask flush (4 rounds) before entering the
+                // event loop — handles fire-and-forget .then() chains that
+                // don't need the full event loop.
+                for _ in 0..4 {
+                    let _ = ctx.block().call(I32, "js_promise_run_microtasks", &[]);
+                    let _ = ctx.block().call(I32, "js_timer_tick", &[]);
+                    let _ = ctx.block().call(I32, "js_callback_timer_tick", &[]);
+                    let _ = ctx.block().call(I32, "js_interval_timer_tick", &[]);
+                }
+                ctx.block().call_void("js_run_stdlib_pump", &[]);
+                ctx.block().br(&header_label);
+
+                // loop_header: check if there's any reason to keep running
+                ctx.current_block = header_idx;
+                let has_timers = ctx.block().call(I32, "js_timer_has_pending", &[]);
+                let has_callbacks = ctx.block().call(I32, "js_callback_timer_has_pending", &[]);
+                let has_intervals = ctx.block().call(I32, "js_interval_timer_has_pending", &[]);
+                let has_stdlib = ctx.block().call(I32, "js_stdlib_has_active_handles", &[]);
+                let any1 = ctx.block().or(I32, &has_timers, &has_callbacks);
+                let any2 = ctx.block().or(I32, &has_intervals, &has_stdlib);
+                let any = ctx.block().or(I32, &any1, &any2);
+                let zero = "0".to_string();
+                let cmp = ctx.block().icmp_ne(I32, &any, &zero);
+                ctx.block().cond_br(&cmp, &body_label, &exit_label);
+
+                // loop_body: tick everything, sleep, loop
+                ctx.current_block = body_idx;
                 let _ = ctx.block().call(I32, "js_promise_run_microtasks", &[]);
                 let _ = ctx.block().call(I32, "js_timer_tick", &[]);
                 let _ = ctx.block().call(I32, "js_callback_timer_tick", &[]);
                 let _ = ctx.block().call(I32, "js_interval_timer_tick", &[]);
+                ctx.block().call_void("js_run_stdlib_pump", &[]);
+                let ten_ms = "10.0".to_string();
+                ctx.block().call_void("js_sleep_ms", &[(DOUBLE, &ten_ms)]);
+                ctx.block().br(&header_label);
+
+                // loop_exit: done
+                ctx.current_block = exit_idx;
+                ctx.block().ret(I32, "0");
             }
-            ctx.block().call_void("js_run_stdlib_pump", &[]);
-            ctx.block().br(&header_label);
-
-            // loop_header: check if there's any reason to keep running
-            ctx.current_block = header_idx;
-            let has_timers = ctx.block().call(I32, "js_timer_has_pending", &[]);
-            let has_callbacks = ctx.block().call(I32, "js_callback_timer_has_pending", &[]);
-            let has_intervals = ctx.block().call(I32, "js_interval_timer_has_pending", &[]);
-            let has_stdlib = ctx.block().call(I32, "js_stdlib_has_active_handles", &[]);
-            let any1 = ctx.block().or(I32, &has_timers, &has_callbacks);
-            let any2 = ctx.block().or(I32, &has_intervals, &has_stdlib);
-            let any = ctx.block().or(I32, &any1, &any2);
-            let zero = "0".to_string();
-            let cmp = ctx.block().icmp_ne(I32, &any, &zero);
-            ctx.block().cond_br(&cmp, &body_label, &exit_label);
-
-            // loop_body: tick everything, sleep, loop
-            ctx.current_block = body_idx;
-            let _ = ctx.block().call(I32, "js_promise_run_microtasks", &[]);
-            let _ = ctx.block().call(I32, "js_timer_tick", &[]);
-            let _ = ctx.block().call(I32, "js_callback_timer_tick", &[]);
-            let _ = ctx.block().call(I32, "js_interval_timer_tick", &[]);
-            ctx.block().call_void("js_run_stdlib_pump", &[]);
-            let ten_ms = "10.0".to_string();
-            ctx.block().call_void("js_sleep_ms", &[(DOUBLE, &ten_ms)]);
-            ctx.block().br(&header_label);
-
-            // loop_exit: done
-            ctx.current_block = exit_idx;
-            ctx.block().ret(I32, "0");
         }
+    let ic_globals = std::mem::take(&mut ctx.ic_globals);
         let pending = std::mem::take(&mut ctx.pending_declares);
         drop(ctx);
         for (name, ret, params) in pending {
             llmod.declare_function(&name, ret, &params);
         }
+    for ic_name in &ic_globals {
+        llmod.add_raw_global(format!("@{} = private global [2 x i64] zeroinitializer", ic_name));
+    }
     } else {
         let init_name = format!("{}__init", module_prefix);
         // Debug: emit puts("INIT: <prefix>") at the top of each module init
@@ -2091,7 +2263,9 @@ fn compile_module_entry(
         init_fn.mark_entry_init_boundary();
 
         let init_boxed_vars = module_boxed_vars.clone();
-        let init_integer_locals = crate::collectors::collect_integer_locals(&hir.init);
+        let clamp_fn_ids: std::collections::HashSet<u32> = cross_module.clamp3_functions
+            .union(&cross_module.clamp_u8_functions).chain(cross_module.returns_int_functions.iter()).copied().collect();
+        let init_integer_locals = crate::collectors::collect_integer_locals(&hir.init, &cross_module.flat_const_arrays.keys().copied().collect(), &clamp_fn_ids);
         let init_non_escaping_news = crate::collectors::collect_non_escaping_news(
             &hir.init, &init_boxed_vars, module_globals,
         );
@@ -2144,6 +2318,12 @@ fn compile_module_entry(
             scalar_replaced: std::collections::HashMap::new(),
             scalar_ctor_target: Vec::new(),
             non_escaping_news: init_non_escaping_news,
+            flat_const_arrays: &cross_module.flat_const_arrays,
+            array_row_aliases: HashMap::new(),
+        clamp3_functions: &cross_module.clamp3_functions,
+        clamp_u8_functions: &cross_module.clamp_u8_functions,
+        ic_site_counter: 0,
+        ic_globals: Vec::new(),
         };
         // Register every module-level global's ADDRESS as a GC root —
         // same reason as the entry-module branch above (issue #36). For
@@ -2159,11 +2339,15 @@ fn compile_module_entry(
         if !ctx.block().is_terminated() {
             ctx.block().ret_void();
         }
+    let ic_globals = std::mem::take(&mut ctx.ic_globals);
         let pending = std::mem::take(&mut ctx.pending_declares);
         drop(ctx);
         for (name, ret, params) in pending {
             llmod.declare_function(&name, ret, &params);
         }
+    for ic_name in &ic_globals {
+        llmod.add_raw_global(format!("@{} = private global [2 x i64] zeroinitializer", ic_name));
+    }
     }
     Ok(())
 }
@@ -2362,7 +2546,9 @@ fn compile_static_method(
         .map(|p| (p.id, p.ty.clone()))
         .collect();
 
-    let integer_locals = crate::collectors::collect_integer_locals(&f.body);
+    let clamp_fn_ids: std::collections::HashSet<u32> = cross_module.clamp3_functions
+        .union(&cross_module.clamp_u8_functions).chain(cross_module.returns_int_functions.iter()).copied().collect();
+    let integer_locals = crate::collectors::collect_integer_locals(&f.body, &cross_module.flat_const_arrays.keys().copied().collect(), &clamp_fn_ids);
 
     let static_boxed_vars = module_boxed_vars.clone();
     let non_escaping_news = crate::collectors::collect_non_escaping_news(
@@ -2422,6 +2608,12 @@ fn compile_static_method(
         scalar_replaced: std::collections::HashMap::new(),
         scalar_ctor_target: Vec::new(),
         non_escaping_news,
+        flat_const_arrays: &cross_module.flat_const_arrays,
+        array_row_aliases: HashMap::new(),
+        clamp3_functions: &cross_module.clamp3_functions,
+        clamp_u8_functions: &cross_module.clamp_u8_functions,
+        ic_site_counter: 0,
+        ic_globals: Vec::new(),
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of static '{}::{}'", class_name, f.name))?;
@@ -2436,10 +2628,14 @@ fn compile_static_method(
             ctx.block().ret(DOUBLE, "0.0");
         }
     }
+    let ic_globals = std::mem::take(&mut ctx.ic_globals);
     let pending = std::mem::take(&mut ctx.pending_declares);
     drop(ctx);
     for (name, ret, params) in pending {
         llmod.declare_function(&name, ret, &params);
+    }
+    for ic_name in &ic_globals {
+        llmod.add_raw_global(format!("@{} = private global [2 x i64] zeroinitializer", ic_name));
     }
     Ok(())
 }

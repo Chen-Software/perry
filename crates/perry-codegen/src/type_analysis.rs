@@ -393,6 +393,16 @@ pub(crate) fn is_bigint_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
                     | BinaryOp::Mul
                     | BinaryOp::Div
                     | BinaryOp::Mod
+                    // Bitwise ops on bigints produce bigints — include
+                    // them so `(a * prime) & mask64` where both operands
+                    // are bigint stays bigint-typed all the way up the
+                    // chain. Without this the outer `&` falls through to
+                    // the i32 ToInt32 path and returns 0 (closes #39).
+                    | BinaryOp::BitAnd
+                    | BinaryOp::BitOr
+                    | BinaryOp::BitXor
+                    | BinaryOp::Shl
+                    | BinaryOp::Shr
             ) && (is_bigint_expr(ctx, left) || is_bigint_expr(ctx, right))
         }
         _ => false,

@@ -15,6 +15,75 @@ use std::fmt::Write as FmtWrite;
 thread_local! {
     /// Stack of object pointers currently being stringified (for circular detection).
     static STRINGIFY_STACK: RefCell<Vec<usize>> = RefCell::new(Vec::new());
+
+    /// Key string intern cache for JSON.parse (issue #51 follow-up).
+    /// Maps key bytes → already-allocated StringHeader pointer.
+    /// Avoids re-allocating "id", "name", etc. for every record in a
+    /// homogeneous JSON array. Cleared at the end of each top-level parse.
+    static PARSE_KEY_CACHE: RefCell<std::collections::HashMap<Vec<u8>, *const StringHeader>> =
+        RefCell::new(std::collections::HashMap::new());
+
+    /// GC roots for in-progress JSON.parse. Each entry is a JSValue bit pattern
+    /// (stored as f64 so the scanner can hand it to the NaN-boxed mark path).
+    ///
+    /// Why this exists (issue #46): parse_array/parse_object build their result
+    /// incrementally over thousands of iterations. Mid-parse heap allocations
+    /// (`js_string_from_bytes` → gc_malloc → adaptive count trigger, or an arena
+    /// block overflow) run GC while the in-progress array/object lives only on
+    /// the Rust call stack. The conservative stack scan only captures callee-
+    /// saved registers via setjmp; values held in caller-saved regs (or on
+    /// the Rust-heap backing of `Vec<(Vec<u8>, JSValue)>` inside parse_object)
+    /// are invisible and get swept. Symptom was `JSON.parse(big_array)` silently
+    /// truncating at ~1666 records (= when the second adaptive malloc GC fires).
+    static PARSE_ROOTS: RefCell<Vec<f64>> = RefCell::new(Vec::new());
+}
+
+#[inline]
+fn parse_root_push(v: JSValue) -> usize {
+    PARSE_ROOTS.with(|r| {
+        let mut r = r.borrow_mut();
+        let idx = r.len();
+        r.push(f64::from_bits(v.bits()));
+        idx
+    })
+}
+
+#[inline]
+fn parse_root_set(idx: usize, v: JSValue) {
+    PARSE_ROOTS.with(|r| {
+        if let Some(slot) = r.borrow_mut().get_mut(idx) {
+            *slot = f64::from_bits(v.bits());
+        }
+    });
+}
+
+#[inline]
+fn parse_root_save_len() -> usize {
+    PARSE_ROOTS.with(|r| r.borrow().len())
+}
+
+#[inline]
+fn parse_root_restore(len: usize) {
+    PARSE_ROOTS.with(|r| r.borrow_mut().truncate(len));
+}
+
+/// Root scanner called by GC — marks every value in PARSE_ROOTS as live.
+pub fn scan_parse_roots(mark: &mut dyn FnMut(f64)) {
+    PARSE_ROOTS.with(|r| {
+        for &v in r.borrow().iter() {
+            mark(v);
+        }
+    });
+    // Also mark interned key strings so GC doesn't sweep them mid-parse.
+    PARSE_KEY_CACHE.with(|c| {
+        for &ptr in c.borrow().values() {
+            if !ptr.is_null() {
+                mark(f64::from_bits(
+                    crate::value::STRING_TAG | (ptr as u64 & 0x0000_FFFF_FFFF_FFFF),
+                ));
+            }
+        }
+    });
 }
 
 // ─── Zero-copy string access ──────────────────────────────────────────────────
@@ -31,6 +100,22 @@ unsafe fn str_from_header<'a>(ptr: *const StringHeader) -> Option<&'a str> {
 }
 
 // ─── Direct JSON parser ────────────────────────────────────────────────────────
+
+/// Result of parsing a JSON string: either a zero-copy borrow from the
+/// input buffer (no escapes) or an owned allocation (had escape sequences).
+enum ParsedStr<'a> {
+    Borrowed(&'a [u8]),
+    Owned(Vec<u8>),
+}
+
+impl<'a> ParsedStr<'a> {
+    fn as_bytes(&self) -> &[u8] {
+        match self {
+            ParsedStr::Borrowed(s) => s,
+            ParsedStr::Owned(v) => v,
+        }
+    }
+}
 
 struct DirectParser<'a> {
     input: &'a [u8],
@@ -89,20 +174,42 @@ impl<'a> DirectParser<'a> {
 
     unsafe fn parse_string_value(&mut self) -> JSValue {
         if let Some(s) = self.parse_string_bytes() {
-            let ptr = js_string_from_bytes(s.as_ptr(), s.len() as u32);
+            let b = s.as_bytes();
+            let ptr = js_string_from_bytes(b.as_ptr(), b.len() as u32);
             JSValue::string_ptr(ptr)
         } else {
             JSValue::null()
         }
     }
 
-    fn parse_string_bytes(&mut self) -> Option<Vec<u8>> {
+    /// Zero-copy fast path: if the string has no escape sequences,
+    /// return a direct slice into the input buffer. Falls back to
+    /// `parse_string_bytes_slow` for strings containing `\`.
+    fn parse_string_bytes(&mut self) -> Option<ParsedStr<'a>> {
         if self.peek() != Some(b'"') {
             return None;
         }
         self.advance();
+        let start = self.pos;
+        // Fast scan: look for closing `"` without any `\`.
+        while self.pos < self.input.len() {
+            let ch = self.input[self.pos];
+            if ch == b'"' {
+                let slice = &self.input[start..self.pos];
+                self.pos += 1;
+                return Some(ParsedStr::Borrowed(slice));
+            }
+            if ch == b'\\' {
+                // Has escapes — fall back to slow path from current position.
+                return self.parse_string_bytes_slow(start);
+            }
+            self.pos += 1;
+        }
+        None
+    }
 
-        let mut result = Vec::new();
+    fn parse_string_bytes_slow(&mut self, start: usize) -> Option<ParsedStr<'a>> {
+        let mut result = Vec::from(&self.input[start..self.pos]);
         loop {
             if self.pos >= self.input.len() {
                 return None;
@@ -110,7 +217,7 @@ impl<'a> DirectParser<'a> {
             let ch = self.input[self.pos];
             self.pos += 1;
             match ch {
-                b'"' => return Some(result),
+                b'"' => return Some(ParsedStr::Owned(result)),
                 b'\\' => {
                     if self.pos >= self.input.len() {
                         return None;
@@ -168,7 +275,7 @@ impl<'a> DirectParser<'a> {
         self.advance();
         self.skip_whitespace();
 
-        let mut pairs: Vec<(Vec<u8>, JSValue)> = Vec::new();
+        let saved_roots = parse_root_save_len();
 
         if self.peek() == Some(b'}') {
             self.advance();
@@ -177,6 +284,16 @@ impl<'a> DirectParser<'a> {
             js_object_set_keys(js_obj, keys_arr);
             return JSValue::object_ptr(js_obj as *mut u8);
         }
+
+        // Incremental build: allocate the object upfront and set fields
+        // as we parse them (no intermediate Vec). Combined with key
+        // interning (PARSE_KEY_CACHE) and transition-cache shape sharing
+        // (js_object_set_field_by_name), this gives:
+        //  - First record of each schema: N key allocs + N transitions.
+        //  - Subsequent records: 0 key allocs + N transition hits.
+        //  - Zero Rust-heap Vec allocations per record.
+        let js_obj = js_object_alloc(0, 0);
+        let _obj_slot = parse_root_push(JSValue::object_ptr(js_obj as *mut u8));
 
         loop {
             self.skip_whitespace();
@@ -190,7 +307,29 @@ impl<'a> DirectParser<'a> {
             }
 
             let value = self.parse_value();
-            pairs.push((key, value));
+            // Root the value before the key-intern + set_field path
+            // (which may allocate and trigger GC).
+            parse_root_push(value);
+
+            let key_bytes = key.as_bytes();
+            // Two-phase lookup: check cache with immutable borrow first,
+            // then allocate OUTSIDE the borrow (js_string_from_bytes can
+            // trigger GC → scan_parse_roots → borrow() on same RefCell).
+            let cached = PARSE_KEY_CACHE.with(|c| {
+                c.borrow().get(key_bytes).copied()
+            });
+            let key_ptr = if let Some(p) = cached {
+                p
+            } else {
+                let ptr = js_string_from_bytes(key_bytes.as_ptr(), key_bytes.len() as u32);
+                PARSE_KEY_CACHE.with(|c| {
+                    c.borrow_mut().insert(key_bytes.to_vec(), ptr);
+                });
+                ptr
+            };
+            crate::object::js_object_set_field_by_name(
+                js_obj, key_ptr as *mut StringHeader, f64::from_bits(value.bits()),
+            );
 
             self.skip_whitespace();
             if self.peek() == Some(b',') {
@@ -200,17 +339,7 @@ impl<'a> DirectParser<'a> {
             }
         }
         self.expect(b'}');
-
-        let count = pairs.len();
-        let js_obj = js_object_alloc(0, count as u32);
-        let keys_arr = js_array_alloc(count as u32);
-
-        for (idx, (key, value)) in pairs.into_iter().enumerate() {
-            let key_ptr = js_string_from_bytes(key.as_ptr(), key.len() as u32);
-            js_array_push(keys_arr, JSValue::string_ptr(key_ptr));
-            js_object_set_field(js_obj, idx as u32, value);
-        }
-        js_object_set_keys(js_obj, keys_arr);
+        parse_root_restore(saved_roots);
         JSValue::object_ptr(js_obj as *mut u8)
     }
 
@@ -218,16 +347,25 @@ impl<'a> DirectParser<'a> {
         self.advance();
         self.skip_whitespace();
 
+        let saved_roots = parse_root_save_len();
         let mut js_arr = js_array_alloc(16);
+        let arr_slot = parse_root_push(JSValue::object_ptr(js_arr as *mut u8));
 
         if self.peek() == Some(b']') {
             self.advance();
+            parse_root_restore(saved_roots);
             return JSValue::object_ptr(js_arr as *mut u8);
         }
 
         loop {
             let value = self.parse_value();
+            // Root value before push — js_array_push may grow (arena alloc → GC)
+            // and value's heap ptr lives only in a caller-saved register here.
+            parse_root_push(value);
             js_arr = js_array_push(js_arr, value);
+            // js_array_push may have returned a new ArrayHeader* after grow;
+            // update the root slot so GC sees the new pointer, not the stale one.
+            parse_root_set(arr_slot, JSValue::object_ptr(js_arr as *mut u8));
 
             self.skip_whitespace();
             if self.peek() == Some(b',') {
@@ -237,6 +375,7 @@ impl<'a> DirectParser<'a> {
             }
         }
         self.expect(b']');
+        parse_root_restore(saved_roots);
         JSValue::object_ptr(js_arr as *mut u8)
     }
 
@@ -320,8 +459,19 @@ pub unsafe extern "C" fn js_json_parse(text_ptr: *const StringHeader) -> JSValue
         crate::exception::js_throw(f64::from_bits(err_val.bits()));
     }
 
+    // Root the input StringHeader for the duration of the parse. The parser
+    // holds `input: &[u8]` pointing INTO the string's data region — a pointer
+    // the conservative stack scan / valid-pointer-set won't match (it only
+    // indexes user pointers at `header + sizeof(GcHeader)`). Without this root
+    // the input string could be swept mid-parse and `bytes` would dangle.
+    let text_root = parse_root_push(JSValue::string_ptr(text_ptr as *mut StringHeader));
+
     let mut parser = DirectParser::new(bytes);
     let result = parser.parse_value();
+    // Also root the final result while we evaluate the error path; a throw
+    // below (which allocates its message via gc_malloc) must not sweep the
+    // just-parsed top-level value.
+    parse_root_push(result);
 
     // If parser didn't consume meaningful input (result is null and input wasn't "null"),
     // the input was invalid JSON — throw SyntaxError
@@ -337,6 +487,7 @@ pub unsafe extern "C" fn js_json_parse(text_ptr: *const StringHeader) -> JSValue
         }
     }
 
+    parse_root_restore(text_root);
     result
 }
 
@@ -372,6 +523,18 @@ unsafe fn extract_pointer(bits: u64) -> Option<*const u8> {
     } else {
         None
     }
+}
+
+/// Read the GC header's object type tag for a user-space heap pointer.
+/// The GcHeader sits 8 bytes before `ptr`; its first byte is `obj_type`.
+/// Returns 0 when `ptr` is null or in the low-memory guard range.
+#[inline]
+unsafe fn gc_obj_type(ptr: *const u8) -> u8 {
+    if ptr.is_null() || (ptr as usize) < 0x1000 {
+        return 0;
+    }
+    // GcHeader.obj_type is at offset 0 (see crate::gc::GcHeader layout).
+    *(ptr.sub(crate::gc::GC_HEADER_SIZE))
 }
 
 #[inline]
@@ -552,23 +715,52 @@ unsafe fn stringify_value(value: f64, type_hint: u32, buf: &mut String) {
             return;
         }
 
-        if is_object_pointer(ptr) {
-            stringify_object(ptr, buf);
-        } else {
-            let arr = ptr as *const crate::ArrayHeader;
-            if !arr.is_null() {
-                let len = (*arr).length;
-                let cap = (*arr).capacity;
-                if len <= cap && cap > 0 && cap < 10000 {
-                    stringify_array(ptr, buf);
-                    return;
+        // Prefer the GC header's obj_type tag for dispatch — the old
+        // capacity heuristic (`cap < 10000`) misidentified legitimate
+        // arrays that had grown past 10k as strings, panicking on
+        // `JSON.stringify(arr)` where `arr.length >= 10000` (issue #43).
+        match gc_obj_type(ptr) {
+            crate::gc::GC_TYPE_ARRAY => stringify_array(ptr, buf),
+            crate::gc::GC_TYPE_OBJECT => {
+                if is_object_pointer(ptr) {
+                    stringify_object(ptr, buf);
+                } else {
+                    buf.push_str("null");
                 }
             }
-            let str_ptr = ptr as *const StringHeader;
-            if let Some(s) = str_from_header(str_ptr) {
-                write_escaped_string(buf, s);
-            } else {
-                buf.push_str("null");
+            crate::gc::GC_TYPE_STRING => {
+                let str_ptr = ptr as *const StringHeader;
+                if let Some(s) = str_from_header(str_ptr) {
+                    write_escaped_string(buf, s);
+                } else {
+                    buf.push_str("null");
+                }
+            }
+            _ => {
+                // Unknown/untagged pointer: fall back to the structural
+                // heuristics for safety (e.g. pointers to non-GC-tracked
+                // memory). Arrays up to 10k cap are dispatched here;
+                // above that we defensively emit "null" rather than
+                // trying to treat them as strings.
+                if is_object_pointer(ptr) {
+                    stringify_object(ptr, buf);
+                } else {
+                    let arr = ptr as *const crate::ArrayHeader;
+                    if !arr.is_null() {
+                        let len = (*arr).length;
+                        let cap = (*arr).capacity;
+                        if len <= cap && cap > 0 && cap < 10000 {
+                            stringify_array(ptr, buf);
+                            return;
+                        }
+                    }
+                    let str_ptr = ptr as *const StringHeader;
+                    if let Some(s) = str_from_header(str_ptr) {
+                        write_escaped_string(buf, s);
+                    } else {
+                        buf.push_str("null");
+                    }
+                }
             }
         }
         return;
@@ -695,20 +887,40 @@ unsafe fn stringify_array(ptr: *const u8, buf: &mut String) {
             } else {
                 elem_bits as *const u8
             };
-            if is_object_pointer(elem_ptr) {
-                stringify_object(elem_ptr, buf);
-            } else {
-                let arr_elem = elem_ptr as *const crate::ArrayHeader;
-                let arr_len = (*arr_elem).length;
-                let arr_cap = (*arr_elem).capacity;
-                if arr_len <= arr_cap && arr_cap > 0 && arr_cap < 10000 {
-                    stringify_array(elem_ptr, buf);
-                } else {
+            match gc_obj_type(elem_ptr) {
+                crate::gc::GC_TYPE_ARRAY => stringify_array(elem_ptr, buf),
+                crate::gc::GC_TYPE_OBJECT => {
+                    if is_object_pointer(elem_ptr) {
+                        stringify_object(elem_ptr, buf);
+                    } else {
+                        buf.push_str("null");
+                    }
+                }
+                crate::gc::GC_TYPE_STRING => {
                     let str_ptr = elem_ptr as *const StringHeader;
                     if let Some(s) = str_from_header(str_ptr) {
                         write_escaped_string(buf, s);
                     } else {
                         buf.push_str("null");
+                    }
+                }
+                _ => {
+                    if is_object_pointer(elem_ptr) {
+                        stringify_object(elem_ptr, buf);
+                    } else {
+                        let arr_elem = elem_ptr as *const crate::ArrayHeader;
+                        let arr_len = (*arr_elem).length;
+                        let arr_cap = (*arr_elem).capacity;
+                        if arr_len <= arr_cap && arr_cap > 0 && arr_cap < 10000 {
+                            stringify_array(elem_ptr, buf);
+                        } else {
+                            let str_ptr = elem_ptr as *const StringHeader;
+                            if let Some(s) = str_from_header(str_ptr) {
+                                write_escaped_string(buf, s);
+                            } else {
+                                buf.push_str("null");
+                            }
+                        }
                     }
                 }
             }

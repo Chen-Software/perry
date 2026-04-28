@@ -5,6 +5,222 @@
 
 use std::collections::HashSet;
 
+/// (Issue #50) Return `true` if any statement in `stmts` mutates the local
+/// `id`. A local is "mutated" if:
+///   - It's the target of a `LocalSet` or `Update` (reassignment), or
+///   - An `IndexSet` has a root object that resolves to `LocalGet(id)` —
+///     covers `X[i] = v` directly, plus `X[i][j] = v` and deeper chains
+///     via nested `IndexGet`s.
+///   - A `NativeMethodCall` targets `LocalGet(id)` with a name from the
+///     Array mutating set (`push`, `pop`, `shift`, `unshift`, `splice`,
+///     `sort`, `reverse`, `fill`, `copyWithin`).
+///
+/// Conservative by design: a true positive means we must fall back from
+/// the flat-const optimization to the normal arena path. A false positive
+/// (flagging something that never actually mutates) only costs us the
+/// flat-table win.
+pub(crate) fn has_any_mutation(stmts: &[perry_hir::Stmt], id: u32) -> bool {
+    use perry_hir::Stmt;
+    for s in stmts {
+        match s {
+            Stmt::Expr(e) | Stmt::Throw(e) => {
+                if expr_has_mutation(e, id) {
+                    return true;
+                }
+            }
+            Stmt::Return(Some(e)) => {
+                if expr_has_mutation(e, id) {
+                    return true;
+                }
+            }
+            Stmt::Let { init: Some(e), .. } => {
+                if expr_has_mutation(e, id) {
+                    return true;
+                }
+            }
+            Stmt::If { condition, then_branch, else_branch } => {
+                if expr_has_mutation(condition, id) {
+                    return true;
+                }
+                if has_any_mutation(then_branch, id) {
+                    return true;
+                }
+                if let Some(eb) = else_branch {
+                    if has_any_mutation(eb, id) {
+                        return true;
+                    }
+                }
+            }
+            Stmt::While { condition, body } | Stmt::DoWhile { body, condition } => {
+                if expr_has_mutation(condition, id) {
+                    return true;
+                }
+                if has_any_mutation(body, id) {
+                    return true;
+                }
+            }
+            Stmt::For { init, condition, update, body } => {
+                if let Some(init_stmt) = init {
+                    if has_any_mutation(std::slice::from_ref(init_stmt), id) {
+                        return true;
+                    }
+                }
+                if let Some(c) = condition {
+                    if expr_has_mutation(c, id) {
+                        return true;
+                    }
+                }
+                if let Some(u) = update {
+                    if expr_has_mutation(u, id) {
+                        return true;
+                    }
+                }
+                if has_any_mutation(body, id) {
+                    return true;
+                }
+            }
+            Stmt::Try { body, catch, finally } => {
+                if has_any_mutation(body, id) {
+                    return true;
+                }
+                if let Some(c) = catch {
+                    if has_any_mutation(&c.body, id) {
+                        return true;
+                    }
+                }
+                if let Some(f) = finally {
+                    if has_any_mutation(f, id) {
+                        return true;
+                    }
+                }
+            }
+            Stmt::Switch { discriminant, cases } => {
+                if expr_has_mutation(discriminant, id) {
+                    return true;
+                }
+                for c in cases {
+                    if let Some(t) = &c.test {
+                        if expr_has_mutation(t, id) {
+                            return true;
+                        }
+                    }
+                    if has_any_mutation(&c.body, id) {
+                        return true;
+                    }
+                }
+            }
+            Stmt::Labeled { body, .. } => {
+                if has_any_mutation(std::slice::from_ref(body.as_ref()), id) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn is_local_get_chain(e: &perry_hir::Expr, id: u32) -> bool {
+    use perry_hir::Expr;
+    match e {
+        Expr::LocalGet(i) => *i == id,
+        Expr::IndexGet { object, .. } => is_local_get_chain(object, id),
+        Expr::PropertyGet { object, .. } => is_local_get_chain(object, id),
+        _ => false,
+    }
+}
+
+fn expr_has_mutation(e: &perry_hir::Expr, id: u32) -> bool {
+    use perry_hir::{ArrayElement, CallArg, Expr};
+    const ARRAY_MUTATORS: &[&str] = &[
+        "push", "pop", "shift", "unshift", "splice", "sort", "reverse",
+        "fill", "copyWithin",
+    ];
+    match e {
+        Expr::LocalSet(tgt, value) => {
+            *tgt == id || expr_has_mutation(value, id)
+        }
+        Expr::Update { id: tgt, .. } => *tgt == id,
+        Expr::IndexSet { object, index, value } => {
+            is_local_get_chain(object, id)
+                || expr_has_mutation(object, id)
+                || expr_has_mutation(index, id)
+                || expr_has_mutation(value, id)
+        }
+        Expr::NativeMethodCall { object: Some(obj), method, args, .. }
+            if ARRAY_MUTATORS.contains(&method.as_str())
+                && is_local_get_chain(obj, id) =>
+        {
+            true
+        }
+        Expr::NativeMethodCall { object, args, .. } => {
+            if let Some(o) = object {
+                if expr_has_mutation(o, id) {
+                    return true;
+                }
+            }
+            args.iter().any(|a| expr_has_mutation(a, id))
+        }
+        Expr::Binary { left, right, .. }
+        | Expr::Compare { left, right, .. }
+        | Expr::Logical { left, right, .. } => {
+            expr_has_mutation(left, id) || expr_has_mutation(right, id)
+        }
+        Expr::Unary { operand, .. }
+        | Expr::Void(operand)
+        | Expr::TypeOf(operand)
+        | Expr::Await(operand)
+        | Expr::Delete(operand)
+        | Expr::StringCoerce(operand)
+        | Expr::BooleanCoerce(operand)
+        | Expr::NumberCoerce(operand) => expr_has_mutation(operand, id),
+        Expr::Call { callee, args, .. } => {
+            if expr_has_mutation(callee, id) {
+                return true;
+            }
+            args.iter().any(|a| expr_has_mutation(a, id))
+        }
+        Expr::CallSpread { callee, args, .. } => {
+            if expr_has_mutation(callee, id) {
+                return true;
+            }
+            args.iter().any(|a| match a {
+                CallArg::Expr(e) | CallArg::Spread(e) => expr_has_mutation(e, id),
+            })
+        }
+        Expr::Conditional { condition, then_expr, else_expr } => {
+            expr_has_mutation(condition, id)
+                || expr_has_mutation(then_expr, id)
+                || expr_has_mutation(else_expr, id)
+        }
+        Expr::PropertyGet { object, .. } => expr_has_mutation(object, id),
+        Expr::PropertySet { object, value, .. } => {
+            expr_has_mutation(object, id) || expr_has_mutation(value, id)
+        }
+        Expr::PropertyUpdate { object, .. } => expr_has_mutation(object, id),
+        Expr::IndexGet { object, index } => {
+            expr_has_mutation(object, id) || expr_has_mutation(index, id)
+        }
+        Expr::Array(elements) => elements.iter().any(|e| expr_has_mutation(e, id)),
+        Expr::ArraySpread(elements) => elements.iter().any(|el| match el {
+            ArrayElement::Expr(e) | ArrayElement::Spread(e) => expr_has_mutation(e, id),
+        }),
+        Expr::Object(props) => props.iter().any(|(_, v)| expr_has_mutation(v, id)),
+        Expr::Closure { body, .. } => has_any_mutation(body, id),
+        Expr::Sequence(es) => es.iter().any(|e| expr_has_mutation(e, id)),
+        Expr::ArrayPush { array_id, value } => {
+            *array_id == id || expr_has_mutation(value, id)
+        }
+        Expr::ArraySplice { array_id, start, delete_count, items } => {
+            *array_id == id
+                || expr_has_mutation(start, id)
+                || delete_count.as_ref().map_or(false, |d| expr_has_mutation(d, id))
+                || items.iter().any(|it| expr_has_mutation(it, id))
+        }
+        _ => false,
+    }
+}
+
 /// Walk for `Expr::Closure` instances and collect each one along with
 /// its `func_id` so the codegen can emit the body as a top-level
 /// function. Each closure expression is captured by clone (it's the
@@ -986,70 +1202,254 @@ fn collect_ref_ids_in_expr(e: &perry_hir::Expr, out: &mut HashSet<u32>) {
 /// function. Used by `BinaryOp::Mod` lowering to emit integer modulo
 /// (`fptosi → srem → sitofp`) instead of `frem double`, which lowers to a
 /// libm `fmod()` call on ARM (no hardware instruction) and costs ~15ns per
-/// iteration.
+/// iteration. Also used as the gate for allocating parallel i32 slots that
+/// issue #48 leans on to skip the `fadd → fcvtzs → scvtf` round-trip on
+/// `sum = (sum + i) | 0` style accumulator writes.
 ///
 /// A local qualifies iff:
 ///   1. It's declared with `Let { init: Some(Expr::Integer(_)) }` — i.e. it
 ///      starts as a whole number, not a fraction.
-///   2. It has NO `Expr::LocalSet(id, _)` anywhere in the function body.
-///      The only permitted mutation is `Expr::Update { id, .. }` (++/--),
-///      which by definition preserves the integer invariant.
+///   2. Every `Expr::LocalSet(id, rhs)` has an int32-producing rhs — see
+///      `is_int32_producing_expr`. `Expr::Update { id, .. }` (++/--) is
+///      always permitted since it trivially preserves integer-ness.
 ///
-/// Rule 2 is strict: any `LocalSet` (even one storing an integer literal)
-/// excludes the local, because proving the rhs is also integer-valued would
-/// require a recursive analysis we don't have. Rule 2 naturally covers the
-/// common case — for-loop counters — without any type inference machinery.
-///
-/// Closure captures are handled correctly: writes from inside a closure body
-/// go through `LocalSet` in the HIR, so rule 2 excludes any local that's
-/// captured mutably. Read-only captures are fine and remain qualified.
-pub(crate) fn collect_integer_locals(stmts: &[perry_hir::Stmt]) -> HashSet<u32> {
+/// Closure captures: writes from inside a closure body go through `LocalSet`
+/// with a rhs that's typically not int32-producing, so mutably-captured
+/// locals naturally fall out. Read-only captures remain qualified.
+fn is_clamp_call(e: &perry_hir::Expr, clamp_fn_ids: &HashSet<u32>) -> bool {
+    if let perry_hir::Expr::Call { callee, .. } = e {
+        if let perry_hir::Expr::FuncRef(fid) = callee.as_ref() {
+            return clamp_fn_ids.contains(fid);
+        }
+    }
+    false
+}
+
+pub(crate) fn collect_integer_locals(
+    stmts: &[perry_hir::Stmt],
+    flat_const_ids: &HashSet<u32>,
+    clamp_fn_ids: &HashSet<u32>,
+) -> HashSet<u32> {
     let mut candidates: HashSet<u32> = HashSet::new();
-    collect_integer_let_ids(stmts, &mut candidates);
-    let mut ever_localset: HashSet<u32> = HashSet::new();
-    collect_localset_ids_in_stmts(stmts, &mut ever_localset);
-    candidates.retain(|id| !ever_localset.contains(id));
+
+    // Issue #50 bridge: pre-compute which locals are row-aliases of
+    // flat-const 2D int arrays BEFORE collecting integer let ids, since
+    // `collect_integer_let_ids` needs to recognize `let k = krow[j]`
+    // (where krow is a flat-const row alias) as an int-producing init.
+    let mut flat_row_alias_ids: HashSet<u32> = HashSet::new();
+    collect_flat_row_aliases(stmts, flat_const_ids, &mut flat_row_alias_ids);
+
+    collect_integer_let_ids(stmts, &mut candidates, flat_const_ids, &flat_row_alias_ids, clamp_fn_ids);
+
+    // Iterate to a fixed point (issue #49): `is_int32_producing_expr` now
+    // recognizes `LocalGet(id)` as int-producing when `id` is itself
+    // int-stable, and `Add/Sub/Mul` as int-producing when both operands
+    // are. That makes the analysis mutually recursive across locals —
+    // disqualifying one candidate may cascade to other candidates whose
+    // rhs referenced the first via LocalGet. Iterate until the set
+    // stabilizes.
+    loop {
+        let mut disqualified: HashSet<u32> = HashSet::new();
+        collect_non_int_localset_ids_in_stmts(
+            stmts, &mut disqualified, &candidates,
+            flat_const_ids, &flat_row_alias_ids, clamp_fn_ids,
+        );
+        let before = candidates.len();
+        candidates.retain(|id| !disqualified.contains(id));
+        if candidates.len() == before {
+            break;
+        }
+    }
     candidates
 }
 
-fn collect_integer_let_ids(stmts: &[perry_hir::Stmt], out: &mut HashSet<u32>) {
+fn collect_flat_row_aliases(
+    stmts: &[perry_hir::Stmt],
+    flat_const_ids: &HashSet<u32>,
+    out: &mut HashSet<u32>,
+) {
     use perry_hir::{Expr, Stmt};
     for s in stmts {
         match s {
-            Stmt::Let { id, init: Some(Expr::Integer(_)), .. } => {
-                out.insert(*id);
+            Stmt::Let { id, init: Some(Expr::IndexGet { object, .. }), mutable: false, .. } => {
+                if let Expr::LocalGet(const_id) = object.as_ref() {
+                    if flat_const_ids.contains(const_id) {
+                        out.insert(*id);
+                    }
+                }
             }
             Stmt::If { then_branch, else_branch, .. } => {
-                collect_integer_let_ids(then_branch, out);
+                collect_flat_row_aliases(then_branch, flat_const_ids, out);
                 if let Some(eb) = else_branch {
-                    collect_integer_let_ids(eb, out);
+                    collect_flat_row_aliases(eb, flat_const_ids, out);
                 }
             }
             Stmt::For { init, body, .. } => {
                 if let Some(init_stmt) = init {
-                    collect_integer_let_ids(std::slice::from_ref(init_stmt), out);
+                    collect_flat_row_aliases(
+                        std::slice::from_ref(init_stmt), flat_const_ids, out,
+                    );
                 }
-                collect_integer_let_ids(body, out);
+                collect_flat_row_aliases(body, flat_const_ids, out);
             }
             Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
-                collect_integer_let_ids(body, out);
+                collect_flat_row_aliases(body, flat_const_ids, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Returns `true` if evaluating `e` yields a value that will already be
+/// integer-valued — so writing it into a local's i32 slot is lossless.
+///
+/// Accepted shapes:
+///   - `Expr::Integer(_)`: trivially integer.
+///   - `(expr) | 0` and `(expr) >>> 0`: the JS ToInt32 / ToUint32 idiom —
+///     always yields a 32-bit integer regardless of the inner expression.
+///   - Pure bitwise ops (`&`, `|`, `^`, `<<`, `>>`, `>>>`): per JS spec
+///     these coerce both operands to int32 and return int32.
+///   - `Expr::Update`: `++` / `--` on an integer-stable local (we don't
+///     verify transitively; if the target isn't qualified, the whole chain
+///     collapses anyway).
+///   - (issue #49) `LocalGet(id)` when `id` is itself in `known_int_locals` —
+///     enables the accumulator pattern `acc = acc + int_expr` without
+///     requiring a `| 0` wrapper on every write.
+///   - (issue #49) `Uint8ArrayGet` / `BufferIndexGet`: typed-array byte
+///     reads return u8 values; always fit in i32.
+///   - (issue #49) `Add` / `Sub` / `Mul` when both operands are
+///     int-producing. The sum/product may overflow i32, but the existing
+///     i32-slot machinery already accepts this risk — the double slot is
+///     maintained in parallel and reads past i32::MAX were already wrong
+///     for `| 0`-written accumulators.
+///
+/// Rejected: everything else (notably `Div`/`Mod` without a `|0` wrapper,
+/// bare floats, calls returning doubles, etc.) because they can produce
+/// non-integer doubles at runtime.
+fn is_int32_producing_expr(
+    e: &perry_hir::Expr,
+    known_int_locals: &HashSet<u32>,
+    flat_const_ids: &HashSet<u32>,
+    flat_row_alias_ids: &HashSet<u32>,
+    clamp_fn_ids: &HashSet<u32>,
+) -> bool {
+    use perry_hir::{BinaryOp, Expr};
+    match e {
+        Expr::Integer(_) => true,
+        Expr::Update { .. } => true,
+        Expr::Binary { op, right, .. }
+            if matches!(op, BinaryOp::BitOr | BinaryOp::UShr)
+                && matches!(right.as_ref(), Expr::Integer(0)) =>
+        {
+            true
+        }
+        Expr::Binary { op, left, right }
+            if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul) =>
+        {
+            is_int32_producing_expr(left, known_int_locals, flat_const_ids, flat_row_alias_ids, clamp_fn_ids)
+                && is_int32_producing_expr(right, known_int_locals, flat_const_ids, flat_row_alias_ids, clamp_fn_ids)
+        }
+        Expr::Call { callee, .. } => {
+            if let Expr::FuncRef(fid) = callee.as_ref() {
+                clamp_fn_ids.contains(fid)
+            } else {
+                false
+            }
+        }
+        Expr::Binary { op, .. } => matches!(
+            op,
+            BinaryOp::BitAnd
+                | BinaryOp::BitOr
+                | BinaryOp::BitXor
+                | BinaryOp::Shl
+                | BinaryOp::Shr
+                | BinaryOp::UShr
+        ),
+        Expr::LocalGet(id) => known_int_locals.contains(id),
+        Expr::Uint8ArrayGet { .. } | Expr::BufferIndexGet { .. } => true,
+        Expr::MathImul(_, _) => true, // Math.imul always returns i32
+        // Issue #50 bridge: element access on a flat-const 2D int array
+        // produces i32. Two shapes:
+        //   - inline `X[i][j]`: IndexGet(IndexGet(LocalGet(X), i), j)
+        //   - aliased `krow[j]`: IndexGet(LocalGet(alias), j)
+        Expr::IndexGet { object, .. } => match object.as_ref() {
+            Expr::IndexGet { object: inner, .. } => {
+                matches!(inner.as_ref(), Expr::LocalGet(id) if flat_const_ids.contains(id))
+            }
+            Expr::LocalGet(id) => flat_row_alias_ids.contains(id),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn is_flat_const_indexget(
+    e: &perry_hir::Expr,
+    flat_const_ids: &HashSet<u32>,
+    flat_row_alias_ids: &HashSet<u32>,
+) -> bool {
+    use perry_hir::Expr;
+    match e {
+        Expr::IndexGet { object, .. } => match object.as_ref() {
+            Expr::IndexGet { object: inner, .. } => {
+                matches!(inner.as_ref(), Expr::LocalGet(id) if flat_const_ids.contains(id))
+            }
+            Expr::LocalGet(id) => flat_row_alias_ids.contains(id),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn collect_integer_let_ids(
+    stmts: &[perry_hir::Stmt],
+    out: &mut HashSet<u32>,
+    flat_const_ids: &HashSet<u32>,
+    flat_row_alias_ids: &HashSet<u32>,
+    clamp_fn_ids: &HashSet<u32>,
+) {
+    use perry_hir::{Expr, Stmt};
+    for s in stmts {
+        match s {
+            Stmt::Let { id, init: Some(init), .. }
+                if matches!(init, Expr::Integer(_))
+                    || is_flat_const_indexget(init, flat_const_ids, flat_row_alias_ids)
+                    || is_clamp_call(init, clamp_fn_ids)
+ =>
+            {
+                out.insert(*id);
+            }
+            Stmt::If { then_branch, else_branch, .. } => {
+                collect_integer_let_ids(then_branch, out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
+                if let Some(eb) = else_branch {
+                    collect_integer_let_ids(eb, out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
+                }
+            }
+            Stmt::For { init, body, .. } => {
+                if let Some(init_stmt) = init {
+                    collect_integer_let_ids(std::slice::from_ref(init_stmt), out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
+                }
+                collect_integer_let_ids(body, out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
+            }
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
+                collect_integer_let_ids(body, out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
             }
             Stmt::Try { body, catch, finally } => {
-                collect_integer_let_ids(body, out);
+                collect_integer_let_ids(body, out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 if let Some(c) = catch {
-                    collect_integer_let_ids(&c.body, out);
+                    collect_integer_let_ids(&c.body, out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 }
                 if let Some(f) = finally {
-                    collect_integer_let_ids(f, out);
+                    collect_integer_let_ids(f, out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 }
             }
             Stmt::Switch { cases, .. } => {
                 for c in cases {
-                    collect_integer_let_ids(&c.body, out);
+                    collect_integer_let_ids(&c.body, out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 }
             }
             Stmt::Labeled { body, .. } => {
-                collect_integer_let_ids(std::slice::from_ref(body.as_ref()), out);
+                collect_integer_let_ids(std::slice::from_ref(body.as_ref()), out, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
             }
             _ => {}
         }
@@ -1062,68 +1462,112 @@ fn collect_integer_let_ids(stmts: &[perry_hir::Stmt], out: &mut HashSet<u32>) {
 /// `collect_ref_ids_in_expr`: any new HIR Expr variant must recurse into its
 /// sub-expressions here, or the walker may miss a LocalSet hidden inside it
 /// and wrongly mark its target as integer-valued.
+/// Walks the HIR and records LocalIds that have at least one LocalSet whose
+/// rhs is NOT int32-producing. `collect_integer_locals` uses this to remove
+/// locals that lose their integer invariant somewhere in the function.
+fn collect_non_int_localset_ids_in_stmts(
+    stmts: &[perry_hir::Stmt],
+    out: &mut HashSet<u32>,
+    known_int_locals: &HashSet<u32>,
+    flat_const_ids: &HashSet<u32>,
+    flat_row_alias_ids: &HashSet<u32>,
+    clamp_fn_ids: &HashSet<u32>,
+) {
+    collect_localset_ids_in_stmts_filtered(
+        stmts, out, Some(known_int_locals), flat_const_ids, flat_row_alias_ids, clamp_fn_ids,
+    );
+}
+
 fn collect_localset_ids_in_stmts(stmts: &[perry_hir::Stmt], out: &mut HashSet<u32>) {
+    let empty = HashSet::new();
+    collect_localset_ids_in_stmts_filtered(stmts, out, None, &empty, &empty, &empty);
+}
+
+fn collect_localset_ids_in_stmts_filtered(
+    stmts: &[perry_hir::Stmt],
+    out: &mut HashSet<u32>,
+    filter: Option<&HashSet<u32>>,
+    flat_const_ids: &HashSet<u32>,
+    flat_row_alias_ids: &HashSet<u32>,
+    clamp_fn_ids: &HashSet<u32>,
+) {
     use perry_hir::Stmt;
     for s in stmts {
         match s {
-            Stmt::Expr(e) | Stmt::Throw(e) => collect_localset_ids_in_expr(e, out),
+            Stmt::Expr(e) | Stmt::Throw(e) => {
+                collect_localset_ids_in_expr_filtered(e, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids)
+            }
             Stmt::Return(opt) => {
                 if let Some(e) = opt {
-                    collect_localset_ids_in_expr(e, out);
+                    collect_localset_ids_in_expr_filtered(e, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 }
             }
             Stmt::Let { init, .. } => {
                 if let Some(e) = init {
-                    collect_localset_ids_in_expr(e, out);
+                    collect_localset_ids_in_expr_filtered(e, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 }
             }
             Stmt::If { condition, then_branch, else_branch } => {
-                collect_localset_ids_in_expr(condition, out);
-                collect_localset_ids_in_stmts(then_branch, out);
+                collect_localset_ids_in_expr_filtered(condition, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
+                collect_localset_ids_in_stmts_filtered(then_branch, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 if let Some(eb) = else_branch {
-                    collect_localset_ids_in_stmts(eb, out);
+                    collect_localset_ids_in_stmts_filtered(eb, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 }
             }
             Stmt::While { condition, body } => {
-                collect_localset_ids_in_expr(condition, out);
-                collect_localset_ids_in_stmts(body, out);
+                collect_localset_ids_in_expr_filtered(condition, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
+                collect_localset_ids_in_stmts_filtered(body, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
             }
             Stmt::DoWhile { body, condition } => {
-                collect_localset_ids_in_stmts(body, out);
-                collect_localset_ids_in_expr(condition, out);
+                collect_localset_ids_in_stmts_filtered(body, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
+                collect_localset_ids_in_expr_filtered(condition, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
             }
             Stmt::For { init, condition, update, body } => {
                 if let Some(init_stmt) = init {
-                    collect_localset_ids_in_stmts(std::slice::from_ref(init_stmt), out);
+                    collect_localset_ids_in_stmts_filtered(
+                        std::slice::from_ref(init_stmt),
+                        out,
+                        filter,
+                        flat_const_ids,
+                        flat_row_alias_ids,
+                        clamp_fn_ids,
+                    );
                 }
                 if let Some(cond) = condition {
-                    collect_localset_ids_in_expr(cond, out);
+                    collect_localset_ids_in_expr_filtered(cond, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 }
                 if let Some(upd) = update {
-                    collect_localset_ids_in_expr(upd, out);
+                    collect_localset_ids_in_expr_filtered(upd, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 }
-                collect_localset_ids_in_stmts(body, out);
+                collect_localset_ids_in_stmts_filtered(body, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
             }
             Stmt::Try { body, catch, finally } => {
-                collect_localset_ids_in_stmts(body, out);
+                collect_localset_ids_in_stmts_filtered(body, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 if let Some(c) = catch {
-                    collect_localset_ids_in_stmts(&c.body, out);
+                    collect_localset_ids_in_stmts_filtered(&c.body, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 }
                 if let Some(f) = finally {
-                    collect_localset_ids_in_stmts(f, out);
+                    collect_localset_ids_in_stmts_filtered(f, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 }
             }
             Stmt::Switch { discriminant, cases } => {
-                collect_localset_ids_in_expr(discriminant, out);
+                collect_localset_ids_in_expr_filtered(discriminant, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 for c in cases {
                     if let Some(t) = &c.test {
-                        collect_localset_ids_in_expr(t, out);
+                        collect_localset_ids_in_expr_filtered(t, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                     }
-                    collect_localset_ids_in_stmts(&c.body, out);
+                    collect_localset_ids_in_stmts_filtered(&c.body, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
                 }
             }
             Stmt::Labeled { body, .. } => {
-                collect_localset_ids_in_stmts(std::slice::from_ref(body.as_ref()), out);
+                collect_localset_ids_in_stmts_filtered(
+                    std::slice::from_ref(body.as_ref()),
+                    out,
+                    filter,
+                    flat_const_ids,
+                    flat_row_alias_ids,
+                    clamp_fn_ids,
+                );
             }
             _ => {}
         }
@@ -1131,13 +1575,30 @@ fn collect_localset_ids_in_stmts(stmts: &[perry_hir::Stmt], out: &mut HashSet<u3
 }
 
 fn collect_localset_ids_in_expr(e: &perry_hir::Expr, out: &mut HashSet<u32>) {
+    let empty = HashSet::new();
+    collect_localset_ids_in_expr_filtered(e, out, None, &empty, &empty, &empty);
+}
+
+fn collect_localset_ids_in_expr_filtered(
+    e: &perry_hir::Expr,
+    out: &mut HashSet<u32>,
+    filter: Option<&HashSet<u32>>,
+    flat_const_ids: &HashSet<u32>,
+    flat_row_alias_ids: &HashSet<u32>,
+    clamp_fn_ids: &HashSet<u32>,
+) {
     use perry_hir::{ArrayElement, CallArg, Expr};
     let mut walk = |sub: &Expr, out: &mut HashSet<u32>| {
-        collect_localset_ids_in_expr(sub, out);
+        collect_localset_ids_in_expr_filtered(sub, out, filter, flat_const_ids, flat_row_alias_ids, clamp_fn_ids);
     };
     match e {
         Expr::LocalSet(id, value) => {
-            out.insert(*id);
+            match filter {
+                Some(known) if is_int32_producing_expr(value, known, flat_const_ids, flat_row_alias_ids, clamp_fn_ids) => {}
+                _ => {
+                    out.insert(*id);
+                }
+            }
             walk(value, out);
         }
         // Intentionally NOT recorded — these preserve integer-ness.
@@ -1477,6 +1938,50 @@ fn collect_localset_ids_in_expr(e: &perry_hir::Expr, out: &mut HashSet<u32>) {
 
 use perry_hir::{Expr, Stmt, Function, BinaryOp};
 
+/// Detect a 3-param clamp pattern: `if (v < lo) return lo; if (v > hi) return hi; return v;`
+/// Returns (v_param_id, lo_param_id, hi_param_id) if the function matches.
+pub fn detect_clamp3(f: &Function) -> Option<(u32, u32, u32)> {
+    if f.is_async || f.is_generator || f.params.len() != 3 { return None; }
+    if !matches!(f.return_type, perry_types::Type::Number) { return None; }
+    if f.body.len() != 3 { return None; }
+    let (v_id, lo_id, hi_id) = (f.params[0].id, f.params[1].id, f.params[2].id);
+    // [0] If { cond: Compare(Lt, v, lo), then: [Return(lo)] }
+    if let Stmt::If { condition: Expr::Compare { op: perry_hir::CompareOp::Lt, left, right }, then_branch, else_branch: None } = &f.body[0] {
+        if !matches!(left.as_ref(), Expr::LocalGet(id) if *id == v_id) { return None; }
+        if !matches!(right.as_ref(), Expr::LocalGet(id) if *id == lo_id) { return None; }
+        if then_branch.len() != 1 { return None; }
+        if !matches!(&then_branch[0], Stmt::Return(Some(Expr::LocalGet(id))) if *id == lo_id) { return None; }
+    } else { return None; }
+    // [1] If { cond: Compare(Gt, v, hi), then: [Return(hi)] }
+    if let Stmt::If { condition: Expr::Compare { op: perry_hir::CompareOp::Gt, left, right }, then_branch, else_branch: None } = &f.body[1] {
+        if !matches!(left.as_ref(), Expr::LocalGet(id) if *id == v_id) { return None; }
+        if !matches!(right.as_ref(), Expr::LocalGet(id) if *id == hi_id) { return None; }
+        if then_branch.len() != 1 { return None; }
+        if !matches!(&then_branch[0], Stmt::Return(Some(Expr::LocalGet(id))) if *id == hi_id) { return None; }
+    } else { return None; }
+    // [2] Return(v)
+    if !matches!(&f.body[2], Stmt::Return(Some(Expr::LocalGet(id))) if *id == v_id) { return None; }
+    Some((v_id, lo_id, hi_id))
+}
+
+/// Detect a 1-param clampU8 pattern: `if (v < 0) return 0; if (v > 255) return 255; return v|0;`
+pub fn detect_clamp_u8(f: &Function) -> bool {
+    if f.is_async || f.is_generator || f.params.len() != 1 { return false; }
+    if f.body.len() != 3 { return false; }
+    let v_id = f.params[0].id;
+    if let Stmt::If { condition: Expr::Compare { op: perry_hir::CompareOp::Lt, left, right }, then_branch, else_branch: None } = &f.body[0] {
+        if !matches!(left.as_ref(), Expr::LocalGet(id) if *id == v_id) { return false; }
+        if !matches!(right.as_ref(), Expr::Integer(0)) { return false; }
+        if !matches!(then_branch.as_slice(), [Stmt::Return(Some(Expr::Integer(0)))]) { return false; }
+    } else { return false; }
+    if let Stmt::If { condition: Expr::Compare { op: perry_hir::CompareOp::Gt, left, right }, then_branch, else_branch: None } = &f.body[1] {
+        if !matches!(left.as_ref(), Expr::LocalGet(id) if *id == v_id) { return false; }
+        if !matches!(right.as_ref(), Expr::Integer(255)) { return false; }
+        if !matches!(then_branch.as_slice(), [Stmt::Return(Some(Expr::Integer(255)))]) { return false; }
+    } else { return false; }
+    true
+}
+
 /// A function is i64-specializable if it's a pure numeric recursive fn.
 pub fn is_integer_specializable(f: &Function) -> bool {
     if f.is_async || f.is_generator { return false; }
@@ -1484,6 +1989,43 @@ pub fn is_integer_specializable(f: &Function) -> bool {
     if !f.params.iter().all(|p| matches!(p.ty, perry_types::Type::Number)) { return false; }
     i64s_stmts(&f.body, f.id)
 }
+/// Detect functions that always return an integer value (all return paths
+/// end with `| 0`, `>>> 0`, or another bitwise op). These functions can be
+/// treated as int-producing at call sites, enabling the i32 fast path for
+/// `h = userImul(h, p)` style patterns.
+pub fn returns_integer(f: &Function) -> bool {
+    if f.is_async || f.is_generator { return false; }
+    if !matches!(f.return_type, perry_types::Type::Number) { return false; }
+    returns_int_stmts(&f.body)
+}
+fn returns_int_stmts(ss: &[Stmt]) -> bool {
+    for s in ss {
+        match s {
+            Stmt::Return(Some(e)) => {
+                if !returns_int_expr(e) { return false; }
+            }
+            Stmt::If { then_branch, else_branch, .. } => {
+                if !returns_int_stmts(then_branch) { return false; }
+                if let Some(eb) = else_branch {
+                    if !returns_int_stmts(eb) { return false; }
+                }
+            }
+            _ => {}
+        }
+    }
+    true
+}
+fn returns_int_expr(e: &Expr) -> bool {
+    match e {
+        Expr::Integer(_) => true,
+        Expr::Binary { op, .. } => matches!(op,
+            BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor
+            | BinaryOp::Shl | BinaryOp::Shr | BinaryOp::UShr),
+        Expr::MathImul(_, _) => true,
+        _ => false,
+    }
+}
+
 fn i64s_stmts(ss: &[Stmt], sid: u32) -> bool {
     ss.iter().all(|s| match s {
         Stmt::Return(Some(e)) => i64s_expr(e, sid),
@@ -1523,6 +2065,7 @@ pub fn emit_i64_function(
     let params: Vec<(crate::types::LlvmType, String)> = f
         .params.iter().map(|p| (I64, format!("%arg{}", p.id))).collect();
     let lf = llmod.define_function(i64_name, I64, params);
+    lf.force_inline = true;
     let _ = lf.create_block("entry");
     let mut locals: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
     {
