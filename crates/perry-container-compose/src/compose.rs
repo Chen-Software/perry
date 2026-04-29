@@ -2,7 +2,8 @@ use crate::backend::ContainerBackend;
 use crate::error::{ComposeError, Result};
 use crate::service;
 use crate::types::{
-    ComposeHandle, ComposeService, ComposeSpec, ContainerInfo, ContainerLogs, ContainerSpec,
+    ComposeHandle, ComposeNetwork, ComposeService, ComposeSpec, ContainerInfo, ContainerLogs,
+    ContainerSpec, ServiceEdge, ServiceGraph, ServiceState, ServiceStatus, StackStatus,
 };
 use indexmap::IndexMap;
 use md5::{Digest, Md5};
@@ -192,28 +193,35 @@ impl ComposeEngine {
         _remove_orphans: bool,
     ) -> Result<ComposeHandle> {
         // 1. Create networks
-        if let Some(networks) = &self.spec.networks {
-            for (decl_name, config) in networks {
-                // Skip creation entirely for `external: true` — the caller
-                // asserts the network already exists and we must not
-                // touch its lifecycle.
-                if self.is_external_network(decl_name) {
-                    continue;
+        let mut networks_to_process = self.spec.networks.clone().unwrap_or_default();
+
+        // If any service has no network assigned, it belongs to the 'default' network.
+        // If 'default' isn't explicitly defined, we add it.
+        let any_service_needs_default = self.spec.services.values().any(|s| s.networks.is_none());
+        if any_service_needs_default && !networks_to_process.contains_key("default") {
+            networks_to_process.insert("default".to_string(), Some(ComposeNetwork::default()));
+        }
+
+        for (decl_name, config) in &networks_to_process {
+            // Skip creation entirely for `external: true` — the caller
+            // asserts the network already exists and we must not
+            // touch its lifecycle.
+            if self.is_external_network(decl_name) {
+                continue;
+            }
+            let runtime_name = self.resolve_network_name(decl_name);
+            if self.backend.inspect_network(&runtime_name).await.is_err() {
+                if let Some(cfg) = config {
+                    self.backend.create_network(&runtime_name, cfg).await?;
+                } else {
+                    self.backend
+                        .create_network(&runtime_name, &Default::default())
+                        .await?;
                 }
-                let runtime_name = self.resolve_network_name(decl_name);
-                if self.backend.inspect_network(&runtime_name).await.is_err() {
-                    if let Some(cfg) = config {
-                        self.backend.create_network(&runtime_name, cfg).await?;
-                    } else {
-                        self.backend
-                            .create_network(&runtime_name, &Default::default())
-                            .await?;
-                    }
-                    self.session_networks
-                        .lock()
-                        .unwrap()
-                        .push(runtime_name.clone());
-                }
+                self.session_networks
+                    .lock()
+                    .unwrap()
+                    .push(runtime_name.clone());
             }
         }
 
@@ -269,11 +277,13 @@ impl ComposeEngine {
             // we attached at creation time as the project-namespaced
             // name (`<project>_forgejo-db-net`) — translate before
             // emitting the `--network` flag.
+            //
+            // If no network is specified, use the 'default' network.
             let network = {
                 let decl = match &svc.networks {
                     Some(crate::types::ServiceNetworks::List(l)) => l.first().cloned(),
                     Some(crate::types::ServiceNetworks::Map(m)) => m.keys().next().cloned(),
-                    None => None,
+                    None => Some("default".to_string()),
                 };
                 decl.map(|d| self.resolve_network_name(&d))
             };
@@ -718,6 +728,69 @@ impl ComposeEngine {
     pub async fn restart(&self, services: &[String]) -> Result<()> {
         self.stop(services).await?;
         self.start(services).await
+    }
+
+    pub fn graph(&self) -> Result<ServiceGraph> {
+        let nodes = resolve_startup_order(&self.spec)?;
+        let mut edges = Vec::new();
+        for (name, service) in &self.spec.services {
+            if let Some(deps) = &service.depends_on {
+                for dep in deps.service_names() {
+                    edges.push(ServiceEdge {
+                        from: name.clone(),
+                        to: dep,
+                    });
+                }
+            }
+        }
+        Ok(ServiceGraph { nodes, edges })
+    }
+
+    pub async fn status(&self) -> Result<StackStatus> {
+        let mut services = Vec::new();
+        let mut healthy = true;
+
+        for svc_name in self.spec.services.keys() {
+            let container_name = self.resolve_container_name(svc_name);
+            let mut state = ServiceState::Pending;
+            let mut container_id = None;
+            let mut error = None;
+
+            match self.backend.inspect(&container_name).await {
+                Ok(info) => {
+                    container_id = Some(info.id);
+                    state = if info.status == "running" {
+                        ServiceState::Running
+                    } else {
+                        healthy = false;
+                        ServiceState::Stopped
+                    };
+                }
+                Err(e) => {
+                    healthy = false;
+                    if let ComposeError::NotFound(_) = e {
+                        state = ServiceState::Pending;
+                    } else {
+                        state = ServiceState::Failed;
+                        error = Some(e.to_string());
+                    }
+                }
+            }
+
+            services.push(ServiceStatus {
+                service: svc_name.clone(),
+                state,
+                container_id,
+                error,
+            });
+        }
+
+        Ok(StackStatus { services, healthy })
+    }
+
+    /// Resolve service startup order (Task 6.1 delegate).
+    pub fn resolve_startup_order(&self) -> Result<Vec<String>> {
+        resolve_startup_order(&self.spec)
     }
 }
 

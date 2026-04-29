@@ -1455,37 +1455,6 @@ pub unsafe extern "C" fn js_workload_runGraph(
     promise
 }
 
-/// Inspect a workload graph
-/// FFI: js_workload_inspectGraph(handle_id: i64) -> *mut Promise
-#[no_mangle]
-pub unsafe extern "C" fn js_workload_inspectGraph(handle_id: i64) -> *mut Promise {
-    let promise = js_promise_new();
-    let id = handle_id as u64;
-
-    crate::common::spawn_for_promise_deferred(
-        promise as *mut u8,
-        async move {
-            let engine = match types::WORKLOAD_HANDLES.get().and_then(|m| m.get(&id)) {
-                Some(e) => e.clone(),
-                None => return Err("Invalid workload handle".to_string()),
-            };
-
-            match engine.status().await {
-                Ok(status) => {
-                    let json = serde_json::to_string(&status).unwrap_or_default();
-                    Ok(json)
-                }
-                Err(e) => Err(e.to_string()),
-            }
-        },
-        |json| {
-            let str_ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
-            perry_runtime::JSValue::string_ptr(str_ptr).bits()
-        },
-    );
-
-    promise
-}
 
 /// Stop and remove a workload graph
 /// FFI: js_workload_handle_down(handle_id: i64, force: i32) -> *mut Promise

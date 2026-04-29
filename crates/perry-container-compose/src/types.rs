@@ -805,6 +805,44 @@ impl ComposeSpec {
     }
 }
 
+// ============ Compose Status & Graph types ============
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceGraph {
+    pub nodes: Vec<String>,
+    pub edges: Vec<ServiceEdge>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceEdge {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ServiceState {
+    Running,
+    Stopped,
+    Failed,
+    Pending,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceStatus {
+    pub service: String,
+    pub state: ServiceState,
+    pub container_id: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StackStatus {
+    pub services: Vec<ServiceStatus>,
+    pub healthy: bool,
+}
+
 // ============ ComposeHandle ============
 
 /// Opaque handle to a running compose stack.
