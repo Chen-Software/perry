@@ -52,7 +52,12 @@ impl ComposeWrapper {
         let mut stderr = String::new();
 
         for (svc, logs) in logs_map {
-            stdout.push_str(&format!("[{}] {}\n", svc, logs));
+            if !logs.stdout.is_empty() {
+                stdout.push_str(&format!("[{}] {}\n", svc, logs.stdout));
+            }
+            if !logs.stderr.is_empty() {
+                stderr.push_str(&format!("[{}] {}\n", svc, logs.stderr));
+            }
         }
 
         Ok(ContainerLogs { stdout, stderr })

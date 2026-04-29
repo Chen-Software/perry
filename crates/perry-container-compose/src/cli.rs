@@ -161,8 +161,11 @@ pub async fn run(cli: Cli) -> Result<()> {
             names.sort();
             for name in names {
                 let log = &logs_map[name];
-                for line in log.lines() {
+                for line in log.stdout.lines() {
                     println!("{:<12} | {}", name, line);
+                }
+                for line in log.stderr.lines() {
+                    eprintln!("{:<12} | {}", name, line);
                 }
             }
         }

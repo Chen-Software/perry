@@ -165,9 +165,13 @@ export interface LogsOptions {
 /**
  * Bring up services defined in a compose spec.
  * @param spec Compose specification object
+ * @param options Up options
  * @returns Promise resolving to the stack handle
  */
-export function up(spec: ComposeSpec): Promise<ComposeHandle>;
+export function up(
+  spec: ComposeSpec,
+  options?: UpOptions,
+): Promise<ComposeHandle>;
 
 /**
  * Stop and remove services in a stack.
@@ -193,9 +197,9 @@ export function ps(handle: ComposeHandle): Promise<string>;
  *
  * @param handle Stack handle
  * @param options Log options
- * @returns Promise resolving to a **JSON-encoded** `ContainerLogs`
- *   string. Call `JSON.parse(await logs(handle, opts))` to recover
- *   `{ stdout, stderr }`.
+ * @returns Promise resolving to a **JSON-encoded** map of service names
+ *   to `ContainerLogs`. Call `JSON.parse(await logs(handle, opts))` to
+ *   recover `Record<string, ContainerLogs>`.
  */
 export function logs(
   handle: ComposeHandle,

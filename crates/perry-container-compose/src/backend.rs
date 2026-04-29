@@ -118,6 +118,7 @@ pub trait CliProtocol: Send + Sync {
     fn parse_list_output(&self, stdout: &str) -> Result<Vec<ContainerInfo>>;
     fn parse_inspect_output(&self, stdout: &str) -> Result<ContainerInfo>;
     fn parse_list_images_output(&self, stdout: &str) -> Result<Vec<ImageInfo>>;
+    fn parse_image_inspect_output(&self, stdout: &str) -> Result<ImageInfo>;
     fn parse_container_id(&self, stdout: &str) -> Result<String>;
 }
 
@@ -563,6 +564,34 @@ impl CliProtocol for DockerProtocol {
                 created: e.created,
             })
             .collect())
+    }
+
+    fn parse_image_inspect_output(&self, stdout: &str) -> Result<ImageInfo> {
+        let entries: Vec<serde_json::Value> = serde_json::from_str(stdout)?;
+        let e = entries
+            .into_iter()
+            .next()
+            .ok_or_else(|| ComposeError::NotFound("Inspect output empty".into()))?;
+
+        let id = e["Id"].as_str().unwrap_or_default().to_string();
+        let repo_tags = e["RepoTags"].as_array();
+        let (repo, tag) = if let Some(tags) = repo_tags {
+            if let Some(first_tag) = tags.first().and_then(|v| v.as_str()) {
+                split_image_reference(first_tag)
+            } else {
+                (String::new(), String::new())
+            }
+        } else {
+            (String::new(), String::new())
+        };
+
+        Ok(ImageInfo {
+            id,
+            repository: repo,
+            tag,
+            size: e["Size"].as_u64().unwrap_or(0),
+            created: e["Created"].as_str().unwrap_or_default().to_string(),
+        })
     }
 
     fn parse_container_id(&self, stdout: &str) -> Result<String> {
@@ -1011,6 +1040,18 @@ impl CliProtocol for AppleContainerProtocol {
         DockerProtocol.parse_list_images_output(stdout)
     }
 
+    fn parse_image_inspect_output(&self, stdout: &str) -> Result<ImageInfo> {
+        let trimmed = stdout.trim();
+        if let Ok(entries) = serde_json::from_str::<Vec<AppleImageEntry>>(trimmed) {
+            if let Some(e) = entries.into_iter().next() {
+                if !e.id.is_empty() || !e.reference.is_empty() {
+                    return Ok(e.into_info());
+                }
+            }
+        }
+        DockerProtocol.parse_image_inspect_output(stdout)
+    }
+
     fn parse_container_id(&self, stdout: &str) -> Result<String> {
         // apple/container `run --detach` prints the container ID to
         // stdout, same as docker. Strip whitespace.
@@ -1296,6 +1337,9 @@ impl CliProtocol for LimaProtocol {
     fn parse_list_images_output(&self, stdout: &str) -> Result<Vec<ImageInfo>> {
         DockerProtocol.parse_list_images_output(stdout)
     }
+    fn parse_image_inspect_output(&self, stdout: &str) -> Result<ImageInfo> {
+        DockerProtocol.parse_image_inspect_output(stdout)
+    }
     fn parse_container_id(&self, stdout: &str) -> Result<String> {
         DockerProtocol.parse_container_id(stdout)
     }
@@ -1472,11 +1516,7 @@ impl ContainerBackend for CliBackend {
     async fn inspect_image(&self, reference: &str) -> Result<ImageInfo> {
         let args = self.protocol.inspect_image_args(reference);
         let (stdout, _) = self.exec_raw(&args).await?;
-        let images = self.protocol.parse_list_images_output(&stdout)?;
-        images
-            .into_iter()
-            .next()
-            .ok_or_else(|| ComposeError::NotFound(reference.to_string()))
+        self.protocol.parse_image_inspect_output(&stdout)
     }
 
     async fn build(&self, spec: &ComposeServiceBuild, image_name: &str) -> Result<()> {
