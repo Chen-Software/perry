@@ -92,13 +92,23 @@ impl ComposeEngine {
         self: Arc<Self>,
         services: &[String],
         _detach: bool,
-        _build: bool,
+        build: bool,
         _remove_orphans: bool,
     ) -> Result<ComposeHandle> {
         // 1. Create networks
         if let Some(networks) = &self.spec.networks {
             for (name, config) in networks {
-                if self.backend.inspect_network(name).await.is_err() {
+                let external = config.as_ref().and_then(|c| c.external).unwrap_or(false);
+                let exists = self.backend.inspect_network(name).await.is_ok();
+
+                if external {
+                    if !exists {
+                        return Err(ComposeError::ValidationError {
+                            message: format!("External network '{}' not found", name),
+                        });
+                    }
+                    // Do not track external networks for rollback
+                } else if !exists {
                     if let Some(cfg) = config {
                         self.backend.create_network(name, cfg).await?;
                     } else {
@@ -114,7 +124,17 @@ impl ComposeEngine {
         // 2. Create volumes
         if let Some(volumes) = &self.spec.volumes {
             for (name, config) in volumes {
-                if self.backend.inspect_volume(name).await.is_err() {
+                let external = config.as_ref().and_then(|c| c.external).unwrap_or(false);
+                let exists = self.backend.inspect_volume(name).await.is_ok();
+
+                if external {
+                    if !exists {
+                        return Err(ComposeError::ValidationError {
+                            message: format!("External volume '{}' not found", name),
+                        });
+                    }
+                    // Do not track external volumes for rollback
+                } else if !exists {
                     if let Some(cfg) = config {
                         self.backend.create_volume(name, cfg).await?;
                     } else {
@@ -138,18 +158,36 @@ impl ComposeEngine {
         let mut started = Vec::new();
         for svc_name in target {
             let svc = self.spec.services.get(svc_name).unwrap();
-            // Generate the container name ONCE per service per session and
-            // cache it so later methods (`exec`, `logs`, `down`) see the
-            // same name we actually `run`'d the container with. The
-            // underlying `service_container_name` re-randomises per call.
-            let container_name = self
+
+            // 3a. Build if necessary
+            if svc.needs_build() && (build || self.backend.inspect_image(&svc.image_ref(svc_name)).await.is_err()) {
+                if let Some(build_spec) = &svc.build {
+                    self.backend.build(&build_spec.as_build(), &svc.image_ref(svc_name)).await?;
+                }
+            }
+
+            // 3b. Resolve container name, checking for existing labeled containers first
+            let mut container_name = self
                 .service_container_names
                 .lock()
                 .unwrap()
                 .get(svc_name)
                 .cloned()
-                .unwrap_or_else(|| service::service_container_name(svc, svc_name));
-            self.cache_container_name(svc_name, &container_name);
+                .unwrap_or_default();
+
+            if container_name.is_empty() {
+                // Try to find by labels
+                let containers = self.backend.list(true).await?;
+                if let Some(existing) = containers.into_iter().find(|c| {
+                    c.labels.get("perry.compose.project") == Some(&self.project_name) &&
+                    c.labels.get("perry.compose.service") == Some(svc_name)
+                }) {
+                    container_name = existing.name;
+                } else {
+                    container_name = service::service_container_name(svc, svc_name);
+                }
+                self.cache_container_name(svc_name, &container_name);
+            }
 
             // Extract primary network if any
             let network = match &svc.networks {
@@ -398,15 +436,21 @@ impl ComposeEngine {
         }
 
         if let Some(networks) = &self.spec.networks {
-            for name in networks.keys() {
-                let _ = self.backend.remove_network(name).await;
+            for (name, config) in networks {
+                let external = config.as_ref().and_then(|c| c.external).unwrap_or(false);
+                if !external {
+                    let _ = self.backend.remove_network(name).await;
+                }
             }
         }
 
         if remove_volumes {
             if let Some(volumes) = &self.spec.volumes {
-                for name in volumes.keys() {
-                    let _ = self.backend.remove_volume(name).await;
+                for (name, config) in volumes {
+                    let external = config.as_ref().and_then(|c| c.external).unwrap_or(false);
+                    if !external {
+                        let _ = self.backend.remove_volume(name).await;
+                    }
                 }
             }
         }

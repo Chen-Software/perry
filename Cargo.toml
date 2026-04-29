@@ -22,6 +22,7 @@ members = [
     "crates/perry-ui-watchos",
     "crates/perry-ui-tvos",
     "crates/perry-ui-geisterhand",
+    "crates/perry-container-compose",
     "crates/perry-codegen-js",
     "crates/perry-codegen-swiftui",
     "crates/perry-codegen-glance",
@@ -183,6 +184,7 @@ perry-runtime = { path = "crates/perry-runtime" }
 perry-stdlib = { path = "crates/perry-stdlib" }
 perry-diagnostics = { path = "crates/perry-diagnostics" }
 perry-jsruntime = { path = "crates/perry-jsruntime" }
+perry-container-compose = { path = "crates/perry-container-compose" }
 perry-codegen-js = { path = "crates/perry-codegen-js" }
 perry-codegen-swiftui = { path = "crates/perry-codegen-swiftui" }
 perry-codegen-glance = { path = "crates/perry-codegen-glance" }
