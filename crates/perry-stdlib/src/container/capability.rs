@@ -18,7 +18,8 @@ pub async fn perry_container_run_capability(
     cmd: &[&str],
     grants: &CapabilityGrants,
 ) -> Result<ContainerLogs, ContainerError> {
-    let digest = verification::verify_image(image)
+    let backend = Arc::clone(get_global_backend().await?);
+    let digest = verification::verify_image(image, Arc::clone(&backend))
         .await
         .map_err(|e| ContainerError::VerificationFailed {
             image: image.to_string(),
@@ -38,7 +39,6 @@ pub async fn perry_container_run_capability(
         ..Default::default()
     };
 
-    let backend = Arc::clone(get_global_backend().await?);
     let profile = SecurityProfile {
         read_only_root: true,
         seccomp: Some("default".to_string()),

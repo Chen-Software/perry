@@ -1,7 +1,7 @@
 use crate::error::{ComposeError, Result};
 use crate::types::{
     ComposeNetwork, ComposeServiceBuild, ComposeVolume, ContainerHandle, ContainerInfo,
-    ContainerLogs, ContainerSpec, ImageInfo,
+    ContainerLogs, ContainerSpec, ImageInfo, IsolationLevel,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -26,6 +26,7 @@ pub struct SecurityProfile {
 #[async_trait]
 pub trait ContainerBackend: Send + Sync {
     fn backend_name(&self) -> &str;
+    fn isolation_level(&self) -> IsolationLevel;
     async fn check_available(&self) -> Result<()>;
     async fn run(&self, spec: &ContainerSpec) -> Result<ContainerHandle>;
     async fn create(&self, spec: &ContainerSpec) -> Result<ContainerHandle>;
@@ -1009,9 +1010,32 @@ impl ContainerBackend for CliBackend {
         let code_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
         Ok(code_str.parse::<i32>().unwrap_or(-1))
     }
+
+    fn isolation_level(&self) -> IsolationLevel {
+        match self.backend_name() {
+            "apple/container" => IsolationLevel::Container,
+            "podman" => IsolationLevel::Container,
+            "docker" => IsolationLevel::Container,
+            "orbstack" => IsolationLevel::Container,
+            "colima" => IsolationLevel::Container,
+            "lima" => IsolationLevel::Container,
+            "nerdctl" => IsolationLevel::Container,
+            _ => IsolationLevel::Container,
+        }
+    }
 }
 
 pub async fn detect_backend() -> Result<Box<dyn ContainerBackend>> {
+    let mode = std::env::var("PERRY_CONTAINER_MODE").unwrap_or_else(|_| "local-first".to_string());
+    if mode != "local-first" && mode != "server-first" {
+        return Err(ComposeError::ValidationError {
+            message: format!(
+                "Invalid PERRY_CONTAINER_MODE '{}'. Expected 'local-first' or 'server-first'.",
+                mode
+            ),
+        });
+    }
+
     if let Ok(name) = std::env::var("PERRY_CONTAINER_BACKEND") {
         return probe_candidate(&name)
             .await
@@ -1024,7 +1048,18 @@ pub async fn detect_backend() -> Result<Box<dyn ContainerBackend>> {
             });
     }
 
-    let candidates = platform_candidates();
+    let mut candidates = platform_candidates().to_vec();
+
+    if mode == "server-first" {
+        // In server-first mode, prioritize candidates that are likely to be remote daemons
+        // or have a running server (like docker or podman with a socket).
+        // For now, we just move docker to the front as it's the most common "server" backend.
+        if let Some(pos) = candidates.iter().position(|&c| c == "docker") {
+            let docker = candidates.remove(pos);
+            candidates.insert(0, docker);
+        }
+    }
+
     let mut results = Vec::new();
 
     for candidate in candidates {

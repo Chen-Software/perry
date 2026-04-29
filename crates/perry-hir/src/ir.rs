@@ -126,6 +126,7 @@ pub const NATIVE_MODULES: &[&str] = &[
     // Perry container subsystem (OCI runtime + Compose orchestration).
     // Routed through perry-stdlib's container/ module → perry-container-compose.
     "perry/container",
+    "perry/container-compose",
     "perry/compose",
     // Workload graph engine (multi-runtime: oci / microVm / wasm).
     "perry/workloads",

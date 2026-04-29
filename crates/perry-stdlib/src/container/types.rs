@@ -20,6 +20,7 @@ pub static WORKLOAD_HANDLES: OnceLock<
 pub static CONTAINER_INFO_LIST_REGISTRY: OnceLock<DashMap<u64, Vec<ContainerInfo>>> = OnceLock::new();
 pub static CONTAINER_INFO_REGISTRY: OnceLock<DashMap<u64, ContainerInfo>> = OnceLock::new();
 pub static CONTAINER_LOGS_REGISTRY: OnceLock<DashMap<u64, ContainerLogs>> = OnceLock::new();
+pub static IMAGE_INFO_REGISTRY: OnceLock<DashMap<u64, ImageInfo>> = OnceLock::new();
 pub static IMAGE_INFO_LIST_REGISTRY: OnceLock<DashMap<u64, Vec<ImageInfo>>> = OnceLock::new();
 
 pub static NEXT_HANDLE_ID: AtomicU64 = AtomicU64::new(1);
@@ -66,6 +67,14 @@ pub fn register_container_info_list(list: Vec<ContainerInfo>) -> u64 {
 pub fn register_container_info(info: ContainerInfo) -> u64 {
     let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
     CONTAINER_INFO_REGISTRY
+        .get_or_init(DashMap::new)
+        .insert(id, info);
+    id
+}
+
+pub fn register_image_info(info: ImageInfo) -> u64 {
+    let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
+    IMAGE_INFO_REGISTRY
         .get_or_init(DashMap::new)
         .insert(id, info);
     id

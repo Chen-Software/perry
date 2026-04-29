@@ -3031,6 +3031,22 @@ fn lower_module_decl(
                                                     }
                                                     _ => {}
                                                 }
+                                            } else if module_name == "perry/container" {
+                                                match method_name {
+                                                    "run" | "create" | "composeUp" => {
+                                                        let class_name = if method_name == "composeUp" { "ComposeHandle" } else { "ContainerHandle" };
+                                                        ctx.register_native_instance(name.clone(), module_name.to_string(), class_name.to_string());
+                                                    }
+                                                    _ => {}
+                                                }
+                                            } else if module_name == "perry/container-compose" || module_name == "perry/compose" {
+                                                if method_name == "up" {
+                                                    ctx.register_native_instance(name.clone(), module_name.to_string(), "ComposeHandle".to_string());
+                                                }
+                                            } else if module_name == "perry/workloads" {
+                                                if method_name == "runGraph" {
+                                                    ctx.register_native_instance(name.clone(), module_name.to_string(), "GraphHandle".to_string());
+                                                }
                                             }
                                         }
                                     }

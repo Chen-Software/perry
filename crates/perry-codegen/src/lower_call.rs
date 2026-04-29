@@ -4573,6 +4573,8 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
         class_filter: None, runtime: "js_container_list", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "perry/container", has_receiver: false, method: "inspect",
         class_filter: None, runtime: "js_container_inspect", args: &[NA_STR], ret: NR_PTR },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "inspectImage",
+        class_filter: None, runtime: "js_container_inspectImage", args: &[NA_STR], ret: NR_PTR },
     NativeModSig { module: "perry/container", has_receiver: false, method: "logs",
         class_filter: None, runtime: "js_container_logs", args: &[NA_STR, NA_F64], ret: NR_PTR },
     NativeModSig { module: "perry/container", has_receiver: false, method: "exec",
@@ -4653,7 +4655,7 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
 
     // ========== perry/workloads ==========
     NativeModSig { module: "perry/workloads", has_receiver: false, method: "graph",
-        class_filter: None, runtime: "js_workload_graph", args: &[NA_STR, NA_STR], ret: NR_STR },
+        class_filter: None, runtime: "js_workload_graph", args: &[NA_STR, NA_STR, NA_STR], ret: NR_STR },
     NativeModSig { module: "perry/workloads", has_receiver: false, method: "node",
         class_filter: None, runtime: "js_workload_node", args: &[NA_STR, NA_STR], ret: NR_STR },
     NativeModSig { module: "perry/workloads", has_receiver: false, method: "runGraph",

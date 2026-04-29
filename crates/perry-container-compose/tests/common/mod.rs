@@ -3,7 +3,7 @@ use perry_container_compose::backend::{ContainerBackend, SecurityProfile};
 use perry_container_compose::error::{ComposeError, Result};
 use perry_container_compose::types::{
     ComposeNetwork, ComposeServiceBuild, ComposeVolume, ContainerHandle, ContainerInfo,
-    ContainerLogs, ContainerSpec, ImageInfo,
+    ContainerLogs, ContainerSpec, ImageInfo, IsolationLevel,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -26,6 +26,10 @@ pub struct MockBackend {
 impl ContainerBackend for MockBackend {
     fn backend_name(&self) -> &str {
         "mock"
+    }
+
+    fn isolation_level(&self) -> IsolationLevel {
+        IsolationLevel::Container
     }
 
     async fn check_available(&self) -> Result<()> {

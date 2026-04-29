@@ -2,7 +2,7 @@ use crate::backend::{ContainerBackend, SecurityProfile};
 use crate::error::{ComposeError, Result};
 use crate::types::{
     ComposeNetwork, ComposeServiceBuild, ComposeVolume, ContainerHandle, ContainerInfo,
-    ContainerLogs, ContainerSpec, ImageInfo,
+    ContainerLogs, ContainerSpec, ImageInfo, IsolationLevel,
 };
 use async_trait::async_trait;
 use std::collections::{HashMap, VecDeque};
@@ -109,6 +109,7 @@ impl Default for MockBackend {
 #[async_trait]
 impl ContainerBackend for MockBackend {
     fn backend_name(&self) -> &str { &self.name }
+    fn isolation_level(&self) -> IsolationLevel { IsolationLevel::Container }
     async fn check_available(&self) -> Result<()> { Ok(()) }
 
     async fn build(&self, _spec: &ComposeServiceBuild, image_name: &str) -> Result<()> {

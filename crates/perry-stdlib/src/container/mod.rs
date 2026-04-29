@@ -168,7 +168,11 @@ async fn maybe_verify_image(image: &str) -> Result<(), String> {
     {
         return Ok(());
     }
-    crate::container::verification::verify_image(image)
+    let backend = match get_global_backend().await {
+        Ok(b) => Arc::clone(b),
+        Err(e) => return Err(e.to_string()),
+    };
+    crate::container::verification::verify_image(image, backend)
         .await
         .map(|_digest| ())
 }
@@ -503,6 +507,39 @@ pub unsafe extern "C" fn js_container_list(all: i32) -> *mut Promise {
         match backend.list(all != 0).await {
             Ok(containers) => {
                 let handle_id = types::register_container_info_list(containers);
+                Ok(handle_to_promise_bits(handle_id as u64))
+            }
+            Err(e) => Err::<u64, String>(e.to_string()),
+        }
+    });
+
+    promise
+}
+
+/// Inspect an image
+/// FFI: js_container_inspectImage(reference: *const StringHeader) -> *mut Promise
+#[no_mangle]
+pub unsafe extern "C" fn js_container_inspectImage(reference_ptr: *const StringHeader) -> *mut Promise {
+    let promise = js_promise_new();
+
+    let reference = match string_from_header(reference_ptr) {
+        Some(s) => s,
+        None => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move {
+                Err::<u64, String>("Invalid image reference".to_string())
+            });
+            return promise;
+        }
+    };
+
+    crate::common::spawn_for_promise(promise as *mut u8, async move {
+        let backend = match get_global_backend().await {
+            Ok(b) => Arc::clone(b),
+            Err(e) => return Err::<u64, String>(e.to_string()),
+        };
+        match backend.inspect_image(&reference).await {
+            Ok(info) => {
+                let handle_id = types::register_image_info(info);
                 Ok(handle_to_promise_bits(handle_id as u64))
             }
             Err(e) => Err::<u64, String>(e.to_string()),
@@ -1141,19 +1178,21 @@ pub unsafe extern "C" fn js_container_compose_exec(
 // ============ Workload Functions ============
 
 /// Create a workload graph
-/// FFI: js_workload_graph(name: *const StringHeader, nodes_json: *const StringHeader) -> *const StringHeader
+/// FFI: js_workload_graph(name: *const StringHeader, nodes_json: *const StringHeader, edges_json: *const StringHeader) -> *const StringHeader
 #[no_mangle]
 pub unsafe extern "C" fn js_workload_graph(
     name_ptr: *const StringHeader,
     nodes_json_ptr: *const StringHeader,
+    edges_json_ptr: *const StringHeader,
 ) -> *const StringHeader {
     let name = string_from_header(name_ptr).unwrap_or_default();
     let nodes_json = string_from_header(nodes_json_ptr).unwrap_or_else(|| "{}".to_string());
+    let edges_json = string_from_header(edges_json_ptr).unwrap_or_else(|| "[]".to_string());
 
     let graph = perry_container_compose::WorkloadGraph {
         name,
         nodes: serde_json::from_str(&nodes_json).unwrap_or_default(),
-        edges: vec![], // Edges inferred from depends_on in nodes
+        edges: serde_json::from_str(&edges_json).unwrap_or_default(),
     };
 
     let json = serde_json::to_string(&graph).unwrap_or_default();

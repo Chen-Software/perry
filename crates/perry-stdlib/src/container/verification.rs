@@ -17,9 +17,14 @@ pub enum VerificationResult {
 
 static VERIFICATION_CACHE: OnceLock<RwLock<HashMap<String, VerificationResult>>> = OnceLock::new();
 
-pub async fn fetch_image_digest(reference: &str) -> Result<String, String> {
-    let backend = get_global_backend_instance().await?;
-    let info = backend.inspect_image(reference).await.map_err(|e| e.to_string())?;
+pub async fn fetch_image_digest(
+    reference: &str,
+    backend: std::sync::Arc<dyn crate::container::backend::ContainerBackend>,
+) -> Result<String, String> {
+    let info = backend
+        .inspect_image(reference)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(info.id)
 }
 
@@ -41,9 +46,12 @@ pub async fn run_cosign_verify(reference: &str, digest: &str) -> VerificationRes
     }
 }
 
-pub async fn verify_image(reference: &str) -> Result<String, String> {
+pub async fn verify_image(
+    reference: &str,
+    backend: std::sync::Arc<dyn crate::container::backend::ContainerBackend>,
+) -> Result<String, String> {
     // 1. Fetch digest (tag -> digest resolution)
-    let digest = fetch_image_digest(reference).await?;
+    let digest = fetch_image_digest(reference, backend).await?;
 
     // 2. Check cache
     let cache = VERIFICATION_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
