@@ -4646,7 +4646,7 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
     NativeModSig { module: "perry/container", has_receiver: false, method: "inspect",
         class_filter: None, runtime: "js_container_inspect", args: &[NA_STR], ret: NR_PTR },
     NativeModSig { module: "perry/container", has_receiver: false, method: "logs",
-        class_filter: None, runtime: "js_container_logs", args: &[NA_STR, NA_F64], ret: NR_PTR },
+        class_filter: None, runtime: "js_container_logs", args: &[NA_STR, NA_STR], ret: NR_PTR },
     NativeModSig { module: "perry/container", has_receiver: false, method: "exec",
         class_filter: None, runtime: "js_container_exec", args: &[NA_STR, NA_STR, NA_STR, NA_STR], ret: NR_PTR },
     NativeModSig { module: "perry/container", has_receiver: false, method: "pullImage",

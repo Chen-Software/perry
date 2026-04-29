@@ -24,12 +24,12 @@ const PROMISE_STATE_REJECTED: i32 = 2;
 
 fn drive_promise(promise: *mut Promise) {
     let mut iterations = 0;
-    while js_promise_state(promise) == PROMISE_STATE_PENDING && iterations < 100 {
+    while js_promise_state(promise) == PROMISE_STATE_PENDING && iterations < 500 {
         unsafe {
             perry_stdlib::common::js_stdlib_process_pending();
             js_promise_run_microtasks();
         }
-        std::thread::yield_now();
+        std::thread::sleep(std::time::Duration::from_millis(1));
         iterations += 1;
     }
 }
