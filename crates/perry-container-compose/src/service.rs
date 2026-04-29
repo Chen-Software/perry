@@ -18,9 +18,11 @@ pub fn service_container_name(
         return name.clone();
     }
 
-    let image = service.image.as_deref().unwrap_or("unknown");
+    let definition = serde_json::to_string(service).unwrap_or_else(|_| {
+        service.image.as_deref().unwrap_or("unknown").to_string()
+    });
     let mut hasher = Md5::new();
-    hasher.update(image.as_bytes());
+    hasher.update(definition.as_bytes());
     let hash = hex::encode(hasher.finalize());
     let short_hash = &hash[..8];
 
