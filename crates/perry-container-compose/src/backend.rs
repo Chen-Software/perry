@@ -1060,8 +1060,9 @@ fn platform_candidates() -> &'static [&'static str] {
         ]
     } else if cfg!(target_os = "linux") {
         &["podman", "nerdctl", "docker"]
+    } else if cfg!(target_os = "windows") {
+        &["podman", "docker"]
     } else {
-        // Windows and other platforms
         &["podman", "nerdctl", "docker"]
     }
 }
@@ -1074,14 +1075,13 @@ async fn probe_candidate(name: &str) -> std::result::Result<Box<dyn ContainerBac
     match name {
         "apple/container" => {
             let bin = which_bin("container")?;
-            Ok(Box::new(CliBackend::new(
-                bin,
-                Box::new(AppleContainerProtocol),
-            )))
+            let backend = CliBackend::new(bin, Box::new(AppleContainerProtocol));
+            backend.check_available().await.map_err(|e| e.to_string())?;
+            Ok(Box::new(backend))
         }
         "podman" => {
             let bin = which_bin("podman")?;
-            if cfg!(target_os = "macos") {
+            if cfg!(target_os = "macos") || cfg!(target_os = "windows") {
                 let out = Command::new(&bin)
                     .args(&["machine", "list", "--format", "json"])
                     .output()
@@ -1101,8 +1101,19 @@ async fn probe_candidate(name: &str) -> std::result::Result<Box<dyn ContainerBac
         }
         "orbstack" => {
             let bin = which_bin("orb")
+                .or_else(|_| which_bin("orbstack"))
                 .or_else(|_| which_bin("docker"))
                 .map_err(|_| "orbstack not found")?;
+            if bin.file_name().and_then(|n| n.to_str()) == Some("docker") {
+                let out = Command::new(&bin)
+                    .arg("info")
+                    .output()
+                    .await
+                    .map_err(|_| "docker info failed")?;
+                if !String::from_utf8_lossy(&out.stdout).contains("OrbStack") {
+                    return Err("docker is not OrbStack".into());
+                }
+            }
             Ok(Box::new(CliBackend::new(bin, Box::new(DockerProtocol))))
         }
         "colima" => {
@@ -1117,6 +1128,18 @@ async fn probe_candidate(name: &str) -> std::result::Result<Box<dyn ContainerBac
             }
             let dbin = which_bin("docker").map_err(|_| "docker cli not found for colima")?;
             Ok(Box::new(CliBackend::new(dbin, Box::new(DockerProtocol))))
+        }
+        "rancher-desktop" => {
+            let bin = which_bin("docker").map_err(|_| "rancher-desktop (docker) not found")?;
+            let out = Command::new(&bin)
+                .arg("info")
+                .output()
+                .await
+                .map_err(|_| "docker info failed")?;
+            if !String::from_utf8_lossy(&out.stdout).contains("Rancher Desktop") {
+                return Err("not Rancher Desktop".into());
+            }
+            Ok(Box::new(CliBackend::new(bin, Box::new(DockerProtocol))))
         }
         "lima" => {
             let bin = which_bin("limactl")?;
@@ -1138,10 +1161,26 @@ async fn probe_candidate(name: &str) -> std::result::Result<Box<dyn ContainerBac
         }
         "nerdctl" => {
             let bin = which_bin("nerdctl")?;
+            let out = Command::new(&bin)
+                .arg("info")
+                .output()
+                .await
+                .map_err(|_| "nerdctl info failed")?;
+            if !out.status.success() {
+                return Err("nerdctl daemon not available".into());
+            }
             Ok(Box::new(CliBackend::new(bin, Box::new(DockerProtocol))))
         }
         "docker" => {
             let bin = which_bin("docker")?;
+            let out = Command::new(&bin)
+                .arg("info")
+                .output()
+                .await
+                .map_err(|_| "docker info failed")?;
+            if !out.status.success() {
+                return Err("docker daemon not available".into());
+            }
             Ok(Box::new(CliBackend::new(bin, Box::new(DockerProtocol))))
         }
         _ => Err("unknown backend".into()),

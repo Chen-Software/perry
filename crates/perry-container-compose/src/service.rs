@@ -18,9 +18,12 @@ pub fn service_container_name(
         return name.clone();
     }
 
-    let image = service.image.as_deref().unwrap_or("unknown");
+    // Spec §8.1 / §12-C2: MD5 hash of the service YAML configuration.
+    // This ensures that different service configurations using the same
+    // image get unique stable name prefixes.
+    let svc_yaml = serde_yaml::to_string(service).unwrap_or_default();
     let mut hasher = Md5::new();
-    hasher.update(image.as_bytes());
+    hasher.update(svc_yaml.as_bytes());
     let hash = hex::encode(hasher.finalize());
     let short_hash = &hash[..8];
 

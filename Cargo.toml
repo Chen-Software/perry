@@ -31,6 +31,7 @@ members = [
     "crates/perry-ui-testkit",
     "crates/perry-doc-tests",
     "crates/perry-updater",
+    "crates/perry-container-compose",
 ]
 # Only build platform-independent crates by default.
 # Platform-specific UI crates (perry-ui-macos, perry-ui-ios, etc.) must be built
@@ -190,3 +191,4 @@ perry-codegen-wear-tiles = { path = "crates/perry-codegen-wear-tiles" }
 perry-codegen-wasm = { path = "crates/perry-codegen-wasm" }
 perry-ui-testkit = { path = "crates/perry-ui-testkit" }
 perry-updater = { path = "crates/perry-updater" }
+perry-container-compose = { path = "crates/perry-container-compose" }
