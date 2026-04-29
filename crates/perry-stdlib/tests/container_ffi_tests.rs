@@ -128,7 +128,7 @@ async fn test_js_container_compose_ps_contract() {
 #[tokio::test]
 async fn test_js_container_compose_logs_null() {
     unsafe {
-        let p = perry_stdlib::container::js_container_compose_logs(0.0, null(), 10.0);
+        let p = perry_stdlib::container::js_container_compose_logs(0.0, null());
         let res = await_promise_sync(p);
         assert!(res.is_err());
     }
@@ -140,7 +140,7 @@ async fn test_js_container_compose_logs_null() {
 #[tokio::test]
 async fn test_js_container_compose_exec_null() {
     unsafe {
-        let p = perry_stdlib::container::js_container_compose_exec(0.0, null(), null());
+        let p = perry_stdlib::container::js_container_compose_exec(0.0, null(), null(), null());
         let res = await_promise_sync(p);
         assert!(res.is_err());
     }
@@ -271,7 +271,7 @@ async fn test_js_container_remove_image_null() {
 #[tokio::test]
 async fn test_js_container_compose_up_null() {
     unsafe {
-        let p = perry_stdlib::container::js_container_composeUp(null());
+        let p = perry_stdlib::container::js_container_composeUp(null(), null());
         let res = await_promise_sync(p);
         assert!(res.is_err());
     }

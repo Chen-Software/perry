@@ -231,9 +231,30 @@ impl ComposeEngine {
         self: Arc<Self>,
         services: &[String],
         _detach: bool,
-        _build: bool,
-        _remove_orphans: bool,
+        build: bool,
+        remove_orphans: bool,
     ) -> Result<ComposeHandle> {
+        // 0. Remove orphans if requested
+        if remove_orphans {
+            if let Ok(all_containers) = self.backend.list(true).await {
+                for container in all_containers {
+                    let project = container.labels.get("perry.compose.project");
+                    let service = container.labels.get("perry.compose.service");
+
+                    if project.map(|v| v == &self.project_name).unwrap_or(false) {
+                        let is_orphan = match service {
+                            Some(s) => !self.spec.services.contains_key(s),
+                            None => true,
+                        };
+                        if is_orphan {
+                            let _ = self.backend.stop(&container.id, Some(5)).await;
+                            let _ = self.backend.remove(&container.id, true).await;
+                        }
+                    }
+                }
+            }
+        }
+
         // 1. Create networks
         if let Some(networks) = &self.spec.networks {
             for (decl_name, config) in networks {
@@ -562,6 +583,17 @@ impl ComposeEngine {
                 .unwrap()
                 .extend(svc_warnings);
 
+            // Build image if needed
+            if build || (svc.needs_build() && self.backend.inspect_image(&svc.image_ref(svc_name)).await.is_err()) {
+                if let Err(e) = svc.build_command(self.backend.as_ref(), svc_name).await {
+                    self.rollback().await;
+                    return Err(ComposeError::ServiceStartupFailed {
+                        service: svc_name.clone(),
+                        message: format!("Build failed: {}", e),
+                    });
+                }
+            }
+
             // Idempotency: skip if already running AND the live spec
             // hash matches the freshly-computed one. If the user
             // edited the spec (new image tag, new env value, etc.),
@@ -578,8 +610,12 @@ impl ComposeEngine {
                     // so the create path below recreates it.
                     let _ = self.backend.stop(&container_name, Some(10)).await;
                     let _ = self.backend.remove(&container_name, true).await;
-                } else if info.status == "running" {
+                } else if info.status == "running" || info.status == "up" {
                     skip = true;
+                    self.session_containers
+                        .lock()
+                        .unwrap()
+                        .push(container_name.clone());
                 } else {
                     // Start existing stopped container. Track it in
                     // session_containers so a later service-startup
@@ -769,7 +805,7 @@ impl ComposeEngine {
         &self,
         services: &[String],
         tail: Option<u32>,
-    ) -> Result<HashMap<String, String>> {
+    ) -> Result<HashMap<String, ContainerLogs>> {
         let mut all_logs = HashMap::new();
         let target: Vec<&String> = if services.is_empty() {
             self.spec.services.keys().collect()
@@ -780,10 +816,7 @@ impl ComposeEngine {
         for svc_name in target {
             let container_name = self.resolve_container_name(svc_name);
             if let Ok(logs) = self.backend.logs(&container_name, tail).await {
-                all_logs.insert(
-                    svc_name.clone(),
-                    format!("STDOUT:\n{}\nSTDERR:\n{}", logs.stdout, logs.stderr),
-                );
+                all_logs.insert(svc_name.clone(), logs);
             }
         }
         Ok(all_logs)

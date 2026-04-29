@@ -4659,7 +4659,7 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
     NativeModSig { module: "perry/container", has_receiver: false, method: "detectBackend",
         class_filter: None, runtime: "js_container_detectBackend", args: &[], ret: NR_PTR },
     NativeModSig { module: "perry/container", has_receiver: false, method: "composeUp",
-        class_filter: None, runtime: "js_container_composeUp", args: &[NA_STR], ret: NR_PTR },
+        class_filter: None, runtime: "js_container_composeUp", args: &[NA_STR, NA_STR], ret: NR_PTR },
     // Cleanup helpers — let users tear down stacks WITHOUT holding
     // a `ComposeHandle`. See `crates/perry-container-compose/src/
     // compose.rs::down_by_project / down_all / remove_if_exists`.
@@ -4698,7 +4698,7 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
 
     // ========== perry/container-compose (canonical compose path) ==========
     NativeModSig { module: "perry/container-compose", has_receiver: false, method: "up",
-        class_filter: None, runtime: "js_container_composeUp", args: &[NA_STR], ret: NR_PTR },
+        class_filter: None, runtime: "js_container_composeUp", args: &[NA_STR, NA_STR], ret: NR_PTR },
     NativeModSig { module: "perry/container-compose", has_receiver: false, method: "down",
         class_filter: None, runtime: "js_container_compose_down", args: &[NA_F64, NA_STR], ret: NR_PTR },
     NativeModSig { module: "perry/container-compose", has_receiver: false, method: "ps",
@@ -4718,7 +4718,7 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
 
     // ========== perry/compose (alias for perry/container-compose) ==========
     NativeModSig { module: "perry/compose", has_receiver: false, method: "up",
-        class_filter: None, runtime: "js_compose_up", args: &[NA_STR], ret: NR_PTR },
+        class_filter: None, runtime: "js_compose_up", args: &[NA_STR, NA_STR], ret: NR_PTR },
     NativeModSig { module: "perry/compose", has_receiver: false, method: "down",
         class_filter: None, runtime: "js_compose_down", args: &[NA_F64, NA_STR], ret: NR_PTR },
     NativeModSig { module: "perry/compose", has_receiver: false, method: "ps",

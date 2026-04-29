@@ -361,11 +361,29 @@ export interface ComposeVolume {
 }
 
 /**
+ * Options for bringing up a Compose stack.
+ */
+export interface UpOptions {
+  /** Start in detached mode (default: true) */
+  detach?: boolean;
+  /** Build images before starting (default: false) */
+  build?: boolean;
+  /** List of services to start (empty = all) */
+  services?: string[];
+  /** Remove orphaned containers (default: false) */
+  removeOrphans?: boolean;
+}
+
+/**
  * Bring up a Compose stack.
  * @param spec Compose specification
+ * @param options Up options
  * @returns Promise resolving to the stack ID (number)
  */
-export function composeUp(spec: ComposeSpec): Promise<number>;
+export function composeUp(
+  spec: ComposeSpec,
+  options?: UpOptions,
+): Promise<number>;
 
 // ---------------------------------------------------------------------------
 // Cleanup / teardown helpers (no ComposeHandle required)

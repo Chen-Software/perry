@@ -58,6 +58,8 @@ pub struct MockBackend {
     /// "no spec_hash label" shape (which is what pre-v0.5.372
     /// containers had).
     inspect_spec_hash: Arc<Mutex<Option<String>>>,
+    list_result: Arc<Mutex<Vec<ContainerInfo>>>,
+    log_responses: Arc<Mutex<HashMap<String, ContainerLogs>>>,
 }
 
 impl MockBackend {
@@ -71,6 +73,8 @@ impl MockBackend {
             run_failure_at: Arc::new(Mutex::new(None)),
             run_call_count: Arc::new(Mutex::new(0)),
             inspect_spec_hash: Arc::new(Mutex::new(None)),
+            list_result: Arc::new(Mutex::new(Vec::new())),
+            log_responses: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -142,6 +146,14 @@ impl MockBackend {
         *self.inspect_spec_hash.lock().unwrap() =
             Some("stale-spec-hash".to_string());
     }
+
+    pub async fn set_list_result(&self, containers: Vec<ContainerInfo>) {
+        *self.list_result.lock().unwrap() = containers;
+    }
+
+    pub async fn set_log_response(&self, id: &str, logs: ContainerLogs) {
+        self.log_responses.lock().unwrap().insert(id.to_string(), logs);
+    }
 }
 
 impl Default for MockBackend {
@@ -187,7 +199,7 @@ impl ContainerBackend for MockBackend {
 
     async fn list(&self, all: bool) -> Result<Vec<ContainerInfo>> {
         self.calls.lock().unwrap().push(RecordedCall::List(all));
-        Ok(Vec::new())
+        Ok(self.list_result.lock().unwrap().clone())
     }
 
     async fn inspect(&self, id: &str) -> Result<ContainerInfo> {
@@ -236,7 +248,10 @@ impl ContainerBackend for MockBackend {
 
     async fn logs(&self, id: &str, tail: Option<u32>) -> Result<ContainerLogs> {
         self.calls.lock().unwrap().push(RecordedCall::Logs(id.to_string(), tail));
-        Ok(ContainerLogs { stdout: String::new(), stderr: String::new() })
+        if let Some(logs) = self.log_responses.lock().unwrap().get(id) {
+            return Ok(logs.clone());
+        }
+        Ok(ContainerLogs { stdout: format!("mock stdout for {}", id), stderr: format!("mock stderr for {}", id) })
     }
 
     async fn wait(&self, id: &str) -> Result<i32> {

@@ -1056,11 +1056,13 @@ pub unsafe extern "C" fn js_container_removeImage(
 
 // ============ Compose Functions ============
 
-/// Bring up a Compose stack
-/// FFI: js_container_composeUp(spec_json: *const StringHeader) -> *mut Promise
+/// Bring up a Compose stack.
+///
+/// FFI: `js_container_composeUp(spec_json: *const StringHeader, opts_json: *const StringHeader) -> *mut Promise`
 #[no_mangle]
 pub unsafe extern "C" fn js_container_composeUp(
     spec_ptr: *const perry_runtime::StringHeader,
+    opts_ptr: *const perry_runtime::StringHeader,
 ) -> *mut Promise {
     let promise = js_promise_new();
 
@@ -1073,18 +1075,34 @@ pub unsafe extern "C" fn js_container_composeUp(
             return promise;
         }
     };
+    let opts_json = string_from_header(opts_ptr);
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         let backend = match get_global_backend().await {
             Ok(b) => Arc::clone(b),
             Err(e) => return Err::<u64, String>(e.to_string()),
         };
-        let wrapper = compose::ComposeWrapper::new(spec, backend);
-        match wrapper.up().await {
-        Ok(_handle) => {
-            let handle_id = types::register_compose_handle(wrapper.engine().clone());
-            Ok(handle_to_promise_bits(handle_id))
+
+        let mut services = Vec::new();
+        let mut build = false;
+        let mut remove_orphans = false;
+
+        if let Some(s) = opts_json {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+                if let Some(svcs) = v.get("services").and_then(|x| x.as_array()) {
+                    services = svcs.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect();
+                }
+                build = v.get("build").and_then(|x| x.as_bool()).unwrap_or(false);
+                remove_orphans = v.get("removeOrphans").and_then(|x| x.as_bool()).unwrap_or(false);
+            }
         }
+
+        let wrapper = compose::ComposeWrapper::new(spec, backend);
+        match wrapper.engine().clone().up(&services, true, build, remove_orphans).await {
+            Ok(_handle) => {
+                let handle_id = types::register_compose_handle(wrapper.engine().clone());
+                Ok(handle_to_promise_bits(handle_id))
+            }
             Err(e) => Err::<u64, String>(e.to_string()),
         }
     });
@@ -1094,8 +1112,11 @@ pub unsafe extern "C" fn js_container_composeUp(
 
 /// Alias for js_container_composeUp
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_up(spec_ptr: *const StringHeader) -> *mut Promise {
-    js_container_composeUp(spec_ptr)
+pub unsafe extern "C" fn js_compose_up(
+    spec_ptr: *const StringHeader,
+    opts_ptr: *const StringHeader,
+) -> *mut Promise {
+    js_container_composeUp(spec_ptr, opts_ptr)
 }
 
 #[no_mangle]
@@ -1114,10 +1135,9 @@ pub unsafe extern "C" fn js_compose_ps(handle: f64) -> *mut Promise {
 #[no_mangle]
 pub unsafe extern "C" fn js_compose_logs(
     handle: f64,
-    service_ptr: *const StringHeader,
-    tail: f64,
+    opts_ptr: *const StringHeader,
 ) -> *mut Promise {
-    js_container_compose_logs(handle, service_ptr, tail)
+    js_container_compose_logs(handle, opts_ptr)
 }
 
 #[no_mangle]
@@ -1125,8 +1145,9 @@ pub unsafe extern "C" fn js_compose_exec(
     handle: f64,
     service_ptr: *const StringHeader,
     cmd_json_ptr: *const StringHeader,
+    opts_ptr: *const StringHeader,
 ) -> *mut Promise {
-    js_container_compose_exec(handle, service_ptr, cmd_json_ptr)
+    js_container_compose_exec(handle, service_ptr, cmd_json_ptr, opts_ptr)
 }
 
 #[no_mangle]
@@ -1265,14 +1286,11 @@ pub unsafe extern "C" fn js_container_compose_ps(handle: f64) -> *mut Promise {
 
 /// Get logs from compose stack.
 ///
-/// FFI: `js_container_compose_logs(handle: f64, service: *const StringHeader, tail: f64) -> *mut Promise`
-///
-/// `tail < 0.0` (or NaN / undefined sentinels) means "no limit".
+/// FFI: `js_container_compose_logs(handle: f64, opts_json: *const StringHeader) -> *mut Promise`
 #[no_mangle]
 pub unsafe extern "C" fn js_container_compose_logs(
     handle: f64,
-    service_ptr: *const StringHeader,
-    tail: f64,
+    opts_ptr: *const StringHeader,
 ) -> *mut Promise {
     let promise = js_promise_new();
     let handle_id = handle_id_from_f64(handle);
@@ -1287,22 +1305,27 @@ pub unsafe extern "C" fn js_container_compose_logs(
         }
     };
 
-    let service = unsafe { string_from_header(service_ptr) };
-    let tail_opt = if tail.is_finite() && tail >= 0.0 {
-        Some(tail as u32)
-    } else {
-        None
-    };
+    let opts_json = unsafe { string_from_header(opts_ptr) };
 
-    // Resolve with a JSON-encoded `ContainerLogs` string ({ stdout,
-    // stderr }) — see `compose_ps` for the rationale.
+    // Resolve with a JSON-encoded map of logs.
     crate::common::spawn_for_promise_deferred(
         promise as *mut u8,
         async move {
+            let mut services = Vec::new();
+            let mut tail_opt = None;
+
+            if let Some(s) = opts_json {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+                    if let Some(svc) = v.get("service").and_then(|x| x.as_str()) {
+                        services.push(svc.to_string());
+                    }
+                    tail_opt = v.get("tail").and_then(|x| x.as_u64()).map(|x| x as u32);
+                }
+            }
+
             let _backend = get_global_backend().await.map_err(|e| e.to_string())?;
-            let wrapper = compose::ComposeWrapper::new_from_engine(engine);
-            let logs = wrapper
-                .logs(service.as_deref(), tail_opt)
+            let logs = engine
+                .logs(&services, tail_opt)
                 .await
                 .map_err(|e| e.to_string())?;
             serde_json::to_string(&logs).map_err(|e| e.to_string())
@@ -1318,12 +1341,13 @@ pub unsafe extern "C" fn js_container_compose_logs(
 
 /// Execute command in compose service.
 ///
-/// FFI: `js_container_compose_exec(handle: f64, service: *const StringHeader, cmd_json: *const StringHeader) -> *mut Promise`
+/// FFI: `js_container_compose_exec(handle: f64, service: *const StringHeader, cmd_json: *const StringHeader, opts_json: *const StringHeader) -> *mut Promise`
 #[no_mangle]
 pub unsafe extern "C" fn js_container_compose_exec(
     handle: f64,
     service_ptr: *const StringHeader,
     cmd_json_ptr: *const StringHeader,
+    opts_ptr: *const StringHeader,
 ) -> *mut Promise {
     let promise = js_promise_new();
     let handle_id = handle_id_from_f64(handle);
@@ -1340,6 +1364,7 @@ pub unsafe extern "C" fn js_container_compose_exec(
 
     let service_opt = unsafe { string_from_header(service_ptr) };
     let cmd_json = unsafe { string_from_header(cmd_json_ptr) };
+    let opts_json = unsafe { string_from_header(opts_ptr) };
 
     // Resolve with a JSON-encoded `ContainerLogs` string.
     crate::common::spawn_for_promise_deferred(
@@ -1349,10 +1374,20 @@ pub unsafe extern "C" fn js_container_compose_exec(
             let cmd: Vec<String> = cmd_json
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_default();
+
+            let mut env = None;
+            let mut workdir = None;
+
+            if let Some(s) = opts_json {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+                    env = v.get("env").and_then(|x| serde_json::from_value(x.clone()).ok());
+                    workdir = v.get("workdir").and_then(|x| x.as_str()).map(|s| s.to_string());
+                }
+            }
+
             let _backend = get_global_backend().await.map_err(|e| e.to_string())?;
-            let wrapper = compose::ComposeWrapper::new_from_engine(engine);
-            let logs = wrapper
-                .exec(&service, &cmd)
+            let logs = engine
+                .exec(&service, &cmd, env.as_ref(), workdir.as_deref())
                 .await
                 .map_err(|e| e.to_string())?;
             serde_json::to_string(&logs).map_err(|e| e.to_string())

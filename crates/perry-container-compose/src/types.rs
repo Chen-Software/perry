@@ -611,7 +611,18 @@ impl ComposeService {
             Some(crate::types::ServiceNetworks::Map(m)) => m.keys().next().cloned(),
             None => None,
         };
-        let labels = self.labels.as_ref().map(|l| l.to_map());
+        let mut labels = self.labels.as_ref().map(|l| l.to_map()).unwrap_or_default();
+        labels.insert("perry.compose.service".to_string(), service_name.to_string());
+
+        let entrypoint = self.entrypoint.as_ref().map(|e| match e {
+            serde_yaml::Value::String(s) => vec![s.clone()],
+            serde_yaml::Value::Sequence(seq) => seq
+                .iter()
+                .map(|v| v.as_str().unwrap_or_default().to_string())
+                .collect(),
+            _ => vec![],
+        });
+
         ContainerSpec {
             image: self.image_ref(service_name),
             name: Some(container_name.to_string()),
@@ -619,11 +630,11 @@ impl ComposeService {
             volumes: Some(self.volume_strings()),
             env: Some(self.resolved_env()),
             cmd: self.command_list(),
-            entrypoint: None,
+            entrypoint,
             network,
             rm: None,
             read_only: self.read_only,
-            labels,
+            labels: Some(labels),
             privileged: self.privileged,
             user: self.user.clone(),
             workdir: self.working_dir.clone(),

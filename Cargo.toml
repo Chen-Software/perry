@@ -30,6 +30,8 @@ members = [
     "crates/perry-ui-test",
     "crates/perry-ui-testkit",
     "crates/perry-doc-tests",
+    "crates/perry-container-compose",
+    "crates/perry-container-e2e",
     "crates/perry-updater",
 ]
 # Only build platform-independent crates by default.
@@ -53,6 +55,7 @@ default-members = [
     "crates/perry-codegen-glance",
     "crates/perry-codegen-wear-tiles",
     "crates/perry-codegen-wasm",
+    "crates/perry-container-compose",
     "crates/perry-updater",
 ]
 
