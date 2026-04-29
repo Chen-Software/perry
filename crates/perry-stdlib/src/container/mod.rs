@@ -737,6 +737,65 @@ pub unsafe extern "C" fn js_container_inspect(id_ptr: *const StringHeader) -> *m
     promise
 }
 
+/// Inspect a container image
+/// FFI: js_container_inspectImage(reference: *const StringHeader) -> *mut Promise
+#[no_mangle]
+pub unsafe extern "C" fn js_container_inspectImage(
+    reference_ptr: *const StringHeader,
+) -> *mut Promise {
+    let promise = js_promise_new();
+    let reference = match string_from_header(reference_ptr) {
+        Some(s) => s,
+        None => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move {
+                Err::<u64, String>("Invalid image reference".to_string())
+            });
+            return promise;
+        }
+    };
+
+    crate::common::spawn_for_promise_deferred(
+        promise as *mut u8,
+        async move {
+            let backend = get_global_backend().await.map_err(|e| e.to_string())?;
+            let info = backend.inspect_image(&reference).await.map_err(|e| e.to_string())?;
+            serde_json::to_string(&info).map_err(|e| e.to_string())
+        },
+        |json| {
+            let str_ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
+            perry_runtime::JSValue::string_ptr(str_ptr).bits()
+        },
+    );
+
+    promise
+}
+
+/// Inspect a network
+/// FFI: js_container_inspectNetwork(name: *const StringHeader) -> *mut Promise
+#[no_mangle]
+pub unsafe extern "C" fn js_container_inspectNetwork(name_ptr: *const StringHeader) -> *mut Promise {
+    let promise = js_promise_new();
+    let name = match string_from_header(name_ptr) {
+        Some(s) => s,
+        None => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move {
+                Err::<u64, String>("Invalid network name".to_string())
+            });
+            return promise;
+        }
+    };
+
+    crate::common::spawn_for_promise(promise as *mut u8, async move {
+        let backend = get_global_backend().await.map_err(|e| e.to_string())?;
+        match backend.inspect_network(&name).await {
+            Ok(()) => Ok(PROMISE_VOID_BITS),
+            Err(e) => Err::<u64, String>(e.to_string()),
+        }
+    });
+
+    promise
+}
+
 /// Get the current backend name.
 ///
 /// FFI: `js_container_getBackend() -> *const StringHeader`

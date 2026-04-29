@@ -4018,6 +4018,115 @@ pub(super) fn lower_call(ctx: &mut LoweringContext, call: &ast::CallExpr) -> Res
                         }
                     }
 
+                    // Native module method mapping: handle TypeScript methods for perry/container,
+                    // perry/compose, and perry/workloads to their canonical FFI symbols.
+                    if let Expr::PropertyGet { object, property } = &callee_expr {
+                        let module_name = match object.as_ref() {
+                            Expr::NativeModuleRef(m) => Some(m.as_str()),
+                            Expr::GlobalGet(0) => {
+                                // Match against top-level imports that lower to GlobalGet(0)
+                                // but are registered as native modules in ctx.
+                                if let ast::Callee::Expr(callee_ast) = &call.callee {
+                                    if let ast::Expr::Member(member) = callee_ast.as_ref() {
+                                        if let ast::Expr::Ident(ident) = member.obj.as_ref() {
+                                            ctx.lookup_native_module(&ident.sym.to_string())
+                                                .map(|(m, _)| m)
+                                        } else { None }
+                                    } else { None }
+                                } else { None }
+                            }
+                            _ => None,
+                        };
+
+                        if let Some(m) = module_name {
+                            match m {
+                                "perry/container" => {
+                                    let ffi_symbol = match property.as_str() {
+                                        "run" => Some("js_container_run"),
+                                        "create" => Some("js_container_create"),
+                                        "start" => Some("js_container_start"),
+                                        "stop" => Some("js_container_stop"),
+                                        "remove" => Some("js_container_remove"),
+                                        "list" => Some("js_container_list"),
+                                        "inspect" => Some("js_container_inspect"),
+                                        "inspectImage" => Some("js_container_inspectImage"),
+                                        "inspectNetwork" => Some("js_container_inspectNetwork"),
+                                        "logs" => Some("js_container_logs"),
+                                        "exec" => Some("js_container_exec"),
+                                        "pullImage" => Some("js_container_pullImage"),
+                                        "listImages" => Some("js_container_listImages"),
+                                        "removeImage" => Some("js_container_removeImage"),
+                                        "getBackend" => Some("js_container_getBackend"),
+                                        "detectBackend" => Some("js_container_detectBackend"),
+                                        "build" => Some("js_container_build"),
+                                        "composeUp" => Some("js_container_composeUp"),
+                                        "downByProject" => Some("js_container_downByProject"),
+                                        "downAll" => Some("js_container_downAll"),
+                                        "removeIfExists" => Some("js_container_removeIfExists"),
+                                        _ => None,
+                                    };
+                                    if let Some(sym) = ffi_symbol {
+                                        return Ok(Expr::Call {
+                                            callee: Box::new(Expr::ExternFuncRef {
+                                                name: sym.to_string(),
+                                                param_types: Vec::new(),
+                                                return_type: Type::Any,
+                                            }),
+                                            args,
+                                            type_args: Vec::new(),
+                                        });
+                                    }
+                                }
+                                "perry/compose" | "perry/container-compose" => {
+                                    let ffi_symbol = match property.as_str() {
+                                        "up" => Some("js_compose_up"),
+                                        "down" => Some("js_compose_down"),
+                                        "ps" => Some("js_compose_ps"),
+                                        "logs" => Some("js_compose_logs"),
+                                        "exec" => Some("js_compose_exec"),
+                                        "config" => Some("js_compose_config"),
+                                        "start" => Some("js_compose_start"),
+                                        "stop" => Some("js_compose_stop"),
+                                        "restart" => Some("js_compose_restart"),
+                                        _ => None,
+                                    };
+                                    if let Some(sym) = ffi_symbol {
+                                        return Ok(Expr::Call {
+                                            callee: Box::new(Expr::ExternFuncRef {
+                                                name: sym.to_string(),
+                                                param_types: Vec::new(),
+                                                return_type: Type::Any,
+                                            }),
+                                            args,
+                                            type_args: Vec::new(),
+                                        });
+                                    }
+                                }
+                                "perry/workloads" => {
+                                    let ffi_symbol = match property.as_str() {
+                                        "graph" => Some("js_workload_graph"),
+                                        "node" => Some("js_workload_node"),
+                                        "runGraph" => Some("js_workload_runGraph"),
+                                        "inspectGraph" => Some("js_workload_inspectGraph"),
+                                        _ => None,
+                                    };
+                                    if let Some(sym) = ffi_symbol {
+                                        return Ok(Expr::Call {
+                                            callee: Box::new(Expr::ExternFuncRef {
+                                                name: sym.to_string(),
+                                                param_types: Vec::new(),
+                                                return_type: Type::Any,
+                                            }),
+                                            args,
+                                            type_args: Vec::new(),
+                                        });
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
                     let callee = Box::new(callee_expr);
                     // Extract explicit type arguments if present (e.g., identity<number>(x))
                     let type_args = call.type_args.as_ref()
