@@ -152,6 +152,10 @@ const RUNTIME_ONLY_MODULES: &[&str] = &[
     // `net` moved to perry-stdlib (event-driven async TCP) in A1/A1.5 —
     // deliberately NOT in this list so `requires_stdlib("net")` returns true
     // and the auto-optimizer enables the `net` feature on perry-stdlib.
+    //
+    // Container-related modules are also excluded to ensure `requires_stdlib`
+    // returns true, triggering the linkage of external dependencies like
+    // `cosign` and the async container runtime.
     "fs", "path", "os", "buffer", "child_process", "stream", "url", "util",
     "perry/ui",
     "perry/system",

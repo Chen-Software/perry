@@ -1656,7 +1656,7 @@ async fn probe_candidate(name: &str) -> std::result::Result<Box<dyn ContainerBac
         }
         "podman" => {
             let bin = which_bin("podman")?;
-            if cfg!(target_os = "macos") {
+            if cfg!(target_os = "macos") || cfg!(target_os = "ios") {
                 let out = Command::new(&bin)
                     .args(&["machine", "list", "--format", "json"])
                     .output()
@@ -1666,7 +1666,13 @@ async fn probe_candidate(name: &str) -> std::result::Result<Box<dyn ContainerBac
                     serde_json::from_slice(&out.stdout).map_err(|_| "invalid podman output")?;
                 if !json
                     .as_array()
-                    .map(|a| a.iter().any(|m| m["Running"].as_bool().unwrap_or(false)))
+                    .map(|a| {
+                        a.iter().any(|m| {
+                            m["Running"].as_bool().unwrap_or(false)
+                                || m["LastUp"].is_string() // Some podman versions use LastUp
+                                || m["Status"].as_str() == Some("currently running")
+                        })
+                    })
                     .unwrap_or(false)
                 {
                     return Err("no podman machine running".into());
@@ -1675,9 +1681,19 @@ async fn probe_candidate(name: &str) -> std::result::Result<Box<dyn ContainerBac
             Ok(Box::new(CliBackend::new(bin, Box::new(DockerProtocol))))
         }
         "orbstack" => {
-            let bin = which_bin("orb")
+            // SPEC §5.3: which orbstack (or orb) + socket/version check
+            let bin = which_bin("orbstack")
+                .or_else(|_| which_bin("orb"))
                 .or_else(|_| which_bin("docker"))
                 .map_err(|_| "orbstack not found")?;
+            let out = Command::new(&bin)
+                .arg("--version")
+                .output()
+                .await
+                .map_err(|_| "orbstack version check failed")?;
+            if !out.status.success() {
+                return Err("orbstack not responsive".into());
+            }
             Ok(Box::new(CliBackend::new(bin, Box::new(DockerProtocol))))
         }
         "colima" => {
@@ -1713,10 +1729,28 @@ async fn probe_candidate(name: &str) -> std::result::Result<Box<dyn ContainerBac
         }
         "nerdctl" => {
             let bin = which_bin("nerdctl")?;
+            // SPEC §5.3: which + daemon availability
+            let out = Command::new(&bin)
+                .arg("info")
+                .output()
+                .await
+                .map_err(|_| "nerdctl info failed")?;
+            if !out.status.success() {
+                return Err("containerd daemon not reachable via nerdctl".into());
+            }
             Ok(Box::new(CliBackend::new(bin, Box::new(DockerProtocol))))
         }
         "docker" => {
             let bin = which_bin("docker")?;
+            // SPEC §5.3: which + daemon availability
+            let out = Command::new(&bin)
+                .arg("info")
+                .output()
+                .await
+                .map_err(|_| "docker info failed")?;
+            if !out.status.success() {
+                return Err("docker daemon not reachable".into());
+            }
             Ok(Box::new(CliBackend::new(bin, Box::new(DockerProtocol))))
         }
         _ => Err("unknown backend".into()),
