@@ -231,7 +231,7 @@ impl ComposeEngine {
         self: Arc<Self>,
         services: &[String],
         _detach: bool,
-        _build: bool,
+        build: bool,
         _remove_orphans: bool,
     ) -> Result<ComposeHandle> {
         // 1. Create networks
@@ -335,8 +335,9 @@ impl ComposeEngine {
             let spec_hash = service_spec_hash(svc);
             labels.insert("perry.compose.spec_hash".to_string(), spec_hash.clone());
 
+            let image_name = svc.image_ref(svc_name);
             let container_spec = ContainerSpec {
-                image: svc.image.clone().unwrap_or_default(),
+                image: image_name.clone(),
                 name: Some(container_name.clone()),
                 ports: Some(
                     svc.ports
@@ -603,6 +604,14 @@ impl ComposeEngine {
             }
 
             if !skip {
+                // On-demand image building (SPEC §6.2): build if the
+                // `build` flag is set OR if the image is missing and a build
+                // spec exists.
+                let image_missing = self.backend.inspect_image(&image_name).await.is_err();
+                if (build || image_missing) && svc.build.is_some() {
+                    svc.build_command(self.backend.as_ref(), svc_name).await?;
+                }
+
                 match self
                     .backend
                     .run_with_security(&container_spec, &profile)
@@ -769,7 +778,7 @@ impl ComposeEngine {
         &self,
         services: &[String],
         tail: Option<u32>,
-    ) -> Result<HashMap<String, String>> {
+    ) -> Result<HashMap<String, ContainerLogs>> {
         let mut all_logs = HashMap::new();
         let target: Vec<&String> = if services.is_empty() {
             self.spec.services.keys().collect()
@@ -780,10 +789,7 @@ impl ComposeEngine {
         for svc_name in target {
             let container_name = self.resolve_container_name(svc_name);
             if let Ok(logs) = self.backend.logs(&container_name, tail).await {
-                all_logs.insert(
-                    svc_name.clone(),
-                    format!("STDOUT:\n{}\nSTDERR:\n{}", logs.stdout, logs.stderr),
-                );
+                all_logs.insert(svc_name.clone(), logs);
             }
         }
         Ok(all_logs)

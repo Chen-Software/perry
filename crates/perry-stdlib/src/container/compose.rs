@@ -44,18 +44,9 @@ impl ComposeWrapper {
         &self,
         service: Option<&str>,
         tail: Option<u32>,
-    ) -> Result<ContainerLogs, ContainerError> {
+    ) -> Result<std::collections::HashMap<String, ContainerLogs>, ContainerError> {
         let services = service.map(|s| vec![s.to_string()]).unwrap_or_default();
-        let logs_map = self.engine.logs(&services, tail).await?;
-
-        let mut stdout = String::new();
-        let mut stderr = String::new();
-
-        for (svc, logs) in logs_map {
-            stdout.push_str(&format!("[{}] {}\n", svc, logs));
-        }
-
-        Ok(ContainerLogs { stdout, stderr })
+        self.engine.logs(&services, tail).await
     }
 
     pub async fn exec(

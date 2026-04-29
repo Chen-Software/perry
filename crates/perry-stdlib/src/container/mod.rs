@@ -1294,18 +1294,20 @@ pub unsafe extern "C" fn js_container_compose_logs(
         None
     };
 
-    // Resolve with a JSON-encoded `ContainerLogs` string ({ stdout,
-    // stderr }) — see `compose_ps` for the rationale.
+    // Resolve with a JSON-encoded `HashMap<String, ContainerLogs>` string
+    // ({ service: { stdout, stderr } }) — see `compose_ps` for the
+    // rationale. Returns a structured map to preserve separate streams
+    // and service attribution across multi-service logs.
     crate::common::spawn_for_promise_deferred(
         promise as *mut u8,
         async move {
             let _backend = get_global_backend().await.map_err(|e| e.to_string())?;
             let wrapper = compose::ComposeWrapper::new_from_engine(engine);
-            let logs = wrapper
+            let logs_map = wrapper
                 .logs(service.as_deref(), tail_opt)
                 .await
                 .map_err(|e| e.to_string())?;
-            serde_json::to_string(&logs).map_err(|e| e.to_string())
+            serde_json::to_string(&logs_map).map_err(|e| e.to_string())
         },
         |json| {
             let str_ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
