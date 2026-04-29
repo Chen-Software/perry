@@ -4589,6 +4589,15 @@ const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
         class_filter: None, runtime: "js_container_detectBackend", args: &[], ret: NR_PTR },
     NativeModSig { module: "perry/container", has_receiver: false, method: "composeUp",
         class_filter: None, runtime: "js_container_composeUp", args: &[NA_STR], ret: NR_PTR },
+    // Cleanup helpers — let users tear down stacks WITHOUT holding
+    // a `ComposeHandle`. See `crates/perry-container-compose/src/
+    // compose.rs::down_by_project / down_all / remove_if_exists`.
+    NativeModSig { module: "perry/container", has_receiver: false, method: "downByProject",
+        class_filter: None, runtime: "js_container_downByProject", args: &[NA_STR, NA_STR], ret: NR_PTR },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "downAll",
+        class_filter: None, runtime: "js_container_downAll", args: &[NA_STR], ret: NR_PTR },
+    NativeModSig { module: "perry/container", has_receiver: false, method: "removeIfExists",
+        class_filter: None, runtime: "js_container_removeIfExists", args: &[NA_STR, NA_F64], ret: NR_PTR },
     // ComposeHandle instance methods (has_receiver = true)
     // `down(opts?)` — opts is a JSON-stringified DownOptions object
     // (`{ volumes?: bool, removeOrphans?: bool }`); the FFI parses it

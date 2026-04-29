@@ -1227,6 +1227,115 @@ mod tests {
     }
 
     #[test]
+    fn test_docker_run_args_emits_seccomp_when_set() {
+        let proto = DockerProtocol;
+        let spec = ContainerSpec {
+            image: "alpine".into(),
+            // seccomp lives on SecurityProfile, not ContainerSpec, so
+            // run_with_security applies it via security_args. Test the
+            // security_args output directly:
+            ..Default::default()
+        };
+        let _ = proto.run_args(&spec); // smoke — no panic on minimal spec
+        let security_args = proto.security_args(&SecurityProfile {
+            read_only_root: true,
+            seccomp: Some("default".into()),
+        });
+        assert!(
+            security_args.iter().any(|s| s.contains("seccomp")),
+            "expected seccomp in security args; got {:?}",
+            security_args
+        );
+    }
+
+    #[test]
+    fn test_docker_run_args_emits_entrypoint_array_form() {
+        let proto = DockerProtocol;
+        let spec = ContainerSpec {
+            image: "alpine".into(),
+            entrypoint: Some(vec!["/usr/bin/env".into(), "sh".into()]),
+            ..Default::default()
+        };
+        let args = proto.run_args(&spec);
+        let ep_idx = args
+            .iter()
+            .position(|s| s == "--entrypoint")
+            .expect("expected --entrypoint flag");
+        assert!(
+            ep_idx + 1 < args.len(),
+            "--entrypoint must have a value after it; got {:?}",
+            args
+        );
+    }
+
+    #[test]
+    fn test_docker_run_args_omits_rm_when_unset() {
+        // Conservative-default invariant: `rm: None` MUST NOT emit
+        // `--rm`. Otherwise containers would silently auto-remove on
+        // exit, defeating debug-after-failure workflows.
+        let proto = DockerProtocol;
+        let spec = ContainerSpec {
+            image: "alpine".into(),
+            rm: None,
+            ..Default::default()
+        };
+        let args = proto.run_args(&spec);
+        assert!(
+            !args.iter().any(|s| s == "--rm"),
+            "rm: None must NOT emit --rm; got {:?}",
+            args
+        );
+    }
+
+    #[test]
+    fn test_docker_run_args_omits_optional_flags_when_unset() {
+        // Snapshot-style invariant: a minimal spec produces only
+        // `run --detach <image>` plus image. No spurious flags.
+        let proto = DockerProtocol;
+        let spec = ContainerSpec {
+            image: "alpine".into(),
+            ..Default::default()
+        };
+        let args = proto.run_args(&spec);
+        let unwanted = [
+            "--privileged",
+            "--read-only",
+            "--user",
+            "--workdir",
+            "--cap-add",
+            "--cap-drop",
+            "--rm",
+            "--name",
+            "--network",
+        ];
+        for flag in unwanted {
+            assert!(
+                !args.iter().any(|s| s == flag),
+                "minimal spec must NOT emit `{flag}`; got {:?}",
+                args
+            );
+        }
+    }
+
+    #[test]
+    fn test_apple_run_args_omits_detach_flag() {
+        // apple/container's run is foreground by default — pre-fix
+        // we'd silently emit --detach (Docker convention) which
+        // apple/container rejects.
+        let proto = AppleContainerProtocol;
+        let spec = ContainerSpec {
+            image: "alpine".into(),
+            ..Default::default()
+        };
+        let args = proto.run_args(&spec);
+        assert!(
+            !args.iter().any(|s| s == "--detach"),
+            "apple/container run must not include --detach; got {:?}",
+            args
+        );
+    }
+
+    #[test]
     fn test_apple_run_args_includes_network_alias() {
         let proto = AppleContainerProtocol;
         let spec = ContainerSpec {

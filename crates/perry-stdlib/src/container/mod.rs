@@ -527,6 +527,158 @@ pub unsafe extern "C" fn js_container_remove(
     promise
 }
 
+// ============ Cleanup helpers (no ComposeHandle required) ============
+//
+// `down_by_project` / `down_all` / `remove_if_exists` cover the
+// "I crashed without calling down()" / "I want to clean up between
+// dev iterations" / "I don't have the ComposeHandle anymore" use
+// cases. They drive the same `ContainerBackend` trait every other
+// FFI uses, scoped by Perry's `perry.compose.project` label so they
+// only ever touch resources the user's program created.
+
+/// Tear down every container labelled with `perry.compose.project = <project>`.
+/// Resolves with a JSON-encoded `CleanupReport` string:
+///
+/// ```text
+/// {"containers_removed":2,"networks_removed":0,"volumes_removed":0,"errors":[]}
+/// ```
+///
+/// FFI: `js_container_downByProject(project: *const StringHeader, opts_json: *const StringHeader) -> *mut Promise`
+#[no_mangle]
+pub unsafe extern "C" fn js_container_downByProject(
+    project_ptr: *const StringHeader,
+    opts_ptr: *const StringHeader,
+) -> *mut Promise {
+    let promise = js_promise_new();
+    let project = match string_from_header(project_ptr) {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move {
+                Err::<u64, String>("project name required".to_string())
+            });
+            return promise;
+        }
+    };
+    let opts_json = string_from_header(opts_ptr);
+
+    crate::common::spawn_for_promise_deferred(
+        promise as *mut u8,
+        async move {
+            use perry_container_compose::compose::{down_by_project, CleanupOptions};
+            let opts = parse_cleanup_options(&opts_json);
+            let backend = get_global_backend().await.map_err(|e| e.to_string())?;
+            let report = down_by_project(backend.as_ref(), &project, &opts).await;
+            serde_json::to_string(&report).map_err(|e| e.to_string())
+        },
+        |json| {
+            let str_ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
+            perry_runtime::JSValue::string_ptr(str_ptr).bits()
+        },
+    );
+
+    promise
+}
+
+/// Tear down every Perry-managed container on this host. Equivalent to
+/// `downByProject` for every project at once. Returns the same JSON-
+/// encoded `CleanupReport` summary.
+///
+/// **Use sparingly** — this stops every stack the user has ever brought
+/// up via `perry/compose`, regardless of which terminal session it's
+/// running in.
+///
+/// FFI: `js_container_downAll(opts_json: *const StringHeader) -> *mut Promise`
+#[no_mangle]
+pub unsafe extern "C" fn js_container_downAll(
+    opts_ptr: *const StringHeader,
+) -> *mut Promise {
+    let promise = js_promise_new();
+    let opts_json = string_from_header(opts_ptr);
+
+    crate::common::spawn_for_promise_deferred(
+        promise as *mut u8,
+        async move {
+            use perry_container_compose::compose::{down_all, CleanupOptions};
+            let opts = parse_cleanup_options(&opts_json);
+            let backend = get_global_backend().await.map_err(|e| e.to_string())?;
+            let report = down_all(backend.as_ref(), &opts).await;
+            serde_json::to_string(&report).map_err(|e| e.to_string())
+        },
+        |json| {
+            let str_ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
+            perry_runtime::JSValue::string_ptr(str_ptr).bits()
+        },
+    );
+
+    promise
+}
+
+/// Idempotent container removal: stop + force-remove if the container
+/// exists; treat NotFound as success. Resolves with `"true"` if the
+/// container was found and removed, `"false"` if it didn't exist.
+///
+/// FFI: `js_container_removeIfExists(id: *const StringHeader, force: i32) -> *mut Promise`
+#[no_mangle]
+pub unsafe extern "C" fn js_container_removeIfExists(
+    id_ptr: *const StringHeader,
+    force: i32,
+) -> *mut Promise {
+    let promise = js_promise_new();
+    let id = match string_from_header(id_ptr) {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            crate::common::spawn_for_promise(promise as *mut u8, async move {
+                Err::<u64, String>("container ID required".to_string())
+            });
+            return promise;
+        }
+    };
+
+    crate::common::spawn_for_promise_deferred(
+        promise as *mut u8,
+        async move {
+            use perry_container_compose::compose::remove_if_exists;
+            let backend = get_global_backend().await.map_err(|e| e.to_string())?;
+            let removed = remove_if_exists(backend.as_ref(), &id, force != 0)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(if removed { "true".to_string() } else { "false".to_string() })
+        },
+        |s| {
+            let str_ptr = perry_runtime::js_string_from_bytes(s.as_ptr(), s.len() as u32);
+            perry_runtime::JSValue::string_ptr(str_ptr).bits()
+        },
+    );
+
+    promise
+}
+
+/// Parse the JSON-encoded `{ volumes?: bool, networks?: bool }`
+/// options object into a `CleanupOptions`. Missing/invalid → defaults.
+fn parse_cleanup_options(
+    json: &Option<String>,
+) -> perry_container_compose::compose::CleanupOptions {
+    use perry_container_compose::compose::CleanupOptions;
+    let s = match json.as_deref() {
+        Some(s) if !s.is_empty() && s != "undefined" && s != "null" => s,
+        _ => return CleanupOptions::default_for_project(),
+    };
+    let v: serde_json::Value = match serde_json::from_str(s) {
+        Ok(v) => v,
+        Err(_) => return CleanupOptions::default_for_project(),
+    };
+    CleanupOptions {
+        volumes: v
+            .get("volumes")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false),
+        networks: v
+            .get("networks")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(true),
+    }
+}
+
 /// List containers
 /// FFI: `js_container_list(all: i32) -> *mut Promise<JSON string>`
 ///

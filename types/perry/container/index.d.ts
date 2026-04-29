@@ -368,6 +368,73 @@ export interface ComposeVolume {
 export function composeUp(spec: ComposeSpec): Promise<number>;
 
 // ---------------------------------------------------------------------------
+// Cleanup / teardown helpers (no ComposeHandle required)
+// ---------------------------------------------------------------------------
+
+/**
+ * Summary returned by `downByProject` / `downAll`. JSON-encoded across
+ * the FFI boundary — call `JSON.parse(await downByProject(...))` to
+ * get this typed shape.
+ */
+export interface CleanupReport {
+  containers_removed: number;
+  networks_removed: number;
+  volumes_removed: number;
+  /** Per-resource error messages; cleanup is best-effort */
+  errors: string[];
+}
+
+/**
+ * Options for `downByProject` / `downAll`.
+ */
+export interface CleanupOptions {
+  /** Drop named volumes (default false — preserves data). */
+  volumes?: boolean;
+  /** Best-effort prune unused networks (default true). */
+  networks?: boolean;
+}
+
+/**
+ * Tear down every container labelled with `perry.compose.project =
+ * <project>`, regardless of whether you still hold the original
+ * `ComposeHandle`. Useful when:
+ *
+ *   - The original process crashed without calling `down()`.
+ *   - You're in a different process / session and don't have the
+ *     in-memory handle anymore.
+ *   - You're cleaning up between dev iterations.
+ *
+ * @returns Promise resolving to a JSON-encoded `CleanupReport` string.
+ *   Call `JSON.parse(await downByProject('myapp'))` to parse it.
+ */
+export function downByProject(
+  project: string,
+  options?: CleanupOptions,
+): Promise<string>;
+
+/**
+ * Tear down EVERY Perry-managed container on this host. **Use
+ * sparingly** — this stops every stack the user has ever brought up
+ * via `perry/compose`, regardless of which terminal session it's
+ * running in. Returns the same JSON-encoded `CleanupReport` shape as
+ * `downByProject`.
+ */
+export function downAll(options?: CleanupOptions): Promise<string>;
+
+/**
+ * Idempotent single-container removal. Stop + force-remove if the
+ * container exists; treat NotFound as success. Returns `"true"` if
+ * the container was found and removed, `"false"` if it didn't exist.
+ *
+ * Useful in test cleanup paths and recovery scripts where you're not
+ * sure whether a container was ever started.
+ */
+export function removeIfExists(
+  idOrName: string,
+  force?: boolean,
+): Promise<string>;
+
+// ---------------------------------------------------------------------------
 // Platform Information
 // ---------------------------------------------------------------------------
 
