@@ -43,6 +43,53 @@ async fn test_compose_up_success() {
 }
 
 #[tokio::test]
+async fn test_compose_up_rollback_network_on_failure() {
+    let mut spec = ComposeSpec::default();
+    spec.networks = Some(
+        [("test-net".to_string(), None)]
+            .into_iter()
+            .collect(),
+    );
+    spec.services.insert(
+        "web".into(),
+        ComposeService {
+            image: Some("nginx".into()),
+            networks: Some(perry_container_compose::types::ServiceNetworks::List(vec![
+                "test-net".into(),
+            ])),
+            ..Default::default()
+        },
+    );
+
+    let backend = Arc::new(MockBackend::default());
+    {
+        let mut state = backend.state.lock().unwrap();
+        state.fail_on_run = Some("nginx".into());
+    }
+
+    let engine = Arc::new(ComposeEngine::new(
+        spec,
+        "net-fail-project".into(),
+        backend.clone(),
+    ));
+    let result = Arc::clone(&engine).up(&[], true, false, false).await;
+
+    assert!(result.is_err());
+
+    let state = backend.state.lock().unwrap();
+    // Network should have been created and then removed during rollback
+    let actions: Vec<_> = state
+        .actions
+        .iter()
+        .map(|s| s.split(':').next().unwrap())
+        .collect();
+
+    assert!(actions.contains(&"create_network"));
+    assert!(actions.contains(&"remove_network"));
+    assert!(state.networks.is_empty());
+}
+
+#[tokio::test]
 async fn test_compose_up_rollback_on_failure() {
     let mut spec = ComposeSpec::default();
     spec.services.insert(

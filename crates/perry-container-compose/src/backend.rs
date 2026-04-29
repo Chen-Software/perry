@@ -98,6 +98,7 @@ pub trait CliProtocol: Send + Sync {
     fn parse_list_output(&self, stdout: &str) -> Result<Vec<ContainerInfo>>;
     fn parse_inspect_output(&self, stdout: &str) -> Result<ContainerInfo>;
     fn parse_list_images_output(&self, stdout: &str) -> Result<Vec<ImageInfo>>;
+    fn parse_image_inspect_output(&self, stdout: &str) -> Result<ImageInfo>;
     fn parse_container_id(&self, stdout: &str) -> Result<String>;
 }
 
@@ -116,6 +117,18 @@ struct DockerListEntry {
     #[serde(rename = "Labels", default)]
     labels: serde_json::Value,
     #[serde(rename = "Created", alias = "CreatedAt", default)]
+    created: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DockerImageInspectOutput {
+    #[serde(rename = "Id")]
+    id: String,
+    #[serde(rename = "RepoTags", default)]
+    repo_tags: Vec<String>,
+    #[serde(rename = "Size")]
+    size: u64,
+    #[serde(rename = "Created")]
     created: String,
 }
 
@@ -545,6 +558,34 @@ impl CliProtocol for DockerProtocol {
             .collect())
     }
 
+    fn parse_image_inspect_output(&self, stdout: &str) -> Result<ImageInfo> {
+        let entries: Vec<DockerImageInspectOutput> = serde_json::from_str(stdout)?;
+        let e = entries
+            .into_iter()
+            .next()
+            .ok_or_else(|| ComposeError::NotFound("Image inspect output empty".into()))?;
+
+        let (repo, tag) = if let Some(first_tag) = e.repo_tags.first() {
+            // SPEC compliance: Use rfind(':') to correctly split repository and tag,
+            // even when the repository part contains a port (e.g., localhost:5000/image:tag).
+            if let Some(pos) = first_tag.rfind(':') {
+                (first_tag[..pos].to_string(), first_tag[pos + 1..].to_string())
+            } else {
+                (first_tag.clone(), "latest".to_string())
+            }
+        } else {
+            ("<none>".to_string(), "<none>".to_string())
+        };
+
+        Ok(ImageInfo {
+            id: e.id,
+            repository: repo,
+            tag,
+            size: e.size,
+            created: e.created,
+        })
+    }
+
     fn parse_container_id(&self, stdout: &str) -> Result<String> {
         Ok(stdout.trim().to_string())
     }
@@ -685,6 +726,9 @@ impl CliProtocol for AppleContainerProtocol {
     fn parse_list_images_output(&self, stdout: &str) -> Result<Vec<ImageInfo>> {
         DockerProtocol.parse_list_images_output(stdout)
     }
+    fn parse_image_inspect_output(&self, stdout: &str) -> Result<ImageInfo> {
+        DockerProtocol.parse_image_inspect_output(stdout)
+    }
     fn parse_container_id(&self, stdout: &str) -> Result<String> {
         DockerProtocol.parse_container_id(stdout)
     }
@@ -815,6 +859,9 @@ impl CliProtocol for LimaProtocol {
     fn parse_list_images_output(&self, stdout: &str) -> Result<Vec<ImageInfo>> {
         DockerProtocol.parse_list_images_output(stdout)
     }
+    fn parse_image_inspect_output(&self, stdout: &str) -> Result<ImageInfo> {
+        DockerProtocol.parse_image_inspect_output(stdout)
+    }
     fn parse_container_id(&self, stdout: &str) -> Result<String> {
         DockerProtocol.parse_container_id(stdout)
     }
@@ -861,12 +908,28 @@ impl ContainerBackend for CliBackend {
     }
 
     async fn check_available(&self) -> Result<()> {
-        Command::new(&self.bin)
-            .arg("--version")
+        // Use `info` or equivalent to check if the daemon is actually
+        // reachable, not just if the CLI binary exists.
+        let args = if self.backend_name() == "container" {
+            vec!["--version".to_string()]
+        } else {
+            vec!["info".to_string()]
+        };
+
+        let output = Command::new(&self.bin)
+            .args(&args)
             .output()
             .await
-            .map_err(ComposeError::IoError)
-            .map(|_| ())
+            .map_err(ComposeError::IoError)?;
+
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(ComposeError::BackendError {
+                code: output.status.code().unwrap_or(-1),
+                message: String::from_utf8_lossy(&output.stderr).to_string(),
+            })
+        }
     }
 
     async fn run(&self, spec: &ContainerSpec) -> Result<ContainerHandle> {
@@ -983,11 +1046,7 @@ impl ContainerBackend for CliBackend {
     async fn inspect_image(&self, reference: &str) -> Result<ImageInfo> {
         let args = self.protocol.inspect_image_args(reference);
         let (stdout, _) = self.exec_raw(&args).await?;
-        let images = self.protocol.parse_list_images_output(&stdout)?;
-        images
-            .into_iter()
-            .next()
-            .ok_or_else(|| ComposeError::NotFound(reference.to_string()))
+        self.protocol.parse_image_inspect_output(&stdout)
     }
 
     async fn build(&self, spec: &ComposeServiceBuild, image_name: &str) -> Result<()> {
@@ -1068,6 +1127,7 @@ pub async fn detect_backend() -> Result<Box<dyn ContainerBackend>> {
 
 fn platform_candidates() -> &'static [&'static str] {
     if cfg!(target_os = "macos") || cfg!(target_os = "ios") {
+        // SPEC §5.2: macOS/iOS Priority Order
         &[
             "apple/container",
             "orbstack",
@@ -1080,8 +1140,10 @@ fn platform_candidates() -> &'static [&'static str] {
         ]
     } else if cfg!(target_os = "linux") {
         &["podman", "nerdctl", "docker"]
+    } else if cfg!(target_os = "windows") {
+        &["podman", "docker"]
     } else {
-        // Windows and other platforms
+        // Other platforms
         &["podman", "nerdctl", "docker"]
     }
 }
@@ -1091,17 +1153,15 @@ async fn probe_candidate(name: &str) -> std::result::Result<Box<dyn ContainerBac
         which::which(name).map_err(|_| format!("{} not found", name))
     };
 
-    match name {
+    let backend: Box<dyn ContainerBackend> = match name {
         "apple/container" => {
             let bin = which_bin("container")?;
-            Ok(Box::new(CliBackend::new(
-                bin,
-                Box::new(AppleContainerProtocol),
-            )))
+            Box::new(CliBackend::new(bin, Box::new(AppleContainerProtocol)))
         }
         "podman" => {
             let bin = which_bin("podman")?;
-            if cfg!(target_os = "macos") {
+            if cfg!(target_os = "macos") || cfg!(target_os = "ios") {
+                // SPEC §5.3: check `podman machine list` for a running machine
                 let out = Command::new(&bin)
                     .args(&["machine", "list", "--format", "json"])
                     .output()
@@ -1111,21 +1171,38 @@ async fn probe_candidate(name: &str) -> std::result::Result<Box<dyn ContainerBac
                     serde_json::from_slice(&out.stdout).map_err(|_| "invalid podman output")?;
                 if !json
                     .as_array()
-                    .map(|a| a.iter().any(|m| m["Running"].as_bool().unwrap_or(false)))
+                    .map(|a| a.iter().any(|m| {
+                        m["Running"].as_bool().unwrap_or(false)
+                            || m["LastUp"].is_string() // Some podman versions use different keys
+                    }))
                     .unwrap_or(false)
                 {
                     return Err("no podman machine running".into());
                 }
             }
-            Ok(Box::new(CliBackend::new(bin, Box::new(DockerProtocol))))
+            Box::new(CliBackend::new(bin, Box::new(DockerProtocol)))
         }
         "orbstack" => {
+            // SPEC §5.3: which orbstack (or orb) + socket/version check
             let bin = which_bin("orb")
                 .or_else(|_| which_bin("docker"))
                 .map_err(|_| "orbstack not found")?;
-            Ok(Box::new(CliBackend::new(bin, Box::new(DockerProtocol))))
+            let backend = Box::new(CliBackend::new(bin, Box::new(DockerProtocol)));
+
+            // Check if it's actually OrbStack
+            let out = Command::new(&backend.bin)
+                .arg("info")
+                .output()
+                .await
+                .map_err(|_| "docker info failed")?;
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if !stdout.contains("OrbStack") {
+                return Err("not an OrbStack backend".into());
+            }
+            backend
         }
         "colima" => {
+            // SPEC §5.3: which colima + colima status check
             let bin = which_bin("colima")?;
             let out = Command::new(&bin)
                 .arg("status")
@@ -1136,9 +1213,26 @@ async fn probe_candidate(name: &str) -> std::result::Result<Box<dyn ContainerBac
                 return Err("colima not running".into());
             }
             let dbin = which_bin("docker").map_err(|_| "docker cli not found for colima")?;
-            Ok(Box::new(CliBackend::new(dbin, Box::new(DockerProtocol))))
+            Box::new(CliBackend::new(dbin, Box::new(DockerProtocol)))
+        }
+        "rancher-desktop" => {
+            // SPEC §5.3: socket verification
+            let bin = which_bin("docker").map_err(|_| "docker cli not found for rancher-desktop")?;
+            let backend = Box::new(CliBackend::new(bin, Box::new(DockerProtocol)));
+
+            let out = Command::new(&backend.bin)
+                .arg("info")
+                .output()
+                .await
+                .map_err(|_| "docker info failed")?;
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if !stdout.contains("Rancher Desktop") {
+                return Err("not a Rancher Desktop backend".into());
+            }
+            backend
         }
         "lima" => {
+            // SPEC §5.3: limactl list for running instance
             let bin = which_bin("limactl")?;
             let out = Command::new(&bin)
                 .args(&["list", "--json"])
@@ -1151,21 +1245,29 @@ async fn probe_candidate(name: &str) -> std::result::Result<Box<dyn ContainerBac
                 .find(|v| v["status"] == "Running")
                 .and_then(|v| v["name"].as_str().map(|s| s.to_string()))
                 .ok_or("no running lima instance")?;
-            Ok(Box::new(CliBackend::new(
+            Box::new(CliBackend::new(
                 bin,
                 Box::new(LimaProtocol { instance }),
-            )))
+            ))
         }
         "nerdctl" => {
             let bin = which_bin("nerdctl")?;
-            Ok(Box::new(CliBackend::new(bin, Box::new(DockerProtocol))))
+            Box::new(CliBackend::new(bin, Box::new(DockerProtocol)))
         }
         "docker" => {
             let bin = which_bin("docker")?;
-            Ok(Box::new(CliBackend::new(bin, Box::new(DockerProtocol))))
+            Box::new(CliBackend::new(bin, Box::new(DockerProtocol)))
         }
-        _ => Err("unknown backend".into()),
-    }
+        _ => return Err("unknown backend".into()),
+    };
+
+    // Final liveness check for all backends
+    backend
+        .check_available()
+        .await
+        .map_err(|e| format!("backend not available: {}", e))?;
+
+    Ok(backend)
 }
 
 #[cfg(test)]

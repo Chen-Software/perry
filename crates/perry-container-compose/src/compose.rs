@@ -202,13 +202,19 @@ impl ComposeEngine {
                 }
                 let runtime_name = self.resolve_network_name(decl_name);
                 if self.backend.inspect_network(&runtime_name).await.is_err() {
-                    if let Some(cfg) = config {
-                        self.backend.create_network(&runtime_name, cfg).await?;
+                    let res = if let Some(cfg) = config {
+                        self.backend.create_network(&runtime_name, cfg).await
                     } else {
                         self.backend
                             .create_network(&runtime_name, &Default::default())
-                            .await?;
+                            .await
+                    };
+
+                    if let Err(e) = res {
+                        self.rollback().await;
+                        return Err(e);
                     }
+
                     self.session_networks
                         .lock()
                         .unwrap()
@@ -225,13 +231,19 @@ impl ComposeEngine {
                 }
                 let runtime_name = self.resolve_volume_name(decl_name);
                 if self.backend.inspect_volume(&runtime_name).await.is_err() {
-                    if let Some(cfg) = config {
-                        self.backend.create_volume(&runtime_name, cfg).await?;
+                    let res = if let Some(cfg) = config {
+                        self.backend.create_volume(&runtime_name, cfg).await
                     } else {
                         self.backend
                             .create_volume(&runtime_name, &Default::default())
-                            .await?;
+                            .await
+                    };
+
+                    if let Err(e) = res {
+                        self.rollback().await;
+                        return Err(e);
                     }
+
                     self.session_volumes
                         .lock()
                         .unwrap()
@@ -510,6 +522,8 @@ impl ComposeEngine {
     }
 
     async fn rollback(&self) {
+        // Rollback session resources in reverse order of creation:
+        // Containers -> Volumes -> Networks.
         let containers = self
             .session_containers
             .lock()
@@ -521,16 +535,6 @@ impl ComposeEngine {
             let _ = self.backend.remove(&id, true).await;
         }
 
-        let networks = self
-            .session_networks
-            .lock()
-            .unwrap()
-            .drain(..)
-            .collect::<Vec<_>>();
-        for name in networks.into_iter().rev() {
-            let _ = self.backend.remove_network(&name).await;
-        }
-
         let volumes = self
             .session_volumes
             .lock()
@@ -539,6 +543,16 @@ impl ComposeEngine {
             .collect::<Vec<_>>();
         for name in volumes.into_iter().rev() {
             let _ = self.backend.remove_volume(&name).await;
+        }
+
+        let networks = self
+            .session_networks
+            .lock()
+            .unwrap()
+            .drain(..)
+            .collect::<Vec<_>>();
+        for name in networks.into_iter().rev() {
+            let _ = self.backend.remove_network(&name).await;
         }
     }
 
