@@ -103,21 +103,17 @@ export interface ContainerInfo {
  * List containers.
  *
  * @param all If true, include stopped containers
- * @returns Promise resolving to a **JSON-encoded** `ContainerInfo[]`
- *   string — call `JSON.parse(await list(all))` to recover the array.
- *   The string-shape return reflects Perry's current FFI contract;
- *   server-side array-materialization is a planned ergonomics task.
+ * @returns Promise resolving to ContainerInfo[]
  */
-export function list(all?: boolean): Promise<string>;
+export function list(all?: boolean): Promise<ContainerInfo[]>;
 
 /**
  * Inspect a container.
  *
  * @param id Container ID or name
- * @returns Promise resolving to a **JSON-encoded** `ContainerInfo`
- *   string. Call `JSON.parse(await inspect(id))` to recover the object.
+ * @returns Promise resolving to ContainerInfo
  */
-export function inspect(id: string): Promise<string>;
+export function inspect(id: string): Promise<ContainerInfo>;
 
 // ---------------------------------------------------------------------------
 // Container Logs and Exec
@@ -138,9 +134,7 @@ export interface ContainerLogs {
  *
  * @param id Container ID or name
  * @param options Options for logs (`tail`: number of trailing lines)
- * @returns Promise resolving to a **JSON-encoded** `ContainerLogs`
- *   string. Call `JSON.parse(await logs(id))` to recover
- *   `{ stdout, stderr }`.
+ * @returns Promise resolving to ContainerLogs
  */
 export function logs(
   id: string,
@@ -148,7 +142,7 @@ export function logs(
     /** Number of lines to return from the end (negative = no limit) */
     tail?: number;
   }
-): Promise<string>;
+): Promise<ContainerLogs>;
 
 /**
  * Execute a command in a running container.
@@ -156,9 +150,7 @@ export function logs(
  * @param id Container ID or name
  * @param cmd Command to execute
  * @param options Options for exec
- * @returns Promise resolving to a **JSON-encoded** `ContainerLogs`
- *   string. Call `JSON.parse(await exec(id, cmd))` to recover
- *   `{ stdout, stderr }`.
+ * @returns Promise resolving to ContainerLogs
  */
 export function exec(
   id: string,
@@ -169,7 +161,7 @@ export function exec(
     /** Working directory */
     workdir?: string;
   }
-): Promise<string>;
+): Promise<ContainerLogs>;
 
 // ---------------------------------------------------------------------------
 // Image Management
@@ -201,10 +193,9 @@ export function pullImage(reference: string): Promise<void>;
 /**
  * List images in the local cache.
  *
- * @returns Promise resolving to a **JSON-encoded** `ImageInfo[]` string.
- *   Call `JSON.parse(await listImages())` to recover the array.
+ * @returns Promise resolving to ImageInfo[]
  */
-export function listImages(): Promise<string>;
+export function listImages(): Promise<ImageInfo[]>;
 
 /**
  * Remove an image from the local cache.
@@ -404,27 +395,25 @@ export interface CleanupOptions {
  *     in-memory handle anymore.
  *   - You're cleaning up between dev iterations.
  *
- * @returns Promise resolving to a JSON-encoded `CleanupReport` string.
- *   Call `JSON.parse(await downByProject('myapp'))` to parse it.
+ * @returns Promise resolving to a `CleanupReport` object.
  */
 export function downByProject(
   project: string,
   options?: CleanupOptions,
-): Promise<string>;
+): Promise<CleanupReport>;
 
 /**
  * Tear down EVERY Perry-managed container on this host. **Use
  * sparingly** — this stops every stack the user has ever brought up
  * via `perry/compose`, regardless of which terminal session it's
- * running in. Returns the same JSON-encoded `CleanupReport` shape as
- * `downByProject`.
+ * running in. Returns a `CleanupReport` object.
  */
-export function downAll(options?: CleanupOptions): Promise<string>;
+export function downAll(options?: CleanupOptions): Promise<CleanupReport>;
 
 /**
  * Idempotent single-container removal. Stop + force-remove if the
- * container exists; treat NotFound as success. Returns `"true"` if
- * the container was found and removed, `"false"` if it didn't exist.
+ * container exists; treat NotFound as success. Returns `true` if
+ * the container was found and removed, `false` if it didn't exist.
  *
  * Useful in test cleanup paths and recovery scripts where you're not
  * sure whether a container was ever started.
@@ -432,7 +421,7 @@ export function downAll(options?: CleanupOptions): Promise<string>;
 export function removeIfExists(
   idOrName: string,
   force?: boolean,
-): Promise<string>;
+): Promise<boolean>;
 
 // ---------------------------------------------------------------------------
 // Platform Information
@@ -462,15 +451,8 @@ export interface BackendInfo {
 /**
  * Probe for available container runtimes and return details about each.
  *
- * @returns Promise resolving to a **JSON-encoded** `BackendInfo[]`
- *   string. Call `JSON.parse(await detectBackend())` to recover the
- *   typed array. Each entry includes `name`, `available`, `reason`
+ * @returns Promise resolving to a `BackendInfo[]` array.
+ *   Each entry includes `name`, `available`, `reason`
  *   (failure reason if any), and an optional `version` field.
- *   Example:
- *
- *   ```ts
- *   const probed = JSON.parse(await detectBackend()) as BackendInfo[];
- *   const live   = probed.filter(b => b.available);
- *   ```
  */
-export function detectBackend(): Promise<string>;
+export function detectBackend(): Promise<BackendInfo[]>;
