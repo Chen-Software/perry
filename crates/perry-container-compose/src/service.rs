@@ -12,15 +12,21 @@ pub fn generate_name(input: &str) -> String {
 
 pub fn service_container_name(
     service: &crate::types::ComposeService,
-    _service_name: &str,
+    service_name: &str,
 ) -> String {
     if let Some(name) = service.container_name.as_ref() {
         return name.clone();
     }
 
-    let image = service.image.as_deref().unwrap_or("unknown");
+    // Per SPEC §8.1: {md5_8chars}-{random_hex8}
+    // md5_8chars = first 8 hex chars of MD5(service YAML or image name).
+    // We try to hash the service YAML representation for better stability.
+    let input = serde_yaml::to_string(service).unwrap_or_else(|_| {
+        service.image.as_deref().unwrap_or(service_name).to_string()
+    });
+
     let mut hasher = Md5::new();
-    hasher.update(image.as_bytes());
+    hasher.update(input.as_bytes());
     let hash = hex::encode(hasher.finalize());
     let short_hash = &hash[..8];
 
