@@ -1080,8 +1080,10 @@ fn platform_candidates() -> &'static [&'static str] {
         ]
     } else if cfg!(target_os = "linux") {
         &["podman", "nerdctl", "docker"]
+    } else if cfg!(target_os = "windows") {
+        &["podman", "docker"]
     } else {
-        // Windows and other platforms
+        // Other platforms
         &["podman", "nerdctl", "docker"]
     }
 }

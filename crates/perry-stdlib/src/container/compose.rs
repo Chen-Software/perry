@@ -70,6 +70,10 @@ impl ComposeWrapper {
         self.engine.config()
     }
 
+    pub async fn status(&self) -> Result<Vec<ContainerInfo>, ContainerError> {
+        self.engine.status().await
+    }
+
     pub async fn start(&self, services: &[String]) -> Result<(), ContainerError> {
         self.engine.start(services).await
     }

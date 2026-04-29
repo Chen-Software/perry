@@ -689,6 +689,10 @@ impl ComposeEngine {
         serde_yaml::to_string(&self.spec).map_err(ComposeError::ParseError)
     }
 
+    pub async fn status(&self) -> Result<Vec<ContainerInfo>> {
+        self.ps().await
+    }
+
     pub async fn start(&self, services: &[String]) -> Result<()> {
         let target: Vec<&String> = if services.is_empty() {
             self.spec.services.keys().collect()
