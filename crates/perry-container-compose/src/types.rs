@@ -504,6 +504,7 @@ pub struct ComposeService {
     pub sysctls: Option<ListOrDict>,
     pub ulimits: Option<serde_yaml::Value>,
     pub logging: Option<ComposeLogging>,
+    pub isolation: Option<String>,
     pub deploy: Option<ComposeDeployment>,
     pub develop: Option<serde_yaml::Value>,
     pub secrets: Option<Vec<String>>,
@@ -623,6 +624,12 @@ impl ComposeService {
             network,
             rm: None,
             read_only: self.read_only,
+            seccomp: self.security_opt.as_ref().and_then(|opts| {
+                opts.iter()
+                    .find(|o| o.starts_with("seccomp="))
+                    .map(|o| o.trim_start_matches("seccomp=").to_string())
+            }),
+            isolation: self.isolation.clone(),
             labels,
             privileged: self.privileged,
             user: self.user.clone(),
@@ -827,6 +834,8 @@ pub struct ContainerSpec {
     pub network: Option<String>,
     pub rm: Option<bool>,
     pub read_only: Option<bool>,
+    pub seccomp: Option<String>,
+    pub isolation: Option<String>,
     pub labels: Option<std::collections::HashMap<String, String>>,
     pub privileged: Option<bool>,
     pub user: Option<String>,

@@ -283,7 +283,7 @@ async fn test_js_container_compose_up_null() {
 #[tokio::test]
 async fn test_js_container_compose_down_contract() {
     unsafe {
-        let p = perry_stdlib::container::js_container_compose_down(0, 1);
+        let p = perry_stdlib::container::js_container_compose_down(0, null());
         let res = await_promise_sync(p);
         assert!(res.is_err());
     }

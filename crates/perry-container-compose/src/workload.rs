@@ -345,6 +345,12 @@ impl WorkloadGraphEngine {
                 } else {
                     None
                 },
+                isolation: match node.runtime {
+                    RuntimeSpec::Microvm { .. } => Some("hyperv".into()),
+                    RuntimeSpec::Wasm { .. } => Some("wasm".into()),
+                    _ if policy.requires_microvm() => Some("hyperv".into()),
+                    _ => None,
+                },
                 ..Default::default()
             };
 
