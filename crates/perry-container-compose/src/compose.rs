@@ -1,11 +1,28 @@
 use crate::backend::ContainerBackend;
 use crate::error::{ComposeError, Result};
 use crate::service;
-use crate::types::{ComposeHandle, ComposeSpec, ContainerInfo, ContainerLogs, ContainerSpec};
+use crate::types::{
+    ComposeHandle, ComposeService, ComposeSpec, ContainerInfo, ContainerLogs, ContainerSpec,
+};
 use indexmap::IndexMap;
+use md5::{Digest, Md5};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+/// Compute a stable 16-char hex hash of a service's user-visible spec
+/// fields. Stamped onto each created container as a `perry.compose.spec
+/// _hash` label; on subsequent `up()` calls we compare the live label
+/// against the freshly-computed hash and recreate the container when
+/// they differ. Without this, editing `image:` from `postgres:15` to
+/// `postgres:16` and re-running `up()` is a silent no-op.
+fn service_spec_hash(svc: &ComposeService) -> String {
+    let json = serde_json::to_string(svc).unwrap_or_default();
+    let mut h = Md5::new();
+    h.update(json.as_bytes());
+    let bytes = h.finalize();
+    hex::encode(&bytes[..8])
+}
 
 static COMPOSE_ENGINES: once_cell::sync::Lazy<std::sync::Mutex<IndexMap<u64, Arc<ComposeEngine>>>> =
     once_cell::sync::Lazy::new(|| std::sync::Mutex::new(IndexMap::new()));
@@ -76,6 +93,85 @@ impl ComposeEngine {
             .insert(service_name.to_string(), container_name.to_string());
     }
 
+    /// Project-namespace a volume or network name so two stacks with the
+    /// same `volumes: { forgejo-pgdata: ... }` declaration don't collide
+    /// and corrupt each other's data. Matches docker-compose's
+    /// `<project>_<name>` convention.
+    ///
+    /// External resources (`{ external: true }`) are NOT prefixed — those
+    /// are the caller's pre-existing infrastructure and we must reach
+    /// them by their actual name.
+    fn project_scoped_name(&self, name: &str) -> String {
+        format!("{}_{}", self.project_name, name)
+    }
+
+    /// Resolve a volume name to the actual docker volume name we use,
+    /// honoring `external: true` (skip namespacing) and `name:` overrides
+    /// on the volume spec.
+    fn resolve_volume_name(&self, decl_name: &str) -> String {
+        let cfg_opt = self
+            .spec
+            .volumes
+            .as_ref()
+            .and_then(|v| v.get(decl_name))
+            .and_then(|c| c.as_ref());
+        if let Some(cfg) = cfg_opt {
+            if cfg.external.unwrap_or(false) {
+                // External: use `name:` if set, else literal declaration name.
+                return cfg.name.clone().unwrap_or_else(|| decl_name.to_string());
+            }
+            if let Some(explicit) = &cfg.name {
+                // Explicit `name:` override — caller asked for this exact
+                // runtime name; honor it without project prefix.
+                return explicit.clone();
+            }
+        }
+        self.project_scoped_name(decl_name)
+    }
+
+    /// Same as `resolve_volume_name` for networks.
+    fn resolve_network_name(&self, decl_name: &str) -> String {
+        let cfg_opt = self
+            .spec
+            .networks
+            .as_ref()
+            .and_then(|n| n.get(decl_name))
+            .and_then(|c| c.as_ref());
+        if let Some(cfg) = cfg_opt {
+            if cfg.external.unwrap_or(false) {
+                return cfg.name.clone().unwrap_or_else(|| decl_name.to_string());
+            }
+            if let Some(explicit) = &cfg.name {
+                return explicit.clone();
+            }
+        }
+        self.project_scoped_name(decl_name)
+    }
+
+    /// Whether a volume is declared `external: true` (so `down(volumes:
+    /// true)` must NOT remove it — it's not ours to drop).
+    fn is_external_volume(&self, decl_name: &str) -> bool {
+        self.spec
+            .volumes
+            .as_ref()
+            .and_then(|v| v.get(decl_name))
+            .and_then(|c| c.as_ref())
+            .and_then(|c| c.external)
+            .unwrap_or(false)
+    }
+
+    /// Whether a network is declared `external: true` (so `down()` must
+    /// NOT remove it).
+    fn is_external_network(&self, decl_name: &str) -> bool {
+        self.spec
+            .networks
+            .as_ref()
+            .and_then(|n| n.get(decl_name))
+            .and_then(|c| c.as_ref())
+            .and_then(|c| c.external)
+            .unwrap_or(false)
+    }
+
     fn register(self: Arc<Self>) -> ComposeHandle {
         let stack_id = NEXT_STACK_ID.fetch_add(1, Ordering::SeqCst);
         let services: Vec<String> = self.spec.services.keys().cloned().collect();
@@ -97,32 +193,49 @@ impl ComposeEngine {
     ) -> Result<ComposeHandle> {
         // 1. Create networks
         if let Some(networks) = &self.spec.networks {
-            for (name, config) in networks {
-                if self.backend.inspect_network(name).await.is_err() {
+            for (decl_name, config) in networks {
+                // Skip creation entirely for `external: true` — the caller
+                // asserts the network already exists and we must not
+                // touch its lifecycle.
+                if self.is_external_network(decl_name) {
+                    continue;
+                }
+                let runtime_name = self.resolve_network_name(decl_name);
+                if self.backend.inspect_network(&runtime_name).await.is_err() {
                     if let Some(cfg) = config {
-                        self.backend.create_network(name, cfg).await?;
+                        self.backend.create_network(&runtime_name, cfg).await?;
                     } else {
                         self.backend
-                            .create_network(name, &Default::default())
+                            .create_network(&runtime_name, &Default::default())
                             .await?;
                     }
-                    self.session_networks.lock().unwrap().push(name.clone());
+                    self.session_networks
+                        .lock()
+                        .unwrap()
+                        .push(runtime_name.clone());
                 }
             }
         }
 
         // 2. Create volumes
         if let Some(volumes) = &self.spec.volumes {
-            for (name, config) in volumes {
-                if self.backend.inspect_volume(name).await.is_err() {
+            for (decl_name, config) in volumes {
+                if self.is_external_volume(decl_name) {
+                    continue;
+                }
+                let runtime_name = self.resolve_volume_name(decl_name);
+                if self.backend.inspect_volume(&runtime_name).await.is_err() {
                     if let Some(cfg) = config {
-                        self.backend.create_volume(name, cfg).await?;
+                        self.backend.create_volume(&runtime_name, cfg).await?;
                     } else {
                         self.backend
-                            .create_volume(name, &Default::default())
+                            .create_volume(&runtime_name, &Default::default())
                             .await?;
                     }
-                    self.session_volumes.lock().unwrap().push(name.clone());
+                    self.session_volumes
+                        .lock()
+                        .unwrap()
+                        .push(runtime_name.clone());
                 }
             }
         }
@@ -151,11 +264,18 @@ impl ComposeEngine {
                 .unwrap_or_else(|| service::service_container_name(svc, svc_name));
             self.cache_container_name(svc_name, &container_name);
 
-            // Extract primary network if any
-            let network = match &svc.networks {
-                Some(crate::types::ServiceNetworks::List(l)) => l.first().cloned(),
-                Some(crate::types::ServiceNetworks::Map(m)) => m.keys().next().cloned(),
-                None => None,
+            // Extract primary network if any. The service references
+            // the network by its DECLARATION key (`forgejo-db-net`), but
+            // we attached at creation time as the project-namespaced
+            // name (`<project>_forgejo-db-net`) — translate before
+            // emitting the `--network` flag.
+            let network = {
+                let decl = match &svc.networks {
+                    Some(crate::types::ServiceNetworks::List(l)) => l.first().cloned(),
+                    Some(crate::types::ServiceNetworks::Map(m)) => m.keys().next().cloned(),
+                    None => None,
+                };
+                decl.map(|d| self.resolve_network_name(&d))
             };
 
             let mut labels = svc.labels.as_ref().map(|l| l.to_map()).unwrap_or_default();
@@ -164,6 +284,13 @@ impl ComposeEngine {
                 self.project_name.clone(),
             );
             labels.insert("perry.compose.service".to_string(), svc_name.clone());
+            // Spec-hash label — read back during the idempotency check
+            // below to detect drift. When a service's user-visible spec
+            // changes (image tag, env var, port, etc.), the hash
+            // changes; we recreate the container instead of silently
+            // skipping it.
+            let spec_hash = service_spec_hash(svc);
+            labels.insert("perry.compose.spec_hash".to_string(), spec_hash.clone());
 
             let container_spec = ContainerSpec {
                 image: svc.image.clone().unwrap_or_default(),
@@ -206,9 +333,42 @@ impl ComposeEngine {
                         .as_ref()
                         .map(|v| {
                             v.iter()
-                                .map(|vs| match vs {
-                                    serde_yaml::Value::String(s) => s.clone(),
-                                    _ => vs.as_str().unwrap_or_default().to_string(),
+                                .map(|vs| {
+                                    let raw = match vs {
+                                        serde_yaml::Value::String(s) => s.clone(),
+                                        _ => vs.as_str().unwrap_or_default().to_string(),
+                                    };
+                                    // Namespace named-volume references:
+                                    //   "named:/path"      → "<proj>_named:/path"
+                                    //   "named:/path:ro"   → "<proj>_named:/path:ro"
+                                    //   "/host:/c"         → "/host:/c" (bind, literal)
+                                    //   "./relative:/c"    → "./relative:/c" (bind, literal)
+                                    // The leading-segment heuristic mirrors
+                                    // docker-compose: a leading `/` or `.`
+                                    // means bind mount; anything else is a
+                                    // named-volume reference iff it's
+                                    // declared in `spec.volumes`.
+                                    if let Some(colon) = raw.find(':') {
+                                        let head = &raw[..colon];
+                                        let tail = &raw[colon..];
+                                        if head.starts_with('/') || head.starts_with('.') {
+                                            return raw;
+                                        }
+                                        let is_declared = self
+                                            .spec
+                                            .volumes
+                                            .as_ref()
+                                            .map(|m| m.contains_key(head))
+                                            .unwrap_or(false);
+                                        if is_declared {
+                                            return format!(
+                                                "{}{}",
+                                                self.resolve_volume_name(head),
+                                                tail
+                                            );
+                                        }
+                                    }
+                                    raw
                                 })
                                 .collect()
                         })
@@ -256,6 +416,27 @@ impl ComposeEngine {
                 workdir: svc.working_dir.clone(),
                 cap_add: svc.cap_add.clone(),
                 cap_drop: svc.cap_drop.clone(),
+                // Register the service KEY as a DNS alias on the
+                // attached network. This is what makes `db:5432` /
+                // `api:8080` etc. resolve from sibling containers
+                // without the user having to set an explicit
+                // `container_name`. Plus any long-form aliases the
+                // user declared via `networks: { foo: { aliases: [...] } }`.
+                network_aliases: Some({
+                    let mut aliases = vec![svc_name.clone()];
+                    if let Some(crate::types::ServiceNetworks::Map(m)) = &svc.networks {
+                        for cfg in m.values().flatten() {
+                            if let Some(extra) = &cfg.aliases {
+                                for a in extra {
+                                    if !aliases.contains(a) {
+                                        aliases.push(a.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    aliases
+                }),
             };
 
             let profile = crate::backend::SecurityProfile {
@@ -263,14 +444,42 @@ impl ComposeEngine {
                 seccomp: None, // Could be parsed from security_opt
             };
 
-            // Idempotency: skip if already running
+            // Idempotency: skip if already running AND the live spec
+            // hash matches the freshly-computed one. If the user
+            // edited the spec (new image tag, new env value, etc.),
+            // the hashes differ and we recreate. Pre-fix `up()`
+            // skipped any container with a matching name regardless
+            // of spec drift, leading to "I changed the image but my
+            // redeploy did nothing" surprises.
             let mut skip = false;
             if let Ok(info) = self.backend.inspect(&container_name).await {
-                if info.status == "running" {
+                let live_hash = info.labels.get("perry.compose.spec_hash").cloned();
+                let drift = live_hash.as_deref() != Some(spec_hash.as_str());
+                if drift {
+                    // Spec changed — tear the existing container down
+                    // so the create path below recreates it.
+                    let _ = self.backend.stop(&container_name, Some(10)).await;
+                    let _ = self.backend.remove(&container_name, true).await;
+                } else if info.status == "running" {
                     skip = true;
                 } else {
-                    // Start existing stopped container
-                    self.backend.start(&container_name).await?;
+                    // Start existing stopped container. Track it in
+                    // session_containers so a later service-startup
+                    // failure rolls it BACK to stopped state instead of
+                    // leaving a half-started stack — pre-fix, this
+                    // branch added nothing to session_containers and
+                    // rollback() couldn't undo the start.
+                    if let Err(e) = self.backend.start(&container_name).await {
+                        self.rollback().await;
+                        return Err(ComposeError::ServiceStartupFailed {
+                            service: svc_name.clone(),
+                            message: e.to_string(),
+                        });
+                    }
+                    self.session_containers
+                        .lock()
+                        .unwrap()
+                        .push(container_name.clone());
                     skip = true;
                 }
             }
@@ -398,15 +607,28 @@ impl ComposeEngine {
         }
 
         if let Some(networks) = &self.spec.networks {
-            for name in networks.keys() {
-                let _ = self.backend.remove_network(name).await;
+            for decl_name in networks.keys() {
+                // Skip `external: true` networks — those are the
+                // caller's pre-existing infrastructure and must not be
+                // deleted by us. Pre-fix `down()` removed every network
+                // in `spec.networks` regardless, which silently deleted
+                // shared infra a user had explicitly marked external.
+                if self.is_external_network(decl_name) {
+                    continue;
+                }
+                let runtime_name = self.resolve_network_name(decl_name);
+                let _ = self.backend.remove_network(&runtime_name).await;
             }
         }
 
         if remove_volumes {
             if let Some(volumes) = &self.spec.volumes {
-                for name in volumes.keys() {
-                    let _ = self.backend.remove_volume(name).await;
+                for decl_name in volumes.keys() {
+                    if self.is_external_volume(decl_name) {
+                        continue;
+                    }
+                    let runtime_name = self.resolve_volume_name(decl_name);
+                    let _ = self.backend.remove_volume(&runtime_name).await;
                 }
             }
         }

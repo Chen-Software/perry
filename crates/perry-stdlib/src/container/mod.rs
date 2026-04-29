@@ -160,17 +160,55 @@ fn handle_id_from_f64(boxed: f64) -> i64 {
 /// helper is the integration point. Per-call guard rather than a global
 /// `up()`-only one so users can pin individual `run`/`create`/`pullImage`
 /// invocations to verified images while leaving compose stacks unchecked.
-async fn maybe_verify_image(image: &str) -> Result<(), String> {
-    if std::env::var("PERRY_CONTAINER_VERIFY_IMAGES")
+/// Image-verification mode controlled by `PERRY_CONTAINER_VERIFY_IMAGES`.
+///
+/// | Value | Behavior |
+/// |---|---|
+/// | unset / `"0"` / `"off"` (default) | Skip verification entirely. |
+/// | `"warn"` | Run cosign verification; on fail, print a warning to stderr and proceed. Useful as a "soft-enable" during rollout — surfaces signing gaps without blocking deployment. |
+/// | `"1"` / `"on"` / `"enforce"` (production) | Run cosign verification; on fail, reject the FFI call with `verification failed`. **This is the recommended setting for production deploys.** |
+///
+/// Values other than the above are treated as `"warn"` (forgiving default
+/// for typos like `PERRY_CONTAINER_VERIFY_IMAGES=true`).
+#[derive(Clone, Copy)]
+enum VerifyMode {
+    Off,
+    Warn,
+    Enforce,
+}
+
+fn current_verify_mode() -> VerifyMode {
+    match std::env::var("PERRY_CONTAINER_VERIFY_IMAGES")
         .ok()
         .as_deref()
-        != Some("1")
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
     {
-        return Ok(());
+        None | Some("") | Some("0") | Some("off") | Some("false") | Some("no") => VerifyMode::Off,
+        Some("1") | Some("on") | Some("enforce") | Some("strict") => VerifyMode::Enforce,
+        // anything else (including "warn", "true", "yes", typos) → warn
+        Some(_) => VerifyMode::Warn,
     }
-    crate::container::verification::verify_image(image)
-        .await
-        .map(|_digest| ())
+}
+
+async fn maybe_verify_image(image: &str) -> Result<(), String> {
+    match current_verify_mode() {
+        VerifyMode::Off => Ok(()),
+        VerifyMode::Enforce => crate::container::verification::verify_image(image)
+            .await
+            .map(|_digest| ()),
+        VerifyMode::Warn => match crate::container::verification::verify_image(image).await {
+            Ok(_digest) => Ok(()),
+            Err(e) => {
+                eprintln!(
+                    "[perry/container] WARNING: image verification failed for {image}: {e} \
+                     (PERRY_CONTAINER_VERIFY_IMAGES=warn — proceeding anyway; \
+                     set =enforce / =1 to reject unsigned images, =off / =0 to skip the check)"
+                );
+                Ok(())
+            }
+        },
+    }
 }
 
 // ============ Container Lifecycle ============
@@ -490,24 +528,26 @@ pub unsafe extern "C" fn js_container_remove(
 }
 
 /// List containers
-/// FFI: js_container_list(all: i32) -> *mut Promise
+/// FFI: `js_container_list(all: i32) -> *mut Promise<JSON string>`
+///
+/// Resolves with a JSON-encoded `ContainerInfo[]` string. User code does
+/// `JSON.parse(await list(true))` to recover the array.
 #[no_mangle]
 pub unsafe extern "C" fn js_container_list(all: i32) -> *mut Promise {
     let promise = js_promise_new();
 
-    crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = match get_global_backend().await {
-            Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
-        };
-        match backend.list(all != 0).await {
-            Ok(containers) => {
-                let handle_id = types::register_container_info_list(containers);
-                Ok(handle_to_promise_bits(handle_id as u64))
-            }
-            Err(e) => Err::<u64, String>(e.to_string()),
-        }
-    });
+    crate::common::spawn_for_promise_deferred(
+        promise as *mut u8,
+        async move {
+            let backend = get_global_backend().await.map_err(|e| e.to_string())?;
+            let containers = backend.list(all != 0).await.map_err(|e| e.to_string())?;
+            serde_json::to_string(&containers).map_err(|e| e.to_string())
+        },
+        |json| {
+            let str_ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
+            perry_runtime::JSValue::string_ptr(str_ptr).bits()
+        },
+    );
 
     promise
 }
@@ -528,19 +568,19 @@ pub unsafe extern "C" fn js_container_inspect(id_ptr: *const StringHeader) -> *m
         }
     };
 
-    crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = match get_global_backend().await {
-            Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
-        };
-        match backend.inspect(&id).await {
-            Ok(info) => {
-                let handle_id = types::register_container_info(info);
-                Ok(handle_to_promise_bits(handle_id as u64))
-            }
-            Err(e) => Err::<u64, String>(e.to_string()),
-        }
-    });
+    // Resolves with a JSON-encoded `ContainerInfo` string.
+    crate::common::spawn_for_promise_deferred(
+        promise as *mut u8,
+        async move {
+            let backend = get_global_backend().await.map_err(|e| e.to_string())?;
+            let info = backend.inspect(&id).await.map_err(|e| e.to_string())?;
+            serde_json::to_string(&info).map_err(|e| e.to_string())
+        },
+        |json| {
+            let str_ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
+            perry_runtime::JSValue::string_ptr(str_ptr).bits()
+        },
+    );
 
     promise
 }
@@ -671,19 +711,22 @@ pub unsafe extern "C" fn js_container_logs(id_ptr: *const StringHeader, tail: i3
 
     let tail_opt = if tail >= 0 { Some(tail as u32) } else { None };
 
-    crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = match get_global_backend().await {
-            Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
-        };
-        match backend.logs(&id, tail_opt).await {
-            Ok(logs) => {
-                let handle_id = types::register_container_logs(logs);
-                Ok(handle_to_promise_bits(handle_id as u64))
-            }
-            Err(e) => Err::<u64, String>(e.to_string()),
-        }
-    });
+    // Resolves with a JSON-encoded `ContainerLogs` string.
+    crate::common::spawn_for_promise_deferred(
+        promise as *mut u8,
+        async move {
+            let backend = get_global_backend().await.map_err(|e| e.to_string())?;
+            let logs = backend
+                .logs(&id, tail_opt)
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_string(&logs).map_err(|e| e.to_string())
+        },
+        |json| {
+            let str_ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
+            perry_runtime::JSValue::string_ptr(str_ptr).bits()
+        },
+    );
 
     promise
 }
@@ -713,29 +756,27 @@ pub unsafe extern "C" fn js_container_exec(
     let env_json = string_from_header(env_json_ptr);
     let workdir = string_from_header(workdir_ptr);
 
-    crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let cmd: Vec<String> = cmd_json
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
-
-        let env: Option<HashMap<String, String>> =
-            env_json.and_then(|s| serde_json::from_str(&s).ok());
-
-        let backend = match get_global_backend().await {
-            Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
-        };
-        match backend
-            .exec(&id, &cmd, env.as_ref(), workdir.as_deref())
-            .await
-        {
-            Ok(logs) => {
-                let handle_id = types::register_container_logs(logs);
-                Ok(handle_to_promise_bits(handle_id as u64))
-            }
-            Err(e) => Err::<u64, String>(e.to_string()),
-        }
-    });
+    // Resolves with a JSON-encoded `ContainerLogs` string.
+    crate::common::spawn_for_promise_deferred(
+        promise as *mut u8,
+        async move {
+            let cmd: Vec<String> = cmd_json
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            let env: Option<HashMap<String, String>> =
+                env_json.and_then(|s| serde_json::from_str(&s).ok());
+            let backend = get_global_backend().await.map_err(|e| e.to_string())?;
+            let logs = backend
+                .exec(&id, &cmd, env.as_ref(), workdir.as_deref())
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_string(&logs).map_err(|e| e.to_string())
+        },
+        |json| {
+            let str_ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
+            perry_runtime::JSValue::string_ptr(str_ptr).bits()
+        },
+    );
 
     promise
 }
@@ -781,19 +822,19 @@ pub unsafe extern "C" fn js_container_pullImage(reference_ptr: *const StringHead
 pub unsafe extern "C" fn js_container_listImages() -> *mut Promise {
     let promise = js_promise_new();
 
-    crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let backend = match get_global_backend().await {
-            Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
-        };
-        match backend.list_images().await {
-            Ok(images) => {
-                let handle_id = types::register_image_info_list(images);
-                Ok(handle_to_promise_bits(handle_id as u64))
-            }
-            Err(e) => Err::<u64, String>(e.to_string()),
-        }
-    });
+    // Resolves with a JSON-encoded `ImageInfo[]` string.
+    crate::common::spawn_for_promise_deferred(
+        promise as *mut u8,
+        async move {
+            let backend = get_global_backend().await.map_err(|e| e.to_string())?;
+            let images = backend.list_images().await.map_err(|e| e.to_string())?;
+            serde_json::to_string(&images).map_err(|e| e.to_string())
+        },
+        |json| {
+            let str_ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
+            perry_runtime::JSValue::string_ptr(str_ptr).bits()
+        },
+    );
 
     promise
 }
@@ -1048,20 +1089,24 @@ pub unsafe extern "C" fn js_container_compose_ps(handle: f64) -> *mut Promise {
         }
     };
 
-    crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let _backend = match get_global_backend().await {
-            Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
-        };
-        let wrapper = compose::ComposeWrapper::new_from_engine(engine);
-        match wrapper.ps().await {
-            Ok(containers) => {
-                let h = types::register_container_info_list(containers);
-                Ok(handle_to_promise_bits(h as u64))
-            }
-            Err(e) => Err::<u64, String>(e.to_string()),
-        }
-    });
+    // Resolve the Promise with a JSON-encoded `ContainerInfo[]` string
+    // rather than a registry-id handle. Pre-fix the FFI returned an
+    // opaque NaN-boxed integer that user code couldn't iterate; the TS
+    // type `Promise<ContainerInfo[]>` lied about the actual shape. Now
+    // the Promise resolves to a JSON string the user `JSON.parse`s.
+    crate::common::spawn_for_promise_deferred(
+        promise as *mut u8,
+        async move {
+            let _backend = get_global_backend().await.map_err(|e| e.to_string())?;
+            let wrapper = compose::ComposeWrapper::new_from_engine(engine);
+            let containers = wrapper.ps().await.map_err(|e| e.to_string())?;
+            serde_json::to_string(&containers).map_err(|e| e.to_string())
+        },
+        |json| {
+            let str_ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
+            perry_runtime::JSValue::string_ptr(str_ptr).bits()
+        },
+    );
 
     promise
 }
@@ -1097,20 +1142,24 @@ pub unsafe extern "C" fn js_container_compose_logs(
         None
     };
 
-    crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let _backend = match get_global_backend().await {
-            Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
-        };
-        let wrapper = compose::ComposeWrapper::new_from_engine(engine);
-        match wrapper.logs(service.as_deref(), tail_opt).await {
-            Ok(logs) => {
-                let h = types::register_container_logs(logs);
-                Ok(handle_to_promise_bits(h as u64))
-            }
-            Err(e) => Err::<u64, String>(e.to_string()),
-        }
-    });
+    // Resolve with a JSON-encoded `ContainerLogs` string ({ stdout,
+    // stderr }) — see `compose_ps` for the rationale.
+    crate::common::spawn_for_promise_deferred(
+        promise as *mut u8,
+        async move {
+            let _backend = get_global_backend().await.map_err(|e| e.to_string())?;
+            let wrapper = compose::ComposeWrapper::new_from_engine(engine);
+            let logs = wrapper
+                .logs(service.as_deref(), tail_opt)
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_string(&logs).map_err(|e| e.to_string())
+        },
+        |json| {
+            let str_ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
+            perry_runtime::JSValue::string_ptr(str_ptr).bits()
+        },
+    );
 
     promise
 }
@@ -1140,29 +1189,27 @@ pub unsafe extern "C" fn js_container_compose_exec(
     let service_opt = unsafe { string_from_header(service_ptr) };
     let cmd_json = unsafe { string_from_header(cmd_json_ptr) };
 
-    crate::common::spawn_for_promise(promise as *mut u8, async move {
-        let service = match service_opt {
-            Some(s) => s,
-            None => return Err::<u64, String>("Invalid service name".to_string()),
-        };
-
-        let cmd: Vec<String> = cmd_json
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
-
-        let _backend = match get_global_backend().await {
-            Ok(b) => Arc::clone(b),
-            Err(e) => return Err::<u64, String>(e.to_string()),
-        };
-        let wrapper = compose::ComposeWrapper::new_from_engine(engine);
-        match wrapper.exec(&service, &cmd).await {
-            Ok(logs) => {
-                let h = types::register_container_logs(logs);
-                Ok(handle_to_promise_bits(h as u64))
-            }
-            Err(e) => Err::<u64, String>(e.to_string()),
-        }
-    });
+    // Resolve with a JSON-encoded `ContainerLogs` string.
+    crate::common::spawn_for_promise_deferred(
+        promise as *mut u8,
+        async move {
+            let service = service_opt.ok_or_else(|| "Invalid service name".to_string())?;
+            let cmd: Vec<String> = cmd_json
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            let _backend = get_global_backend().await.map_err(|e| e.to_string())?;
+            let wrapper = compose::ComposeWrapper::new_from_engine(engine);
+            let logs = wrapper
+                .exec(&service, &cmd)
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_string(&logs).map_err(|e| e.to_string())
+        },
+        |json| {
+            let str_ptr = perry_runtime::js_string_from_bytes(json.as_ptr(), json.len() as u32);
+            perry_runtime::JSValue::string_ptr(str_ptr).bits()
+        },
+    );
 
     promise
 }
@@ -1487,6 +1534,101 @@ pub extern "C" fn js_container_module_init() {
         handle.spawn(async {
             let _ = get_global_backend().await;
         });
+    }
+    install_default_signal_cleanup();
+}
+
+/// Install a process-level SIGINT / SIGTERM handler that tears down any
+/// Compose stacks the user brought up but never called `down()` on.
+///
+/// **Why this exists:** Perry's runtime currently does not deliver
+/// POSIX signals to TS-side `process.on('SIGINT', ...)` handlers. So a
+/// program that does `await up(spec)` and then waits on something
+/// (long-running watch loop, blocked network read, etc.) will, on
+/// Ctrl-C, leave every container the stack created running. The user
+/// has to `docker rm -f` them by hand.
+///
+/// This handler runs at the OS-process level: when the process
+/// receives SIGINT or SIGTERM, the handler walks the global
+/// `COMPOSE_HANDLES` registry, calls `down(volumes=false)` on each
+/// engine (so committed data survives), and then exits with status
+/// matching the signal (130 for SIGINT, 143 for SIGTERM).
+///
+/// Idempotent: calling `install_default_signal_cleanup()` multiple
+/// times is safe — internally guarded by `OnceLock`.
+///
+/// Opt out: `PERRY_NO_DEFAULT_SIGINT_CLEANUP=1` skips installation
+/// (for callers that intend to handle teardown themselves and don't
+/// want the default tear-down).
+fn install_default_signal_cleanup() {
+    use std::sync::OnceLock;
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    if INSTALLED.set(()).is_err() {
+        return;
+    }
+    if std::env::var("PERRY_NO_DEFAULT_SIGINT_CLEANUP").is_ok() {
+        return;
+    }
+    // Need a tokio runtime handle to drive the async `down()` calls
+    // from inside the signal handler. If there's no current runtime
+    // (the user invoked module_init before any async work), skip the
+    // install — the user will set up their own teardown if they need
+    // signal handling at all.
+    let rt = match tokio::runtime::Handle::try_current() {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    rt.spawn(async {
+        // Listen for both SIGINT (Ctrl-C) and SIGTERM (kill) on Unix;
+        // Windows only delivers Ctrl-C / Ctrl-Break which tokio maps to
+        // ctrl_c() / ctrl_break(). The select! exits as soon as either
+        // arrives, then the cleanup runs once.
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigint = match signal(SignalKind::interrupt()) {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let mut sigterm = match signal(SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let exit_code = tokio::select! {
+                _ = sigint.recv()  => 130,  // 128 + SIGINT(2)
+                _ = sigterm.recv() => 143,  // 128 + SIGTERM(15)
+            };
+            drain_compose_handles().await;
+            std::process::exit(exit_code);
+        }
+        #[cfg(not(unix))]
+        {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                drain_compose_handles().await;
+                std::process::exit(130);
+            }
+        }
+    });
+}
+
+/// Walk the global `COMPOSE_HANDLES` registry and call `down(volumes=
+/// false)` on each engine. Run from the SIGINT/SIGTERM cleanup task —
+/// volumes are preserved by default so committed data survives an
+/// abnormal shutdown; users who want destructive cleanup must call
+/// `down(handle, { volumes: true })` explicitly while their process
+/// is still alive.
+async fn drain_compose_handles() {
+    let registry = match types::COMPOSE_HANDLES.get() {
+        Some(r) => r,
+        None => return,
+    };
+    // Snapshot the keys so we don't hold the dashmap across awaits.
+    let ids: Vec<u64> = registry.iter().map(|e| *e.key()).collect();
+    for id in ids {
+        if let Some(engine) = types::take_compose_handle(id) {
+            let wrapper = compose::ComposeWrapper::new_from_engine(engine);
+            let _ = wrapper.down(false).await;
+        }
     }
 }
 

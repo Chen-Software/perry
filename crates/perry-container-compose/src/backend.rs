@@ -200,6 +200,18 @@ impl CliProtocol for DockerProtocol {
         if let Some(net) = &spec.network {
             args.extend(["--network".into(), net.clone()]);
         }
+        // Service-key network alias — registers the service KEY (e.g.
+        // `db`, `api`) as a DNS name on the attached network, so
+        // sibling containers can resolve `db:5432` directly. This
+        // matches docker-compose semantics; pre-fix Perry's compose
+        // engine relied on the user setting `container_name`
+        // explicitly, which broke any compose stack ported from the
+        // wider ecosystem.
+        if let Some(aliases) = &spec.network_aliases {
+            for alias in aliases {
+                args.extend(["--network-alias".into(), alias.clone()]);
+            }
+        }
         if spec.rm.unwrap_or(false) {
             args.push("--rm".into());
         }
@@ -551,6 +563,14 @@ impl CliProtocol for AppleContainerProtocol {
         }
         if let Some(network) = &spec.network {
             args.extend(["--network".into(), network.clone()]);
+        }
+        // Service-key network alias — see DockerProtocol::run_args for
+        // the rationale. apple/container's CLI accepts `--network-alias`
+        // with the same semantics as docker.
+        if let Some(aliases) = &spec.network_aliases {
+            for alias in aliases {
+                args.extend(["--network-alias".into(), alias.clone()]);
+            }
         }
         for port in spec.ports.as_ref().iter().flat_map(|v| v.iter()) {
             args.extend(["-p".into(), port.clone()]);
@@ -1175,6 +1195,52 @@ mod tests {
         assert!(args.contains(&"FOO=BAR".to_string()));
         assert!(args.contains(&"--rm".to_string()));
         assert!(args.contains(&"nginx".to_string()));
+    }
+
+    #[test]
+    fn test_docker_run_args_includes_network_alias() {
+        // Service-key network alias regression: pre-fix Perry's compose
+        // engine relied on `container_name` for cross-service DNS,
+        // breaking any port of a docker-compose stack from the wider
+        // ecosystem. The fix populates `network_aliases` from the
+        // service KEY in `ComposeEngine::up`; this test pins that
+        // `--network-alias <name>` is emitted per entry.
+        let proto = DockerProtocol;
+        let spec = ContainerSpec {
+            image: "postgres:16-alpine".into(),
+            name: Some("myapp_db_abc12345".into()),
+            network: Some("myapp_appnet".into()),
+            network_aliases: Some(vec!["db".into(), "primary-db".into()]),
+            ..Default::default()
+        };
+        let args = proto.run_args(&spec);
+        assert!(
+            args.windows(2).any(|w| w[0] == "--network-alias" && w[1] == "db"),
+            "expected --network-alias db; got {:?}",
+            args
+        );
+        assert!(
+            args.windows(2).any(|w| w[0] == "--network-alias" && w[1] == "primary-db"),
+            "expected --network-alias primary-db; got {:?}",
+            args
+        );
+    }
+
+    #[test]
+    fn test_apple_run_args_includes_network_alias() {
+        let proto = AppleContainerProtocol;
+        let spec = ContainerSpec {
+            image: "alpine".into(),
+            network: Some("appnet".into()),
+            network_aliases: Some(vec!["worker".into()]),
+            ..Default::default()
+        };
+        let args = proto.run_args(&spec);
+        assert!(
+            args.windows(2).any(|w| w[0] == "--network-alias" && w[1] == "worker"),
+            "apple/container should emit --network-alias too; got {:?}",
+            args
+        );
     }
 
     #[test]

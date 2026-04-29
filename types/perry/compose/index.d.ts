@@ -178,34 +178,45 @@ export function down(handle: ComposeHandle, options?: DownOptions): Promise<void
 
 /**
  * List service statuses in a stack.
+ *
  * @param handle Stack handle
- * @returns Array of ContainerInfo entries
+ * @returns Promise resolving to a **JSON-encoded** `ContainerInfo[]`
+ *   string. Call `JSON.parse(await ps(handle))` to recover the array.
+ *   The JSON-string return shape reflects Perry's current FFI
+ *   contract; server-side array-materialization is a planned
+ *   ergonomics task.
  */
-export function ps(handle: ComposeHandle): Promise<ContainerInfo[]>;
+export function ps(handle: ComposeHandle): Promise<string>;
 
 /**
  * Get logs from services in a stack.
+ *
  * @param handle Stack handle
  * @param options Log options
- * @returns Promise resolving to ContainerLogs
+ * @returns Promise resolving to a **JSON-encoded** `ContainerLogs`
+ *   string. Call `JSON.parse(await logs(handle, opts))` to recover
+ *   `{ stdout, stderr }`.
  */
 export function logs(
   handle: ComposeHandle,
   options?: LogsOptions
-): Promise<ContainerLogs>;
+): Promise<string>;
 
 /**
  * Execute a command in a running service container within a stack.
+ *
  * @param handle Stack handle
  * @param service Service name
  * @param cmd Command and arguments to execute
- * @returns Promise resolving to ContainerLogs
+ * @returns Promise resolving to a **JSON-encoded** `ContainerLogs`
+ *   string. Call `JSON.parse(await exec(handle, svc, cmd))` to recover
+ *   `{ stdout, stderr }`.
  */
 export function exec(
   handle: ComposeHandle,
   service: string,
   cmd: string[]
-): Promise<ContainerLogs>;
+): Promise<string>;
 
 /**
  * Get the resolved compose configuration.
