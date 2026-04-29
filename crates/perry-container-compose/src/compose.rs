@@ -256,6 +256,12 @@ impl ComposeEngine {
                 workdir: svc.working_dir.clone(),
                 cap_add: svc.cap_add.clone(),
                 cap_drop: svc.cap_drop.clone(),
+                seccomp: svc.security_opt.as_ref().and_then(|opts| {
+                    opts.iter()
+                        .find(|o| o.starts_with("seccomp="))
+                        .map(|o| o.trim_start_matches("seccomp=").to_string())
+                }),
+                isolation: svc.isolation.clone(),
             };
 
             let profile = crate::backend::SecurityProfile {

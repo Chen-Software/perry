@@ -11,6 +11,7 @@ members = [
     "crates/perry-runtime",
     "crates/perry-jsruntime",
     "crates/perry-stdlib",
+    "crates/perry-container-compose",
     "crates/perry-diagnostics",
     "crates/perry-ui",
     "crates/perry-ui-macos",
@@ -46,6 +47,7 @@ default-members = [
     "crates/perry-runtime",
     "crates/perry-jsruntime",
     "crates/perry-stdlib",
+    "crates/perry-container-compose",
     "crates/perry-diagnostics",
     "crates/perry-ui",
     "crates/perry-codegen-js",
@@ -183,6 +185,7 @@ perry-runtime = { path = "crates/perry-runtime" }
 perry-stdlib = { path = "crates/perry-stdlib" }
 perry-diagnostics = { path = "crates/perry-diagnostics" }
 perry-jsruntime = { path = "crates/perry-jsruntime" }
+perry-container-compose = { path = "crates/perry-container-compose" }
 perry-codegen-js = { path = "crates/perry-codegen-js" }
 perry-codegen-swiftui = { path = "crates/perry-codegen-swiftui" }
 perry-codegen-glance = { path = "crates/perry-codegen-glance" }

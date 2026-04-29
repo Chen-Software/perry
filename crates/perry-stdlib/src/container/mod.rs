@@ -213,14 +213,14 @@ pub unsafe extern "C" fn js_container_run(spec_ptr: *const StringHeader) -> *mut
 
 /// Start compose services.
 ///
-/// FFI: `js_container_compose_start(handle: f64, services_json: *const StringHeader) -> *mut Promise`
+/// FFI: `js_container_compose_start(handle: i64, services_json: *const StringHeader) -> *mut Promise`
 #[no_mangle]
 pub unsafe extern "C" fn js_container_compose_start(
-    handle: f64,
+    handle: i64,
     services_json_ptr: *const StringHeader,
 ) -> *mut Promise {
     let promise = js_promise_new();
-    let handle_id = handle_id_from_f64(handle);
+    let handle_id = handle;
 
     let engine = match types::get_compose_handle(handle_id as u64) {
         Some(h) => h.clone(),
@@ -251,14 +251,14 @@ pub unsafe extern "C" fn js_container_compose_start(
 
 /// Stop compose services.
 ///
-/// FFI: `js_container_compose_stop(handle: f64, services_json: *const StringHeader) -> *mut Promise`
+/// FFI: `js_container_compose_stop(handle: i64, services_json: *const StringHeader) -> *mut Promise`
 #[no_mangle]
 pub unsafe extern "C" fn js_container_compose_stop(
-    handle: f64,
+    handle: i64,
     services_json_ptr: *const StringHeader,
 ) -> *mut Promise {
     let promise = js_promise_new();
-    let handle_id = handle_id_from_f64(handle);
+    let handle_id = handle;
 
     let engine = match types::get_compose_handle(handle_id as u64) {
         Some(h) => h.clone(),
@@ -289,14 +289,14 @@ pub unsafe extern "C" fn js_container_compose_stop(
 
 /// Restart compose services.
 ///
-/// FFI: `js_container_compose_restart(handle: f64, services_json: *const StringHeader) -> *mut Promise`
+/// FFI: `js_container_compose_restart(handle: i64, services_json: *const StringHeader) -> *mut Promise`
 #[no_mangle]
 pub unsafe extern "C" fn js_container_compose_restart(
-    handle: f64,
+    handle: i64,
     services_json_ptr: *const StringHeader,
 ) -> *mut Promise {
     let promise = js_promise_new();
-    let handle_id = handle_id_from_f64(handle);
+    let handle_id = handle;
 
     let engine = match types::get_compose_handle(handle_id as u64) {
         Some(h) => h.clone(),
@@ -328,11 +328,11 @@ pub unsafe extern "C" fn js_container_compose_restart(
 /// Get compose configuration
 /// Get the resolved compose YAML configuration.
 ///
-/// FFI: `js_container_compose_config(handle: f64) -> *mut Promise`
+/// FFI: `js_container_compose_config(handle: i64) -> *mut Promise`
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_config(handle: f64) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_config(handle: i64) -> *mut Promise {
     let promise = js_promise_new();
-    let handle_id = handle_id_from_f64(handle);
+    let handle_id = handle;
 
     let engine = match types::get_compose_handle(handle_id as u64) {
         Some(h) => h.clone(),
@@ -907,29 +907,29 @@ pub unsafe extern "C" fn js_compose_up(spec_ptr: *const StringHeader) -> *mut Pr
 
 #[no_mangle]
 pub unsafe extern "C" fn js_compose_down(
-    handle: f64,
+    handle: i64,
     opts_ptr: *const StringHeader,
 ) -> *mut Promise {
     js_container_compose_down(handle, opts_ptr)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_ps(handle: f64) -> *mut Promise {
+pub unsafe extern "C" fn js_compose_ps(handle: i64) -> *mut Promise {
     js_container_compose_ps(handle)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn js_compose_logs(
-    handle: f64,
+    handle: i64,
     service_ptr: *const StringHeader,
-    tail: f64,
+    tail: i32,
 ) -> *mut Promise {
     js_container_compose_logs(handle, service_ptr, tail)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn js_compose_exec(
-    handle: f64,
+    handle: i64,
     service_ptr: *const StringHeader,
     cmd_json_ptr: *const StringHeader,
 ) -> *mut Promise {
@@ -937,13 +937,13 @@ pub unsafe extern "C" fn js_compose_exec(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn js_compose_config(handle: f64) -> *mut Promise {
+pub unsafe extern "C" fn js_compose_config(handle: i64) -> *mut Promise {
     js_container_compose_config(handle)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn js_compose_start(
-    handle: f64,
+    handle: i64,
     services_json_ptr: *const StringHeader,
 ) -> *mut Promise {
     js_container_compose_start(handle, services_json_ptr)
@@ -951,7 +951,7 @@ pub unsafe extern "C" fn js_compose_start(
 
 #[no_mangle]
 pub unsafe extern "C" fn js_compose_stop(
-    handle: f64,
+    handle: i64,
     services_json_ptr: *const StringHeader,
 ) -> *mut Promise {
     js_container_compose_stop(handle, services_json_ptr)
@@ -959,7 +959,7 @@ pub unsafe extern "C" fn js_compose_stop(
 
 #[no_mangle]
 pub unsafe extern "C" fn js_compose_restart(
-    handle: f64,
+    handle: i64,
     services_json_ptr: *const StringHeader,
 ) -> *mut Promise {
     js_container_compose_restart(handle, services_json_ptr)
@@ -967,7 +967,7 @@ pub unsafe extern "C" fn js_compose_restart(
 
 /// Stop and remove compose stack.
 ///
-/// FFI: `js_container_compose_down(handle: f64, opts_json: *const StringHeader)
+/// FFI: `js_container_compose_down(handle: i64, opts_json: *const StringHeader)
 ///       -> *mut Promise`
 ///
 /// `opts_json` is a JSON-encoded `DownOptions` object — the codegen's
@@ -984,11 +984,11 @@ pub unsafe extern "C" fn js_compose_restart(
 ///   - `removeOrphans: boolean`  remove orphaned containers (default `false`)
 #[no_mangle]
 pub unsafe extern "C" fn js_container_compose_down(
-    handle: f64,
+    handle: i64,
     opts_ptr: *const StringHeader,
 ) -> *mut Promise {
     let promise = js_promise_new();
-    let handle_id = handle_id_from_f64(handle);
+    let handle_id = handle;
 
     let opts_json = unsafe { string_from_header(opts_ptr) };
     let (remove_volumes, _remove_orphans) = match opts_json.as_deref() {
@@ -1032,11 +1032,11 @@ pub unsafe extern "C" fn js_container_compose_down(
 
 /// Get container info for compose stack.
 ///
-/// FFI: `js_container_compose_ps(handle: f64) -> *mut Promise`
+/// FFI: `js_container_compose_ps(handle: i64) -> *mut Promise`
 #[no_mangle]
-pub unsafe extern "C" fn js_container_compose_ps(handle: f64) -> *mut Promise {
+pub unsafe extern "C" fn js_container_compose_ps(handle: i64) -> *mut Promise {
     let promise = js_promise_new();
-    let handle_id = handle_id_from_f64(handle);
+    let handle_id = handle;
 
     let engine = match types::get_compose_handle(handle_id as u64) {
         Some(h) => h.clone(),
@@ -1068,17 +1068,17 @@ pub unsafe extern "C" fn js_container_compose_ps(handle: f64) -> *mut Promise {
 
 /// Get logs from compose stack.
 ///
-/// FFI: `js_container_compose_logs(handle: f64, service: *const StringHeader, tail: f64) -> *mut Promise`
+/// FFI: `js_container_compose_logs(handle: i64, service: *const StringHeader, tail: i32) -> *mut Promise`
 ///
-/// `tail < 0.0` (or NaN / undefined sentinels) means "no limit".
+/// `tail < 0` means "no limit".
 #[no_mangle]
 pub unsafe extern "C" fn js_container_compose_logs(
-    handle: f64,
+    handle: i64,
     service_ptr: *const StringHeader,
-    tail: f64,
+    tail: i32,
 ) -> *mut Promise {
     let promise = js_promise_new();
-    let handle_id = handle_id_from_f64(handle);
+    let handle_id = handle;
 
     let engine = match types::get_compose_handle(handle_id as u64) {
         Some(h) => h.clone(),
@@ -1091,11 +1091,7 @@ pub unsafe extern "C" fn js_container_compose_logs(
     };
 
     let service = unsafe { string_from_header(service_ptr) };
-    let tail_opt = if tail.is_finite() && tail >= 0.0 {
-        Some(tail as u32)
-    } else {
-        None
-    };
+    let tail_opt = if tail >= 0 { Some(tail as u32) } else { None };
 
     crate::common::spawn_for_promise(promise as *mut u8, async move {
         let _backend = match get_global_backend().await {
@@ -1117,15 +1113,15 @@ pub unsafe extern "C" fn js_container_compose_logs(
 
 /// Execute command in compose service.
 ///
-/// FFI: `js_container_compose_exec(handle: f64, service: *const StringHeader, cmd_json: *const StringHeader) -> *mut Promise`
+/// FFI: `js_container_compose_exec(handle: i64, service: *const StringHeader, cmd_json: *const StringHeader) -> *mut Promise`
 #[no_mangle]
 pub unsafe extern "C" fn js_container_compose_exec(
-    handle: f64,
+    handle: i64,
     service_ptr: *const StringHeader,
     cmd_json_ptr: *const StringHeader,
 ) -> *mut Promise {
     let promise = js_promise_new();
-    let handle_id = handle_id_from_f64(handle);
+    let handle_id = handle;
 
     let engine = match types::get_compose_handle(handle_id as u64) {
         Some(h) => h.clone(),
