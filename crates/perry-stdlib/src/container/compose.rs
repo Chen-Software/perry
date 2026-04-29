@@ -63,7 +63,17 @@ impl ComposeWrapper {
         service: &str,
         cmd: &[String],
     ) -> Result<ContainerLogs, ContainerError> {
-        self.engine.exec(service, cmd, None, None).await
+        self.exec_with_opts(service, cmd, None, None).await
+    }
+
+    pub async fn exec_with_opts(
+        &self,
+        service: &str,
+        cmd: &[String],
+        env: Option<&std::collections::HashMap<String, String>>,
+        workdir: Option<&str>,
+    ) -> Result<ContainerLogs, ContainerError> {
+        self.engine.exec(service, cmd, env, workdir).await
     }
 
     pub fn config(&self) -> Result<String, ContainerError> {
