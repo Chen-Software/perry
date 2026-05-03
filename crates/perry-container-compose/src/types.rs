@@ -256,9 +256,14 @@ impl PortSpec {
 #[serde(rename_all = "snake_case")]
 pub struct ComposeServiceNetworkConfig {
     pub aliases: Option<Vec<String>>,
+    pub interface_name: Option<String>,
     pub ipv4_address: Option<String>,
     pub ipv6_address: Option<String>,
-    pub priority: Option<i32>,
+    pub link_local_ips: Option<Vec<String>>,
+    pub mac_address: Option<String>,
+    pub driver_opts: Option<IndexMap<String, serde_yaml::Value>>,
+    pub priority: Option<f64>,
+    pub gw_priority: Option<f64>,
 }
 
 /// `networks` field on a service: list or map
@@ -276,6 +281,76 @@ impl ServiceNetworks {
             ServiceNetworks::Map(m) => m.keys().cloned().collect(),
         }
     }
+}
+
+// ============ EnvFileEntry ============
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum EnvFileEntry {
+    Short(String),
+    Long(EnvFileConfig),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvFileConfig {
+    pub path: String,
+    #[serde(default = "default_true")]
+    pub required: bool,
+    pub format: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+// ============ Ulimit ============
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Ulimit {
+    Single(i64),
+    SoftHard { soft: i64, hard: i64 },
+}
+
+// ============ DeviceEntry ============
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DeviceEntry {
+    Short(String),
+    Long(DeviceRequest),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceRequest {
+    pub source: String,
+    pub target: Option<String>,
+    pub permissions: Option<String>,
+}
+
+// ============ BlkioConfig ============
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlkioConfig {
+    pub device_read_bps: Option<Vec<BlkioLimit>>,
+    pub device_read_iops: Option<Vec<BlkioLimit>>,
+    pub device_write_bps: Option<Vec<BlkioLimit>>,
+    pub device_write_iops: Option<Vec<BlkioLimit>>,
+    pub weight: Option<u16>,
+    pub weight_device: Option<Vec<BlkioWeight>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlkioLimit {
+    pub path: String,
+    pub rate: serde_yaml::Value, // string or int
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlkioWeight {
+    pub path: String,
+    pub weight: u16,
 }
 
 // ============ Build ============
@@ -296,24 +371,24 @@ pub struct ComposeServiceBuild {
     pub containerfile: Option<String>,
     pub dockerfile_inline: Option<String>,
     pub args: Option<ListOrDict>,
-    pub ssh: Option<serde_yaml::Value>,
+    pub ssh: Option<ListOrDict>,
     pub labels: Option<ListOrDict>,
     pub cache_from: Option<Vec<String>>,
     pub cache_to: Option<Vec<String>>,
     pub no_cache: Option<bool>,
     pub additional_contexts: Option<IndexMap<String, String>>,
     pub network: Option<String>,
-    pub provenance: Option<serde_yaml::Value>,
-    pub sbom: Option<serde_yaml::Value>,
+    pub provenance: Option<serde_yaml::Value>, // bool or string
+    pub sbom: Option<serde_yaml::Value>,       // bool or string
     pub pull: Option<bool>,
     pub target: Option<String>,
-    pub shm_size: Option<serde_yaml::Value>,
+    pub shm_size: Option<serde_yaml::Value>, // int or string
     pub extra_hosts: Option<ListOrDict>,
     pub isolation: Option<String>,
     pub privileged: Option<bool>,
-    pub secrets: Option<Vec<String>>,
+    pub secrets: Option<Vec<ServiceSecret>>,
     pub tags: Option<Vec<String>>,
-    pub ulimits: Option<serde_yaml::Value>,
+    pub ulimits: Option<IndexMap<String, Ulimit>>,
     pub platforms: Option<Vec<String>>,
     pub entitlements: Option<Vec<String>>,
 }
@@ -338,12 +413,92 @@ impl BuildSpec {
     }
 }
 
+// ============ Extends ============
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtendsSpec {
+    pub file: Option<String>,
+    pub service: String,
+}
+
+// ============ Develop ============
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DevelopConfig {
+    pub watch: Option<Vec<WatchEntry>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum EnvFileSpec {
+    String(String),
+    List(Vec<EnvFileEntry>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchEntry {
+    pub path: String,
+    pub action: String, // sync, rebuild, sync+restart
+    pub target: Option<String>,
+    pub ignore: Option<Vec<String>>,
+}
+
+// ============ Lifecycle Hooks ============
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LifecycleHook {
+    pub command: StringOrList,
+    pub user: Option<String>,
+    pub privileged: Option<bool>,
+    pub working_dir: Option<String>,
+    pub environment: Option<ListOrDict>,
+}
+
+// ============ CredentialSpec ============
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialSpec {
+    pub config: Option<String>,
+    pub file: Option<String>,
+    pub registry: Option<String>,
+}
+
+// ============ Models ============
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComposeModel {
+    pub name: Option<String>,
+    pub model: String,
+    pub context_size: Option<i64>,
+    pub runtime_flags: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ServiceModels {
+    List(Vec<String>),
+    Map(IndexMap<String, ServiceModelConfig>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceModelConfig {
+    pub endpoint_var: Option<String>,
+    pub model_var: Option<String>,
+}
+
 // ============ Healthcheck ============
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum HealthcheckTest {
+    String(String),
+    List(Vec<String>),
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ComposeHealthcheck {
-    pub test: serde_yaml::Value,
+    pub test: Option<HealthcheckTest>,
     pub interval: Option<String>,
     pub timeout: Option<String>,
     pub retries: Option<u32>,
@@ -361,10 +516,35 @@ pub struct ComposeDeployment {
     pub replicas: Option<u32>,
     pub labels: Option<ListOrDict>,
     pub resources: Option<ComposeDeploymentResources>,
-    pub restart_policy: Option<serde_yaml::Value>,
-    pub placement: Option<serde_yaml::Value>,
-    pub update_config: Option<serde_yaml::Value>,
-    pub rollback_config: Option<serde_yaml::Value>,
+    pub restart_policy: Option<ComposeRestartPolicy>,
+    pub placement: Option<ComposePlacement>,
+    pub update_config: Option<ComposeUpdateConfig>,
+    pub rollback_config: Option<ComposeUpdateConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ComposeRestartPolicy {
+    pub condition: Option<String>,
+    pub delay: Option<String>,
+    pub max_attempts: Option<u32>,
+    pub window: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ComposePlacement {
+    pub constraints: Option<Vec<String>>,
+    pub preferences: Option<Vec<serde_yaml::Value>>,
+    pub max_replicas_per_node: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ComposeUpdateConfig {
+    pub parallelism: Option<u32>,
+    pub delay: Option<String>,
+    pub failure_action: Option<String>,
+    pub monitor: Option<String>,
+    pub max_failure_ratio: Option<f32>,
+    pub order: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -376,9 +556,20 @@ pub struct ComposeDeploymentResources {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ComposeResourceSpec {
-    pub cpus: Option<serde_yaml::Value>,
+    pub cpus: Option<serde_yaml::Value>, // float or string
     pub memory: Option<String>,
     pub pids: Option<i64>,
+    pub devices: Option<Vec<ComposeDeviceRequest>>,
+    pub generic_resources: Option<Vec<serde_yaml::Value>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ComposeDeviceRequest {
+    pub driver: Option<String>,
+    pub count: Option<serde_yaml::Value>,
+    pub device_ids: Option<Vec<String>>,
+    pub capabilities: Option<Vec<String>>,
+    pub options: Option<ListOrDict>,
 }
 
 // ============ Logging ============
@@ -413,9 +604,9 @@ pub struct ComposeNetworkIpam {
 pub struct ComposeNetwork {
     pub name: Option<String>,
     pub driver: Option<String>,
-    pub driver_opts: Option<IndexMap<String, String>>,
+    pub driver_opts: Option<IndexMap<String, serde_yaml::Value>>,
     pub ipam: Option<ComposeNetworkIpam>,
-    pub external: Option<bool>,
+    pub external: Option<serde_yaml::Value>, // bool or object
     pub internal: Option<bool>,
     pub enable_ipv4: Option<bool>,
     pub enable_ipv6: Option<bool>,
@@ -431,12 +622,28 @@ pub struct ComposeNetwork {
 pub struct ComposeVolume {
     pub name: Option<String>,
     pub driver: Option<String>,
-    pub driver_opts: Option<IndexMap<String, String>>,
-    pub external: Option<bool>,
+    pub driver_opts: Option<IndexMap<String, serde_yaml::Value>>,
+    pub external: Option<serde_yaml::Value>, // bool or object
     pub labels: Option<ListOrDict>,
 }
 
 // ============ Secret ============
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ServiceSecret {
+    Short(String),
+    Long(ServiceSecretConfig),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceSecretConfig {
+    pub source: String,
+    pub target: Option<String>,
+    pub uid: Option<String>,
+    pub gid: Option<String>,
+    pub mode: Option<serde_yaml::Value>, // Can be octal string or int
+}
 
 /// Top-level secret definition
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -445,14 +652,30 @@ pub struct ComposeSecret {
     pub name: Option<String>,
     pub environment: Option<String>,
     pub file: Option<String>,
-    pub external: Option<bool>,
+    pub external: Option<serde_yaml::Value>, // bool or object
     pub labels: Option<ListOrDict>,
     pub driver: Option<String>,
-    pub driver_opts: Option<IndexMap<String, String>>,
+    pub driver_opts: Option<IndexMap<String, serde_yaml::Value>>,
     pub template_driver: Option<String>,
 }
 
 // ============ Config ============
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ServiceConfigRef {
+    Short(String),
+    Long(ServiceConfigConfig),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceConfigConfig {
+    pub source: String,
+    pub target: Option<String>,
+    pub uid: Option<String>,
+    pub gid: Option<String>,
+    pub mode: Option<serde_yaml::Value>, // Can be octal string or int
+}
 
 /// Top-level config definition (compose-spec `config` object)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -462,7 +685,7 @@ pub struct ComposeConfig {
     pub content: Option<String>,
     pub environment: Option<String>,
     pub file: Option<String>,
-    pub external: Option<bool>,
+    pub external: Option<serde_yaml::Value>, // bool or object
     pub labels: Option<ListOrDict>,
     pub template_driver: Option<String>,
 }
@@ -475,56 +698,89 @@ pub struct ComposeConfig {
 pub struct ComposeService {
     pub image: Option<String>,
     pub build: Option<BuildSpec>,
-    pub command: Option<serde_yaml::Value>,
-    pub entrypoint: Option<serde_yaml::Value>,
-    pub environment: Option<ListOrDict>,
-    pub env_file: Option<serde_yaml::Value>,
-    pub ports: Option<Vec<PortSpec>>,
-    pub volumes: Option<Vec<serde_yaml::Value>>,
-    pub networks: Option<ServiceNetworks>,
-    pub depends_on: Option<DependsOnSpec>,
-    pub restart: Option<String>,
-    pub healthcheck: Option<ComposeHealthcheck>,
+    pub blkio_config: Option<BlkioConfig>,
+    pub command: Option<StringOrList>,
     pub container_name: Option<String>,
-    pub labels: Option<ListOrDict>,
-    pub hostname: Option<String>,
-    pub user: Option<String>,
-    pub working_dir: Option<String>,
-    pub privileged: Option<bool>,
-    pub read_only: Option<bool>,
-    pub stdin_open: Option<bool>,
-    pub tty: Option<bool>,
-    pub stop_signal: Option<String>,
-    pub stop_grace_period: Option<String>,
-    pub network_mode: Option<String>,
-    pub pid: Option<String>,
+    pub cpu_count: Option<serde_yaml::Value>,
+    pub cpu_percent: Option<serde_yaml::Value>,
+    pub cpu_shares: Option<serde_yaml::Value>,
+    pub cpu_period: Option<serde_yaml::Value>,
+    pub cpu_quota: Option<serde_yaml::Value>,
+    pub cpu_rt_period: Option<serde_yaml::Value>,
+    pub cpu_rt_runtime: Option<serde_yaml::Value>,
+    pub cpus: Option<serde_yaml::Value>,
+    pub cpuset: Option<String>,
     pub cap_add: Option<Vec<String>>,
     pub cap_drop: Option<Vec<String>>,
-    pub security_opt: Option<Vec<String>>,
-    pub sysctls: Option<ListOrDict>,
-    pub ulimits: Option<serde_yaml::Value>,
-    pub logging: Option<ComposeLogging>,
+    pub cgroup: Option<String>,
+    pub cgroup_parent: Option<String>,
+    pub configs: Option<Vec<ServiceConfigRef>>,
+    pub credential_spec: Option<CredentialSpec>,
+    pub depends_on: Option<DependsOnSpec>,
     pub deploy: Option<ComposeDeployment>,
-    pub develop: Option<serde_yaml::Value>,
-    pub secrets: Option<Vec<String>>,
-    pub configs: Option<Vec<String>>,
-    pub expose: Option<Vec<serde_yaml::Value>>,
+    pub device_cgroup_rules: Option<Vec<String>>,
+    pub devices: Option<Vec<DeviceEntry>>,
+    pub dns: Option<StringOrList>,
+    pub dns_opt: Option<Vec<String>>,
+    pub dns_search: Option<StringOrList>,
+    pub domainname: Option<String>,
+    pub entrypoint: Option<StringOrList>,
+    pub env_file: Option<EnvFileSpec>,
+    pub environment: Option<ListOrDict>,
+    pub expose: Option<Vec<ExposeSpec>>,
+    pub extends: Option<ExtendsSpec>,
+    pub external_links: Option<Vec<String>>,
     pub extra_hosts: Option<ListOrDict>,
-    pub dns: Option<serde_yaml::Value>,
-    pub dns_search: Option<serde_yaml::Value>,
-    pub tmpfs: Option<serde_yaml::Value>,
-    pub shm_size: Option<serde_yaml::Value>,
+    pub group_add: Option<Vec<serde_yaml::Value>>,
+    pub healthcheck: Option<ComposeHealthcheck>,
+    pub hostname: Option<String>,
+    pub init: Option<serde_yaml::Value>, // bool or string
+    pub ipc: Option<String>,
+    pub isolation: Option<String>,
+    pub labels: Option<ListOrDict>,
+    pub links: Option<Vec<String>>,
+    pub logging: Option<ComposeLogging>,
+    pub models: Option<ServiceModels>,
+    pub network_mode: Option<String>,
+    pub networks: Option<ServiceNetworks>,
+    pub mac_address: Option<String>,
     pub mem_limit: Option<serde_yaml::Value>,
+    pub mem_reservation: Option<serde_yaml::Value>,
+    pub mem_swappiness: Option<serde_yaml::Value>,
     pub memswap_limit: Option<serde_yaml::Value>,
-    pub cpus: Option<serde_yaml::Value>,
-    pub cpu_shares: Option<i64>,
+    pub oom_kill_disable: Option<serde_yaml::Value>,
+    pub oom_score_adj: Option<serde_yaml::Value>,
+    pub pid: Option<String>,
+    pub pids_limit: Option<serde_yaml::Value>,
     pub platform: Option<String>,
-    pub pull_policy: Option<String>,
+    pub ports: Option<Vec<PortSpec>>,
+    pub privileged: Option<serde_yaml::Value>,
     pub profiles: Option<Vec<String>>,
-    pub scale: Option<u32>,
-    pub extends: Option<serde_yaml::Value>,
-    pub post_start: Option<Vec<serde_yaml::Value>>,
-    pub pre_stop: Option<Vec<serde_yaml::Value>>,
+    pub pull_policy: Option<String>,
+    pub read_only: Option<serde_yaml::Value>,
+    pub restart: Option<String>,
+    pub runtime: Option<String>,
+    pub scale: Option<serde_yaml::Value>,
+    pub secrets: Option<Vec<ServiceSecret>>,
+    pub security_opt: Option<Vec<String>>,
+    pub shm_size: Option<serde_yaml::Value>,
+    pub stdin_open: Option<serde_yaml::Value>,
+    pub stop_grace_period: Option<String>,
+    pub stop_signal: Option<String>,
+    pub storage_opt: Option<IndexMap<String, String>>,
+    pub sysctls: Option<ListOrDict>,
+    pub tmpfs: Option<StringOrList>,
+    pub tty: Option<serde_yaml::Value>,
+    pub ulimits: Option<IndexMap<String, Ulimit>>,
+    pub user: Option<String>,
+    pub userns_mode: Option<String>,
+    pub uts: Option<String>,
+    pub volumes: Option<Vec<VolumeEntry>>,
+    pub volumes_from: Option<Vec<String>>,
+    pub working_dir: Option<String>,
+    pub develop: Option<DevelopConfig>,
+    pub post_start: Option<Vec<LifecycleHook>>,
+    pub pre_stop: Option<Vec<LifecycleHook>>,
 }
 
 impl ComposeService {
@@ -565,14 +821,7 @@ impl ComposeService {
             .as_deref()
             .unwrap_or(&[])
             .iter()
-            .filter_map(|v| {
-                // Try to parse as VolumeEntry (short or long)
-                if let Ok(short) = serde_yaml::from_value::<VolumeEntry>(v.clone()) {
-                    return Some(short.to_string_form());
-                }
-                // Fallback: string representation
-                Some(yaml_value_to_str(v))
-            })
+            .map(|v| v.to_string_form())
             .collect()
     }
 
@@ -583,14 +832,12 @@ impl ComposeService {
 
     /// Get command as a list of strings.
     pub fn command_list(&self) -> Option<Vec<String>> {
-        self.command.as_ref().map(|c| match c {
-            serde_yaml::Value::String(s) => vec![s.clone()],
-            serde_yaml::Value::Sequence(arr) => arr
-                .iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect(),
-            _ => vec![],
-        })
+        self.command.as_ref().map(|c| c.to_list())
+    }
+
+    /// Get entrypoint as a list of strings.
+    pub fn entrypoint_list(&self) -> Option<Vec<String>> {
+        self.entrypoint.as_ref().map(|e| e.to_list())
     }
 
     /// Build a `ContainerSpec` from this service's compose-spec config.
@@ -619,12 +866,12 @@ impl ComposeService {
             volumes: Some(self.volume_strings()),
             env: Some(self.resolved_env()),
             cmd: self.command_list(),
-            entrypoint: None,
+            entrypoint: self.entrypoint_list(),
             network,
             rm: None,
-            read_only: self.read_only,
+            read_only: self.read_only.as_ref().and_then(|v| v.as_bool()),
             labels,
-            privileged: self.privileged,
+            privileged: self.privileged.as_ref().and_then(|v| v.as_bool()),
             user: self.user.clone(),
             workdir: self.working_dir.clone(),
             cap_add: self.cap_add.clone(),
@@ -722,6 +969,41 @@ impl ComposeService {
     }
 }
 
+// ============ Include ============
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum IncludeEntry {
+    Short(String),
+    Long(IncludeConfig),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IncludeConfig {
+    pub path: StringOrList,
+    pub project_directory: Option<String>,
+    pub env_file: Option<StringOrList>,
+}
+
+// ============ Expose ============
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ExposeSpec {
+    String(String),
+    Integer(u16),
+}
+
+// ============ Namespace Modes ============
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum NamespaceMode {
+    Host(String),    // e.g. "host"
+    Service(String), // e.g. "service:foo"
+    Other(String),
+}
+
 // ============ ComposeSpec ============
 
 /// Root compose spec (compose-spec §root)
@@ -735,8 +1017,8 @@ pub struct ComposeSpec {
     pub volumes: Option<IndexMap<String, Option<ComposeVolume>>>,
     pub secrets: Option<IndexMap<String, Option<ComposeSecret>>>,
     pub configs: Option<IndexMap<String, Option<ComposeConfig>>>,
-    pub include: Option<Vec<serde_yaml::Value>>,
-    pub models: Option<IndexMap<String, serde_yaml::Value>>,
+    pub include: Option<Vec<IncludeEntry>>,
+    pub models: Option<IndexMap<String, ComposeModel>>,
     #[serde(flatten)]
     pub extensions: IndexMap<String, serde_yaml::Value>,
 }
