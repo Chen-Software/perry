@@ -505,7 +505,7 @@ pub fn required_features(spec: &crate::types::ComposeSpec) -> std::collections::
 
     for (_svc_name, svc) in &spec.services {
         // privileged: true → privileged
-        if svc.privileged.unwrap_or(false) {
+        if svc.privileged.as_ref().and_then(|v| v.as_bool()).unwrap_or(false) {
             needed.insert("privileged");
         }
 
@@ -533,7 +533,7 @@ pub fn required_features(spec: &crate::types::ComposeSpec) -> std::collections::
         }
 
         // read_only: true → read_only_rootfs
-        if svc.read_only.unwrap_or(false) {
+        if svc.read_only.as_ref().and_then(|v| v.as_bool()).unwrap_or(false) {
             needed.insert("read_only_rootfs");
         }
 
@@ -573,10 +573,9 @@ pub fn required_features(spec: &crate::types::ComposeSpec) -> std::collections::
         // volumes with :Z or :z suffix → selinux_mount_labels
         if let Some(volumes) = &svc.volumes {
             for v in volumes {
-                if let Some(s) = v.as_str() {
-                    if s.ends_with(":Z") || s.ends_with(":z") {
-                        needed.insert("selinux_mount_labels");
-                    }
+                let s = v.to_string_form();
+                if s.ends_with(":Z") || s.ends_with(":z") {
+                    needed.insert("selinux_mount_labels");
                 }
             }
         }

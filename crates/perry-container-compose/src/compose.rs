@@ -159,7 +159,12 @@ impl ComposeEngine {
             .and_then(|v| v.get(decl_name))
             .and_then(|c| c.as_ref());
         if let Some(cfg) = cfg_opt {
-            if cfg.external.unwrap_or(false) {
+            let is_external = match &cfg.external {
+                Some(serde_yaml::Value::Bool(b)) => *b,
+                Some(serde_yaml::Value::Mapping(_)) => true,
+                _ => false,
+            };
+            if is_external {
                 // External: use `name:` if set, else literal declaration name.
                 return cfg.name.clone().unwrap_or_else(|| decl_name.to_string());
             }
@@ -181,7 +186,12 @@ impl ComposeEngine {
             .and_then(|n| n.get(decl_name))
             .and_then(|c| c.as_ref());
         if let Some(cfg) = cfg_opt {
-            if cfg.external.unwrap_or(false) {
+            let is_external = match &cfg.external {
+                Some(serde_yaml::Value::Bool(b)) => *b,
+                Some(serde_yaml::Value::Mapping(_)) => true,
+                _ => false,
+            };
+            if is_external {
                 return cfg.name.clone().unwrap_or_else(|| decl_name.to_string());
             }
             if let Some(explicit) = &cfg.name {
@@ -199,7 +209,11 @@ impl ComposeEngine {
             .as_ref()
             .and_then(|v| v.get(decl_name))
             .and_then(|c| c.as_ref())
-            .and_then(|c| c.external)
+            .and_then(|c| match &c.external {
+                Some(serde_yaml::Value::Bool(b)) => Some(*b),
+                Some(serde_yaml::Value::Mapping(_)) => Some(true),
+                _ => None,
+            })
             .unwrap_or(false)
     }
 
@@ -211,7 +225,11 @@ impl ComposeEngine {
             .as_ref()
             .and_then(|n| n.get(decl_name))
             .and_then(|c| c.as_ref())
-            .and_then(|c| c.external)
+            .and_then(|c| match &c.external {
+                Some(serde_yaml::Value::Bool(b)) => Some(*b),
+                Some(serde_yaml::Value::Mapping(_)) => Some(true),
+                _ => None,
+            })
             .unwrap_or(false)
     }
 
@@ -421,49 +439,14 @@ impl ComposeEngine {
             let container_spec = ContainerSpec {
                 image: image_to_use,
                 name: Some(container_name.clone()),
-                ports: Some(
-                    svc.ports
-                        .as_ref()
-                        .map(|p| {
-                            p.iter()
-                                .map(|ps| match ps {
-                                    crate::types::PortSpec::Short(v) => match v {
-                                        serde_yaml::Value::String(s) => s.clone(),
-                                        serde_yaml::Value::Number(n) => n.to_string(),
-                                        _ => v.as_str().unwrap_or_default().to_string(),
-                                    },
-                                    crate::types::PortSpec::Long(lp) => {
-                                        let publ = lp
-                                            .published
-                                            .as_ref()
-                                            .map(|v| match v {
-                                                serde_yaml::Value::String(s) => s.clone(),
-                                                serde_yaml::Value::Number(n) => n.to_string(),
-                                                _ => v.as_str().unwrap_or_default().to_string(),
-                                            })
-                                            .unwrap_or_default();
-                                        let target = match &lp.target {
-                                            serde_yaml::Value::String(s) => s.clone(),
-                                            serde_yaml::Value::Number(n) => n.to_string(),
-                                            _ => lp.target.as_str().unwrap_or_default().to_string(),
-                                        };
-                                        format!("{}:{}", publ, target)
-                                    }
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                ),
+                ports: Some(svc.port_strings()),
                 volumes: Some(
                     svc.volumes
                         .as_ref()
                         .map(|v| {
                             v.iter()
                                 .map(|vs| {
-                                    let raw = match vs {
-                                        serde_yaml::Value::String(s) => s.clone(),
-                                        _ => vs.as_str().unwrap_or_default().to_string(),
-                                    };
+                                    let raw = vs.to_string_form();
                                     // Namespace named-volume references:
                                     //   "named:/path"      → "<proj>_named:/path"
                                     //   "named:/path:ro"   → "<proj>_named:/path:ro"
@@ -500,44 +483,14 @@ impl ComposeEngine {
                         })
                         .unwrap_or_default(),
                 ),
-                env: Some(match &svc.environment {
-                    Some(crate::types::ListOrDict::Dict(d)) => d
-                        .iter()
-                        .map(|(k, v)| {
-                            (
-                                k.clone(),
-                                v.as_ref()
-                                    .map(|vv| match vv {
-                                        serde_yaml::Value::String(s) => s.clone(),
-                                        serde_yaml::Value::Number(n) => n.to_string(),
-                                        serde_yaml::Value::Bool(b) => b.to_string(),
-                                        _ => vv.as_str().unwrap_or_default().to_string(),
-                                    })
-                                    .unwrap_or_default(),
-                            )
-                        })
-                        .collect(),
-                    Some(crate::types::ListOrDict::List(l)) => l
-                        .iter()
-                        .filter_map(|s| s.split_once('='))
-                        .map(|(k, v)| (k.to_string(), v.to_string()))
-                        .collect(),
-                    None => HashMap::new(),
-                }),
-                cmd: Some(match &svc.command {
-                    Some(serde_yaml::Value::String(s)) => vec![s.clone()],
-                    Some(serde_yaml::Value::Sequence(seq)) => seq
-                        .iter()
-                        .map(|v| v.as_str().unwrap_or_default().to_string())
-                        .collect(),
-                    _ => vec![],
-                }),
-                entrypoint: None,
+                env: Some(svc.resolved_env()),
+                cmd: svc.command_list(),
+                entrypoint: svc.entrypoint_list(),
                 network: network.clone(),
                 rm: None,
-                read_only: svc.read_only,
+                read_only: svc.read_only.as_ref().and_then(|v| v.as_bool()),
                 labels: Some(labels),
-                privileged: svc.privileged,
+                privileged: svc.privileged.as_ref().and_then(|v| v.as_bool()),
                 user: svc.user.clone(),
                 workdir: svc.working_dir.clone(),
                 cap_add: svc.cap_add.clone(),
@@ -591,7 +544,7 @@ impl ComposeEngine {
             // (apple/container) with a structured warning, so the user
             // knows the policy wasn't honored.
             let mut profile = crate::backend::SecurityProfile {
-                read_only_root: svc.read_only.unwrap_or(false),
+                read_only_root: svc.read_only.as_ref().and_then(|v| v.as_bool()).unwrap_or(false),
                 seccomp: None,
                 no_new_privileges: false,
             };

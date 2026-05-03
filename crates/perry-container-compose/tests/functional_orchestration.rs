@@ -15,9 +15,9 @@
 
 use perry_container_compose::backend::ContainerBackend;
 use perry_container_compose::compose::ComposeEngine;
-use perry_container_compose::testing::mock_backend::{InspectMode, MockBackend, RecordedCall};
+use perry_container_compose::testing::mock_backend::{MockBackend, RecordedCall};
 use perry_container_compose::types::{
-    ComposeNetwork, ComposeService, ComposeSpec, ComposeVolume, ServiceNetworks,
+    ComposeNetwork, ComposeService, ComposeSpec, ComposeVolume, ServiceNetworks, VolumeEntry,
 };
 use indexmap::IndexMap;
 use std::sync::Arc;
@@ -44,7 +44,7 @@ fn svc_with_net(image: &str, net: &str) -> ComposeService {
 fn svc_with_vol(image: &str, vol: &str) -> ComposeService {
     ComposeService {
         image: Some(image.to_string()),
-        volumes: Some(vec![serde_yaml::Value::String(vol.to_string())]),
+        volumes: Some(vec![VolumeEntry::Short(vol.to_string())]),
         ..Default::default()
     }
 }
