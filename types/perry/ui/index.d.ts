@@ -73,6 +73,32 @@ export interface Window {
     onFocusLost(callback: () => void): void;
 }
 
+declare global {
+    /**
+     * Global JSX namespace for Perry UI components.
+     * Tells tsc that JSX elements resolve to Widget handles.
+     */
+    namespace JSX {
+        /** The type of a JSX element is a native Widget handle. */
+        type Element = Widget;
+        /** Standard attributes for all elements (placeholder). */
+        interface IntrinsicAttributes {
+            key?: string | number;
+        }
+        /** Standard attributes for all elements (placeholder). */
+        interface IntrinsicClassAttributes<T> {
+            ref?: any;
+        }
+        /**
+         * Allow any tag name for intrinsic elements. This enables
+         * <VStack> style usage of component constructors directly.
+         */
+        interface IntrinsicElements {
+            [elemName: string]: any;
+        }
+    }
+}
+
 /**
  * RGBA color in 0..=1 floats.
  *
